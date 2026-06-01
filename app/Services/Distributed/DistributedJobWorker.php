@@ -8,8 +8,8 @@ use App\Models\Settings;
 use App\Services\Tmux\TmuxMonitorService;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
-use Throwable;
 use Symfony\Component\Console\Output\OutputInterface;
+use Throwable;
 
 class DistributedJobWorker
 {
@@ -102,6 +102,8 @@ class DistributedJobWorker
             return 0;
         }
 
+        $restoreSignalHandlers = $this->registerLockTerminationHandlers($lock, $lockName, $plan['name'], $output);
+
         try {
             $output->writeln(sprintf(
                 '[%s] starting %s: %s',
@@ -129,8 +131,83 @@ class DistributedJobWorker
 
             return 0;
         } finally {
+            $restoreSignalHandlers();
             $lock->release();
         }
+    }
+
+    /**
+     * Release a held distributed lock when Kubernetes terminates this pod.
+     *
+     * Without this, a Recreate rollout can leave the next pod polling until
+     * the full lock TTL expires even though no worker process remains.
+     */
+    private function registerLockTerminationHandlers(
+        mixed $lock,
+        string $lockName,
+        string $job,
+        OutputInterface $output,
+    ): callable {
+        if (! function_exists('pcntl_signal')) {
+            return static fn (): null => null;
+        }
+
+        $signals = array_values(array_filter([
+            defined('SIGTERM') ? SIGTERM : null,
+            defined('SIGINT') ? SIGINT : null,
+            defined('SIGHUP') ? SIGHUP : null,
+        ]));
+
+        if ($signals === []) {
+            return static fn (): null => null;
+        }
+
+        $previousAsyncSignals = null;
+        if (function_exists('pcntl_async_signals')) {
+            $previousAsyncSignals = pcntl_async_signals();
+            pcntl_async_signals(true);
+        }
+
+        $previousHandlers = [];
+        foreach ($signals as $signal) {
+            $previousHandlers[$signal] = function_exists('pcntl_signal_get_handler')
+                ? pcntl_signal_get_handler($signal)
+                : SIG_DFL;
+
+            pcntl_signal($signal, function (int $receivedSignal) use ($lock, $lockName, $job, $output): void {
+                $output->writeln(sprintf(
+                    '[%s] received signal %d while running %s; releasing %s before exit',
+                    now()->toDateTimeString(),
+                    $receivedSignal,
+                    $job,
+                    $lockName,
+                ));
+
+                try {
+                    $lock->release();
+                } catch (Throwable $e) {
+                    $output->writeln(sprintf(
+                        '[%s] failed to release %s after signal %d: %s',
+                        now()->toDateTimeString(),
+                        $lockName,
+                        $receivedSignal,
+                        $e->getMessage(),
+                    ));
+                }
+
+                exit(128 + $receivedSignal);
+            });
+        }
+
+        return static function () use ($previousHandlers, $previousAsyncSignals): void {
+            foreach ($previousHandlers as $signal => $handler) {
+                pcntl_signal($signal, $handler);
+            }
+
+            if ($previousAsyncSignals !== null && function_exists('pcntl_async_signals')) {
+                pcntl_async_signals($previousAsyncSignals);
+            }
+        };
     }
 
     /**
