@@ -234,6 +234,20 @@ cp docker-compose.yml.prod-dist docker-compose.yml
 docker compose up -d
 ```
 
+For Kubernetes deployments that need to spread indexing load across nodes, use
+the distributed worker command instead of a tmux session:
+
+```bash
+php artisan nntmux:worker --list
+php artisan nntmux:worker binaries
+php artisan nntmux:worker backfill
+```
+
+Run one deployment per job, back the Laravel cache with Redis, and use
+ReadWriteMany storage for shared app state. See
+[`docs/distributed-workers.md`](docs/distributed-workers.md) for the full job
+list and runtime notes.
+
 ## Troubleshooting
 
 | Problem                         | Solution                                                              |
@@ -269,4 +283,3 @@ To revert to stock Ubuntu nginx, remove the GetPageSpeed apt key, list, and
 preferences entries from `docker/8.5/Dockerfile`, drop `nginx-module-brotli`
 from the install line, re-comment the brotli block in `docker/8.5/nginx.conf`,
 and run `make rebuild`.
-

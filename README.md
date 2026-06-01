@@ -28,6 +28,7 @@ This project is a fork of [newznab plus](https://github.com/anth0/nnplus) and [n
 - [Database Setup](#database-setup)
 - [Search Engines](#search-engines)
 - [Console Commands](#console-commands)
+- [Distributed Workers](#distributed-workers)
 - [IRC Pre Channels](#irc-pre-channels)
 - [TV & Movie Processing](#tv--movie-processing)
 - [API](#api)
@@ -159,6 +160,17 @@ REDIS_PORT=6379
 ```
 
 For high-volume processing, consider using [Laravel Horizon](https://github.com/NNTmux/newznab-tmux/wiki/Laravel-Horizon).
+
+### Distributed Worker Locks
+
+When processing is split into one worker process per lane, use Redis-backed
+Laravel cache locks:
+
+```env
+NNTMUX_DISTRIBUTED_LOCK_STORE=redis
+NNTMUX_DISTRIBUTED_LOCK_SECONDS=900
+NNTMUX_DISTRIBUTED_LONG_LOCK_SECONDS=3600
+```
 
 ## Database Setup
 
@@ -312,6 +324,23 @@ php artisan nntmux:create-admin
 # Reset user password
 php artisan nntmux:reset-password --email=user@example.com
 ```
+
+## Distributed Workers
+
+For Kubernetes and other orchestrators, NNTmux processing can be split into one
+long-running Artisan process per former tmux pane:
+
+```bash
+php artisan nntmux:worker --list
+php artisan nntmux:worker binaries
+php artisan nntmux:worker backfill
+```
+
+This avoids a single tmux session becoming the scheduling and observability
+boundary. Each worker refreshes site settings on every cycle and uses cache
+locks as a final duplicate-work guard for the same lane. See
+[`docs/distributed-workers.md`](docs/distributed-workers.md) for the job list,
+locking settings, Kubernetes pattern, and monitoring commands.
 
 ## IRC Pre Channels
 

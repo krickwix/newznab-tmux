@@ -476,7 +476,7 @@ class TmuxOutput extends Tmux
             )
         );
 
-        $info = $this->pdo->getAttribute(\PDO::ATTR_SERVER_INFO);
+        $info = $this->pdo()->getAttribute(\PDO::ATTR_SERVER_INFO);
         $pieces = [];
         foreach ([
             ['Threads', '/.*\bThreads: (\d+)\b.*/'],

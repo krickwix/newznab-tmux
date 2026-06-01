@@ -18,6 +18,9 @@ return [
     'multiprocessing_max_child_time' => env('NN_MULTIPROCESSING_MAX_CHILD_TIME', 1800),
     'concurrency_timeout' => env('NN_CONCURRENCY_TIMEOUT'),
     'stream_fork_output' => env('STREAM_FORK_OUTPUT', false),
+    'distributed_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_LOCK_SECONDS', 900),
+    'distributed_long_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_LONG_LOCK_SECONDS', 3600),
+    'distributed_lock_store' => env('NNTMUX_DISTRIBUTED_LOCK_STORE', 'redis'),
     'purge_inactive_users' => env('PURGE_INACTIVE_USERS', false),
     'purge_inactive_users_days' => env('PURGE_INACTIVE_USERS_DAYS', 180),
     'mysql_search_fallback' => env('MYSQL_SEARCH_FALLBACK', false), // Disable MySQL LIKE fallback when Manticore/Elasticsearch return no results

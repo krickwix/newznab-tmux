@@ -16,10 +16,7 @@ use Illuminate\Support\Facades\DB;
  */
 class Tmux
 {
-    /**
-     * @var \PDO
-     */
-    public \Closure|\PDO $pdo;
+    protected ?\PDO $pdo = null;
 
     public mixed $tmux_session;
 
@@ -28,7 +25,11 @@ class Tmux
      */
     public function __construct()
     {
-        $this->pdo = DB::connection()->getPdo();
+    }
+
+    protected function pdo(): \PDO
+    {
+        return $this->pdo ??= DB::connection()->getPdo();
     }
 
     /**

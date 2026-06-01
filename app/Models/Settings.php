@@ -24,6 +24,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use Illuminate\Database\QueryException;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Cache;
 
@@ -149,10 +150,33 @@ class Settings extends Model
 
     public static function settingValue(mixed $setting): mixed
     {
-        $value = self::query()->where('name', $setting)->value('value');
+        try {
+            $value = self::query()->where('name', $setting)->value('value');
+        } catch (QueryException $e) {
+            if (self::isDatabaseOptionalCli()) {
+                return null;
+            }
+
+            throw $e;
+        }
 
         // Apply the same conversion logic as the accessor
         return self::convertValue($value);
+    }
+
+    private static function isDatabaseOptionalCli(): bool
+    {
+        if (PHP_SAPI !== 'cli') {
+            return false;
+        }
+
+        $argv = $_SERVER['argv'] ?? [];
+        if (! is_array($argv)) {
+            return false;
+        }
+
+        return in_array('package:discover', $argv, true)
+            || (in_array('nntmux:worker', $argv, true) && in_array('--list', $argv, true));
     }
 
     /**
