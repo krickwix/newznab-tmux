@@ -1,0 +1,276 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Metrics;
+
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Redis;
+use Throwable;
+
+class NntmuxPrometheusMetrics
+{
+    private const TABLES = [
+        'binaries',
+        'collections',
+        'missed_parts',
+        'parts',
+        'releases',
+        'predb',
+        'usenet_groups',
+    ];
+
+    private const TIMER_SETTINGS = [
+        'bins_timer',
+        'back_timer',
+        'rel_timer',
+        'fix_timer',
+        'crap_timer',
+        'post_timer',
+        'post_timer_non',
+        'post_timer_amazon',
+        'seq_timer',
+    ];
+
+    public function render(): string
+    {
+        $lines = [
+            '# HELP nntmux_metric_scrape_success Whether the NNTmux metrics scrape completed successfully.',
+            '# TYPE nntmux_metric_scrape_success gauge',
+        ];
+
+        try {
+            $lines = array_merge(
+                $lines,
+                $this->tableEstimateMetrics(),
+                $this->groupMetrics(),
+                $this->releaseMetrics(),
+                $this->timerMetrics(),
+                $this->lockMetrics(),
+            );
+            $lines[] = 'nntmux_metric_scrape_success 1';
+        } catch (Throwable $e) {
+            $lines[] = 'nntmux_metric_scrape_success 0';
+            $lines[] = $this->metric('nntmux_metric_scrape_error', 1, [
+                'class' => $e::class,
+            ]);
+        }
+
+        return implode("\n", $lines)."\n";
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function tableEstimateMetrics(): array
+    {
+        $database = DB::connection()->getDatabaseName();
+        $rows = DB::table('information_schema.tables')
+            ->select(['table_name', 'table_rows'])
+            ->where('table_schema', $database)
+            ->whereIn('table_name', self::TABLES)
+            ->get();
+
+        $lines = [
+            '# HELP nntmux_table_rows_estimate Estimated table row count from information_schema.',
+            '# TYPE nntmux_table_rows_estimate gauge',
+        ];
+
+        foreach ($rows as $row) {
+            $lines[] = $this->metric('nntmux_table_rows_estimate', (float) ($row->table_rows ?? 0), [
+                'table' => (string) $row->table_name,
+            ]);
+        }
+
+        return $lines;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function groupMetrics(): array
+    {
+        $active = (int) DB::table('usenet_groups')->where('active', 1)->count();
+        $backfill = (int) DB::table('usenet_groups')->where('active', 1)->where('backfill', 1)->count();
+        $oldest = DB::table('usenet_groups')
+            ->where('active', 1)
+            ->where('backfill', 1)
+            ->whereNotNull('first_record_postdate')
+            ->min('first_record_postdate');
+
+        $lines = [
+            '# HELP nntmux_groups_total Usenet group count by state.',
+            '# TYPE nntmux_groups_total gauge',
+            $this->metric('nntmux_groups_total', $active, ['state' => 'active']),
+            $this->metric('nntmux_groups_total', $backfill, ['state' => 'active_backfill']),
+            '# HELP nntmux_backfill_oldest_cursor_age_seconds Age of the oldest active backfill first-record cursor.',
+            '# TYPE nntmux_backfill_oldest_cursor_age_seconds gauge',
+            $this->metric('nntmux_backfill_oldest_cursor_age_seconds', $oldest === null ? 0 : max(0, time() - strtotime((string) $oldest))),
+            '# HELP nntmux_group_first_record_postdate_timestamp First-record postdate timestamp for active backfill groups.',
+            '# TYPE nntmux_group_first_record_postdate_timestamp gauge',
+            '# HELP nntmux_group_first_record Current first article number for active backfill groups.',
+            '# TYPE nntmux_group_first_record gauge',
+        ];
+
+        $groups = DB::table('usenet_groups')
+            ->select(['name', 'first_record', 'first_record_postdate'])
+            ->where('active', 1)
+            ->where('backfill', 1)
+            ->orderByDesc('first_record_postdate')
+            ->limit(50)
+            ->get();
+
+        foreach ($groups as $group) {
+            $labels = ['group' => (string) $group->name];
+            $lines[] = $this->metric('nntmux_group_first_record', (float) $group->first_record, $labels);
+            $lines[] = $this->metric(
+                'nntmux_group_first_record_postdate_timestamp',
+                $group->first_record_postdate === null ? 0 : strtotime((string) $group->first_record_postdate),
+                $labels,
+            );
+        }
+
+        return $lines;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function releaseMetrics(): array
+    {
+        $hour = (int) DB::table('releases')->where('adddate', '>=', now()->subHour())->count();
+        $day = (int) DB::table('releases')->where('adddate', '>=', now()->subDay())->count();
+        $hashed = (int) DB::table('releases')->where('ishashed', 1)->count();
+        $renamed = (int) DB::table('releases')->where('isrenamed', 1)->count();
+
+        return [
+            '# HELP nntmux_releases_recent_total Releases added in a recent time window.',
+            '# TYPE nntmux_releases_recent_total gauge',
+            $this->metric('nntmux_releases_recent_total', $hour, ['window' => '1h']),
+            $this->metric('nntmux_releases_recent_total', $day, ['window' => '24h']),
+            '# HELP nntmux_releases_state_total Release count by processing state.',
+            '# TYPE nntmux_releases_state_total gauge',
+            $this->metric('nntmux_releases_state_total', $hashed, ['state' => 'hashed']),
+            $this->metric('nntmux_releases_state_total', $renamed, ['state' => 'renamed']),
+        ];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function timerMetrics(): array
+    {
+        $settings = DB::table('settings')
+            ->whereIn('name', self::TIMER_SETTINGS)
+            ->pluck('value', 'name');
+
+        $lines = [
+            '# HELP nntmux_worker_sleep_seconds Configured distributed worker sleep setting.',
+            '# TYPE nntmux_worker_sleep_seconds gauge',
+        ];
+
+        foreach (self::TIMER_SETTINGS as $setting) {
+            if (! $settings->has($setting)) {
+                continue;
+            }
+
+            $lines[] = $this->metric('nntmux_worker_sleep_seconds', (float) $settings[$setting], [
+                'setting' => $setting,
+            ]);
+        }
+
+        return $lines;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function lockMetrics(): array
+    {
+        $lines = [
+            '# HELP nntmux_worker_lock_ttl_seconds Redis distributed worker lock TTL.',
+            '# TYPE nntmux_worker_lock_ttl_seconds gauge',
+        ];
+
+        try {
+            $prefix = (string) config('cache.prefix');
+            $keys = Redis::keys('*distributed-worker*');
+            foreach ($keys as $key) {
+                $key = (string) $key;
+                $job = preg_replace('/^.*distributed-worker:/', '', $key) ?: $key;
+                $ttl = $this->redisTtl($key, $prefix);
+
+                $lines[] = $this->metric('nntmux_worker_lock_ttl_seconds', $ttl, [
+                    'job' => $job,
+                    'prefix' => $prefix,
+                ]);
+            }
+        } catch (Throwable) {
+            $lines[] = $this->metric('nntmux_worker_lock_ttl_seconds', -1, [
+                'job' => 'redis_unavailable',
+                'prefix' => '',
+            ]);
+        }
+
+        return $lines;
+    }
+
+    private function redisTtl(string $key, string $prefix): int
+    {
+        foreach ($this->redisKeyCandidates($key, $prefix) as $candidate) {
+            $ttl = (int) Redis::ttl($candidate);
+            if ($ttl !== -2) {
+                return $ttl;
+            }
+        }
+
+        return -2;
+    }
+
+    /**
+     * Redis::keys() returns the physical key with the Redis connection prefix,
+     * while Redis::ttl() applies that prefix before lookup.
+     *
+     * @return list<string>
+     */
+    private function redisKeyCandidates(string $key, string $cachePrefix): array
+    {
+        $candidates = [$key];
+        $redisPrefix = (string) config('database.redis.options.prefix');
+
+        foreach ([$redisPrefix, $cachePrefix, $redisPrefix.$cachePrefix] as $prefix) {
+            if ($prefix !== '' && str_starts_with($key, $prefix)) {
+                $candidates[] = substr($key, strlen($prefix));
+            }
+        }
+
+        return array_values(array_unique($candidates));
+    }
+
+    /**
+     * @param  array<string, string>  $labels
+     */
+    private function metric(string $name, float|int $value, array $labels = []): string
+    {
+        if ($labels === []) {
+            return sprintf('%s %s', $name, $this->formatValue($value));
+        }
+
+        $pairs = [];
+        foreach ($labels as $key => $label) {
+            $pairs[] = sprintf('%s="%s"', $key, $this->escapeLabel($label));
+        }
+
+        return sprintf('%s{%s} %s', $name, implode(',', $pairs), $this->formatValue($value));
+    }
+
+    private function formatValue(float|int $value): string
+    {
+        return is_float($value) ? rtrim(rtrim(sprintf('%.6F', $value), '0'), '.') : (string) $value;
+    }
+
+    private function escapeLabel(string $value): string
+    {
+        return str_replace(["\\", "\n", '"'], ["\\\\", "\\n", '\\"'], $value);
+    }
+}
