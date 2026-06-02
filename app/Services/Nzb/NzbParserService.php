@@ -281,7 +281,45 @@ class NzbParserService
      */
     public function detectPar2IndexFile(string $subject): bool
     {
-        return (bool) preg_match('/\.par2$/i', $subject);
+        if (preg_match('/\.vol\d+\+\d+\.par2/i', $subject) === 1) {
+            return false;
+        }
+
+        return (bool) preg_match('/\.par2(?:"|#34;)?(?:\s|$|[)\]])/i', $subject);
+    }
+
+    /**
+     * Check if a subject indicates any PAR2 file.
+     *
+     * @param  string  $subject  The file subject
+     * @return bool True if it's a PAR2 index or recovery volume file
+     */
+    public function detectPar2File(string $subject): bool
+    {
+        return (bool) preg_match('/\.par2(?:"|#34;)?(?:\s|$|[)\]])/i', $subject);
+    }
+
+    /**
+     * Check whether a parsed NZB file list contains only PAR2 files.
+     *
+     * Empty or unparsable file lists are treated as unknown, not PAR2-only, so
+     * callers do not delete releases just because the NZB could not be read.
+     *
+     * @param  array<string|int, array<string, mixed>>  $fileList
+     */
+    public function isPar2OnlyFileList(array $fileList): bool
+    {
+        if ($fileList === []) {
+            return false;
+        }
+
+        foreach ($fileList as $file) {
+            if (($file['ext'] ?? '') !== 'par2') {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**

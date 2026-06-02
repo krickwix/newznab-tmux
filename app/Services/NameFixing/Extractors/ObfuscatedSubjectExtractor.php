@@ -26,6 +26,7 @@ final class ObfuscatedSubjectExtractor
         '/\.7z$/i',
         '/\.rar$/i',
         '/\.par2?$/i',
+        '/\.(?:nfo|sfv|nzb|srr|srs|txt|md5|sha1)$/i',
         '/\.part$/i',
         '/\.vol\d+[+\-]\d+\.par2?$/i',
         '/\.\d{3}$/',

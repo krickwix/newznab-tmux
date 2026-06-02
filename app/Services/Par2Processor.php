@@ -58,6 +58,8 @@ class Par2Processor
             return false;
         }
 
+        $this->nameFixingService->getUpdateService()->reset();
+
         // Only get a new name if the category is OTHER.
         $foundName = true;
         if (\in_array((int) $query['categories_id'], Category::OTHERS_GROUP, true)) {

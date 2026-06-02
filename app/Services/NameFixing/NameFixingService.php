@@ -11,6 +11,7 @@ use App\Services\NameFixing\Extractors\FileNameExtractor;
 use App\Services\NameFixing\Extractors\NfoNameExtractor;
 use App\Services\NNTP\NNTPService;
 use App\Services\Nzb\NzbContentsService;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Main service for name fixing operations.
@@ -80,6 +81,15 @@ class NameFixingService
 
     protected string $fullall;
 
+    protected string $moviecats;
+
+    /** @var list<int> */
+    protected array $movieCategoryIds;
+
+    protected string $timemovies;
+
+    protected string $fullmovies;
+
     protected int $_totalReleases = 0;
 
     public function __construct(
@@ -98,19 +108,23 @@ class NameFixingService
         $this->fileNameCleaner = $fileNameCleaner ?? new FileNameCleaner;
         $this->filePrioritizer = $filePrioritizer ?? new FilePrioritizer;
         $this->predbMatchSelector = $predbMatchSelector ?? new PredbMatchSelector($this->fileNameCleaner);
-        $this->echoOutput = config('nntmux.echocli');
+        $this->echoOutput = (bool) config('nntmux.echocli');
 
         $this->othercats = implode(',', Category::OTHERS_GROUP);
         $this->timeother = sprintf(' AND rel.adddate > (NOW() - INTERVAL 6 HOUR) AND rel.categories_id IN (%s) GROUP BY rel.id ORDER BY postdate DESC', $this->othercats);
         $this->timeall = ' AND rel.adddate > (NOW() - INTERVAL 6 HOUR) GROUP BY rel.id ORDER BY postdate DESC';
-        $this->fullother = sprintf(' AND rel.categories_id IN (%s) GROUP BY rel.id', $this->othercats);
+        $this->fullother = sprintf(' AND rel.categories_id IN (%s) GROUP BY rel.id ORDER BY rel.adddate DESC', $this->othercats);
         $this->fullall = '';
+        $this->movieCategoryIds = array_values(array_diff(Category::MOVIES_GROUP, [Category::MOVIE_ROOT]));
+        $this->moviecats = implode(',', $this->movieCategoryIds);
+        $this->timemovies = sprintf(' AND rel.adddate > (NOW() - INTERVAL 6 HOUR) AND rel.categories_id IN (%s) GROUP BY rel.id ORDER BY postdate DESC', $this->moviecats);
+        $this->fullmovies = sprintf(' AND rel.categories_id IN (%s) GROUP BY rel.id', $this->moviecats);
     }
 
     /**
      * Fix names using NFO content.
      */
-    public function fixNamesWithNfo(int $time, bool $echo, int $cats, bool $nameStatus, bool $show): void
+    public function fixNamesWithNfo(int $time, bool $echo, int $cats, bool $nameStatus, bool $show, int $limit = 0): void
     {
         $this->echoStartMessage($time, '.nfo files');
         $type = 'NFO, ';
@@ -140,7 +154,7 @@ class NameFixingService
             );
         }
 
-        $releases = $this->getReleases($time, $cats, $query);
+        $releases = $this->getReleases($time, $cats, $query, $limit);
         $total = $releases->count();
 
         if ($total > 0) {
@@ -190,6 +204,10 @@ class NameFixingService
                     $this->checkWithPatternMatchers($releaseRow[0], $echo, $type, $nameStatus, $show, $preId);
                 }
 
+                if ($nameStatus === true && ! $this->updateService->matched) {
+                    $this->updateProcessingFlags($type, $rel->releases_id);
+                }
+
                 $this->echoRenamed($show);
             }
             $this->echoFoundCount($echo, ' NFO\'s');
@@ -201,10 +219,11 @@ class NameFixingService
     /**
      * Fix names using file names.
      */
-    public function fixNamesWithFiles(int $time, bool $echo, int $cats, bool $nameStatus, bool $show): void
+    public function fixNamesWithFiles(int $time, bool $echo, int $cats, bool $nameStatus, bool $show, int $limit = 0): void
     {
         $this->echoStartMessage($time, 'file names');
         $type = 'Filenames, ';
+        $allowedCategories = $cats === 4 ? $this->movieCategoryIds : [];
 
         $preId = false;
         if ($cats === 3) {
@@ -233,7 +252,7 @@ class NameFixingService
             );
         }
 
-        $releases = $this->getReleases($time, $cats, $query);
+        $releases = $this->getReleases($time, $cats, $query, $limit);
         $total = $releases->count();
 
         if ($total > 0) {
@@ -265,19 +284,24 @@ class NameFixingService
                     /** @var Release $release */
                     $release = clone $data['release'];
                     $release->textstring = $filename;
+                    if ($allowedCategories !== []) {
+                        $release->allowed_categories = $allowedCategories;
+                    }
 
                     // Try file name extraction
                     $fileResult = $this->fileExtractor->extractFromFile($filename);
                     if ($fileResult !== null) {
-                        $this->updateService->updateRelease(
-                            $release,
-                            $fileResult->newName,
-                            'fileCheck: '.$fileResult->method,
-                            $echo,
-                            $type,
-                            $nameStatus,
-                            $show
-                        );
+                        if ($allowedCategories === [] || $this->isSafeMovieFilenameResult($fileResult->method, $fileResult->newName)) {
+                            $this->updateService->updateRelease(
+                                $release,
+                                $fileResult->newName,
+                                'fileCheck: '.$fileResult->method,
+                                $echo,
+                                $type,
+                                $nameStatus,
+                                $show
+                            );
+                        }
                     }
 
                     // If not matched, try PreDB search
@@ -294,6 +318,10 @@ class NameFixingService
                     }
                 }
 
+                if ($nameStatus === true && ! $this->updateService->matched) {
+                    $this->updateProcessingFlags($type, (int) $releaseId);
+                }
+
                 $this->echoRenamed($show);
             }
 
@@ -301,6 +329,134 @@ class NameFixingService
         } else {
             cli()->info('Nothing to fix.');
         }
+    }
+
+    /**
+     * Fix names from release subjects when no release_files row exists yet.
+     */
+    public function fixNamesWithSubjects(int $time, bool $echo, int $cats, bool $nameStatus, bool $show, int $limit = 0): void
+    {
+        $this->echoStartMessage($time, 'release subjects');
+        $type = 'Filenames, ';
+        $allowedCategories = $cats === 4 ? $this->movieCategoryIds : [];
+
+        $query = sprintf(
+            'SELECT rel.id AS releases_id, rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id,
+                COALESCE(NULLIF(rel.searchname, \'\'), rel.name) AS textstring
+            FROM releases rel
+            WHERE rel.isrenamed = %d
+            AND rel.predb_id = 0
+            AND (
+                rel.proc_files = %d
+                OR COALESCE(NULLIF(rel.searchname, \'\'), rel.name) REGEXP %s
+            )',
+            self::IS_RENAMED_NONE,
+            self::PROC_FILES_NONE,
+            escapeString('(^|[^[:alnum:]])(19|20)[0-9]{2}([^[:alnum:]]|$)')
+        );
+
+        $releases = $this->getReleases($time, $cats, $query, $limit);
+        $total = $releases ? $releases->count() : 0;
+
+        if ($total > 0) {
+            $this->_totalReleases = $total;
+            cli()->info(number_format($total).' release subjects to process.');
+
+            foreach ($releases as $release) {
+                /** @var Release $release */
+                $this->updateService->reset();
+                $this->updateService->incrementChecked();
+
+                if ($allowedCategories !== []) {
+                    $release->allowed_categories = $allowedCategories;
+                }
+
+                foreach ($this->subjectNameCandidates((string) $release->textstring) as $candidate) {
+                    $candidateRelease = clone $release;
+                    $candidateRelease->textstring = $candidate;
+
+                    $fileResult = $this->fileExtractor->extractFromFile($candidate);
+                    if ($fileResult !== null
+                        && $this->isSafeSubjectFilenameResult($fileResult->method, $fileResult->newName)
+                        && ($allowedCategories === [] || $this->isSafeMovieFilenameResult($fileResult->method, $fileResult->newName))) {
+                        $this->updateService->updateRelease(
+                            $candidateRelease,
+                            $fileResult->newName,
+                            'subjectCheck: '.$fileResult->method,
+                            $echo,
+                            $type,
+                            $nameStatus,
+                            $show
+                        );
+                    }
+
+                    if (! $this->updateService->matched) {
+                        $this->checkWithPatternMatchers($candidateRelease, $echo, $type, $nameStatus, $show, false);
+                    }
+
+                    if ($this->updateService->matched) {
+                        break;
+                    }
+                }
+
+                if ($nameStatus === true && ! $this->updateService->matched) {
+                    $this->updateProcessingFlags($type, $release->releases_id);
+                }
+
+                $this->echoRenamed($show);
+            }
+
+            $this->echoFoundCount($echo, ' subjects');
+        } else {
+            cli()->info('Nothing to fix.');
+        }
+    }
+
+    /**
+     * @return list<string>
+     */
+    protected function subjectNameCandidates(string $subject): array
+    {
+        $candidates = [];
+
+        if (preg_match('/\byEnc\b/i', $subject) && preg_match('/\b(?:19|20)\d{2}\b/', $subject)) {
+            $candidates[] = $subject;
+        }
+
+        if (preg_match_all('/"([^"]+)"/', $subject, $matches)) {
+            foreach ($matches[1] as $quoted) {
+                $candidates[] = $quoted;
+            }
+        }
+
+        if (preg_match('/(?:^|[-:>])\s*([^"<>]+?\b(?:19|20)\d{2}\b[^"<>]+?)(?:\s+yEnc|\s*$)/i', $subject, $match)) {
+            $candidates[] = trim($match[1]);
+        }
+
+        $candidates[] = $subject;
+
+        return array_values(array_unique(array_filter(array_map(
+            static fn (string $candidate): string => trim($candidate),
+            $candidates
+        ))));
+    }
+
+    protected function isSafeMovieFilenameResult(string $method, string $name): bool
+    {
+        return $method !== 'Folder name';
+    }
+
+    protected function isSafeSubjectFilenameResult(string $method, string $name): bool
+    {
+        if (preg_match('/\.(?:asb|cneg\d*|ene)$/i', $name)) {
+            return false;
+        }
+
+        if ($method !== 'Folder name') {
+            return true;
+        }
+
+        return (bool) preg_match('/\b(?:S\d{1,2}E\d{1,2}|(?:19|20)\d{2})\b/i', $name);
     }
 
     /**
@@ -366,7 +522,7 @@ class NameFixingService
     /**
      * Fix names using CRC32 hashes.
      */
-    public function fixNamesWithCrc(int $time, bool $echo, int $cats, bool $nameStatus, bool $show): void
+    public function fixNamesWithCrc(int $time, bool $echo, int $cats, bool $nameStatus, bool $show, int $limit = 0): void
     {
         $this->echoStartMessage($time, 'CRC32');
         $type = 'CRC32, ';
@@ -374,7 +530,7 @@ class NameFixingService
         $preId = false;
         if ($cats === 3) {
             $query = sprintf(
-                'SELECT rf.crc32 AS textstring, rf.name AS filename, rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id, rel.size as relsize,
+                'SELECT rf.crc32 AS textstring, rf.name AS filename, rf.size AS filesize, rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id, rel.size as relsize,
                     rf.releases_id AS fileid, rel.id AS releases_id
                 FROM releases rel
                 INNER JOIN release_files rf ON rf.releases_id = rel.id
@@ -386,7 +542,7 @@ class NameFixingService
             $preId = true;
         } else {
             $query = sprintf(
-                'SELECT rf.crc32 AS textstring, rf.name AS filename, rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id, rel.size as relsize,
+                'SELECT rf.crc32 AS textstring, rf.name AS filename, rf.size AS filesize, rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id, rel.size as relsize,
                     rf.releases_id AS fileid, rel.id AS releases_id
                 FROM releases rel
                 INNER JOIN release_files rf ON rf.releases_id = rel.id
@@ -402,7 +558,7 @@ class NameFixingService
             );
         }
 
-        $releases = $this->getReleases($time, $cats, $query);
+        $releases = $this->getReleases($time, $cats, $query, $limit);
         $total = $releases->count();
 
         if ($total > 0) {
@@ -658,6 +814,33 @@ class NameFixingService
             return false;
         }
 
+        $predbMatch = DB::selectOne(
+            'SELECT p.id AS predb_id, p.title
+            FROM predb_crcs pc
+            INNER JOIN predb p ON p.id = pc.predb_id
+            WHERE pc.crchash = ?
+            AND (pc.filesize = 0 OR pc.filesize = ?)
+            ORDER BY pc.filesize DESC, p.predate DESC
+            LIMIT 1',
+            [strtoupper((string) $release->textstring), (int) ($release->filesize ?? $release->relsize ?? 0)]
+        );
+
+        if ($predbMatch !== null) {
+            $this->updateService->updateRelease(
+                $release,
+                $predbMatch->title,
+                'crcCheck: PreDB CRC',
+                $echo,
+                $type,
+                $nameStatus,
+                $show,
+                (int) $predbMatch->predb_id
+            );
+            $this->updateService->updateSingleColumn('proc_crc32', self::PROC_CRC_DONE, $release->releases_id);
+
+            return true;
+        }
+
         $result = Release::fromQuery(
             sprintf(
                 'SELECT rf.crc32, rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id, rel.size as relsize, rel.predb_id as predb_id,
@@ -874,6 +1057,12 @@ class NameFixingService
         if ($time === 2 && $cats === 2) {
             $releases = Release::fromQuery($query.$this->fullall.$queryLimit);
         }
+        if ($time === 1 && $cats === 4) {
+            $releases = Release::fromQuery($query.$this->timemovies.$queryLimit);
+        }
+        if ($time === 2 && $cats === 4) {
+            $releases = Release::fromQuery($query.$this->fullmovies.$queryLimit);
+        }
 
         return $releases;
     }
@@ -971,20 +1160,22 @@ class NameFixingService
     /**
      * Fix names using PAR2 files (requires NNTP connection).
      */
-    public function fixNamesWithPar2(int $time, bool $echo, int $cats, bool $nameStatus, bool $show, NNTPService $nntp): void
+    public function fixNamesWithPar2(int $time, bool $echo, int $cats, bool $nameStatus, bool $show, NNTPService $nntp, int $limit = 0): void
     {
         $this->echoStartMessage($time, 'par2 files');
 
         if ($cats === 3) {
             $query = sprintf(
-                'SELECT rel.id AS releases_id, rel.guid, rel.groups_id, rel.fromname
+                'SELECT rel.id AS releases_id, rel.guid, rel.groups_id, rel.fromname,
+                    rel.name, rel.searchname, rel.categories_id
                 FROM releases rel
                 WHERE rel.predb_id = 0'
             );
             $cats = 2;
         } else {
             $query = sprintf(
-                'SELECT rel.id AS releases_id, rel.guid, rel.groups_id, rel.fromname
+                'SELECT rel.id AS releases_id, rel.guid, rel.groups_id, rel.fromname,
+                    rel.name, rel.searchname, rel.categories_id
                 FROM releases rel
                 WHERE (rel.isrenamed = %d OR rel.categories_id IN (%d, %d))
                 AND rel.predb_id = 0
@@ -996,7 +1187,7 @@ class NameFixingService
             );
         }
 
-        $releases = $this->getReleases($time, $cats, $query);
+        $releases = $this->getReleases($time, $cats, $query, $limit);
         $total = $releases ? $releases->count() : 0;
 
         if ($total > 0) {
@@ -1006,7 +1197,20 @@ class NameFixingService
 
             foreach ($releases as $release) {
                 /** @var Release $release */
-                if ($nzbContentsService->checkPar2($release->guid, $release->releases_id, $release->groups_id, (int) $nameStatus, (int) $show)) {
+                $subjectTitle = $this->extractTitleFromPar2Subject((string) ($release->name ?? ''));
+                if ($subjectTitle !== null) {
+                    $this->updateService->reset();
+                    $this->updateService->updateRelease($release, $subjectTitle, 'PAR2 subject title', $echo, 'PAR2, ', $nameStatus, $show);
+                    if ($this->updateService->matched) {
+                        $this->updateService->fixed++;
+                    }
+                    $this->updateService->incrementChecked();
+                    $this->echoRenamed($show);
+
+                    continue;
+                }
+
+                if ($nzbContentsService->checkPar2($release->guid, $release->releases_id, $release->groups_id, (int) $echo, (int) $nameStatus, (int) $show)) {
                     $this->updateService->fixed++;
                 }
 
@@ -1017,6 +1221,30 @@ class NameFixingService
         } else {
             cli()->info('Nothing to fix.');
         }
+    }
+
+    protected function extractTitleFromPar2Subject(string $subject): ?string
+    {
+        if ($subject === '' || stripos($subject, '.par2') === false) {
+            return null;
+        }
+
+        if (preg_match('/^(.+?)\s+-\s*((?:19|20)\d{2})\s+-/u', $subject, $hit)) {
+            $title = preg_replace('/[^\pL\pN]+/u', '.', trim($hit[1]));
+            $title = trim((string) $title, '.');
+            if ($title !== '') {
+                return $title.'.'.$hit[2];
+            }
+        }
+
+        if (preg_match('/"([^"]+?)\.(?:vol\d+\+\d+\.)?par2"/iu', $subject, $hit)) {
+            $title = trim($hit[1]);
+            if ($title !== '' && ! preg_match('/^[a-f0-9]{32,}$/i', $title)) {
+                return $title;
+            }
+        }
+
+        return null;
     }
 
     /**

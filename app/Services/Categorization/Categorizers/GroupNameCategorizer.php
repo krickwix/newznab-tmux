@@ -29,7 +29,7 @@ class GroupNameCategorizer extends AbstractCategorizer
         if (preg_match('/alt\.binaries\..*?(tv|hdtv|tvseries)/i', $groupName)) {
             return $this->matched(Category::TV_OTHER, 0.6, 'group_name_tv');
         }
-        if (preg_match('/alt\.binaries\..*?(movies?|dvd|bluray|x264)/i', $groupName)) {
+        if (preg_match('/alt\.binaries\..*?(movies?|movie[.-]?classic|dvd[.-]classic|dvd[.-]movies?|dvd[.-]documentar|bluray|blu[.-]?ray|x264|vintage[.-]?film)/i', $groupName)) {
             return $this->matched(Category::MOVIE_OTHER, 0.6, 'group_name_movie');
         }
         if (preg_match('/alt\.binaries\..*?(erotica|pictures\.erotica|xxx)/i', $groupName)) {

@@ -67,6 +67,7 @@ class BackfillRunner extends BaseRunner
         $backfill_qty = (int) Settings::settingValue('backfill_qty');
         $backfill_order = (int) Settings::settingValue('backfill_order');
         $backfill_days = (int) Settings::settingValue('backfill_days');
+        $backfill_groups = max(1, (int) Settings::settingValue('backfill_groups'));
         $maxMessages = (int) Settings::settingValue('maxmssgs');
         $threads = (int) Settings::settingValue('backfillthreads');
 
@@ -97,33 +98,66 @@ class BackfillRunner extends BaseRunner
             AND g.backfill = 1
             AND (NOW() - INTERVAL '.$backfilldays.' DAY ) < g.first_record_postdate
             GROUP BY a.name, a.last_record, g.name, g.first_record
-            '.$orderby.' LIMIT 1';
+            '.$orderby.' LIMIT '.$backfill_groups;
 
         $data = DB::select($sql);
 
-        $groupName = '';
-        $count = 0;
-        if (! empty($data) && isset($data[0]->name)) {
-            $groupName = $data[0]->name;
-            $count = ($data[0]->our_first - $data[0]->their_first);
-        }
-
-        if ($count <= 0) {
+        if (empty($data)) {
             $this->headerNone();
-            if (config('nntmux.echocli') && $groupName !== '') {
-                cli()->primary('No backfill needed for group '.$groupName);
-            }
 
             return;
         }
 
-        $getEach = ($count > ($backfill_qty * $threads))
-            ? (int) ceil(($backfill_qty * $threads) / $maxMessages)
-            : (int) ceil($count / $maxMessages);
+        $queuesByChunk = [];
+        $queueGroupsByChunk = [];
+        foreach ($data as $group) {
+            $ourFirst = (int) $group->our_first;
+            $theirFirst = max(1, (int) $group->their_first);
+            $count = $ourFirst - $theirFirst;
+
+            if ($count <= 0) {
+                if (config('nntmux.echocli')) {
+                    cli()->primary('No backfill needed for group '.$group->name);
+                }
+
+                continue;
+            }
+
+            $getEach = ($count > ($backfill_qty * $threads))
+                ? (int) ceil(($backfill_qty * $threads) / $maxMessages)
+                : (int) ceil($count / $maxMessages);
+
+            for ($i = 0; $i <= $getEach - 1; $i++) {
+                $end = $ourFirst - $i * $maxMessages - 1;
+                $start = max($theirFirst, $end - $maxMessages + 1);
+                if ($end < $theirFirst || $start > $end) {
+                    continue;
+                }
+
+                if ($start === $theirFirst && ($end - $start + 1) < $maxMessages) {
+                    continue;
+                }
+
+                $key = $group->name.'#'.($i + 1);
+                $queuesByChunk[$i][$key] = sprintf('get_range  backfill  %s  %s  %s  %s', $group->name, $start, $end, $i + 1);
+                $queueGroupsByChunk[$i][$key] = $group->name;
+            }
+        }
 
         $queues = [];
-        for ($i = 0; $i <= $getEach - 1; $i++) {
-            $queues[$i] = sprintf('get_range  backfill  %s  %s  %s  %s', $groupName, $data[0]->our_first - $i * $maxMessages - $maxMessages, $data[0]->our_first - $i * $maxMessages - 1, $i + 1);
+        $queueGroups = [];
+        ksort($queuesByChunk);
+        foreach ($queuesByChunk as $chunk => $chunkQueues) {
+            foreach ($chunkQueues as $key => $queue) {
+                $queues[$key] = $queue;
+                $queueGroups[$key] = $queueGroupsByChunk[$chunk][$key];
+            }
+        }
+
+        if ($queues === []) {
+            $this->headerNone();
+
+            return;
         }
 
         // Streaming mode
@@ -150,7 +184,7 @@ class BackfillRunner extends BaseRunner
 
         foreach ($results as $idx => $output) {
             echo $output;
-            cli()->primary('Backfilled group '.$groupName);
+            cli()->primary('Backfilled group '.$queueGroups[$idx]);
         }
     }
 }

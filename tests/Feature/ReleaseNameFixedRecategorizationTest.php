@@ -8,6 +8,7 @@ use App\Facades\Search;
 use App\Models\Category;
 use App\Models\Release;
 use App\Models\UsenetGroup;
+use App\Services\NameFixing\NameFixingService;
 use App\Services\NameFixing\ReleaseUpdateService;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Database\Schema\Blueprint;
@@ -130,6 +131,15 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(1, (int) $release->isrenamed);
     }
 
+    public function test_movie_fix_name_lane_includes_movie_other_category(): void
+    {
+        $service = app(NameFixingService::class);
+        $property = new \ReflectionProperty($service, 'movieCategoryIds');
+        $property->setAccessible(true);
+
+        $this->assertContains(Category::MOVIE_OTHER, $property->getValue($service));
+    }
+
     public function test_renaming_olympic_webdl_release_recategorizes_it_from_movie_webdl_to_tv_sport(): void
     {
         Search::shouldReceive('updateRelease')->twice();
@@ -220,6 +230,94 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(Category::TV_HD, $release->categories_id);
         $this->assertSame(1, (int) $release->iscategorized);
         $this->assertSame(1, (int) $release->isrenamed);
+    }
+
+    public function test_par2_archive_part_name_prefers_subject_title_and_year(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.multimedia.vintage-film.post-1960',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $subject = 'A.Boy.And.His.Dog -1975 - [01/32] - 720x480 (Letterbox) - H264/AC3->MP4 - "A.Boy.And.His.Dog.par2" yEnc';
+        $release = Release::factory()->create([
+            'name' => $subject,
+            'searchname' => $subject,
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('d', 40),
+            'leftguid' => 'd',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $service = app(ReleaseUpdateService::class);
+        $service->updateRelease(
+            $release->fresh(),
+            'A.Boy.And.His.Dog.part01',
+            'fileCheck: Folder name',
+            true,
+            'PAR2, ',
+            true,
+            false,
+        );
+
+        $release->refresh();
+
+        $this->assertSame('A.Boy.And.His.Dog.1975', $release->searchname);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(1, (int) $release->isrenamed);
+    }
+
+    public function test_par2_folder_name_without_subject_rescue_does_not_rename(): void
+    {
+        Search::shouldReceive('updateRelease')->never();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'random.par2 yEnc',
+            'searchname' => 'random.par2 yEnc',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('e', 40),
+            'leftguid' => 'e',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $service = app(ReleaseUpdateService::class);
+        $service->updateRelease(
+            $release->fresh(),
+            'Random.Folder.Name.part01',
+            'fileCheck: Folder name',
+            true,
+            'PAR2, ',
+            true,
+            false,
+        );
+
+        $release->refresh();
+
+        $this->assertSame('random.par2 yEnc', $release->searchname);
+        $this->assertSame(Category::OTHER_HASHED, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(0, (int) $release->isrenamed);
     }
 
     private function setEnvironmentValue(string $key, ?string $value): void

@@ -99,7 +99,7 @@ class ReleaseUpdateService
     ) {
         $this->category = $category ?? new CategorizationService;
         $this->fileNameCleaner = $fileNameCleaner ?? new FileNameCleaner;
-        $this->echoOutput = config('nntmux.echocli');
+        $this->echoOutput = (bool) config('nntmux.echocli');
     }
 
     /**
@@ -152,6 +152,16 @@ class ReleaseUpdateService
                 return;
             }
 
+            if ($type === 'PAR2, ') {
+                $candidateBeforeSubjectPreference = $newName;
+                $newName = $this->preferPar2SubjectTitle($release, $name, $newName);
+                if (stripos($method, 'Folder name') !== false && $newName === $candidateBeforeSubjectPreference) {
+                    $this->done = true;
+
+                    return;
+                }
+            }
+
             if (strtolower($newName) !== strtolower($release->searchname)) {
                 $this->matched = true;
                 $this->relid = (int) $release->releases_id;
@@ -163,8 +173,6 @@ class ReleaseUpdateService
                     }
                 }
 
-                $this->fixed++;
-
                 // Split on path separator backslash to strip any path
                 $newName = explode('\\', $newName);
                 $newName = preg_replace(['/^[=_.:\s-]+/', '/[=_.:\s-]+$/'], '', $newName[0]);
@@ -172,13 +180,26 @@ class ReleaseUpdateService
                 $newTitle = substr($newName, 0, 299);
 
                 $determinedCategory = null;
-                if ($this->echoOutput && $show) {
+                $allowedCategories = (array) ($release->allowed_categories ?? []);
+                if (($this->echoOutput && $show) || $allowedCategories !== []) {
                     $determinedCategory = $this->category->determineCategory(
                         $release->groups_id,
                         $newTitle,
                         ! empty($release->fromname) ? $release->fromname : ''
                     );
+                }
 
+                if ($allowedCategories !== [] && ! in_array((int) $determinedCategory['categories_id'], $allowedCategories, true)) {
+                    $this->matched = false;
+                    $this->relid = 0;
+                    $this->done = true;
+
+                    return;
+                }
+
+                $this->fixed++;
+
+                if ($this->echoOutput && $show && $determinedCategory !== null) {
                     $this->echoReleaseInfo($release, $newTitle, $determinedCategory, $type, $method);
                 }
 
@@ -188,6 +209,40 @@ class ReleaseUpdateService
             }
         }
         $this->done = true;
+    }
+
+    /**
+     * PAR2 file lists often expose archive members like Title.part01.rar while
+     * the original subject carries the cleaner PAR2 title and sometimes a year.
+     */
+    protected function preferPar2SubjectTitle(object $release, string $rawName, string $candidate): string
+    {
+        if (! preg_match('/(?:^|[._ -])(?:part\d+|r\d{2,3})$/i', $candidate)
+            && ! preg_match('/(?:^|[._ -])(?:part\d+|r\d{2,3})(?:\.rar)?$/i', $rawName)) {
+            return $candidate;
+        }
+
+        $subject = (string) ($release->searchname ?? $release->name ?? '');
+        if ($subject === '') {
+            return $candidate;
+        }
+
+        if (preg_match('/^(.+?)\s+-\s*((?:19|20)\d{2})\s+-/u', $subject, $hit)) {
+            $title = preg_replace('/[^\pL\pN]+/u', '.', trim($hit[1]));
+            $title = trim((string) $title, '.');
+            if ($title !== '') {
+                return $title.'.'.$hit[2];
+            }
+        }
+
+        if (preg_match('/"([^"]+?)\.(?:vol\d+\+\d+\.)?par2"/iu', $subject, $hit)) {
+            $title = trim($hit[1]);
+            if ($title !== '') {
+                return $title;
+            }
+        }
+
+        return $candidate;
     }
 
     /**
@@ -204,6 +259,7 @@ class ReleaseUpdateService
             $type === 'CRC32, ' ||
             $type === 'SRR, ' ||
             stripos($method, 'Title Match') !== false ||
+            stripos($method, 'Classic movie support filename') !== false ||
             stripos($method, 'file matched source') !== false ||
             stripos($method, 'PreDb') !== false ||
             stripos($method, 'preDB') !== false;

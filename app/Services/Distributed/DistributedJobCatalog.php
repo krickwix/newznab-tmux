@@ -215,7 +215,63 @@ class DistributedJobCatalog
         }
 
         $commands = [];
-        foreach ([3, 5, 7, 9, 11, 13, 15, 17, 19] as $method) {
+        foreach ([3, 4, 5, 6] as $method) {
+            $commands[] = [
+                'command' => 'releases:fix-names',
+                'arguments' => [
+                    'method' => (string) $method,
+                    '--update' => true,
+                    '--category' => 'other',
+                    '--set-status' => true,
+                    '--show' => true,
+                ],
+            ];
+        }
+        $commands[] = [
+            'command' => 'releases:fix-names',
+            'arguments' => [
+                'method' => '6',
+                '--update' => true,
+                '--category' => 'movies',
+                '--set-status' => true,
+                '--limit' => 500,
+                '--show' => true,
+            ],
+        ];
+        $commands[] = [
+            'command' => 'releases:fix-names',
+            'arguments' => [
+                'method' => '21',
+                '--update' => true,
+                '--category' => 'other',
+                '--set-status' => true,
+                '--limit' => 500,
+                '--show' => true,
+            ],
+        ];
+        $commands[] = [
+            'command' => 'releases:fix-names',
+            'arguments' => [
+                'method' => '21',
+                '--update' => true,
+                '--category' => 'movies',
+                '--set-status' => true,
+                '--limit' => 500,
+                '--show' => true,
+            ],
+        ];
+        $commands[] = [
+            'command' => 'releases:fix-names',
+            'arguments' => [
+                'method' => '8',
+                '--update' => true,
+                '--category' => 'other',
+                '--set-status' => true,
+                '--limit' => 50,
+                '--show' => true,
+            ],
+        ];
+        foreach ([7, 9, 11, 13, 15, 17, 19] as $method) {
             $commands[] = [
                 'command' => 'releases:fix-names',
                 'arguments' => [

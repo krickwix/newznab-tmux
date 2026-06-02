@@ -16,10 +16,11 @@ class FixReleaseNames extends Command
      * @var string
      */
     protected $signature = 'releases:fix-names
-                                 {method : The method number (3-20) to use for fixing names}
+                                 {method : The method number (3-21) to use for fixing names}
                                  {--update : Actually update the names, otherwise just display results}
-                                 {--category=other : Category to process: "other", "all", or "predb_id"}
+                                 {--category=other : Category to process: "other", "movies", "all", or "predb_id"}
                                  {--set-status : Set releases as checked after processing}
+                                 {--limit=0 : Maximum releases to process (0 = no limit)}
                                  {--show : Display detailed release changes rather than just counters}';
 
     /**
@@ -38,6 +39,7 @@ class FixReleaseNames extends Command
         $update = (bool) $this->option('update');
         $setStatus = (bool) $this->option('set-status');
         $show = $this->option('show');
+        $limit = max(0, (int) $this->option('limit'));
 
         // Set category option
         $categoryOption = $this->option('category');
@@ -46,6 +48,8 @@ class FixReleaseNames extends Command
             $other = 2;
         } elseif ($categoryOption === 'predb_id') {
             $other = 3;
+        } elseif ($categoryOption === 'movies') {
+            $other = 4;
         }
 
         // Connect to NNTP if method requires it
@@ -68,22 +72,22 @@ class FixReleaseNames extends Command
 
         switch ($method) {
             case '3':
-                $nameFixingService->fixNamesWithNfo(1, $update, $other, $setStatus, $show);
+                $nameFixingService->fixNamesWithNfo(1, $update, $other, $setStatus, $show, $limit);
                 break;
             case '4':
-                $nameFixingService->fixNamesWithNfo(2, $update, $other, $setStatus, $show);
+                $nameFixingService->fixNamesWithNfo(2, $update, $other, $setStatus, $show, $limit);
                 break;
             case '5':
-                $nameFixingService->fixNamesWithFiles(1, $update, $other, $setStatus, $show);
+                $nameFixingService->fixNamesWithFiles(1, $update, $other, $setStatus, $show, $limit);
                 break;
             case '6':
-                $nameFixingService->fixNamesWithFiles(2, $update, $other, $setStatus, $show);
+                $nameFixingService->fixNamesWithFiles(2, $update, $other, $setStatus, $show, $limit);
                 break;
             case '7':
-                $nameFixingService->fixNamesWithPar2(1, $update, $other, $setStatus, $show, $nntp);
+                $nameFixingService->fixNamesWithPar2(1, $update, $other, $setStatus, $show, $nntp, $limit);
                 break;
             case '8':
-                $nameFixingService->fixNamesWithPar2(2, $update, $other, $setStatus, $show, $nntp);
+                $nameFixingService->fixNamesWithPar2(2, $update, $other, $setStatus, $show, $nntp, $limit);
                 break;
             case '9':
                 $nameFixingService->fixNamesWithMedia(1, $update, $other, $setStatus, $show);
@@ -116,10 +120,13 @@ class FixReleaseNames extends Command
                 $nameFixingService->fixNamesWithMediaMovieName(2, $update, $other, $setStatus, $show);
                 break;
             case '19':
-                $nameFixingService->fixNamesWithCrc(1, $update, $other, $setStatus, $show);
+                $nameFixingService->fixNamesWithCrc(1, $update, $other, $setStatus, $show, $limit);
                 break;
             case '20':
-                $nameFixingService->fixNamesWithCrc(2, $update, $other, $setStatus, $show);
+                $nameFixingService->fixNamesWithCrc(2, $update, $other, $setStatus, $show, $limit);
+                break;
+            case '21':
+                $nameFixingService->fixNamesWithSubjects(2, $update, $other, $setStatus, $show, $limit);
                 break;
             default:
                 $this->showHelp();
@@ -156,10 +163,11 @@ class FixReleaseNames extends Command
         $this->info('php artisan releases:fix-names 18 : Fix release names using Mediainfo.');
         $this->info('php artisan releases:fix-names 19 : Fix release names using CRC32 in the past 6 hours.');
         $this->info('php artisan releases:fix-names 20 : Fix release names using CRC32.');
+        $this->info('php artisan releases:fix-names 21 : Fix release names using release subjects.');
         $this->info('');
         $this->info('Options:');
         $this->info('  --update           Actually update the names (default: only display potential changes)');
-        $this->info('  --category=VALUE   Process "other" categories (default), "all" categories, or "predb_id" for unmatched');
+        $this->info('  --category=VALUE   Process "other" categories (default), "movies", "all", or "predb_id" for unmatched');
         $this->info('  --set-status       Mark releases as checked so they won\'t be processed again');
         $this->info('  --show             Display detailed release changes (default: only show counters)');
         $this->info('');

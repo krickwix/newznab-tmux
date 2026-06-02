@@ -30,12 +30,40 @@ class MusicCategorizer extends AbstractCategorizer
         if ($context->hasAdultMarkers()) {
             return true;
         }
+
+        if ($this->looksLikeMoviePost($context) || $this->looksLikeTvVideoPost($context)) {
+            return true;
+        }
+
         // Skip TV shows (season patterns)
         if (preg_match('/[._ -]S\d{1,3}[._ -]?(E\d|Complete|Full|1080|720|480|2160|WEB|HDTV|BluRay)/i', $context->releaseName)) {
             return true;
         }
 
         return false;
+    }
+
+    protected function looksLikeMoviePost(ReleaseContext $context): bool
+    {
+        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:movies?|dvd|blu[.-]?ray|vintage[.-]?film|classic[.-]?film|old[.-]?movies?|documentaries)/i')) {
+            return false;
+        }
+
+        return (bool) preg_match('/\b(?:19|20)\d{2}\b/i', $context->releaseName)
+            && (
+                preg_match('/(?:"[^"]+|\\S+)\.(?:nfo|par2|rar|avi|mkv|mp4|mpg|mpeg|vob|iso|nzb)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $context->releaseName)
+                || preg_match('/\b(?:480p|576p|720p|1080p|2160p|x264|x265|h\.?264|h\.?265|xvid|divx|avi|mkv|mp4|mpg|mpeg|svcd|vcd|dvdrip|vhsrip|tvrip|bdrip|bluray|web[._ -]?dl|webrip|dvd)\b/i', $context->releaseName)
+                || preg_match('/\b(?:VCD|SVCD)[._ -]?(?:Collection|Disc|Movie|Film)\b/i', $context->releaseName)
+            );
+    }
+
+    protected function looksLikeTvVideoPost(ReleaseContext $context): bool
+    {
+        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:tv|hdtv|tvseries)/i')) {
+            return false;
+        }
+
+        return (bool) preg_match('/\b\d{1,4}\b.*\b(?:480p|720p|1080p|2160p|4K|x264|x265|h\.?264|h\.?265|AAC|AC3|WEB[._ -]?DL|HDTV)\b/i', $context->releaseName);
     }
 
     public function categorize(ReleaseContext $context): CategorizationResult
@@ -202,8 +230,10 @@ class MusicCategorizer extends AbstractCategorizer
             }
         }
 
-        // MP3 scene patterns
-        if (preg_match('/^[a-zA-Z0-9]{1,12}[._-](19|20)\d\d[._-][a-zA-Z0-9]{1,12}$|[a-z0-9]{1,12}\-(19|20)\d\d\-[a-z0-9]{1,12}/i', $name)) {
+        // MP3 scene patterns. Do not let embedded video codec/source tokens
+        // such as x264-2008-GROUP turn movie/video posts into MP3 releases.
+        if (! $this->hasVideoReleaseEvidence($name)
+            && preg_match('/^[a-zA-Z0-9]{1,12}[._-](19|20)\d\d[._-][a-zA-Z0-9]{1,12}$|[a-z0-9]{1,12}\-(19|20)\d\d\-[a-z0-9]{1,12}/i', $name)) {
             if ($categorizeForeign && $this->checkForeign($name)) {
                 return $this->matched(Category::MUSIC_FOREIGN, 0.75, 'mp3_scene_foreign');
             }
@@ -221,6 +251,11 @@ class MusicCategorizer extends AbstractCategorizer
         }
 
         return null;
+    }
+
+    protected function hasVideoReleaseEvidence(string $name): bool
+    {
+        return (bool) preg_match('/\b(?:x264|x265|h\.?264|h\.?265|hevc|avc|divx|xvid|720p|1080p|2160p|4k|bluray|blu[._ -]?ray|bdrip|dvdrip|vhsrip|webrip|web[._ -]?dl|hdtv|mkv|mp4|avi|mpg|mpeg|vob|vcd|svcd|iso|par2|rar)\b/i', $name);
     }
 
     protected function checkOther(string $name, bool $categorizeForeign): ?CategorizationResult

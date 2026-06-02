@@ -50,7 +50,7 @@ class MovieCategorizer extends AbstractCategorizer
         $name = $context->releaseName;
 
         // Check if it looks like movie content
-        if (! $this->looksLikeMovie($name)) {
+        if (! $this->looksLikeMovie($name, $context)) {
             return $this->noMatch();
         }
 
@@ -60,6 +60,10 @@ class MovieCategorizer extends AbstractCategorizer
         }
 
         if ($result = $this->checkX265($name)) {
+            return $result;
+        }
+
+        if ($result = $this->checkDocumentaryVideo($name, $context)) {
             return $result;
         }
 
@@ -87,7 +91,15 @@ class MovieCategorizer extends AbstractCategorizer
             return $result;
         }
 
+        if ($result = $this->checkVintageFilmSD($name, $context)) {
+            return $result;
+        }
+
         if ($result = $this->checkSD($name)) {
+            return $result;
+        }
+
+        if ($result = $this->checkClassicTitle($name, $context)) {
             return $result;
         }
 
@@ -101,9 +113,56 @@ class MovieCategorizer extends AbstractCategorizer
     /**
      * Check if release name looks like movie content.
      */
-    protected function looksLikeMovie(string $name): bool
+    protected function looksLikeMovie(string $name, ReleaseContext $context): bool
     {
-        return (bool) preg_match('/[._ -]AVC|[BH][DR]RIP|(Bluray|Blu-Ray)|BD[._ -]?(25|50)?|\bBR\b|Camrip|[._ -]\d{4}[._ -].+(720p|1080p|Cam|HDTS|2160p)|DIVX|[._ -]DVD[._ -]|DVD-?(5|9|R|Rip)|Untouched|VHSRip|XVID|[._ -](DTS|TVrip|webrip|WEBDL|WEB-DL)[._ -]|\b(2160)p\b.*\b(Netflix|Amazon|NF|AMZN|Disney)\b/i', $name);
+        return (bool) preg_match('/[._ -]AVC|[BH][DR]RIP|(Bluray|Blu-Ray)|BD[._ -]?(25|50)?|\bBR\b|Camrip|[._ -]\d{4}[._ -].+(720p|1080p|Cam|HDTS|2160p)|DIVX|[._ -]DVD[._ -]|DVD-?(5|9|R|Rip)|Untouched|VHSRip|XVID|[._ -](DTS|TVrip|webrip|WEBDL|WEB-DL)[._ -]|\b(2160)p\b.*\b(Netflix|Amazon|NF|AMZN|Disney)\b/i', $name)
+            || $this->looksLikeClassicMovieTitle($name, $context)
+            || $this->looksLikeVintageFilmPost($name, $context)
+            || $this->looksLikeVideoPar2Sidecar($name)
+            || $this->looksLikeCleanedVideoSidecar($name)
+            || $this->looksLikeDocumentaryVideoPost($name, $context);
+    }
+
+    protected function looksLikeClassicMovieTitle(string $name, ReleaseContext $context): bool
+    {
+        $year = $this->extractTrailingYear($name);
+        if ($year === null || $year > 1969) {
+            return false;
+        }
+
+        if (preg_match('/\((?!19\d{2}|20\d{2})[^)]{3,80}\)\s*(?:\((?:19|20)\d{2}\)|(?:19|20)\d{2})\s*$/i', $name)) {
+            return true;
+        }
+
+        return $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?)/i');
+    }
+
+    protected function extractTrailingYear(string $name): ?int
+    {
+        if (! preg_match('/(?:^|[._ \(])((?:19|20)\d{2})(?:\)?\s*)$/i', $name, $matches)) {
+            return null;
+        }
+
+        return (int) $matches[1];
+    }
+
+    protected function looksLikeVintageFilmPost(string $name, ReleaseContext $context): bool
+    {
+        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
+            return false;
+        }
+
+        $hasVideoEvidence = (bool) preg_match('/(?:\.|\b)(?:nfo|rar|par2|avi|mkv|mp4|mpg|mpeg|vob|iso|nzb)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $name)
+            || preg_match('/\b(?:480p|576p|720p|1080p|x264|x265|h\.?264|h\.?265|xvid|divx|avi|mkv|mp4|mpg|mpeg|vcd|svcd|dvdrip|vhsrip|dvd|disc|film|films|shorts?)\b/i', $name)
+            || preg_match('/\b(?:19|20)\d{2}-\d{1,3}(?:-\d{1,3})?mn\b/i', $name);
+
+        if (! $hasVideoEvidence) {
+            return false;
+        }
+
+        return (bool) preg_match('/(?:^|[._ \(-])(?:19|20)\d{2}(?:$|[._ -]|\)|\])/i', $name)
+            || preg_match('/\b(?:film|films|shorts?)\b/i', $name)
+            || $hasVideoEvidence;
     }
 
     protected function checkForeign(string $name): ?CategorizationResult
@@ -130,6 +189,23 @@ class MovieCategorizer extends AbstractCategorizer
         }
 
         return null;
+    }
+
+    protected function checkDocumentaryVideo(string $name, ReleaseContext $context): ?CategorizationResult
+    {
+        if (! $this->looksLikeDocumentaryVideoPost($name, $context)) {
+            return null;
+        }
+
+        if (preg_match('/\b(?:WEBRip|WEB[._ -]?DL|WEB)\b/i', $name)) {
+            return $this->matched(Category::MOVIE_WEBDL, 0.92, 'documentary_video_web');
+        }
+
+        if (preg_match('/\b(?:2160p|1080p|720p|x264|x265|h\.?264|h\.?265|mkv|mp4)\b/i', $name)) {
+            return $this->matched(Category::MOVIE_HD, 0.9, 'documentary_video_hd');
+        }
+
+        return $this->matched(Category::MOVIE_OTHER, 0.86, 'documentary_video');
     }
 
     protected function checkUHD(string $name): ?CategorizationResult
@@ -204,6 +280,10 @@ class MovieCategorizer extends AbstractCategorizer
 
     protected function checkSD(string $name): ?CategorizationResult
     {
+        if (preg_match('/\b(?:480p|576p|SVCD)\b/i', $name)) {
+            return $this->matched(Category::MOVIE_SD, 0.82, 'vintage_film_sd');
+        }
+
         if (preg_match('/(divx|dvdscr|extrascene|dvdrip|\.CAM|HDTS(-LINE)?|vhsrip|xvid(vd)?)[._ -]/i', $name)) {
             return $this->matched(Category::MOVIE_SD, 0.8, 'sd');
         }
@@ -211,8 +291,78 @@ class MovieCategorizer extends AbstractCategorizer
         return null;
     }
 
+    protected function checkVintageFilmSD(string $name, ReleaseContext $context): ?CategorizationResult
+    {
+        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?)/i')) {
+            return null;
+        }
+
+        if (preg_match('/(?:^|[._ \(-])(?:19|20)\d{2}(?:$|[._ -]|\)|\])/i', $name) &&
+            (preg_match('/(?:\.|\b)(?:avi|mkv|mp4|mpg|mpeg|vob)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $name)
+                || preg_match('/\b(?:VCD|SVCD)[._ -]?(?:Collection|Disc|Movie|Film)\b/i', $name)
+                || preg_match('/\b(?:19|20)\d{2}-\d{1,3}(?:-\d{1,3})?mn\b/i', $name))) {
+            return $this->matched(Category::MOVIE_SD, 0.82, 'vintage_film_sd');
+        }
+
+        if (preg_match('/\b(?:VCD|SVCD)[._ -]?(?:Collection|Disc|Movie|Film)\b/i', $name)) {
+            return $this->matched(Category::MOVIE_SD, 0.82, 'vintage_film_sd');
+        }
+
+        return null;
+    }
+
+    protected function looksLikeVideoPar2Sidecar(string $name): bool
+    {
+        if (! preg_match('/(?:"[^"]+|\\S+)\\.(?:avi|mkv|mp4|mpg|mpeg|vob)\\.par2"?\\s*(?:yEnc)?$/i', $name)) {
+            return false;
+        }
+
+        return (bool) preg_match('/(?:19|20)\d{2}|\bmovie\b|\bfilm\b/i', $name);
+    }
+
+    protected function looksLikeCleanedVideoSidecar(string $name): bool
+    {
+        if (! preg_match('/\b(?:avi|mkv|mp4|mpg|mpeg|vob)\b/i', $name)) {
+            return false;
+        }
+
+        return (bool) preg_match('/(?:19|20)\d{2}|\bmovie\b|\bfilm\b/i', $name);
+    }
+
+    protected function looksLikeDocumentaryVideoPost(string $name, ReleaseContext $context): bool
+    {
+        if (! $context->groupMatchesPattern('/alt\.binaries\.documentaries(?:\.|$)/i')) {
+            return false;
+        }
+
+        return (bool) preg_match('/\b(?:19|20)\d{2}\b/i', $name)
+            && preg_match('/\b(?:2160p|1080p|720p|WEBRip|WEB[._ -]?DL|WEB|x264|x265|h\.?264|h\.?265|mkv|mp4)\b/i', $name);
+    }
+
+    protected function checkClassicTitle(string $name, ReleaseContext $context): ?CategorizationResult
+    {
+        if ($this->looksLikeClassicMovieTitle($name, $context)) {
+            return $this->matched(Category::MOVIE_OTHER, 0.82, 'classic_movie_title');
+        }
+
+        return null;
+    }
+
     protected function checkOther(string $name): ?CategorizationResult
     {
+        if ($this->looksLikeVideoPar2Sidecar($name)) {
+            return $this->matched(Category::MOVIE_OTHER, 0.82, 'video_par2_sidecar');
+        }
+
+        if ($this->looksLikeCleanedVideoSidecar($name)) {
+            return $this->matched(Category::MOVIE_OTHER, 0.82, 'video_sidecar_stem');
+        }
+
+        if (preg_match('/\b(?:19|20)\d{2}\b/i', $name) &&
+            preg_match('/(?:\.|\b)(?:nfo|rar|par2|avi|mkv|mp4|mpg|mpeg|vob|iso|nzb)(?:\.par2)?"?\s*(?:yEnc)?$/i', $name)) {
+            return $this->matched(Category::MOVIE_OTHER, 0.82, 'vintage_film_file');
+        }
+
         if (preg_match('/[._ -]cam[._ -]/i', $name)) {
             return $this->matched(Category::MOVIE_OTHER, 0.6, 'cam');
         }

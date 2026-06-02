@@ -1088,7 +1088,8 @@ class MovieService
                     $this->searchIMDb($arr['id']) ||
                     $this->searchOMDbAPI($arr['id']) ||
                     $this->searchTraktTV($arr['id'], $movieName) ||
-                    $this->searchTMDB($arr['id']);
+                    $this->searchTMDB($arr['id']) ||
+                    $this->searchReleaseFileTitleCandidates($arr['id']);
 
                 if ($foundIMDB) {
                     if ($this->echooutput) {
@@ -1317,6 +1318,140 @@ class MovieService
         return false;
     }
 
+    private function searchReleaseFileTitleCandidates(int $releaseId): bool
+    {
+        foreach ($this->releaseFileTitleCandidates($releaseId) as $candidate) {
+            $this->currentTitle = $candidate['title'];
+            $this->currentYear = $candidate['year'];
+            $movieName = $this->formatMovieName();
+
+            if ($this->echooutput) {
+                cli()->info('Looking up alternate file title: '.$movieName);
+            }
+
+            if ($this->searchLocalDatabase($releaseId) ||
+                $this->searchIMDb($releaseId) ||
+                $this->searchOMDbAPI($releaseId) ||
+                $this->searchTraktTV($releaseId, $movieName) ||
+                $this->searchTMDB($releaseId)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Extract conservative movie title candidates from release_files.
+     *
+     * Obfuscated releases often expose the useful title only in NZB/PAR2 file
+     * names, including localized-title + English-title folder forms like:
+     * "Vrah skrývá tvár (The Murderer Hides His Face) (1966)/...".
+     *
+     * @return list<array{title: string, year: string}>
+     */
+    protected function releaseFileTitleCandidates(int $releaseId): array
+    {
+        $files = Release::query()
+            ->where('id', $releaseId)
+            ->first()
+            ?->file()
+            ->select(['name'])
+            ->limit(200)
+            ->pluck('name')
+            ->all() ?? [];
+
+        $candidates = [];
+        foreach ($files as $file) {
+            if (! is_string($file) || $file === '') {
+                continue;
+            }
+
+            foreach ($this->extractMovieTitleCandidatesFromString($file) as $candidate) {
+                $key = mb_strtolower($candidate['title']).'|'.$candidate['year'];
+                $candidates[$key] = $candidate;
+            }
+        }
+
+        return array_values($candidates);
+    }
+
+    /**
+     * @return list<array{title: string, year: string}>
+     */
+    protected function extractMovieTitleCandidatesFromString(string $value): array
+    {
+        $normalized = str_replace('\\', '/', $value);
+        $parts = array_values(array_filter(explode('/', $normalized), static fn (string $part): bool => $part !== ''));
+        $segments = array_unique(array_merge([$normalized], $parts));
+        $candidates = [];
+
+        foreach ($segments as $segment) {
+            $segment = preg_replace('/\.(?:mkv|mp4|m4v|avi|iso|vob|rar|r\d{2,3})$/iu', '', $segment) ?? $segment;
+            $segment = preg_replace('/(?:[._ -]part0*\d+|[._ -]r\d{2,3})$/iu', '', $segment) ?? $segment;
+            $segment = trim(str_replace(['.', '_'], ' ', $segment));
+
+            if ($segment === '' || preg_match('/^(?:video_ts|vts_\d{2}_\d|sample|proof|subs?)$/iu', $segment)) {
+                continue;
+            }
+
+            $segment = $this->normalizeGenericMediaMovieTitle($segment);
+
+            if (preg_match('/^(?P<title>[\pL\pN][\pL\pN\s\',.!:&;’`-]{2,}?)\s*\((?P<alt>[\pL\pN][^()]{2,})\)\s*\((?P<year>(?:19|20)\d{2})\)(?:\s+[\pL]{2,3})?$/u', $segment, $matches) === 1) {
+                $this->addMovieTitleCandidate($candidates, $matches['alt'], $matches['year']);
+                $this->addMovieTitleCandidate($candidates, $matches['title'], $matches['year']);
+
+                continue;
+            }
+
+            if (preg_match('/^\(?(?P<year>(?:19|20)\d{2})\)?\s+(?P<title>[\pL\pN][\pL\pN\s\',.!:&;’`() -]{2,})$/u', $segment, $matches) === 1) {
+                $this->addMovieTitleCandidate($candidates, $matches['title'], $matches['year']);
+
+                continue;
+            }
+
+            if (preg_match('/^(?P<title>[\pL\pN][\pL\pN\s\',.!:&;’`() -]{2,}?)\s*\(?(?P<year>(?:19|20)\d{2})\)?(?:\s+[\pL]{2,3})?$/u', $segment, $matches) === 1) {
+                $this->addMovieTitleCandidate($candidates, $matches['title'], $matches['year']);
+            }
+        }
+
+        return array_values($candidates);
+    }
+
+    /**
+     * @param  array<string, array{title: string, year: string}>  $candidates
+     */
+    private function addMovieTitleCandidate(array &$candidates, string $title, string $year): void
+    {
+        $title = $this->normalizeGenericMediaMovieTitle($title);
+        $title = trim(preg_replace('/\s{2,}/', ' ', str_replace(['.', '_'], ' ', $title)) ?? $title);
+        $title = preg_replace('/\s+\b(?:NL|EN|ENG|FRENCH|GERMAN|MULTI|SUBBED)\b$/iu', '', $title) ?? $title;
+        $title = trim($title, " \t\n\r\0\x0B-");
+
+        if (mb_strlen($title) < 3 || preg_match('/^\d+$/', $title)) {
+            return;
+        }
+
+        $key = mb_strtolower($title).'|'.$year;
+        $candidates[$key] = [
+            'title' => $title,
+            'year' => $year,
+        ];
+    }
+
+    private function normalizeGenericMediaMovieTitle(string $title): string
+    {
+        $title = trim(str_replace(['.', '_'], ' ', $title));
+        $title = preg_replace('/\s+/', ' ', $title) ?: $title;
+        $title = trim($title, " \t\n\r\0\x0B\"'._-");
+
+        $title = preg_replace('/^(?:an?\s+)?(?:mp4|mkv|avi|xvid|divx)\s+(?:file|film|movie)\s+/iu', '', $title) ?: $title;
+        $title = preg_replace('/^((?:19|20)\d{2})\s+(?:an?\s+)?(?:mp4|mkv|avi|xvid|divx)\s+(?:file|film|movie)\s+/iu', '$1 ', $title) ?: $title;
+        $title = preg_replace('/^\(((?:19|20)\d{2})\)\s+(?:an?\s+)?(?:mp4|mkv|avi|xvid|divx)\s+(?:file|film|movie)\s+/iu', '($1) ', $title) ?: $title;
+
+        return trim(preg_replace('/\s+/', ' ', $title) ?: $title);
+    }
+
     protected function localIMDBSearch(): string|false
     {
         if (empty($this->currentTitle)) {
@@ -1373,8 +1508,11 @@ class MovieService
      */
     protected function cleanReleaseNameForMovieLookup(string $searchname): string
     {
+        $searchname = preg_replace('/\.(?:mkv|mp4|m4v|avi|iso)\.\d{1,4}(?=\D|$)/iu', ' ', $searchname) ?? $searchname;
+        $searchname = preg_replace('/\b\d+\s+of\s+\d+\b/iu', ' ', $searchname) ?? $searchname;
         $s = str_replace(['.', '_'], ' ', $searchname);
         $s = trim(preg_replace('/\s{2,}/', ' ', $s));
+        $s = trim($s, " \t\n\r\0\x0B\"'");
 
         return $s;
     }
@@ -1436,9 +1574,27 @@ class MovieService
 
         $followingList = '[^\w]((1080|480|720|2160)p|AC3D|Directors([^\w]CUT)?|DD5\.1|(DVD|BD|BR|UHD)(Rip)?|'
             .'BluRay|divx|HDTV|iNTERNAL|LiMiTED|(Real\.)?PROPER|RE(pack|Rip)|Sub\.?(fix|pack)|'
-            .'Unrated|WEB-?DL|WEBRip|(x|H|HEVC)[ ._-]?26[45]|xvid|AAC|REMUX)[^\w]';
+            .'Unrated|WEB-?DL|WEBRip|AVC|(x|H|HEVC)[ ._-]?26[45]|xvid|AAC|REMUX)[^\w]';
 
-        if (preg_match('/(?P<name>[\w. -]+)[^\w](?P<year>(19|20)\d\d)/i', $releaseName, $hits)) {
+        if (preg_match('/^\(?(?P<year>(?:19|20)\d{2})\)?\s+(?P<name>[\w .\'!,&;:`()-]+?)(?:\s+(?:part|r)\d+)?(?:\s+rar)?$/i', $releaseName, $hits)) {
+            $name = $hits['name'];
+            $year = $hits['year'];
+        } elseif (preg_match('/^(?P<name>[\w .\'!,&;:`-]+?)\s+\([^,()]+,\s*(?P<year>(?:19|20)\d{2})\)/i', $releaseName, $hits)) {
+            $name = $hits['name'];
+            $year = $hits['year'];
+        } elseif (preg_match('/^(?:an?\s+)?(?:mp4|mkv|avi|xvid|divx)\s+(?:file|film|movie)\s+\(?(?P<year>(?:19|20)\d{2})\)?\s+(?P<name>[\w .\'!,&;:`()-]+?)(?:\s+(?:part|r)\d+)?(?:\s+rar)?$/i', $releaseName, $hits)) {
+            $name = $hits['name'];
+            $year = $hits['year'];
+        } elseif (preg_match('/^(?P<year>(?:19|20)\d{2})\s+(?:an?\s+)?(?:mp4|mkv|avi|xvid|divx)\s+(?:file|film|movie)\s+(?P<name>[\w .\'!,&;:`()-]+?)(?:\s+(?:part|r)\d+)?(?:\s+rar)?$/i', $releaseName, $hits)) {
+            $name = $hits['name'];
+            $year = $hits['year'];
+        } elseif (preg_match('/^\(?(?P<year>(?:19|20)\d{2})\)?\s+(?:an?\s+)?(?:mp4|mkv|avi|xvid|divx)\s+(?:file|film|movie)\s+(?P<name>[\w .\'!,&;:`()-]+?)(?:\s+(?:part|r)\d+)?(?:\s+rar)?$/i', $releaseName, $hits)) {
+            $name = $hits['name'];
+            $year = $hits['year'];
+        } elseif (preg_match('/^(?P<name>[\w .\'!,&;:`()-]+?)\s+(?P<year>(?:19|20)\d{2})\s+[\w .\'!,&;:`()-]*?(?P=name)\b/i', $releaseName, $hits)) {
+            $name = $hits['name'];
+            $year = $hits['year'];
+        } elseif (preg_match('/(?P<name>[\w .\'!,&;:`()-]+)[^\w](?P<year>(19|20)\d\d)/i', $releaseName, $hits)) {
             $name = $hits['name'];
             $year = $hits['year'];
         } elseif (preg_match('/([^\w]{2,})?(?P<name>[\w .-]+?)'.$followingList.'/i', $releaseName, $hits)) {
@@ -1450,14 +1606,24 @@ class MovieService
         }
 
         if (! empty($name)) {
-            $name = preg_replace('/'.$followingList.'/i', ' ', $name);
+            $name = $this->normalizeGenericMediaMovieTitle($name);
+            do {
+                $previousName = $name;
+                $name = preg_replace('/'.$followingList.'/i', ' ', $name) ?? $name;
+                $name = trim(preg_replace('/\s{2,}/', ' ', $name) ?? $name);
+            } while ($name !== $previousName);
             $name = preg_replace('/\([^)]*\)/i', ' ', $name);
             while (($openPos = strpos($name, '[')) !== false && ($closePos = strpos($name, ']', $openPos)) !== false) {
                 $name = substr($name, 0, $openPos).' '.substr($name, $closePos + 1);
             }
             $name = str_replace(['.', '_'], ' ', $name);
+            $name = preg_replace('/\b(?:part|r)\d+\s+rar\b/i', ' ', $name);
+            $name = preg_replace('/\bNoGroup\b.*$/i', '', $name);
             $name = preg_replace('/-[A-Z0-9].*$/i', '', $name);
             $name = trim(preg_replace('/\s{2,}/', ' ', $name));
+            if (preg_match('/^N([A-Z][A-Z0-9 ]{4,})NO$/', $name, $posterMatch)) {
+                $name = Str::title(strtolower($posterMatch[1]));
+            }
 
             if (strlen($name) > 2 && ! preg_match('/^\d+$/', $name)) {
                 $this->currentTitle = $name;

@@ -231,7 +231,7 @@ class ReleasesFixNamesGroup extends Command
                 }
 
                 if (isset($nzbcontents)) {
-                    $nzbcontents->checkPar2($release->guid, $release->releases_id, $release->groups_id, 1, 1);
+                    $nzbcontents->checkPar2($release->guid, $release->releases_id, $release->groups_id, 1, 1, 1);
                 }
             }
 

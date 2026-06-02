@@ -230,6 +230,23 @@ class BinariesService
             ]);
         }
 
+        if ($groupMySQL['first_record_postdate'] === null
+            && (int) $groupMySQL['first_record'] === 0
+            && (int) $groupMySQL['last_record'] > 0) {
+            $groupMySQL['first_record'] = (int) $groupMySQL['last_record'];
+            $groupMySQL['first_record_postdate'] = $groupMySQL['last_record_postdate'] !== null
+                ? strtotime((string) $groupMySQL['last_record_postdate'])
+                : $this->postdate($groupMySQL['first_record'], $groupNNTP);
+            $firstRecordPostdate = $groupMySQL['first_record_postdate'] !== false
+                ? (int) $groupMySQL['first_record_postdate']
+                : time();
+
+            UsenetGroup::query()->where('id', $groupMySQL['id'])->update([
+                'first_record' => $groupMySQL['first_record'],
+                'first_record_postdate' => Carbon::createFromTimestamp($firstRecordPostdate, date_default_timezone_get()),
+            ]);
+        }
+
         // Calculate article range
         $range = $this->calculateArticleRange($groupMySQL, $groupNNTP, $maxHeaders);
 

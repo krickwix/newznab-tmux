@@ -240,15 +240,44 @@ class NzbContentsService
      *
      * @throws \Exception
      */
-    public function checkPar2(string $guid, int $relID, int $groupID, int $nameStatus, int $show): bool
+    public function checkPar2(string $guid, int $relID, int $groupID, int $update, int $setStatus, int $show): bool
     {
         $nzbFile = $this->loadNzb($guid);
         if ($nzbFile !== false) {
+            $indexCandidates = [];
+            $volumeCandidates = [];
+            $par2Subjects = [];
+
             foreach ($nzbFile->file as $nzbContents) {
-                if ($nameStatus === 1
-                    && $this->postProcessService->parsePAR2((string) $nzbContents->segments->segment, $relID, $groupID, $this->nntp, $show)
-                    && preg_match('/\.(par[2" ]|\d{2,3}").+\(1\/1\)/i', (string) $nzbContents->attributes()->subject)
-                ) {
+                $subject = (string) $nzbContents->attributes()->subject;
+                if (! $this->parserService->detectPar2File($subject)) {
+                    continue;
+                }
+                $par2Subjects[] = $subject;
+
+                $messageID = (string) ($nzbContents->segments->segment[0] ?? '');
+                if ($messageID === '') {
+                    continue;
+                }
+
+                if ($this->parserService->detectPar2IndexFile($subject)) {
+                    $indexCandidates[] = $messageID;
+                } else {
+                    $volumeCandidates[] = $messageID;
+                }
+            }
+
+            if ($par2Subjects !== [] && $this->hasOnlyHashNamedPar2Subjects($par2Subjects)) {
+                if ($setStatus === 1) {
+                    Release::query()->where('id', $relID)->update(['proc_par2' => 1]);
+                }
+
+                return false;
+            }
+
+            $candidates = array_merge($indexCandidates, array_slice($volumeCandidates, 0, 1));
+            foreach ($candidates as $messageID) {
+                if ($update === 1 && $this->postProcessService->parsePAR2($messageID, $relID, $groupID, $this->nntp, $show)) {
                     Release::query()->where('id', $relID)->update(['proc_par2' => 1]);
 
                     return true;
@@ -256,11 +285,32 @@ class NzbContentsService
             }
         }
 
-        if ($nameStatus === 1) {
+        if ($setStatus === 1) {
             Release::query()->where('id', $relID)->update(['proc_par2' => 1]);
         }
 
         return false;
+    }
+
+    /**
+     * Long hex PAR2 names have repeatedly produced only obfuscated archive
+     * members locally; skip their NNTP body fetch so useful candidates can run.
+     *
+     * @param  array<int, string>  $subjects
+     */
+    protected function hasOnlyHashNamedPar2Subjects(array $subjects): bool
+    {
+        foreach ($subjects as $subject) {
+            if (! preg_match('/"([^"]+?)\.(?:vol\d+\+\d+\.)?par2"/iu', $subject, $hit)) {
+                return false;
+            }
+
+            if (! preg_match('/^[a-f0-9]{32,}$/i', $hit[1])) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**

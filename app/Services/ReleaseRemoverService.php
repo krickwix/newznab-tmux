@@ -8,6 +8,7 @@ use App\Enums\BlacklistConstants;
 use App\Facades\Search;
 use App\Models\Category;
 use App\Models\Settings;
+use App\Services\Nzb\NzbParserService;
 use App\Services\Nzb\NzbService;
 use App\Services\Releases\ReleaseManagementService;
 use Carbon\Carbon;
@@ -79,6 +80,8 @@ class ReleaseRemoverService
 
     private NzbService $nzb;
 
+    private NzbParserService $nzbParser;
+
     private ReleaseImageService $releaseImage;
 
     /**
@@ -91,10 +94,12 @@ class ReleaseRemoverService
     public function __construct(
         ?ReleaseManagementService $releaseManagement = null,
         ?NzbService $nzb = null,
+        ?NzbParserService $nzbParser = null,
         ?ReleaseImageService $releaseImage = null
     ) {
         $this->releaseManagement = $releaseManagement ?? app(ReleaseManagementService::class);
         $this->nzb = $nzb ?? app(NzbService::class);
+        $this->nzbParser = $nzbParser ?? app(NzbParserService::class);
         $this->releaseImage = $releaseImage ?? new ReleaseImageService;
         $this->echoCLI = config('nntmux.echocli');
 
@@ -870,7 +875,7 @@ class ReleaseRemoverService
      * These releases are useless since PAR2 files are only repair/verification
      * data and cannot be used without the original content files.
      *
-     * Two detection strategies are used:
+     * Three detection strategies are used:
      * 1. The searchname contains a .par2 filename AND has no associated
      *    release_files, or only par2 release_files. The character class after
      *    .par2 includes underscore because the searchname sanitizer replaces
@@ -880,6 +885,10 @@ class ReleaseRemoverService
      *    even though the actual content is video/audio/etc.
      * 2. All associated release_files have names containing .par2 (rare edge case
      *    where par2 metadata was stored during post-processing).
+     * 3. Hashed, unrenamed releases whose actual NZB subjects contain only PAR2
+     *    files. These can otherwise evade release_files checks when PAR2 metadata
+     *    lists obfuscated RAR filenames even though no RAR subjects exist in the
+     *    NZB itself.
      *
      * @throws Exception
      */
@@ -906,7 +915,7 @@ class ReleaseRemoverService
         ));
 
         // Strategy 2: All release_files are .par2
-        return $this->executeSimpleRemoval('Par2Only_Files', sprintf(
+        $this->executeSimpleRemoval('Par2Only_Files', sprintf(
             "SELECT r.guid, r.searchname, r.id
             FROM releases r
             INNER JOIN release_files rf ON r.id = rf.releases_id
@@ -915,6 +924,44 @@ class ReleaseRemoverService
             HAVING COUNT(*) = SUM(CASE WHEN rf.name REGEXP '[.]par2' THEN 1 ELSE 0 END)",
             $this->crapTime
         ));
+
+        return $this->removePar2OnlyHashedNzbs();
+    }
+
+    /**
+     * Delete hashed releases where the persisted NZB contains only PAR2 subjects.
+     *
+     * @throws Exception
+     */
+    private function removePar2OnlyHashedNzbs(): bool
+    {
+        $this->method = 'Par2Only_HashedNzb';
+        $this->result = [];
+
+        $candidates = DB::select($this->cleanSpaces(sprintf(
+            'SELECT r.guid, r.searchname, r.id
+            FROM releases r
+            WHERE r.ishashed = 1
+            AND r.isrenamed = 0
+            %s
+            ORDER BY r.id',
+            $this->crapTime
+        )));
+
+        foreach ($candidates as $release) {
+            $contents = $this->nzb->readNzbContents($release->guid);
+            $fileList = $this->nzbParser->parseNzbFileList($contents ?: '', ['no-file-key' => true]);
+
+            if ($this->nzbParser->isPar2OnlyFileList($fileList)) {
+                $this->result[] = $release;
+            }
+        }
+
+        if ($this->result === []) {
+            return true;
+        }
+
+        return $this->deleteReleases();
     }
 
     /**

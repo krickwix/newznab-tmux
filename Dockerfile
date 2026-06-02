@@ -47,6 +47,9 @@ COPY . /app
 RUN rm -Rf tests/
 
 RUN composer install --no-interaction --no-progress --no-plugins
+RUN npm install --no-audit --no-fund \
+ && npx vite build \
+ && rm -rf node_modules
 
 RUN chmod -R 755 /app/vendor/
 RUN chmod -R 777 /app/storage/

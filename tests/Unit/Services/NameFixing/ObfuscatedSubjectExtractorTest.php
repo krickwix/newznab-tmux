@@ -31,6 +31,16 @@ class ObfuscatedSubjectExtractorTest extends TestCase
     }
 
     #[Test]
+    public function it_extracts_classic_movie_title_and_removes_nfo_suffix(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        $result = $extractor->extract('(NMR) [03/34] - "West of Cheyenne (Tom Tyler) (1931).nfo" yEnc');
+
+        $this->assertSame('West of Cheyenne (Tom Tyler) (1931)', $result);
+    }
+
+    #[Test]
     public function it_extracts_title_and_removes_part_rar_suffix(): void
     {
         $extractor = new ObfuscatedSubjectExtractor;

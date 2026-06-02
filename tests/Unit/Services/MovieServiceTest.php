@@ -178,6 +178,125 @@ class MovieServiceTest extends ImdbScraperTestCase
         $this->assertNull(Release::query()->whereKey(2)->value('movieinfo_id'));
     }
 
+    #[Test]
+    public function it_extracts_alternate_movie_titles_from_release_file_paths(): void
+    {
+        $service = new class extends MovieService
+        {
+            /**
+             * @return list<array{title: string, year: string}>
+             */
+            public function candidates(string $value): array
+            {
+                return $this->extractMovieTitleCandidatesFromString($value);
+            }
+        };
+        $service->echooutput = false;
+
+        $candidates = $service->candidates('Vrah skrývá tvár (The Murderer Hides His Face) (1966)/Vrah skrývá tvár (1966).mkv');
+
+        $this->assertContains(['title' => 'The Murderer Hides His Face', 'year' => '1966'], $candidates);
+        $this->assertContains(['title' => 'Vrah skrývá tvár', 'year' => '1966'], $candidates);
+    }
+
+    #[Test]
+    public function it_removes_archive_language_suffixes_from_file_title_candidates(): void
+    {
+        $service = new class extends MovieService
+        {
+            /**
+             * @return list<array{title: string, year: string}>
+             */
+            public function candidates(string $value): array
+            {
+                return $this->extractMovieTitleCandidatesFromString($value);
+            }
+        };
+        $service->echooutput = false;
+
+        $candidates = $service->candidates('Die, Monster, Die! (1965) NL.part01.rar');
+
+        $this->assertContains(['title' => 'Die, Monster, Die!', 'year' => '1965'], $candidates);
+    }
+
+    #[Test]
+    public function it_extracts_year_first_generic_media_file_title_candidates(): void
+    {
+        $service = new class extends MovieService
+        {
+            /**
+             * @return list<array{title: string, year: string}>
+             */
+            public function candidates(string $value): array
+            {
+                return $this->extractMovieTitleCandidatesFromString($value);
+            }
+        };
+        $service->echooutput = false;
+
+        $candidates = $service->candidates('(1949)_mkv_film_all_the_kings_men.part30.rar');
+
+        $this->assertContains(['title' => 'all the kings men', 'year' => '1949'], $candidates);
+    }
+
+    #[Test]
+    public function it_parses_generic_media_release_search_names(): void
+    {
+        Cache::flush();
+
+        $service = new class extends MovieService
+        {
+            /**
+             * @return array{title: string, year: string}|null
+             */
+            public function parsed(string $value): ?array
+            {
+                if (! $this->parseMovieSearchName($value)) {
+                    return null;
+                }
+
+                return [
+                    'title' => $this->currentTitle,
+                    'year' => $this->currentYear,
+                ];
+            }
+        };
+        $service->echooutput = false;
+
+        $this->assertSame(
+            ['title' => 'The Lost Battalion', 'year' => '1919'],
+            $service->parsed('an mp4 file The Lost Battalion (1919) DVDRip XviD NoGroup')
+        );
+        $this->assertSame(
+            ['title' => 'all the kings men', 'year' => '1949'],
+            $service->parsed('"(1949)_mkv_film_all_the_kings_men.part30.rar"')
+        );
+        $this->assertSame(
+            ['title' => 'Suddenly', 'year' => '1954'],
+            $service->parsed('an mkv film (1954) Suddenly DVDRip XviD NoGroup')
+        );
+        $this->assertSame(
+            ['title' => "Adam's Rib", 'year' => '1949'],
+            $service->parsed("Adam's Rib (1949) DVDRip XviD NoGroup")
+        );
+        $this->assertSame(
+            ['title' => 'I Love You, Alice B Toklas!', 'year' => '1968'],
+            $service->parsed('"I Love You, Alice B Toklas! (1968) AVC 480p.MKV.001" 1 of 7')
+        );
+        $this->assertSame(
+            ['title' => 'Lost Jungle', 'year' => '1934'],
+            $service->parsed('Lost Jungle (Clyde Beatty,1934) DVDRip XviD NoGroup')
+        );
+        $this->assertSame(
+            ['title' => 'Rififi', 'year' => '1955'],
+            $service->parsed('Rififi 1955 Criterion Rififi 1955 Criterion DVDRip XviD NoGroup')
+        );
+        $this->assertSame(
+            ['title' => 'Texas Lady', 'year' => '1955'],
+            $service->parsed('NTEXAS LADYNO (1955) DVDRip XviD NoGroup')
+        );
+    }
+
     /**
      * @param  array<string, mixed>  $response
      */

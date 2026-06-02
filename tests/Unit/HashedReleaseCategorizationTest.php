@@ -325,6 +325,285 @@ class HashedReleaseCategorizationTest extends TestCase
         $this->assertSame('0day_msix_installer', $passable->bestResult->matchedBy);
     }
 
+    public function test_readable_tv_title_with_season_episode_is_not_hashed(): void
+    {
+        $passable = $this->runPipeline('Filing for Love S01E12', 'alt.binaries.hdtv.x264');
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::TV_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('group_name_tv', $passable->bestResult->matchedBy);
+    }
+
+    public function test_readable_vintage_movie_title_without_year_is_not_hashed(): void
+    {
+        $passable = $this->runPipeline('G Men Vs The Black Dragon', 'alt.binaries.multimedia.vintage-film');
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('group_name_movie', $passable->bestResult->matchedBy);
+    }
+
+    public function test_readable_classic_movie_series_title_is_not_hashed(): void
+    {
+        $passable = $this->runPipeline('Torchy Blane Movies 2', 'alt.binaries.multimedia.vintage-film.pre-1960');
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('group_name_movie', $passable->bestResult->matchedBy);
+    }
+
+    public function test_dvd_r_group_alone_does_not_override_software_evidence(): void
+    {
+        $passable = $this->runPipeline(
+            'Topaz Video AI Pro 2026.8.1.6 (x64).rar.par2',
+            'alt.binaries.dvd-r',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::PC_0DAY, $passable->bestResult->categoryId);
+        $this->assertSame('0day_software', $passable->bestResult->matchedBy);
+    }
+
+    public function test_dvd_classic_movie_group_still_categorizes_movie_sidecar(): void
+    {
+        $passable = $this->runPipeline(
+            'The Night My Number Came Up (1955) [01/62] - "The Night My Number Came Up (1955).par2" yEnc',
+            'alt.binaries.dvd.classic.movies',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_file', $passable->bestResult->matchedBy);
+    }
+
+    public function test_vintage_film_nfo_subject_categorizes_as_movie_not_audio(): void
+    {
+        $passable = $this->runPipeline(
+            '(NMR) [03/34] - "West of Cheyenne (Tom Tyler) (1931).nfo" yEnc',
+            'alt.binaries.multimedia.vintage-film.pre-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_file', $passable->bestResult->matchedBy);
+    }
+
+    public function test_normalized_vintage_film_nfo_subject_categorizes_as_movie_not_audio(): void
+    {
+        $passable = $this->runPipeline(
+            'West of Cheyenne (Tom Tyler) (1931) nfo',
+            'alt.binaries.multimedia.vintage-film.pre-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_file', $passable->bestResult->matchedBy);
+    }
+
+    public function test_normalized_classic_movie_title_beats_audio_group_name(): void
+    {
+        $passable = $this->runPipeline(
+            'West of Cheyenne (Tom Tyler) (1931)',
+            'alt.binaries.sounds.movies',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('classic_movie_title', $passable->bestResult->matchedBy);
+    }
+
+    public function test_music_album_with_single_trailing_year_stays_audio(): void
+    {
+        $passable = $this->runPipeline(
+            'Miles Davis Kind of Blue (1959)',
+            'alt.binaries.sounds.mp3',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MUSIC_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('group_name_music', $passable->bestResult->matchedBy);
+    }
+
+    public function test_classic_movie_with_mp3_audio_token_beats_audio_category(): void
+    {
+        $passable = $this->runPipeline(
+            '[4/28] "Ma and Pa Kettle On Old MacDonald\'s Farm (1957) 480p TVrip MPEG4 MP3 AOS.part03.rar" yEnc',
+            'alt.binaries.dvd.classic.movies',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_SD, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_classic_movie_nfo_sidecar_is_not_audio_other(): void
+    {
+        $passable = $this->runPipeline(
+            '(NMR) [03/34] - "West of Cheyenne (Tom Tyler) (1931).nfo" yEnc',
+            'alt.binaries.multimedia.vintage-film.pre-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_file', $passable->bestResult->matchedBy);
+    }
+
+    public function test_vintage_movie_sidecar_with_music_words_is_not_audio_lossless(): void
+    {
+        $passable = $this->runPipeline(
+            'The GAZEBO - 1959 - [WS] - AVC - [02/59] - "gazebo.part01.rar" yEnc',
+            'alt.binaries.multimedia.vintage-film',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_HD, $passable->bestResult->categoryId);
+        $this->assertSame('hd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_hdtv_encoded_episode_is_not_music_video(): void
+    {
+        $passable = $this->runPipeline(
+            '[YE] Pocket Monsters (2023) - 138 (TVO 1280x720 x265 10bit AAC).7z',
+            'alt.binaries.hdtv.x264',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::TV_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('group_name_tv', $passable->bestResult->matchedBy);
+    }
+
+    public function test_generic_x264_release_does_not_become_mp3_from_embedded_scene_token(): void
+    {
+        $passable = $this->runPipeline(
+            'Britney_Spears-Circus-x264-2008-FRAY_INT.rar.vol0+1',
+            'alt.binaries.x264',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('group_name_movie', $passable->bestResult->matchedBy);
+    }
+
+    public function test_vintage_film_vcd_collection_is_movie_not_audio_album(): void
+    {
+        $passable = $this->runPipeline(
+            'Even More Offerings - REQ:Decasia [07/27] - "Assorted Spike Jones VCD Collection.part06.rar" yEnc',
+            'alt.binaries.multimedia.vintage-film.pre-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_SD, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_segmented_vintage_film_avi_beats_mp3_scene_pattern(): void
+    {
+        $passable = $this->runPipeline(
+            '[Pierre Etaix - Le grand amour)[08/57] - "Le grand amour-Pierre Etaix-1969-87mn.avi.008" yEnc',
+            'alt.binaries.multimedia.vintage-film',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_SD, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_vintage_film_archive_disc_pattern_beats_music_anthology(): void
+    {
+        $passable = $this->runPipeline(
+            'EnJoY! =>PLEASE READ "0" FILE (Day3/?) [034/198] - "Brakhage - An Anthology 2010 - Vol2-Disc1 - Program I - The Dead - 1960 (SVCD).part.PAR2" yEnc',
+            'alt.binaries.multimedia.vintage-film.pre-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_SD, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_vintage_film_without_year_but_video_evidence_beats_audio_video(): void
+    {
+        $passable = $this->runPipeline(
+            'Joyeux Noel! =>Req:READ "0" FILE=>EnJoY! [17/61] - "Alexandre Alexeieff - Assorted Advertising Films (480p,x264).nfo" yEnc',
+            'alt.binaries.multimedia.vintage-film.pre-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_HD, $passable->bestResult->categoryId);
+        $this->assertSame('hd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_movie_video_par2_sidecar_beats_mp3_scene_pattern(): void
+    {
+        $passable = $this->runPipeline(
+            'Gallipoli2014 [57/71]  "Gallipoli01-2014-Movie.mkv.par2"',
+            'alt.binaries.documentaries.mkv',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_HD, $passable->bestResult->categoryId);
+        $this->assertSame('documentary_video_hd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_cleaned_movie_video_sidecar_stem_beats_mp3_scene_pattern(): void
+    {
+        $passable = $this->runPipeline(
+            'Gallipoli01-2014-Movie mkv',
+            'alt.binaries.documentaries.mkv',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_HD, $passable->bestResult->categoryId);
+        $this->assertSame('documentary_video_hd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_preprocessed_vintage_video_title_beats_music_video_artist(): void
+    {
+        $passable = $this->runPipeline(
+            'Ray Harryhausen - Tests and Experiments - A Collection, Hosted by Their Creator (480p,x264)',
+            'alt.binaries.multimedia.vintage-film.pre-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_HD, $passable->bestResult->categoryId);
+        $this->assertSame('hd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_vintage_runtime_title_beats_mp3_scene_pattern(): void
+    {
+        $passable = $this->runPipeline(
+            'Heureux Anniversaire-Pierre Etaix-1962-12mn',
+            'alt.binaries.multimedia.vintage-film',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_SD, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_documentary_webrip_beats_lossless_audio_pattern(): void
+    {
+        $passable = $this->runPipeline(
+            'Apex 2026 1080p WEBRip DD5 1 x265-iND',
+            'alt.binaries.documentaries',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_WEBDL, $passable->bestResult->categoryId);
+        $this->assertSame('documentary_video_web', $passable->bestResult->matchedBy);
+    }
+
+    public function test_documentary_web_video_is_movie_not_audio_or_misc(): void
+    {
+        $passable = $this->runPipeline(
+            'Crime 101 2026 1080p WEB x265-iND',
+            'alt.binaries.documentaries',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_WEBDL, $passable->bestResult->categoryId);
+        $this->assertSame('documentary_video_web', $passable->bestResult->matchedBy);
+    }
+
     // ------------------------------------------------------------------
     // Tests: shouldStopProcessing() respects the lock
     // ------------------------------------------------------------------

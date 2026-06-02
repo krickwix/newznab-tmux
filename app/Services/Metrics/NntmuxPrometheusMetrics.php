@@ -152,7 +152,42 @@ class NntmuxPrometheusMetrics
             '# TYPE nntmux_releases_state_total gauge',
             $this->metric('nntmux_releases_state_total', $hashed, ['state' => 'hashed']),
             $this->metric('nntmux_releases_state_total', $renamed, ['state' => 'renamed']),
+            ...$this->releaseCategoryMetrics(),
         ];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function releaseCategoryMetrics(): array
+    {
+        $rows = DB::table('releases AS r')
+            ->join('categories AS c', 'c.id', '=', 'r.categories_id')
+            ->leftJoin('root_categories AS rc', 'rc.id', '=', 'c.root_categories_id')
+            ->selectRaw('r.categories_id, c.title AS category, rc.title AS root_category, COUNT(*) AS releases_count')
+            ->groupBy('r.categories_id', 'c.title', 'rc.title')
+            ->orderBy('rc.title')
+            ->orderBy('c.title')
+            ->get();
+
+        $lines = [
+            '# HELP nntmux_releases_category_total Current release count by NNTmux category.',
+            '# TYPE nntmux_releases_category_total gauge',
+        ];
+
+        foreach ($rows as $row) {
+            $rootCategory = (string) ($row->root_category ?? 'Uncategorized');
+            $category = (string) $row->category;
+
+            $lines[] = $this->metric('nntmux_releases_category_total', (int) $row->releases_count, [
+                'category_id' => (string) $row->categories_id,
+                'root_category' => $rootCategory,
+                'category' => $category,
+                'category_path' => $rootCategory.' / '.$category,
+            ]);
+        }
+
+        return $lines;
     }
 
     /**

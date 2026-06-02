@@ -120,6 +120,29 @@ class DistributedJobCatalogTest extends TestCase
         $this->assertSame(['ama'], $this->argumentValues($catalog->resolve('post-amazon', $runVar), 'type'));
     }
 
+    public function test_fixnames_includes_full_history_nfo_and_file_passes(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('fixnames', $this->runVar(
+            ['fix_names' => 1],
+            ['processrenames' => 1],
+        ));
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame(
+            ['3', '4', '5', '6', '6', '21', '21', '8', '7', '9', '11', '13', '15', '17', '19'],
+            $this->argumentValues($plan, 'method'),
+        );
+        $this->assertSame('movies', $plan['commands'][4]['arguments']['--category']);
+        $this->assertSame(500, $plan['commands'][4]['arguments']['--limit']);
+        $this->assertSame('other', $plan['commands'][5]['arguments']['--category']);
+        $this->assertSame(500, $plan['commands'][5]['arguments']['--limit']);
+        $this->assertSame('movies', $plan['commands'][6]['arguments']['--category']);
+        $this->assertSame(500, $plan['commands'][6]['arguments']['--limit']);
+        $this->assertSame('other', $plan['commands'][7]['arguments']['--category']);
+        $this->assertSame(50, $plan['commands'][7]['arguments']['--limit']);
+    }
+
     public function test_it_uses_sleep_metadata_without_shell_sleep_commands(): void
     {
         $catalog = new DistributedJobCatalog;

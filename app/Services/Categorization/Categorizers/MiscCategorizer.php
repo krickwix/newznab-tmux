@@ -203,6 +203,10 @@ class MiscCategorizer extends AbstractCategorizer
         $cleaned = $this->stripExtensionsForAnalysis($name);
         $coreName = $this->getCoreNameWithoutSeparators($cleaned);
 
+        if ($this->hasStrongWordStructure($name, $coreName)) {
+            return null;
+        }
+
         // High character-transition rate suggests randomness
         if ($this->isRandomByCharacterAnalysis($coreName, $name)) {
             return $this->matched(Category::OTHER_HASHED, 0.75, 'gibberish_random_transitions');

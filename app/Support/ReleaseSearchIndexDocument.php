@@ -43,7 +43,10 @@ final class ReleaseSearchIndexDocument
             'name' => (string) ($row['name'] ?? ''),
             'searchname' => (string) ($row['searchname'] ?? ''),
             'fromname' => (string) ($row['fromname'] ?? ''),
-            'categories_id' => (int) ($row['categories_id'] ?? 0),
+            // Existing live Manticore indexes may have categories_id as a text
+            // field from older schema creation. Numeric strings are accepted by
+            // newer integer schemas, while integers fail against the text schema.
+            'categories_id' => (string) ($row['categories_id'] ?? 0),
             'filename' => (string) ($row['filename'] ?? ''),
             'imdbid' => (string) ($row['imdbid'] ?? ''),
             'tmdbid' => (int) ($row['tmdbid'] ?? 0),

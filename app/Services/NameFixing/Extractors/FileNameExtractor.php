@@ -33,6 +33,7 @@ class FileNameExtractor
     public function extractFromFile(string $filename): ?NameFixResult
     {
         $result = [];
+        $baseFilename = preg_replace('/^.*[\\\\\/]/', '', $filename) ?: $filename;
         $cleanedFilename = $this->cleaner->cleanForTitleMatch($filename);
 
         // Try each pattern in order of specificity
@@ -45,6 +46,28 @@ class FileNameExtractor
             }
 
             return null;
+        }
+
+        if (preg_match('/(?:^|[._ -])sample(?:[._ -]|$)/i', $filename)) {
+            return null;
+        }
+
+        if ($this->isSubtitleSupportFilename($baseFilename)) {
+            return null;
+        }
+
+        if ($subjectResult = $this->extractFromYencSubject($filename)) {
+            return $subjectResult;
+        }
+
+        if ($supportFileResult = $this->extractClassicMovieSupportFilename($baseFilename)) {
+            return $supportFileResult;
+        }
+
+        if (! preg_match('/(?:^|[._ -])(?:sample|proof|subs?|thumbs?)(?:[._ -]|$)/iu', $baseFilename)
+            && ! $this->isLikelySoftwareArchivePart($baseFilename)
+            && preg_match('/^(.+?(19|20)\d\d.+?)(?:[._ -]part0*\d+|[._ -]r\d{2,3})\.rar$/iu', $baseFilename, $result)) {
+            return NameFixResult::fromMatch($this->normalizeBareMovieCandidate($result[1]).' DVDRip XviD NoGroup', 'Movie (year) archive part', 'File');
         }
 
         // Scene TV release with group suffix
@@ -124,6 +147,25 @@ class FileNameExtractor
             $newName = preg_replace('/\.(mkv|mp4|m4v)$/i', ' BDRip x264 NoGroup', $result[1]);
 
             return NameFixResult::fromMatch($newName, 'Movie (year) mkv/mp4', 'File');
+        }
+
+        // Bare classic/movie filenames are common in non-scene Usenet posts.
+        // They do not carry quality tags, but the year plus video extension is
+        // enough to recover a useful movie title from obfuscated subjects.
+        if (! preg_match('/(?:^|[._ -])sample(?:[._ -]|$)/iu', $baseFilename)
+            && preg_match('/^([\pL\pN][\pL\pN\s._\',;&!()’`-]{2,}?\(?\b(19|20)\d\d\)?)(?:[._ -][\pL]{2,})?\.(avi)$/iu', $baseFilename, $result)) {
+            return NameFixResult::fromMatch(trim($result[1]).' DVDRip XviD NoGroup', 'Bare movie (year) avi', 'File');
+        }
+
+        if (! preg_match('/(?:^|[._ -])sample(?:[._ -]|$)/iu', $baseFilename)
+            && preg_match('/^([\pL\pN][\pL\pN\s._\',;&!()’`-]{2,}?\(?\b(19|20)\d\d\)?)(?:[._ -][\pL]{2,})?\.(mkv|mp4|m4v)$/iu', $baseFilename, $result)) {
+            return NameFixResult::fromMatch(trim($result[1]).' BDRip x264 NoGroup', 'Bare movie (year) mkv/mp4', 'File');
+        }
+
+        if (! preg_match('/(?:^|[._ -])(?:sample|proof|subs?|thumbs?)(?:[._ -]|$)/iu', $baseFilename)
+            && ! $this->isLikelySoftwareArchivePart($baseFilename)
+            && preg_match('/^(.+?(19|20)\d\d.+?)(?:[._ -]part0*\d+|[._ -]r\d{2,3})\.rar$/iu', $baseFilename, $result)) {
+            return NameFixResult::fromMatch($this->normalizeBareMovieCandidate($result[1]).' DVDRip XviD NoGroup', 'Movie (year) archive part', 'File');
         }
 
         // RAR file contents - look for release name in RAR path
@@ -219,16 +261,233 @@ class FileNameExtractor
             return NameFixResult::fromMatch($result[1], 'Audiobook', 'File');
         }
 
+        if ($this->isLikelySoftwareArchivePart($baseFilename)) {
+            return null;
+        }
+
         // Scene release from cleaned filename
         if (preg_match('/^([A-Za-z0-9][\w.\-]+\-[A-Za-z0-9]{2,15})$/i', $cleanedFilename, $result) && preg_match(self::PREDB_REGEX, $cleanedFilename)) {
             return NameFixResult::fromMatch($result[1], 'Cleaned scene name', 'File');
         }
 
         // Folder name fallback
-        if (preg_match('/\w+[\-\w.\',;& ]+$/i', $filename, $result) && preg_match(self::PREDB_REGEX, $filename)) {
+        if (! preg_match('/(?:^|\s)yEnc$/i', trim($filename))
+            && ! $this->isLowInformationName($cleanedFilename)
+            && preg_match('/\w+[\-\w.\',;& ]+$/i', $filename, $result)
+            && preg_match(self::PREDB_REGEX, $filename)) {
             return NameFixResult::fromMatch($result[0], 'Folder name', 'File');
         }
 
         return null;
+    }
+
+    private function extractFromYencSubject(string $subject): ?NameFixResult
+    {
+        if (! preg_match('/\byEnc\b/i', $subject)) {
+            return null;
+        }
+
+        if (! preg_match('/\b(19|20)\d{2}\b/', $subject)) {
+            if ($sceneArchiveResult = $this->extractQuotedSceneArchiveFilename($subject)) {
+                return $sceneArchiveResult;
+            }
+
+            return null;
+        }
+
+        $candidate = null;
+        if (preg_match('/^(?:REQ[:\s]*)?(.+?\b(?:19|20)\d{2}\b.*?)(?:[._\s-]*\[\d+\/\d+\]\s*(?:-|\")|\s+-\s+"|\s+yEnc\b)/iu', $subject, $match)) {
+            $candidate = $match[1];
+        } elseif (preg_match('/^(?:REQ[:\s]*)?(.+?\b(?:19|20)\d{2}\b.*?)[._\s-]+\[[^\]]+\]/iu', $subject, $match)) {
+            $candidate = $match[1];
+        }
+
+        if ($candidate === null) {
+            if (preg_match('/^\[(?P<title>[^\[\]]*\b(?:19|20)\d{2}\b[^\[\]]*)\]\s+yEnc\b/iu', $subject, $match)) {
+                $candidate = $match['title'];
+            }
+        }
+
+        if ($candidate === null) {
+            if ($supportFileResult = $this->extractQuotedClassicMovieSupportFilename($subject)) {
+                return $supportFileResult;
+            }
+
+            if ($sceneArchiveResult = $this->extractQuotedSceneArchiveFilename($subject)) {
+                return $sceneArchiveResult;
+            }
+
+            return null;
+        }
+
+        $candidate = trim((string) preg_replace('/\s+-\s*$/', '', $candidate));
+        $candidate = trim($candidate, " \t\n\r\0\x0B.-_[]");
+
+        if ($candidate === '' || ! $this->cleaner->isPlausibleReleaseTitle($candidate)) {
+            if ($supportFileResult = $this->extractQuotedClassicMovieSupportFilename($subject)) {
+                return $supportFileResult;
+            }
+
+            if ($sceneArchiveResult = $this->extractQuotedSceneArchiveFilename($subject)) {
+                return $sceneArchiveResult;
+            }
+
+            return null;
+        }
+
+        return NameFixResult::fromMatch($candidate, 'yEnc subject title', 'File');
+    }
+
+    private function extractQuotedClassicMovieSupportFilename(string $subject): ?NameFixResult
+    {
+        if (preg_match_all('/"([^"]+)"/', $subject, $matches)) {
+            foreach ($matches[1] as $quoted) {
+                if ($supportFileResult = $this->extractClassicMovieSupportFilename($quoted)) {
+                    return $supportFileResult;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function extractQuotedSceneArchiveFilename(string $subject): ?NameFixResult
+    {
+        if (preg_match_all('/"([^"]+)"/', $subject, $matches)) {
+            foreach ($matches[1] as $quoted) {
+                if ($sceneArchiveResult = $this->extractSceneArchiveFilename($quoted)) {
+                    return $sceneArchiveResult;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function extractClassicMovieSupportFilename(string $baseFilename): ?NameFixResult
+    {
+        if (preg_match('/(?:^|[._ -])(?:sample|proof|subs?|thumbs?)(?:[._ -]|$)/iu', $baseFilename)) {
+            return null;
+        }
+
+        if (! preg_match('/\.(?:nfo|sfv|par2?|nzb|srr|srs|txt|md5|sha1)$/iu', $baseFilename)) {
+            return null;
+        }
+
+        $candidate = $this->cleaner->normalizeCandidateTitle($baseFilename);
+        $candidate = $this->normalizeBareMovieCandidate($candidate);
+
+        if ($this->isLowInformationName($candidate)
+            || ! preg_match('/\b(19|20)\d{2}\b/u', $candidate)
+            || ! preg_match('/[\pL\pN][\pL\pN\s._\',;&!()’`-]{2,}/u', $candidate)) {
+            return null;
+        }
+
+        return NameFixResult::fromMatch($candidate, 'Classic movie support filename', 'File');
+    }
+
+    private function extractSceneArchiveFilename(string $baseFilename): ?NameFixResult
+    {
+        if (preg_match('/(?:^|[._ -])(?:sample|proof|subs?|thumbs?)(?:[._ -]|$)/iu', $baseFilename)) {
+            return null;
+        }
+
+        if ($this->isSubtitleSupportFilename($baseFilename)) {
+            return null;
+        }
+
+        if (! preg_match('/\.(?:part\d{1,4}\.rar|r\d{2,4}|rar|par2?|vol\d+[+\-]\d+\.par2?|7z\.\d{2,4}|\d{3})$/iu', $baseFilename)) {
+            return null;
+        }
+
+        if ($this->isLikelySoftwareArchivePart($baseFilename)) {
+            return null;
+        }
+
+        $candidate = $this->stripArchiveSuffixes($baseFilename);
+
+        if ($candidate === ''
+            || $this->isLowInformationName($candidate)
+            || $this->cleaner->looksLikeHashedName($candidate)
+            || ! $this->cleaner->isPlausibleReleaseTitle($candidate)) {
+            return null;
+        }
+
+        return NameFixResult::fromMatch($candidate, 'Scene archive filename', 'File');
+    }
+
+    private function normalizeBareMovieCandidate(string $candidate): string
+    {
+        $candidate = trim(str_replace(['_', '.'], ' ', $candidate));
+        $candidate = preg_replace('/\s+/', ' ', $candidate) ?: $candidate;
+        $candidate = trim($candidate, " \t\n\r\0\x0B.-_");
+        $candidate = preg_replace('/^\[?\d{1,4}\/\d{1,4}\]?\s*/u', '', $candidate) ?: $candidate;
+        $candidate = preg_replace('/^\d{1,4}\]\s*/u', '', $candidate) ?: $candidate;
+        $candidate = trim($candidate, " \t\n\r\0\x0B.-_");
+        $candidate = preg_replace('/\s+(?:avi|mkv|mp4|mpg|mpeg|vob|iso)$/iu', '', $candidate) ?: $candidate;
+        $candidate = preg_replace('/^(?:an?\s+)?(?:mp4|mkv|avi|xvid|divx)\s+(?:file|film|movie)\s+/iu', '', $candidate) ?: $candidate;
+        $candidate = preg_replace('/^(?:an?\s+)?((?:19|20)\d{2})\s+(?:mp4|mkv|avi|xvid|divx)\s+(?:file|film|movie)\s+(.+)$/iu', '$2 ($1)', $candidate) ?: $candidate;
+        $candidate = preg_replace('/^((?:19|20)\d{2})\s+(?:an?\s+)?(?:mp4|mkv|avi|xvid|divx)\s+(?:file|film|movie)\s+(.+)$/iu', '$2 ($1)', $candidate) ?: $candidate;
+        $candidate = preg_replace('/^\(((?:19|20)\d{2})\)\s+(?:an?\s+)?(?:mp4|mkv|avi|xvid|divx)\s+(?:file|film|movie)\s+(.+)$/iu', '$2 ($1)', $candidate) ?: $candidate;
+
+        if (preg_match('/^\(((?:19|20)\d{2})\)\s+(.+)$/u', $candidate, $match)) {
+            $candidate = trim($match[2]).' ('.$match[1].')';
+        }
+
+        return trim($candidate);
+    }
+
+    private function stripArchiveSuffixes(string $candidate): string
+    {
+        $candidate = trim($candidate);
+        $patterns = [
+            '/\.vol\d+[+\-]\d+\.par2?$/i',
+            '/\.part\d{1,4}\.rar$/i',
+            '/\.r\d{2,4}$/i',
+            '/\.7z\.\d{2,4}$/i',
+            '/\.par2?$/i',
+            '/\.rar$/i',
+            '/\.\d{3}$/',
+        ];
+
+        foreach ($patterns as $pattern) {
+            $candidate = preg_replace($pattern, '', $candidate) ?? $candidate;
+        }
+
+        return trim($candidate, " \t\n\r\0\x0B.-_");
+    }
+
+    private function isLowInformationName(string|false|null $name): bool
+    {
+        if (! is_string($name)) {
+            return true;
+        }
+
+        $name = trim($name, " \t\n\r\0\x0B.-_\"'");
+
+        if ($name === '') {
+            return true;
+        }
+
+        return preg_match('/^(?:nfo|sfv|par2?|nzb|srr|srs|txt|md5|sha1)$/i', $name) === 1;
+    }
+
+    private function isSubtitleSupportFilename(string $baseFilename): bool
+    {
+        return preg_match('/\.(?:srt|sub|idx|ssa|ass|sup|vtt)$/iu', $baseFilename) === 1;
+    }
+
+    private function isLikelySoftwareArchivePart(string $baseFilename): bool
+    {
+        if (! preg_match('/(?:[._ -]part0*\d+|[._ -]r\d{2,3})\.(?:rar|rev)$/i', $baseFilename)) {
+            return false;
+        }
+
+        return preg_match(
+            '/\b(?:setup|installer|patch|keygen|crack|downloader|build|fix|acronis|true[._ -]?image|vegas|pro|x64|x86|'
+            .'wondershare|repairit|recoverit|photodirector|cyberlink|musify|ratiborus|kms|'
+            .'activator|serial|license|portable|multilingual|win(?:dows)?|macos?)\b/i',
+            $baseFilename
+        ) === 1;
     }
 }
