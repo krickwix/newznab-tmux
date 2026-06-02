@@ -134,6 +134,9 @@ class HashedReleaseCategorizationTest extends TestCase
             'Game release' => ['Starfield-RUNE', 'alt.binaries.games'],
             'Readable software package' => ['Microsoft Office Suite Installer', 'alt.binaries.warez'],
             'Adobe msix bundle' => ['Adobe Express Photos.Msixbundle', 'alt.binaries.erotica.divx'],
+            'Classic movie with short scene-like token' => ['R2R 1947 Xvid', 'alt.binaries.movies'],
+            'Classic movie archive subject' => ['[161/182] - "King Lear_2xDVD9.7z.021" yEnc', 'alt.binaries.dvd.classics'],
+            'Movie title with resolution marker' => ['Payroll 1961 mkv', 'alt.binaries.movies'],
         ];
     }
 

@@ -171,7 +171,7 @@ class MiscCategorizer extends AbstractCategorizer
 
         $cleaned = $this->stripExtensionsForAnalysis($name);
         $coreName = $this->getCoreNameWithoutSeparators($cleaned);
-        if ($this->isObfuscatedShortMixedAlphanumeric($coreName)) {
+        if ($this->isSingleTokenForShortObfuscationCheck($cleaned) && $this->isObfuscatedShortMixedAlphanumeric($coreName)) {
             return $this->matched(Category::OTHER_HASHED, 0.68, 'obfuscated_short_mixed_alphanumeric');
         }
 
@@ -197,6 +197,11 @@ class MiscCategorizer extends AbstractCategorizer
         }
 
         return null;
+    }
+
+    protected function isSingleTokenForShortObfuscationCheck(string $cleaned): bool
+    {
+        return preg_match('/^[A-Za-z0-9]+$/', $cleaned) === 1;
     }
 
     /**
