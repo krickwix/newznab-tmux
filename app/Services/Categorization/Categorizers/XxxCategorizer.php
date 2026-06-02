@@ -39,6 +39,10 @@ class XxxCategorizer extends AbstractCategorizer
     {
         $name = $context->releaseName;
 
+        if ($this->isClassicMovieGroupRelease($context)) {
+            return $this->noMatch();
+        }
+
         // Check if it looks like adult content
         if (! $this->looksLikeXxx($name)) {
             return $this->noMatch();
@@ -102,6 +106,19 @@ class XxxCategorizer extends AbstractCategorizer
         }
 
         return $this->noMatch();
+    }
+
+    protected function isClassicMovieGroupRelease(ReleaseContext $context): bool
+    {
+        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]?classic)/i')) {
+            return false;
+        }
+
+        if ($context->hasAdultMarkers() || ! preg_match('/\b(19|20)\d{2}\b/', $context->releaseName)) {
+            return false;
+        }
+
+        return (bool) preg_match('/\b(?:DVDRip|TVRip|VHSRip|BDRip|BluRay|DVD5|DVD9|NTSC|PAL|XviD|DivX|AVC|H\.?264|x264|mkv|avi|mp4|NoGroup)\b/i', $context->releaseName);
     }
 
     /**

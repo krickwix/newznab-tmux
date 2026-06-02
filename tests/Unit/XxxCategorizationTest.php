@@ -116,11 +116,12 @@ class XxxCategorizationTest extends TestCase
     }
 
     #[DataProvider('vrReleasesProvider')]
-    public function test_vr_releases_through_full_pipeline(string $releaseName, int $expectedCategoryId): void
+    public function test_vr_releases_through_full_pipeline(string $releaseName, int $expectedCategoryId, string $expectedMatchedBy): void
     {
         $passable = $this->runPipeline($releaseName);
 
         $this->assertSame($expectedCategoryId, $passable->bestResult->categoryId, "Pipeline wrong category for: {$releaseName}");
+        $this->assertSame($expectedMatchedBy, $passable->bestResult->matchedBy, "Pipeline wrong matched_by for: {$releaseName}");
     }
 
     #[DataProvider('nonVrReleasesProvider')]
@@ -155,5 +156,26 @@ class XxxCategorizationTest extends TestCase
         $result = $categorizer->categorize($context);
 
         $this->assertFalse($result->isSuccessful());
+    }
+
+    #[DataProvider('classicMovieFalsePositiveProvider')]
+    public function test_classic_movie_group_posts_are_not_xxx_xvid(string $releaseName): void
+    {
+        $passable = $this->runPipeline($releaseName, 'alt.binaries.multimedia.vintage-film.pre-1960');
+
+        $this->assertNotSame(Category::XXX_XVID, $passable->bestResult->categoryId, "Should not be XXX XviD: {$releaseName}");
+        $this->assertContains($passable->bestResult->categoryId, Category::MOVIES_GROUP);
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function classicMovieFalsePositiveProvider(): array
+    {
+        return [
+            'private eyes movie title' => ['Bowery Boys - 32 Private Eyes (1953) DVDRip XviD NoGroup'],
+            'score in parenthetical music credit' => ['Dr Jekyll and Mr Hyde (1920) (score by Devil Music Ensemble) DVDRip XviD NoGroup'],
+            'classic xvid archive part' => ['Bowery Boys - 33 Paris Playboys (1954) DVDRip XviD NoGroup'],
+        ];
     }
 }
