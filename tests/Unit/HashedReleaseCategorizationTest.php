@@ -170,6 +170,7 @@ class HashedReleaseCategorizationTest extends TestCase
             'Zero vowel token in movie group' => ['xkcdqwrtypsdfghjklmnbvcxz', 'alt.binaries.movies'],
             'Random archive part stem in movies group' => ['KJ9A5X4o0eW6mbnA.part01', 'alt.binaries.movies'],
             'Short random archive stem in classic DVD group' => ['EaytKMjYT7', 'alt.binaries.dvd.classics'],
+            'Random file-of archive subject in classic DVD group' => ['rxeW3D5GEkKf5f9e4Nm - File 32 of 76: "EaytKMjYT7.part32.rar"', 'alt.binaries.dvd.classics'],
         ];
     }
 

@@ -177,6 +177,14 @@ trait DetectsHashedNames
                 && $this->looksLikeRandomString($filename);
         }
 
+        if (preg_match('/\bFile\s+\d+\s+of\s+\d+:\s*"([a-zA-Z0-9]{8,})\.(part\d+\.rar|7z\.\d{3}|rar|zip|vol\d+\+\d+\.par2|par2)"/i', $name, $matches)) {
+            $filename = $matches[1];
+
+            return ! preg_match('/[._ -]/', $filename)
+                && ! preg_match('/\b(19|20)\d{2}\b/', $filename)
+                && $this->looksLikeRandomString($filename);
+        }
+
         return false;
     }
 
