@@ -120,6 +120,7 @@ class ImdbScraper
                     $this->lastFetchSource = 'imdb_html';
                     $this->lastFailureReason = null;
                     Cache::put($cacheKey, $data, now()->addDays(7));
+                    $this->recordLookupMetric('success');
 
                     return $data;
                 }
@@ -135,6 +136,7 @@ class ImdbScraper
                 $this->lastFailureReason = null;
                 $this->lastFallbackFailureReason = null;
                 Cache::put($cacheKey, $fallbackData, now()->addDays(7));
+                $this->recordLookupMetric('success');
 
                 return $fallbackData;
             }
@@ -143,6 +145,7 @@ class ImdbScraper
                 ? now()->addMinutes(self::SOFT_FAILURE_TTL_MINUTES)
                 : now()->addHours(self::HARD_FAILURE_TTL_HOURS);
             Cache::put($cacheKey, false, $ttl);
+            $this->recordLookupMetric('failed');
 
             return false;
         } catch (\Throwable $e) {
@@ -157,6 +160,7 @@ class ImdbScraper
                 $this->lastFailureReason = null;
                 $this->lastFallbackFailureReason = null;
                 Cache::put($cacheKey, $fallbackData, now()->addDays(7));
+                $this->recordLookupMetric('success');
 
                 return $fallbackData;
             }
@@ -165,6 +169,7 @@ class ImdbScraper
                 ? now()->addMinutes(self::SOFT_FAILURE_TTL_MINUTES)
                 : now()->addHours(self::HARD_FAILURE_TTL_HOURS);
             Cache::put($cacheKey, false, $ttl);
+            $this->recordLookupMetric('failed');
 
             return false;
         }
@@ -409,6 +414,31 @@ class ImdbScraper
         }
 
         Cache::put(self::IMDBAPI_DEV_COOLDOWN_CACHE_KEY, true, now()->addSeconds($cooldownSeconds));
+    }
+
+    private function recordLookupMetric(string $outcome): void
+    {
+        $key = sprintf(
+            'metrics:imdb_lookup:outcome:%s:reason:%s:fallback:%s:source:%s',
+            $this->sanitizeMetricLabel($outcome),
+            $this->sanitizeMetricLabel($this->lastFailureReason ?? 'none'),
+            $this->sanitizeMetricLabel($this->lastFallbackFailureReason ?? 'none'),
+            $this->sanitizeMetricLabel($this->lastFetchSource ?? 'none'),
+        );
+
+        try {
+            Cache::increment($key);
+        } catch (\Throwable) {
+            // Metrics must never alter scraper behavior.
+        }
+    }
+
+    private function sanitizeMetricLabel(string $value): string
+    {
+        $value = strtolower(trim($value));
+        $value = preg_replace('/[^a-z0-9_]+/', '_', $value) ?: 'unknown';
+
+        return trim($value, '_') ?: 'unknown';
     }
 
     /**

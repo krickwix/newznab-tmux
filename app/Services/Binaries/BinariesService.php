@@ -761,7 +761,28 @@ class BinariesService
         $notInsertedCount = \count($headersNotInserted);
         if ($notInsertedCount > 0) {
             $this->missedPartHandler->addMissingParts($headersNotInserted, $this->groupMySQL['id']);
-            $this->log($notInsertedCount.' articles failed to insert!', __FUNCTION__, 'warning');
+            $sample = array_map(
+                static function (mixed $number): string {
+                    if (is_scalar($number) || $number === null) {
+                        return (string) $number;
+                    }
+
+                    return json_encode($number) ?: get_debug_type($number);
+                },
+                array_slice(array_values($headersNotInserted), 0, 10)
+            );
+            $this->log(
+                $notInsertedCount.' articles failed to insert! '.
+                'group='.($this->groupMySQL['name'] ?? 'unknown').
+                ' group_id='.($this->groupMySQL['id'] ?? 0).
+                ' range='.$this->first.'-'.$this->last.
+                ' received='.\count($this->headersReceived).
+                ' not_yenc='.$this->notYEnc.
+                ' blacklisted='.$this->headersBlackListed.
+                ' sample='.implode(',', $sample),
+                __FUNCTION__,
+                'warning'
+            );
         }
 
         // Check for missing headers in range

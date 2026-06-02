@@ -64,6 +64,10 @@ class FileNameExtractor
             return $supportFileResult;
         }
 
+        if ($collectionPartResult = $this->extractClassicMovieCollectionArchivePart($baseFilename)) {
+            return $collectionPartResult;
+        }
+
         if (! preg_match('/(?:^|[._ -])(?:sample|proof|subs?|thumbs?)(?:[._ -]|$)/iu', $baseFilename)
             && ! $this->isLikelySoftwareArchivePart($baseFilename)
             && preg_match('/^(.+?(19|20)\d\d.+?)(?:[._ -]part0*\d+|[._ -]r\d{2,3})\.rar$/iu', $baseFilename, $result)) {
@@ -328,6 +332,10 @@ class FileNameExtractor
                 return $supportFileResult;
             }
 
+            if ($bareSubjectResult = $this->extractBareMovieSubjectTitle($candidate, $subject)) {
+                return $bareSubjectResult;
+            }
+
             if ($sceneArchiveResult = $this->extractQuotedSceneArchiveFilename($subject)) {
                 return $sceneArchiveResult;
             }
@@ -336,6 +344,27 @@ class FileNameExtractor
         }
 
         return NameFixResult::fromMatch($candidate, 'yEnc subject title', 'File');
+    }
+
+    private function extractBareMovieSubjectTitle(string $candidate, string $subject): ?NameFixResult
+    {
+        if (! preg_match('/\b(19|20)\d{2}\b/u', $candidate)) {
+            return null;
+        }
+
+        if (! preg_match('/(?:\[\d{1,4}\/\d{1,4}\]|"(?:[^"]+\.(?:part\d{1,4}\.rar|r\d{2,4}|rar|par2?))")/iu', $subject)) {
+            return null;
+        }
+
+        $candidate = $this->normalizeBareMovieCandidate($candidate);
+        if ($candidate === ''
+            || $this->isLowInformationName($candidate)
+            || $this->cleaner->looksLikeHashedName($candidate)
+            || ! preg_match('/[\pL][\pL\pN\s._\',;&!()’`-]{2,}/u', $candidate)) {
+            return null;
+        }
+
+        return NameFixResult::fromMatch($candidate.' DVDRip XviD NoGroup', 'Bare movie subject title', 'File');
     }
 
     private function extractQuotedClassicMovieSupportFilename(string $subject): ?NameFixResult
@@ -355,6 +384,10 @@ class FileNameExtractor
     {
         if (preg_match_all('/"([^"]+)"/', $subject, $matches)) {
             foreach ($matches[1] as $quoted) {
+                if ($collectionPartResult = $this->extractClassicMovieCollectionArchivePart($quoted)) {
+                    return $collectionPartResult;
+                }
+
                 if ($sceneArchiveResult = $this->extractSceneArchiveFilename($quoted)) {
                     return $sceneArchiveResult;
                 }
@@ -384,6 +417,35 @@ class FileNameExtractor
         }
 
         return NameFixResult::fromMatch($candidate, 'Classic movie support filename', 'File');
+    }
+
+    private function extractClassicMovieCollectionArchivePart(string $baseFilename): ?NameFixResult
+    {
+        if (preg_match('/(?:^|[._ -])(?:sample|proof|subs?|thumbs?)(?:[._ -]|$)/iu', $baseFilename)) {
+            return null;
+        }
+
+        if ($this->isLikelySoftwareArchivePart($baseFilename)) {
+            return null;
+        }
+
+        if (! preg_match(
+            '/^(?<title>[\pL\pN][\pL\pN\s._\',;&!()’`-]{2,}?)[._ -]+(?:cd|disc|disk|dvd)[._ -]*(?<disc>\d{1,3})[._ -]+of[._ -]+\d{1,3}(?:[._ -]part0*\d+|[._ -]r\d{2,4})\.rar$/iu',
+            $baseFilename,
+            $match,
+        )) {
+            return null;
+        }
+
+        $title = $this->normalizeBareMovieCandidate((string) $match['title']);
+        if ($title === ''
+            || $this->isLowInformationName($title)
+            || $this->cleaner->looksLikeHashedName($title)
+            || ! preg_match('/[\pL][\pL\s._\',;&!()’`-]{2,}/u', $title)) {
+            return null;
+        }
+
+        return NameFixResult::fromMatch($title.' CD'.(int) $match['disc'].' DVDRip XviD NoGroup', 'Classic movie collection archive part', 'File');
     }
 
     private function extractSceneArchiveFilename(string $baseFilename): ?NameFixResult

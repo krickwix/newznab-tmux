@@ -46,6 +46,10 @@ class TvCategorizer extends AbstractCategorizer
             return $result;
         }
 
+        if ($this->looksLikeClassicMoviePost($name, $context)) {
+            return $this->noMatch();
+        }
+
         if (! $this->looksLikeTV($name)) {
             return $this->noMatch();
         }
@@ -82,6 +86,25 @@ class TvCategorizer extends AbstractCategorizer
         }
 
         return $this->noMatch();
+    }
+
+    protected function looksLikeClassicMoviePost(string $name, ReleaseContext $context): bool
+    {
+        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
+            return false;
+        }
+
+        if ($this->isSportEvent($name) || preg_match(self::ANIME_GROUPS_REGEX, $name)) {
+            return false;
+        }
+
+        if (preg_match('/[._ -]s\d{1,3}[._ -]?(e|d(isc)?)\d{1,3}([._ -]|$)/i', $name)
+            || preg_match('/\b(Episode|Ep)[._ -]?\d{1,4}\b/i', $name)) {
+            return false;
+        }
+
+        return (bool) preg_match('/(?:^|[._ \(-])(?:19|20)\d{2}(?:$|[._ -]|\)|\])/i', $name)
+            && preg_match('/\b(?:TVRip|VHSRip|DVDRip|BRRip|XviD|DivX|AVC|x264|x265|H\.?264|H\.?265|mkv|avi|mp4|rar|nfo|par2)\b/i', $name);
     }
 
     protected function looksLikeTV(string $name): bool

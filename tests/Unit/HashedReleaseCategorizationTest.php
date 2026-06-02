@@ -460,6 +460,44 @@ class HashedReleaseCategorizationTest extends TestCase
         $this->assertSame('hd', $passable->bestResult->matchedBy);
     }
 
+    #[DataProvider('classicMovieTvRipProvider')]
+    public function test_classic_movie_tvrip_posts_in_film_groups_are_movies_not_tv(string $releaseName, string $groupName, int $expectedCategory): void
+    {
+        $passable = $this->runPipeline($releaseName, $groupName);
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame($expectedCategory, $passable->bestResult->categoryId);
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: string, 2: int}>
+     */
+    public static function classicMovieTvRipProvider(): array
+    {
+        return [
+            'laura dvd classic multipart' => [
+                'Laura (1944) - [27/41] - "LAURA.part26.rar"',
+                'alt.binaries.dvd.classic.movies',
+                Category::MOVIE_OTHER,
+            ],
+            'kiss the girls tvrip post 1960' => [
+                'Kiss the Girls and Make Them Die 1966 TVrip Xvid-ToR "Kiss the Girls 1966.r05" yEnc',
+                'alt.binaries.multimedia.vintage-film.post-1960',
+                Category::MOVIE_SD,
+            ],
+            'horror at 37000 feet dotted title' => [
+                'The.Horror.At.37,000.Feet.1973.TVrip.Xvid-WpF',
+                'alt.binaries.multimedia.vintage-film.post-1960',
+                Category::MOVIE_SD,
+            ],
+            'ill wait for you classic film' => [
+                'Ill.Wait.For.You.1941.TVRip.XviD-GmsMX',
+                'alt.binaries.multimedia.vintage-film',
+                Category::MOVIE_SD,
+            ],
+        ];
+    }
+
     public function test_hdtv_encoded_episode_is_not_music_video(): void
     {
         $passable = $this->runPipeline(

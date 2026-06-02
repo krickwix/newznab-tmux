@@ -9,6 +9,7 @@ use GuzzleHttp\Client;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Psr7\Response;
+use Illuminate\Support\Facades\Cache;
 
 class ImdbScraperTest extends ImdbScraperTestCase
 {
@@ -48,6 +49,7 @@ class ImdbScraperTest extends ImdbScraperTestCase
         $this->assertSame('waf_block', $scraper->getLastFailureReason());
         $this->assertSame('fallback_http_failure', $scraper->getLastFallbackFailureReason());
         $this->assertNull($scraper->getLastFetchSource());
+        $this->assertSame(1, Cache::get('metrics:imdb_lookup:outcome:failed:reason:waf_block:fallback:fallback_http_failure:source:none'));
     }
 
     public function test_fetch_by_id_falls_back_to_imdbapi_dev_when_title_page_is_blocked(): void
@@ -144,6 +146,8 @@ class ImdbScraperTest extends ImdbScraperTestCase
         $this->assertSame('waf_block', $scraper->getLastFailureReason());
         $this->assertSame('fallback_min_interval_active', $scraper->getLastFallbackFailureReason());
         $this->assertNull($scraper->getLastFetchSource());
+        $this->assertSame(1, Cache::get('metrics:imdb_lookup:outcome:success:reason:none:fallback:none:source:imdbapi_dev'));
+        $this->assertSame(1, Cache::get('metrics:imdb_lookup:outcome:failed:reason:waf_block:fallback:fallback_min_interval_active:source:none'));
     }
 
     public function test_fetch_by_id_skips_imdbapi_dev_when_cooldown_is_active_after_rate_limit(): void

@@ -19,6 +19,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Throwable;
 
 /**
@@ -524,13 +525,9 @@ class NfoService
     public function addAlternateNfo(bool|string &$nfo, mixed $release, NNTPService $nntp): bool
     {
         if ($release->id > 0 && $this->isNFO($nfo, $release->guid)) {
-            $check = ReleaseNfo::whereReleasesId($release->id)->first(['releases_id']);
-
-            if ($check === null) {
-                ReleaseNfo::query()->insert(['releases_id' => $release->id, 'nfo' => "\x1f\x8b\x08\x00".gzcompress($nfo)]);
+            if (! $this->saveNfoIfReleaseExists((int) $release->id, $nfo)) {
+                return false;
             }
-
-            Release::whereId($release->id)->update(['nfostatus' => self::NFO_FOUND]);
 
             if (! isset($release->completion)) {
                 $release->completion = 0;
@@ -765,24 +762,10 @@ class NfoService
                     }
 
                     if ($fetchedBinary !== false) {
-                        DB::beginTransaction();
-                        try {
-                            $exists = ReleaseNfo::whereReleasesId($release['id'])->exists();
-                            if (! $exists) {
-                                ReleaseNfo::query()->insert([
-                                    'releases_id' => $release['id'],
-                                    'nfo' => "\x1f\x8b\x08\x00".gzcompress($fetchedBinary),
-                                ]);
-                            }
-
-                            Release::whereId($release['id'])->update(['nfostatus' => self::NFO_FOUND]);
-                            DB::commit();
+                        if ($this->saveNfoIfReleaseExists((int) $release['id'], $fetchedBinary)) {
                             $processedCount++;
-                        } catch (\Exception $e) {
-                            DB::rollBack();
-                            if ($this->echo) {
-                                cli()->error("Error saving NFO for release {$release['id']}: {$e->getMessage()}");
-                            }
+                        } elseif ($this->echo) {
+                            cli()->warning("Skipping NFO save for missing release {$release['id']}");
                         }
                     }
                 } catch (\Exception $e) {
@@ -924,26 +907,14 @@ class NfoService
                 $fetchedBinary = $this->attemptNfoFromArchive($release['guid'], $release['id'], $nntp);
 
                 if ($fetchedBinary !== false) {
-                    DB::beginTransaction();
-                    try {
-                        if (! ReleaseNfo::whereReleasesId($release['id'])->exists()) {
-                            ReleaseNfo::query()->insert([
-                                'releases_id' => $release['id'],
-                                'nfo' => "\x1f\x8b\x08\x00".gzcompress($fetchedBinary),
-                            ]);
-                        }
-                        Release::whereId($release['id'])->update(['nfostatus' => self::NFO_FOUND]);
-                        DB::commit();
+                    if ($this->saveNfoIfReleaseExists((int) $release['id'], $fetchedBinary)) {
                         $processed++;
 
                         if ($this->echo) {
                             echo 'A';
                         }
-                    } catch (\Exception $e) {
-                        DB::rollBack();
-                        if ($this->echo) {
-                            cli()->error("Error saving archive NFO for release {$release['id']}: {$e->getMessage()}");
-                        }
+                    } elseif ($this->echo) {
+                        cli()->warning("Skipping archive NFO save for missing release {$release['id']}");
                     }
                 } else {
                     Release::whereId($release['id'])->update(['nfostatus' => self::NFO_FAILED_ARCHIVE]);
@@ -1709,6 +1680,24 @@ class NfoService
      */
     public function storeNfoContent(int $releaseId, string $nfoContent, bool $compress = true): bool
     {
+        return $this->saveNfoIfReleaseExists($releaseId, $nfoContent, $compress);
+    }
+
+    /**
+     * Store NFO content only when the parent release still exists.
+     *
+     * Post-processing queues can race with cleanup workers that delete stale or
+     * unwanted releases. Guarding the write here avoids FK failures on
+     * release_nfos while preserving normal NFO persistence.
+     */
+    private function saveNfoIfReleaseExists(int $releaseId, string $nfoContent, bool $compress = true): bool
+    {
+        if (! Release::query()->whereKey($releaseId)->exists()) {
+            Log::warning('nfo.save_skipped_missing_release', ['release_id' => $releaseId]);
+
+            return false;
+        }
+
         try {
             $data = $compress ? "\x1f\x8b\x08\x00".gzcompress($nfoContent) : $nfoContent;
 
@@ -1721,6 +1710,15 @@ class NfoService
 
             return true;
         } catch (Throwable $e) {
+            if (! Release::query()->whereKey($releaseId)->exists()) {
+                Log::warning('nfo.save_skipped_missing_release_race', [
+                    'release_id' => $releaseId,
+                    'error' => Str::limit($e->getMessage(), 160),
+                ]);
+
+                return false;
+            }
+
             Log::error("Failed to store NFO for release {$releaseId}: ".$e->getMessage());
 
             return false;

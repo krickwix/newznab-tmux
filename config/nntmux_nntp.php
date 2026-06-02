@@ -11,6 +11,8 @@ return [
     'alternate_server_password' => env('NNTP_PASSWORD_A', ''),
     'ssl' => env('NNTP_SSLENABLED', false),
     'alternate_server_ssl' => env('NNTP_SSLENABLED_A', false),
+    'connect_timeout' => env('NNTP_CONNECT_TIMEOUT', 15),
+    'alternate_server_connect_timeout' => env('NNTP_CONNECT_TIMEOUT_A', 15),
     'socket_timeout' => env('NNTP_SOCKET_TIMEOUT', 120),
     'alternate_server_socket_timeout' => env('NNTP_SOCKET_TIMEOUT_A', 120),
     'main_nntp_connections' => env('NNTP_CONNECTIONS', 1),

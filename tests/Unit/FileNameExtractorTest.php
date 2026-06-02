@@ -236,6 +236,50 @@ class FileNameExtractorTest extends TestCase
         $this->assertSame('Movie (year) archive part', $result->method);
     }
 
+    public function test_extracts_classic_collection_disc_archive_part(): void
+    {
+        $extractor = new FileNameExtractor;
+
+        $result = $extractor->extractFromFile('Laurel and Hardy cd 12 of 21.part063.rar');
+
+        $this->assertNotNull($result);
+        $this->assertSame('Laurel and Hardy CD12 DVDRip XviD NoGroup', $result->newName);
+        $this->assertSame('Classic movie collection archive part', $result->method);
+    }
+
+    public function test_extracts_classic_collection_disc_from_yenc_subject(): void
+    {
+        $extractor = new FileNameExtractor;
+
+        $result = $extractor->extractFromFile('[063/100] - "Laurel and Hardy cd 12 of 21.part063.rar" yEnc');
+
+        $this->assertNotNull($result);
+        $this->assertSame('Laurel and Hardy CD12 DVDRip XviD NoGroup', $result->newName);
+        $this->assertSame('Classic movie collection archive part', $result->method);
+    }
+
+    public function test_extracts_bare_movie_subject_title_with_year_from_multipart_yenc(): void
+    {
+        $extractor = new FileNameExtractor;
+
+        $result = $extractor->extractFromFile('Midnight (1939) [02/21] - "MIDNIGHT.part01.rar" yEnc');
+
+        $this->assertNotNull($result);
+        $this->assertSame('Midnight (1939) DVDRip XviD NoGroup', $result->newName);
+        $this->assertSame('Bare movie subject title', $result->method);
+    }
+
+    public function test_extracts_bare_movie_subject_title_with_unbracketed_year(): void
+    {
+        $extractor = new FileNameExtractor;
+
+        $result = $extractor->extractFromFile('Kiss the Girls and Make Them Die 1966 [01/42] - "Kiss.the.Girls.part001.rar" yEnc');
+
+        $this->assertNotNull($result);
+        $this->assertSame('Kiss the Girls and Make Them Die 1966 DVDRip XviD NoGroup', $result->newName);
+        $this->assertSame('Bare movie subject title', $result->method);
+    }
+
     public function test_strips_terminal_video_extension_from_bare_movie_candidate(): void
     {
         $extractor = new FileNameExtractor;

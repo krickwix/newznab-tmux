@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Metrics;
 
+use App\Models\Category;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Throwable;
@@ -45,6 +46,7 @@ class NntmuxPrometheusMetrics
                 $this->tableEstimateMetrics(),
                 $this->groupMetrics(),
                 $this->releaseMetrics(),
+                $this->imdbLookupMetrics(),
                 $this->timerMetrics(),
                 $this->lockMetrics(),
             );
@@ -57,6 +59,59 @@ class NntmuxPrometheusMetrics
         }
 
         return implode("\n", $lines)."\n";
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function imdbLookupMetrics(): array
+    {
+        $lines = [
+            '# HELP nntmux_imdb_lookup_total IMDb lookup attempts by outcome and reason since cache start.',
+            '# TYPE nntmux_imdb_lookup_total counter',
+        ];
+
+        try {
+            foreach (Redis::keys('*metrics:imdb_lookup*') as $key) {
+                $key = (string) $key;
+                $labels = $this->parseImdbMetricLabels($key);
+                if ($labels === null) {
+                    continue;
+                }
+
+                $lines[] = $this->metric('nntmux_imdb_lookup_total', $this->redisValue($key), $labels);
+            }
+        } catch (Throwable) {
+            $lines[] = $this->metric('nntmux_imdb_lookup_total', 0, [
+                'outcome' => 'redis_unavailable',
+                'reason' => 'redis_unavailable',
+                'fallback_reason' => 'redis_unavailable',
+                'source' => 'redis_unavailable',
+            ]);
+        }
+
+        return $lines;
+    }
+
+    /**
+     * @return array{outcome: string, reason: string, fallback_reason: string, source: string}|null
+     */
+    private function parseImdbMetricLabels(string $key): ?array
+    {
+        if (! preg_match(
+            '/metrics:imdb_lookup:outcome:(?<outcome>[^:]+):reason:(?<reason>[^:]+):fallback:(?<fallback>[^:]+):source:(?<source>[^:]+)/',
+            $key,
+            $match,
+        )) {
+            return null;
+        }
+
+        return [
+            'outcome' => $match['outcome'],
+            'reason' => $match['reason'],
+            'fallback_reason' => $match['fallback'],
+            'source' => $match['source'],
+        ];
     }
 
     /**
@@ -141,6 +196,13 @@ class NntmuxPrometheusMetrics
         $hour = (int) DB::table('releases')->where('adddate', '>=', now()->subHour())->count();
         $day = (int) DB::table('releases')->where('adddate', '>=', now()->subDay())->count();
         $hashed = (int) DB::table('releases')->where('ishashed', 1)->count();
+        $hashedCategory = (int) DB::table('releases')->where('categories_id', Category::OTHER_HASHED)->count();
+        $hashedEffective = (int) DB::table('releases')
+            ->where(static function ($query): void {
+                $query->where('ishashed', 1)
+                    ->orWhere('categories_id', Category::OTHER_HASHED);
+            })
+            ->count();
         $renamed = (int) DB::table('releases')->where('isrenamed', 1)->count();
 
         return [
@@ -151,6 +213,8 @@ class NntmuxPrometheusMetrics
             '# HELP nntmux_releases_state_total Release count by processing state.',
             '# TYPE nntmux_releases_state_total gauge',
             $this->metric('nntmux_releases_state_total', $hashed, ['state' => 'hashed']),
+            $this->metric('nntmux_releases_state_total', $hashedCategory, ['state' => 'hashed_category']),
+            $this->metric('nntmux_releases_state_total', $hashedEffective, ['state' => 'hashed_effective']),
             $this->metric('nntmux_releases_state_total', $renamed, ['state' => 'renamed']),
             ...$this->releaseCategoryMetrics(),
         ];
@@ -260,6 +324,18 @@ class NntmuxPrometheusMetrics
         }
 
         return -2;
+    }
+
+    private function redisValue(string $key): int
+    {
+        foreach ($this->redisKeyCandidates($key, (string) config('cache.prefix')) as $candidate) {
+            $value = Redis::get($candidate);
+            if ($value !== null) {
+                return (int) $value;
+            }
+        }
+
+        return 0;
     }
 
     /**

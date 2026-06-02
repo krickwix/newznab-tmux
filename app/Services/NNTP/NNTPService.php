@@ -106,6 +106,10 @@ class NNTPService extends NntpClient
 
     protected string $_configAlternatePassword;
 
+    protected int $_configConnectTimeout;
+
+    protected int $_configAlternateConnectTimeout;
+
     protected int $_configSocketTimeout;
 
     protected int $_configAlternateSocketTimeout;
@@ -162,6 +166,8 @@ class NNTPService extends NntpClient
         $this->_configPassword = config('nntmux_nntp.password') ?? '';
         $this->_configAlternateUsername = config('nntmux_nntp.alternate_server_username') ?? '';
         $this->_configAlternatePassword = config('nntmux_nntp.alternate_server_password') ?? '';
+        $this->_configConnectTimeout = max(1, (int) config('nntmux_nntp.connect_timeout'));
+        $this->_configAlternateConnectTimeout = max(1, (int) config('nntmux_nntp.alternate_server_connect_timeout'));
         $this->_configSocketTimeout = (int) (config('nntmux_nntp.socket_timeout') ?: $this->_socketTimeout);
         $this->_configAlternateSocketTimeout = (int) (config('nntmux_nntp.alternate_server_socket_timeout') ?: $this->_socketTimeout);
         $this->_configCompressedHeaders = (bool) config('nntmux_nntp.compressed_headers');
@@ -231,6 +237,7 @@ class NNTPService extends NntpClient
             $this->_currentPort = $this->_configPort;
             $userName = $this->_configUsername;
             $password = $this->_configPassword;
+            $connectTimeout = $this->_configConnectTimeout;
             $socketTimeout = $this->_configSocketTimeout;
         } else {
             $sslEnabled = $this->_configAlternateSsl;
@@ -238,6 +245,7 @@ class NNTPService extends NntpClient
             $this->_currentPort = $this->_configAlternatePort;
             $userName = $this->_configAlternateUsername;
             $password = $this->_configAlternatePassword;
+            $connectTimeout = $this->_configAlternateConnectTimeout;
             $socketTimeout = $this->_configAlternateSocketTimeout;
         }
 
@@ -252,7 +260,7 @@ class NNTPService extends NntpClient
 
             // If we are not connected, try to connect.
             if (! $connected) {
-                $ret = $this->connect($this->_currentServer, $sslEnabled, (int) $this->_currentPort, 5, $socketTimeout);
+                $ret = $this->connect($this->_currentServer, $sslEnabled, (int) $this->_currentPort, $connectTimeout, $socketTimeout);
             }
             // Check if we got an error while connecting.
             $cErr = self::isError($ret);
