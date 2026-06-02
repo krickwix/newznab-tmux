@@ -168,6 +168,8 @@ class HashedReleaseCategorizationTest extends TestCase
             'Random digits in ebook group' => ['ab12345678901234', 'alt.binaries.e-book'],
             'Base64-like token in TV group' => ['VGhpc0lzTm90QVNob3dOYW1lMTIzNDU2Nzg5MA==', 'alt.binaries.hdtv'],
             'Zero vowel token in movie group' => ['xkcdqwrtypsdfghjklmnbvcxz', 'alt.binaries.movies'],
+            'Random archive part stem in movies group' => ['KJ9A5X4o0eW6mbnA.part01', 'alt.binaries.movies'],
+            'Short random archive stem in classic DVD group' => ['EaytKMjYT7', 'alt.binaries.dvd.classics'],
         ];
     }
 

@@ -32,6 +32,7 @@ trait DetectsHashedNames
             || $this->isBase64LikeToken($name)
             || $this->isObfuscatedUppercaseString($name)
             || $this->isObfuscatedMixedAlphanumeric($name)
+            || $this->isObfuscatedShortMixedAlphanumeric($coreName)
             || $this->isObfuscatedUsenetFilename($name)
             || $this->isRandomByCharacterAnalysis($coreName, $name)
             || $this->hasInsufficientWordStructure($coreName)
@@ -145,6 +146,20 @@ trait DetectsHashedNames
         return (bool) preg_match('/^[a-zA-Z0-9]{15,}$/', $name)
             && ! preg_match('/\b(19|20)\d{2}\b/', $name)
             && ! preg_match('/^[A-Z][a-z]+([A-Z][a-z]+)+$/', $name);
+    }
+
+    /**
+     * Detect shorter random archive stems after suffix cleanup.
+     */
+    protected function isObfuscatedShortMixedAlphanumeric(string $coreName): bool
+    {
+        return (bool) preg_match('/^[a-zA-Z0-9]{10,14}$/', $coreName)
+            && preg_match('/[A-Z]/', $coreName)
+            && preg_match('/[a-z]/', $coreName)
+            && preg_match('/\d/', $coreName)
+            && ! preg_match('/\b(19|20)\d{2}\b/', $coreName)
+            && ! preg_match('/^[A-Z][a-z]+([A-Z][a-z]+)+$/', $coreName)
+            && $this->looksLikeRandomString($coreName);
     }
 
     /**
@@ -331,11 +346,13 @@ trait DetectsHashedNames
      */
     protected function stripExtensionsForAnalysis(string $name): string
     {
-        return preg_replace(
+        $stripped = preg_replace(
             '/\.(mkv|avi|mp4|m4v|mpg|mpeg|wmv|flv|mov|ts|vob|iso|divx|par2?|nfo|sfv|nzb|rar|r\d{2,3}|zip|7z|gz|tar|001|msix|msixbundle|appx|appxbundle|apk|xap|ipa|deb|rpm|pkg|dmg|exe|msi)$/i',
             '',
             trim($name)
         );
+
+        return preg_replace('/[.\-_\s]+part\d{1,4}$/i', '', $stripped);
     }
 
     /**

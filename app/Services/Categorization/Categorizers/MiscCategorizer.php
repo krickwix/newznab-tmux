@@ -169,6 +169,12 @@ class MiscCategorizer extends AbstractCategorizer
             return $this->matched(Category::OTHER_HASHED, 0.7, 'obfuscated_mixed_alphanumeric');
         }
 
+        $cleaned = $this->stripExtensionsForAnalysis($name);
+        $coreName = $this->getCoreNameWithoutSeparators($cleaned);
+        if ($this->isObfuscatedShortMixedAlphanumeric($coreName)) {
+            return $this->matched(Category::OTHER_HASHED, 0.68, 'obfuscated_short_mixed_alphanumeric');
+        }
+
         // Obfuscated filename embedded in usenet subject line format
         if ($this->isObfuscatedUsenetFilename($name)) {
             return $this->matched(Category::OTHER_HASHED, 0.85, 'obfuscated_usenet_filename');
