@@ -85,7 +85,7 @@ class DistributedJobCatalogTest extends TestCase
             ['sequential' => 2],
         );
 
-        foreach (['binaries', 'backfill', 'releases', 'fixnames', 'post-additional'] as $job) {
+        foreach (['binaries', 'backfill', 'releases', 'fixnames', 'hashed-fixnames', 'post-additional'] as $job) {
             $this->assertFalse($catalog->resolve($job, $runVar)['enabled'], $job);
         }
 
@@ -143,6 +143,43 @@ class DistributedJobCatalogTest extends TestCase
         $this->assertSame(50, $plan['commands'][7]['arguments']['--limit']);
     }
 
+    public function test_hashed_fixnames_runs_full_history_hashed_passes_when_hashed_count_exceeds_threshold(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('hashed-fixnames', $this->runVar(
+            ['fix_names' => 1],
+            ['other_hashed' => 101],
+        ));
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame(
+            ['4', '6', '21', '18', '10', '14', '16', '20', '12', '8'],
+            $this->argumentValues($plan, 'method'),
+        );
+
+        foreach ($plan['commands'] as $command) {
+            $this->assertSame('releases:fix-names', $command['command']);
+            $this->assertSame('hashed', $command['arguments']['--category']);
+            $this->assertTrue($command['arguments']['--update']);
+            $this->assertTrue($command['arguments']['--set-status']);
+        }
+    }
+
+    public function test_hashed_fixnames_does_not_run_when_hashed_count_is_not_greater_than_threshold(): void
+    {
+        $catalog = new DistributedJobCatalog;
+
+        foreach ([0, 100] as $count) {
+            $plan = $catalog->resolve('hashed-fixnames', $this->runVar(
+                ['fix_names' => 1],
+                ['other_hashed' => $count],
+            ));
+
+            $this->assertFalse($plan['enabled'], 'count='.$count);
+            $this->assertSame([], $plan['commands'], 'count='.$count);
+        }
+    }
+
     public function test_it_uses_sleep_metadata_without_shell_sleep_commands(): void
     {
         $catalog = new DistributedJobCatalog;
@@ -185,6 +222,7 @@ class DistributedJobCatalogTest extends TestCase
             'counts' => [
                 'now' => array_merge([
                     'collections_table' => 0,
+                    'other_hashed' => 0,
                     'processrenames' => 0,
                     'work' => 0,
                     'processnfo' => 0,

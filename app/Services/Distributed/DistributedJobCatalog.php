@@ -6,6 +6,8 @@ namespace App\Services\Distributed;
 
 class DistributedJobCatalog
 {
+    private const int HASHED_FIXNAMES_THRESHOLD = 100;
+
     /**
      * @return array<string, string>
      */
@@ -16,6 +18,7 @@ class DistributedJobCatalog
             'backfill' => 'Backfill enabled groups',
             'releases' => 'Create and categorize releases',
             'fixnames' => 'Run release name fixing passes',
+            'hashed-fixnames' => 'Run full-history name fixing passes for Other > Hashed backlogs',
             'removecrap' => 'Remove configured unwanted releases',
             'post-additional' => 'Run additional and/or NFO post-processing',
             'post-tv' => 'Run TV and anime post-processing',
@@ -64,6 +67,7 @@ class DistributedJobCatalog
                 (int) ($settings['rel_timer'] ?? 60)
             ),
             'fixnames' => $this->fixNames($settings, $counts),
+            'hashed-fixnames' => $this->hashedFixNames($settings, $counts),
             'removecrap' => $this->removeCrap($settings),
             'post-additional' => $this->postAdditional($settings, $counts),
             'post-tv' => $this->postTv($settings, $counts),
@@ -103,7 +107,7 @@ class DistributedJobCatalog
             'binaries' => (int) ($settings['bins_timer'] ?? 60),
             'backfill' => $this->backfillSleep($settings, []),
             'releases' => (int) ($settings['rel_timer'] ?? 60),
-            'fixnames' => (int) ($settings['fix_timer'] ?? 300),
+            'fixnames', 'hashed-fixnames' => (int) ($settings['fix_timer'] ?? 300),
             'removecrap' => (int) ($settings['crap_timer'] ?? 300),
             'post-additional' => (int) ($settings['post_timer'] ?? 300),
             'post-tv', 'post-movies' => (int) ($settings['post_timer_non'] ?? 300),
@@ -285,6 +289,45 @@ class DistributedJobCatalog
         }
 
         return $this->job('fixnames', true, null, $commands, $sleep);
+    }
+
+    /**
+     * @param  array<string, mixed>  $settings
+     * @param  array<string, mixed>  $counts
+     * @return array<string, mixed>
+     */
+    private function hashedFixNames(array $settings, array $counts): array
+    {
+        $sleep = (int) ($settings['fix_timer'] ?? 300);
+
+        if ((int) ($settings['fix_names'] ?? 0) !== 1) {
+            return $this->disabled('hashed-fixnames', 'disabled in settings', $sleep);
+        }
+
+        $hashedCount = (int) ($counts['other_hashed'] ?? 0);
+        if ($hashedCount <= self::HASHED_FIXNAMES_THRESHOLD) {
+            return $this->disabled(
+                'hashed-fixnames',
+                sprintf('Other > Hashed count %d is not greater than %d', $hashedCount, self::HASHED_FIXNAMES_THRESHOLD),
+                $sleep
+            );
+        }
+
+        $commands = [];
+        foreach ([4, 6, 21, 18, 10, 14, 16, 20, 12, 8] as $method) {
+            $commands[] = [
+                'command' => 'releases:fix-names',
+                'arguments' => [
+                    'method' => (string) $method,
+                    '--update' => true,
+                    '--category' => 'hashed',
+                    '--set-status' => true,
+                    '--show' => true,
+                ],
+            ];
+        }
+
+        return $this->job('hashed-fixnames', true, null, $commands, $sleep);
     }
 
     /**

@@ -18,7 +18,7 @@ class FixReleaseNames extends Command
     protected $signature = 'releases:fix-names
                                  {method : The method number (3-21) to use for fixing names}
                                  {--update : Actually update the names, otherwise just display results}
-                                 {--category=other : Category to process: "other", "movies", "all", or "predb_id"}
+                                 {--category=other : Category to process: "other", "hashed", "movies", "all", or "predb_id"}
                                  {--set-status : Set releases as checked after processing}
                                  {--limit=0 : Maximum releases to process (0 = no limit)}
                                  {--show : Display detailed release changes rather than just counters}';
@@ -50,6 +50,8 @@ class FixReleaseNames extends Command
             $other = 3;
         } elseif ($categoryOption === 'movies') {
             $other = 4;
+        } elseif ($categoryOption === 'hashed') {
+            $other = 5;
         }
 
         // Connect to NNTP if method requires it
@@ -167,7 +169,7 @@ class FixReleaseNames extends Command
         $this->info('');
         $this->info('Options:');
         $this->info('  --update           Actually update the names (default: only display potential changes)');
-        $this->info('  --category=VALUE   Process "other" categories (default), "movies", "all", or "predb_id" for unmatched');
+        $this->info('  --category=VALUE   Process "other" categories (default), "hashed", "movies", "all", or "predb_id" for unmatched');
         $this->info('  --set-status       Mark releases as checked so they won\'t be processed again');
         $this->info('  --show             Display detailed release changes (default: only show counters)');
         $this->info('');

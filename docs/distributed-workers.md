@@ -22,6 +22,7 @@ without restarting the pod.
 | `backfill` | Safely backfill enabled groups. This always uses `multiprocessing:safe backfill`. |
 | `releases` | Create and categorize releases from complete collections. |
 | `fixnames` | Run release name-fixing passes. |
+| `hashed-fixnames` | Run full-history name-fixing passes for `Other > Hashed` when the count exceeds 100. |
 | `removecrap` | Remove releases matched by configured cleanup rules. |
 | `post-additional` | Download/process additional files and NFOs. |
 | `post-tv` | Run TV and anime post-processing. |
@@ -47,6 +48,11 @@ NNTMUX_DISTRIBUTED_LONG_LOCK_SECONDS=3600
 rollout cannot release its cache lock, so very long TTLs can leave the lane idle
 until the key expires or an operator clears it. Locks do not heartbeat while a
 long Artisan command is running, so do not scale one lane above one replica.
+
+The `hashed-fixnames` lane uses the normal `fix_timer` sleep. It is disabled
+unless `fix_names` is enabled and the exact `Other > Hashed` count is greater
+than 100. It runs the hashed-only selector, while the regular `fixnames`
+worker excludes `Other > Hashed` to avoid duplicate rename attempts.
 
 ## Kubernetes Pattern
 

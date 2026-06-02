@@ -81,6 +81,10 @@ class NameFixingService
 
     protected string $fullall;
 
+    protected string $timehashed;
+
+    protected string $fullhashed;
+
     protected string $moviecats;
 
     /** @var list<int> */
@@ -110,11 +114,13 @@ class NameFixingService
         $this->predbMatchSelector = $predbMatchSelector ?? new PredbMatchSelector($this->fileNameCleaner);
         $this->echoOutput = (bool) config('nntmux.echocli');
 
-        $this->othercats = implode(',', Category::OTHERS_GROUP);
+        $this->othercats = implode(',', array_diff(Category::OTHERS_GROUP, [Category::OTHER_HASHED]));
         $this->timeother = sprintf(' AND rel.adddate > (NOW() - INTERVAL 6 HOUR) AND rel.categories_id IN (%s) GROUP BY rel.id ORDER BY postdate DESC', $this->othercats);
         $this->timeall = ' AND rel.adddate > (NOW() - INTERVAL 6 HOUR) GROUP BY rel.id ORDER BY postdate DESC';
         $this->fullother = sprintf(' AND rel.categories_id IN (%s) GROUP BY rel.id ORDER BY rel.adddate DESC', $this->othercats);
         $this->fullall = '';
+        $this->timehashed = sprintf(' AND rel.adddate > (NOW() - INTERVAL 6 HOUR) AND rel.categories_id = %d GROUP BY rel.id ORDER BY postdate DESC', Category::OTHER_HASHED);
+        $this->fullhashed = sprintf(' AND rel.categories_id = %d GROUP BY rel.id ORDER BY rel.adddate DESC', Category::OTHER_HASHED);
         $this->movieCategoryIds = array_values(array_diff(Category::MOVIES_GROUP, [Category::MOVIE_ROOT]));
         $this->moviecats = implode(',', $this->movieCategoryIds);
         $this->timemovies = sprintf(' AND rel.adddate > (NOW() - INTERVAL 6 HOUR) AND rel.categories_id IN (%s) GROUP BY rel.id ORDER BY postdate DESC', $this->moviecats);
@@ -1062,6 +1068,12 @@ class NameFixingService
         }
         if ($time === 2 && $cats === 4) {
             $releases = Release::fromQuery($query.$this->fullmovies.$queryLimit);
+        }
+        if ($time === 1 && $cats === 5) {
+            $releases = Release::fromQuery($query.$this->timehashed.$queryLimit);
+        }
+        if ($time === 2 && $cats === 5) {
+            $releases = Release::fromQuery($query.$this->fullhashed.$queryLimit);
         }
 
         return $releases;

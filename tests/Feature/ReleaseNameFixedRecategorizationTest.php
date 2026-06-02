@@ -131,6 +131,50 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(1, (int) $release->isrenamed);
     }
 
+    public function test_renaming_hashed_classic_movie_release_recategorizes_it_to_movie(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.dvd.classic.movies',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'rxeW3D5GEkKf5f9e4Nm - File 32 of 76: "EaytKMjYT7.part32.rar" yEnc',
+            'searchname' => 'rxeW3D5GEkKf5f9e4Nm - File 32 of 76: "EaytKMjYT7.part32.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('f', 40),
+            'leftguid' => 'f',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $service = app(ReleaseUpdateService::class);
+        $service->updateRelease(
+            $release->fresh(),
+            'West.of.Cheyenne.1931.DVDRip.XviD-NoGroup',
+            'nfoCheck: Title Match',
+            true,
+            'NFO, ',
+            true,
+            false,
+        );
+
+        $release->refresh();
+
+        $this->assertSame('West.of.Cheyenne.1931.DVDRip.XviD-NoGroup', $release->searchname);
+        $this->assertSame(Category::MOVIE_SD, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(1, (int) $release->isrenamed);
+    }
+
     public function test_movie_fix_name_lane_includes_movie_other_category(): void
     {
         $service = app(NameFixingService::class);
@@ -138,6 +182,30 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $property->setAccessible(true);
 
         $this->assertContains(Category::MOVIE_OTHER, $property->getValue($service));
+    }
+
+    public function test_regular_other_fix_name_lane_excludes_hashed_category(): void
+    {
+        $service = app(NameFixingService::class);
+        $property = new \ReflectionProperty($service, 'othercats');
+        $property->setAccessible(true);
+
+        $categoryIds = array_map('intval', explode(',', $property->getValue($service)));
+
+        $this->assertNotContains(Category::OTHER_HASHED, $categoryIds);
+        $this->assertContains(Category::OTHER_MISC, $categoryIds);
+        $this->assertContains(Category::MOVIE_OTHER, $categoryIds);
+    }
+
+    public function test_hashed_fix_name_lane_targets_only_hashed_category(): void
+    {
+        $service = app(NameFixingService::class);
+
+        $fullHashed = new \ReflectionProperty($service, 'fullhashed');
+        $fullHashed->setAccessible(true);
+
+        $this->assertStringContainsString('rel.categories_id = '.Category::OTHER_HASHED, $fullHashed->getValue($service));
+        $this->assertStringNotContainsString('rel.categories_id IN', $fullHashed->getValue($service));
     }
 
     public function test_renaming_olympic_webdl_release_recategorizes_it_from_movie_webdl_to_tv_sport(): void
@@ -278,8 +346,6 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
 
     public function test_par2_folder_name_without_subject_rescue_does_not_rename(): void
     {
-        Search::shouldReceive('updateRelease')->never();
-
         $group = UsenetGroup::query()->create([
             'name' => 'alt.binaries.movies',
             'active' => 1,
@@ -300,6 +366,8 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
             'postdate' => now(),
             'adddate' => now(),
         ]);
+
+        Search::shouldReceive('updateRelease')->never();
 
         $service = app(ReleaseUpdateService::class);
         $service->updateRelease(

@@ -155,7 +155,10 @@ class ReleaseUpdateService
             if ($type === 'PAR2, ') {
                 $candidateBeforeSubjectPreference = $newName;
                 $newName = $this->preferPar2SubjectTitle($release, $name, $newName);
-                if (stripos($method, 'Folder name') !== false && $newName === $candidateBeforeSubjectPreference) {
+                if (
+                    stripos($method, 'Folder name') !== false
+                    && $this->sameNormalizedCandidate($newName, $candidateBeforeSubjectPreference)
+                ) {
                     $this->done = true;
 
                     return;
@@ -243,6 +246,13 @@ class ReleaseUpdateService
         }
 
         return $candidate;
+    }
+
+    protected function sameNormalizedCandidate(string $first, string $second): bool
+    {
+        $normalize = static fn (string $value): string => strtolower((string) preg_replace('/[^\pL\pN]+/u', '', $value));
+
+        return $normalize($first) === $normalize($second);
     }
 
     /**

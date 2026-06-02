@@ -204,6 +204,10 @@ class TmuxMonitorService
             ->whereBetween('categories_id', [Category::OTHER_ROOT, Category::OTHER_HASHED])
             ->count('id');
 
+        $this->runVar['counts']['now']['other_hashed'] = Release::query()
+            ->where('categories_id', Category::OTHER_HASHED)
+            ->count('id');
+
         $this->runVar['timers']['query']['init_time'] = time() - $timer;
     }
 
