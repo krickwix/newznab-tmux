@@ -172,6 +172,28 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 2)->value('nzbstatus'));
     }
 
+    public function test_command_selection_does_not_require_parts_table_payload(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a', withParts: false);
+
+        $writtenIds = [];
+        $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+
+            return false;
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--groups' => 'alt.binaries.boneless',
+            '--leftguid' => 'a',
+            '--limit' => 1,
+            '--sleep' => 0,
+        ])->assertSuccessful();
+
+        $this->assertSame([1], $writtenIds);
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
     public function test_command_rejects_invalid_leftguid_partition(): void
     {
         $this->bindNzbWriter(static function (): bool {
@@ -225,6 +247,7 @@ final class NzbCreateBacklogCommandTest extends TestCase
         string $leftGuid,
         int $nzbStatus = NzbService::NZB_NONE,
         bool $withPayload = true,
+        bool $withParts = true,
         int $currentParts = 1,
         int $totalParts = 1
     ): void {
@@ -279,6 +302,10 @@ final class NzbCreateBacklogCommandTest extends TestCase
             'currentparts' => $currentParts,
             'totalparts' => $totalParts,
         ]);
+        if (! $withParts) {
+            return;
+        }
+
         DB::table('parts')->insert([
             'binaries_id' => $id * 100,
             'number' => $id,

@@ -87,7 +87,6 @@ final class NzbBacklogCreationService
                 $query->selectRaw('1')
                     ->from('collections')
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
-                    ->join('parts', 'parts.binaries_id', '=', 'binaries.id')
                     ->whereColumn('collections.releases_id', 'releases.id')
                     ->limit(1);
             })
