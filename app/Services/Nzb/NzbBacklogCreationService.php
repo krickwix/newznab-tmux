@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Nzb;
 
 use App\Models\Release;
+use App\Models\Settings;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 
@@ -30,7 +31,9 @@ final class NzbBacklogCreationService
         $limit = max(1, min(5000, $limit));
         $order = strtolower($order) === 'desc' ? 'desc' : 'asc';
 
-        $query = $this->basePendingQuery();
+        $completion = $this->requiredCompletionPercent();
+
+        $query = $this->basePendingQuery($completion);
         $this->applyGroupFilter($query, $groups);
         $this->applyLeftGuidFilter($query, $leftGuids);
 
@@ -75,7 +78,7 @@ final class NzbBacklogCreationService
     /**
      * @return Builder<Release>
      */
-    private function basePendingQuery(): Builder
+    private function basePendingQuery(int $completion): Builder
     {
         return Release::query()
             ->with('category.parent')
@@ -88,18 +91,28 @@ final class NzbBacklogCreationService
                     ->whereColumn('collections.releases_id', 'releases.id')
                     ->limit(1);
             })
-            ->whereNotExists(function ($query): void {
+            ->whereNotExists(function ($query) use ($completion): void {
                 $query->selectRaw('1')
                     ->from('collections')
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
                     ->whereColumn('collections.releases_id', 'releases.id')
-                    ->where(function ($query): void {
-                        $query->whereColumn('binaries.currentparts', '<', 'binaries.totalparts')
+                    ->where(function ($query) use ($completion): void {
+                        $query->whereRaw('binaries.currentparts < CEIL(binaries.totalparts * ? / 100)', [$completion])
                             ->orWhere('binaries.totalparts', '<=', 0);
                     })
                     ->limit(1);
             })
             ->select(['id', 'guid', 'name', 'categories_id', 'groups_id', 'leftguid', 'nzbstatus']);
+    }
+
+    private function requiredCompletionPercent(): int
+    {
+        $completion = (int) Settings::settingValue('completionpercent');
+        if ($completion <= 0) {
+            return 100;
+        }
+
+        return min(100, $completion);
     }
 
     /**

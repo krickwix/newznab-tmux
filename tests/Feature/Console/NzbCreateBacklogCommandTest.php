@@ -20,7 +20,11 @@ final class NzbCreateBacklogCommandTest extends TestCase
     {
         parent::setUp();
 
-        config(['database.default' => 'sqlite', 'database.connections.sqlite.database' => ':memory:']);
+        config([
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+            'nntmux.echocli' => false,
+        ]);
         DB::purge();
         DB::reconnect();
 
@@ -139,6 +143,33 @@ final class NzbCreateBacklogCommandTest extends TestCase
 
         $this->assertSame([2], $writtenIds);
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
+    public function test_command_honors_completion_percent_when_selecting_nzb_backlog(): void
+    {
+        DB::table('settings')->where('name', 'completionpercent')->update(['value' => '94']);
+
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a', currentParts: 94, totalParts: 100);
+        $this->seedRelease(2, groupId: 1, leftGuid: 'a', currentParts: 93, totalParts: 100);
+        $this->seedRelease(3, groupId: 1, leftGuid: 'a', currentParts: 100, totalParts: 100);
+
+        $writtenIds = [];
+        $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+            DB::table('releases')->where('id', $release->id)->update(['nzbstatus' => NzbService::NZB_ADDED]);
+
+            return true;
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--groups' => 'alt.binaries.boneless',
+            '--leftguid' => 'a',
+            '--limit' => 10,
+            '--sleep' => 0,
+        ])->assertSuccessful();
+
+        $this->assertSame([1, 3], $writtenIds);
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 2)->value('nzbstatus'));
     }
 
     public function test_command_rejects_invalid_leftguid_partition(): void

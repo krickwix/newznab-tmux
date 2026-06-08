@@ -990,6 +990,7 @@ final class ReleaseProcessingService
     private function runCollectionFileCheckStage6(string $whereSql): void
     {
         $normalizedGroupId = $this->extractGroupIdFromWhereSql($whereSql);
+        $completion = $this->requiredCompletionPercent();
         $collectionIds = Collection::query()
             ->where('dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
             ->whereIn('filecheck', [
@@ -997,6 +998,19 @@ final class ReleaseProcessingService
                 CollectionFileCheckStatus::CompleteCollection->value,
                 10,
             ])
+            ->whereRaw(
+                'EXISTS (SELECT 1 FROM binaries b WHERE b.collections_id = collections.id LIMIT 1)'
+            )
+            ->whereRaw(
+                'NOT EXISTS (
+                    SELECT 1
+                    FROM binaries b
+                    WHERE b.collections_id = collections.id
+                    AND (b.currentparts < CEIL(b.totalparts * ? / 100) OR b.totalparts <= 0)
+                    LIMIT 1
+                )',
+                [$completion]
+            )
             ->when($normalizedGroupId !== null, static fn ($q) => $q->where('groups_id', $normalizedGroupId))
             ->pluck('id');
 

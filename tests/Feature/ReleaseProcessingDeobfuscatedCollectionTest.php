@@ -69,15 +69,39 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
         $this->assertSame(2, (int) $collection->totalfiles);
     }
 
-    private function seedCollection(int $id, string $subject, int $totalFiles): void
+    public function test_delayed_collection_is_not_forced_complete_when_any_binary_is_incomplete(): void
     {
+        DB::table('settings')->where('name', 'completionpercent')->update(['value' => '100']);
+
+        $this->seedCollection(4, 'delayed-incomplete-parts', 2, now()->subHours(13)->format('Y-m-d H:i:s'));
+        $this->seedBinary(4001, 4, 1, currentParts: 100, totalParts: 100);
+        $this->seedBinary(4002, 4, 2, currentParts: 94, totalParts: 100);
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        $service->processIncompleteCollections(null);
+
+        $collection = DB::table('collections')->where('id', 4)->first();
+
+        $this->assertSame(CollectionFileCheckStatus::CompleteCollection->value, (int) $collection->filecheck);
+        $this->assertSame(2, (int) $collection->totalfiles);
+    }
+
+    private function seedCollection(
+        int $id,
+        string $subject,
+        int $totalFiles,
+        ?string $dateAdded = null
+    ): void {
+        $dateAdded ??= now()->format('Y-m-d H:i:s');
+
         DB::table('collections')->insert([
             'id' => $id,
             'subject' => $subject,
             'fromname' => 'poster@example.com',
             'date' => now()->format('Y-m-d H:i:s'),
-            'dateadded' => now()->format('Y-m-d H:i:s'),
-            'added' => now()->format('Y-m-d H:i:s'),
+            'dateadded' => $dateAdded,
+            'added' => $dateAdded,
             'xref' => 'alt.binaries.blu-ray:'.$id,
             'groups_id' => 5,
             'totalfiles' => $totalFiles,
