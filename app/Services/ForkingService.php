@@ -264,13 +264,11 @@ class ForkingService
     }
 
     /**
-     * Process end work for releases (DNR signalling).
+     * Process end work for releases.
      */
     protected function processReleasesEndWork(): void
     {
-        $count = $this->getReleaseWorkCount();
-        $command = $this->backfillRunner->buildDnrCommandPublic("releases  {$count}_");
-        $this->executeCommand($command);
+        // Grouped release workers already process all pending group work.
     }
 
     /**

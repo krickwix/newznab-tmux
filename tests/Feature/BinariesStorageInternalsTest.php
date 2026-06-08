@@ -187,6 +187,48 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(250, (int) $binary->partsize);
     }
 
+    public function test_header_storage_cleans_each_distinct_subject_once_per_chunk(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $cleaner = new class extends CollectionsCleaningService
+        {
+            public int $calls = 0;
+
+            public function __construct()
+            {
+                parent::__construct();
+            }
+
+            public function collectionsCleaner(string $subject, string $groupName = ''): array
+            {
+                $this->calls++;
+
+                return ['id' => 0, 'name' => $subject];
+            }
+        };
+
+        $service = new HeaderStorageService(
+            new CollectionHandler($cleaner),
+            config: new BinariesConfig(partsChunkSize: 10, headerChunkSize: 10)
+        );
+
+        $failed = $service->store([
+            $this->parsedHeaderWithTotal(551, 1, 4, 'Cached.Subject', 100),
+            $this->parsedHeaderWithTotal(552, 2, 4, 'Cached.Subject', 100),
+            $this->parsedHeaderWithTotal(553, 3, 4, 'Cached.Subject', 100),
+            $this->parsedHeaderWithTotal(554, 4, 4, 'Cached.Subject', 100),
+            $this->parsedHeaderWithTotal(555, 1, 2, 'Other.Subject', 100),
+            $this->parsedHeaderWithTotal(556, 2, 2, 'Other.Subject', 100),
+        ], ['id' => 1, 'name' => 'alt.test'], true);
+
+        $this->assertSame([], $failed);
+        $this->assertSame(2, $cleaner->calls);
+        $this->assertSame(2, DB::table('collections')->count());
+        $this->assertSame(2, DB::table('binaries')->count());
+        $this->assertSame(6, DB::table('parts')->count());
+    }
+
     public function test_header_storage_does_not_merge_same_subject_across_different_collections(): void
     {
         $this->createHeaderStorageTables();

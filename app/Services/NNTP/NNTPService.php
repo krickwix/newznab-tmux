@@ -474,11 +474,11 @@ class NNTPService extends NntpClient
      *                         All newer than article number: "679871775-"
      *                         All older than article number: "-679871775"
      *                         Message-ID:                    "<part1of1.uS*yYxQvtAYt$5t&wmE%UejhjkCKXBJ!@example.local>"
-     * @return array<string, mixed>|string|NNTPService Multi-dimensional Array of headers on success, Error object on failure.
+     * @return array<string, mixed>|string|NNTPService|NntpError Multi-dimensional Array of headers on success, Error object on failure.
      *
      * @throws \Exception
      */
-    public function getXOVER(string $range): array|string|NNTPService
+    public function getXOVER(string $range): array|string|NNTPService|NntpError
     {
         // Check if we are still connected.
         $connected = $this->_checkConnection();
@@ -749,6 +749,64 @@ class NNTPService extends NntpClient
         }
 
         return $body;
+    }
+
+    /**
+     * Fetch only the first raw BODY lines needed to read yEnc metadata.
+     *
+     * The NNTP protocol has no "BODY first N lines" command. Once we stop
+     * after the preamble, the remaining article payload is still pending on the
+     * socket, so this method closes the connection before returning.
+     *
+     * @return array<int, string>|NntpError
+     *
+     * @throws \Exception
+     */
+    public function getYencBodyPreambleLines(string $groupName, mixed $identifier, int $maxLines = 8): array|NntpError
+    {
+        $connected = $this->_checkConnection();
+        if ($connected !== true) {
+            return $connected;
+        }
+
+        $group = $this->selectGroup($groupName);
+        if (self::isError($group)) {
+            return $group;
+        }
+
+        if (! is_numeric($identifier)) {
+            $identifier = $this->_formatMessageID($identifier);
+        }
+
+        $response = $this->_sendCommand('BODY '.$identifier);
+        if (self::isError($response)) {
+            return $response;
+        }
+        if ($response !== ResponseCode::BodyFollows->value) {
+            return $this->_handleErrorResponse($response);
+        }
+
+        $lines = [];
+        $lineLimit = max(2, $maxLines);
+        while (! feof($this->_socket) && \count($lines) < $lineLimit) {
+            $line = fgets($this->_socket, 8192);
+            if ($line === false || $line === ".\r\n") {
+                break;
+            }
+            if ($line[0] === '.' && isset($line[1]) && $line[1] === '.') {
+                $line = substr($line, 1);
+            }
+
+            $line = rtrim($line, "\r\n");
+            $lines[] = $line;
+            if (str_starts_with($line, '=ypart ')) {
+                break;
+            }
+        }
+
+        $this->doQuit(true);
+
+        return $lines;
     }
 
     /**

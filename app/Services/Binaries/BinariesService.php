@@ -7,6 +7,7 @@ namespace App\Services\Binaries;
 use App\Models\Settings;
 use App\Models\UsenetGroup;
 use App\Services\NNTP\NNTPService;
+use DariusIII\NetNntp\Error;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -247,6 +248,14 @@ class BinariesService
             ]);
         }
 
+        if ((int) $groupMySQL['last_record'] > (int) $groupNNTP['last']) {
+            $groupMySQL['last_record'] = (int) $groupNNTP['last'];
+            UsenetGroup::query()->where('id', $groupMySQL['id'])->update([
+                'last_record' => $groupMySQL['last_record'],
+                'last_updated' => now(),
+            ]);
+        }
+
         // Calculate article range
         $range = $this->calculateArticleRange($groupMySQL, $groupNNTP, $maxHeaders);
 
@@ -274,7 +283,7 @@ class BinariesService
      * @param  int  $first  The oldest wanted header.
      * @param  int  $last  The newest wanted header.
      * @param  string  $type  Is this part repair or update or backfill?
-     * @param  array<string, mixed>|null  $missingParts  If we are running in part repair, the list of missing article numbers.
+     * @param  list<int>|null  $missingParts  If we are running in part repair, the list of missing article numbers.
      * @return array<string, mixed> Empty on failure.
      *
      * @throws \Exception
@@ -313,6 +322,9 @@ class BinariesService
 
         // Extract article range info
         $returnArray = $this->headerParser->getArticleRange($headers);
+        if (! $partRepair) {
+            $headers = $this->deobfuscateBodyPreambleHeaders($headers, $groupMySQL['name']);
+        }
 
         // Parse and filter headers
         $this->headerParser->reset();
@@ -363,6 +375,72 @@ class BinariesService
     }
 
     /**
+     * @param  array<int, array<string, mixed>>  $headers
+     * @return array<int, array<string, mixed>>
+     */
+    private function deobfuscateBodyPreambleHeaders(array $headers, string $groupName): array
+    {
+        if ($this->config->bodyPreambleDeobfuscateLimit <= 0 || ! $this->shouldDeobfuscateBodyPreambleGroup($groupName)) {
+            return $headers;
+        }
+
+        $probed = 0;
+        foreach ($headers as $index => $header) {
+            if ($probed >= $this->config->bodyPreambleDeobfuscateLimit) {
+                break;
+            }
+            if (! $this->shouldProbeBodyPreamble($header)) {
+                continue;
+            }
+
+            $lines = $this->getNntp()->getYencBodyPreambleLines(
+                $groupName,
+                $header['Number'],
+                $this->config->bodyPreambleLineLimit
+            );
+            $probed++;
+            if (NNTPService::isError($lines) || ! \is_array($lines)) {
+                continue;
+            }
+
+            $metadata = YencBodyPreamble::fromLines($lines);
+            if ($metadata === null) {
+                continue;
+            }
+
+            $headers[$index]['Original-Subject'] = $header['Subject'] ?? '';
+            $headers[$index]['Subject'] = $metadata->toSyntheticSubject();
+            $headers[$index]['collection_file_number'] = $metadata->collectionFileNumber();
+            $headers[$index]['collection_total_files'] = 0;
+        }
+
+        return $headers;
+    }
+
+    private function shouldDeobfuscateBodyPreambleGroup(string $groupName): bool
+    {
+        foreach ($this->config->bodyPreambleDeobfuscateGroups as $configuredGroup) {
+            if (strcasecmp($configuredGroup, $groupName) === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param  array<string, mixed>  $header
+     */
+    private function shouldProbeBodyPreamble(array $header): bool
+    {
+        if (! isset($header['Number'], $header['Subject'])) {
+            return false;
+        }
+
+        return preg_match('/^[a-f0-9]{16,64}$/i', trim((string) $header['Subject'])) === 1;
+    }
+
+    /**
      * Attempt to get missing article headers.
      *
      * @param  array<string, mixed>  $groupArr  The info for this group from mysql.
@@ -398,7 +476,7 @@ class BinariesService
         }
 
         // Calculate parts repaired
-        $lastPartNumber = $missingParts[$missingCount - 1]->numberid; // @phpstan-ignore offsetAccess.notFound
+        $lastPartNumber = $missingParts[$missingCount - 1]->numberid;
         $remainingCount = $this->missedPartHandler->getCount($groupArr['id'], $lastPartNumber);
         $partsRepaired = $missingCount - $remainingCount;
 
@@ -710,7 +788,7 @@ class BinariesService
     }
 
     /**
-     * @return array<string, mixed>
+     * @return array<int, array<string, mixed>>
      */
     private function downloadHeaders(bool $partRepair): ?array
     {
@@ -738,9 +816,10 @@ class BinariesService
             $nntp->enableCompression();
 
             if (NNTPService::isError($headers) || ! \is_array($headers)) {
-                if (\is_object($headers) && isset($headers->code, $headers->message)) {
-                    $message = ((int) $headers->code === 0 ? 'Unknown error' : $headers->message);
-                    $this->log("Code {$headers->code}: $message\nSkipping group: {$this->groupMySQL['name']}", __FUNCTION__, 'error');
+                if ($headers instanceof Error) {
+                    $code = $headers->getCode();
+                    $message = $code === 0 ? 'Unknown error' : $headers->getMessage();
+                    $this->log("Code {$code}: $message\nSkipping group: {$this->groupMySQL['name']}", __FUNCTION__, 'error');
                 } else {
                     $this->log("Unknown error\nSkipping group: {$this->groupMySQL['name']}", __FUNCTION__, 'error');
                 }
@@ -753,7 +832,7 @@ class BinariesService
     }
 
     /**
-     * @param  array<string, mixed>  $headersNotInserted
+     * @param  list<int>  $headersNotInserted
      * @param  array<string, mixed>  $parsedHeaders
      */
     private function handlePartRepairTracking(array $headersNotInserted, array $parsedHeaders): void
@@ -792,7 +871,7 @@ class BinariesService
             $notReceivedCount = \count($rangeNotReceived);
 
             if ($notReceivedCount > 0) {
-                $this->missedPartHandler->addMissingParts($rangeNotReceived, $this->groupMySQL['id']); // @phpstan-ignore argument.type
+                $this->missedPartHandler->addMissingParts(array_values($rangeNotReceived), $this->groupMySQL['id']);
 
                 if ($this->config->echoCli) {
                     cli()->alternate(
@@ -804,14 +883,14 @@ class BinariesService
     }
 
     /**
-     * @param  array<string, mixed>  $missingParts
-     * @return array<string, mixed>
+     * @param  array<int, \stdClass>  $missingParts
+     * @return list<array{partfrom: mixed, partto: mixed, partlist: list<mixed>}>
      */
     private function groupMissingPartsIntoRanges(array $missingParts): array
     {
         $ranges = [];
         $partList = [];
-        $firstPart = $lastNum = $missingParts[0]->numberid; // @phpstan-ignore offsetAccess.notFound
+        $firstPart = $lastNum = $missingParts[0]->numberid;
 
         foreach ($missingParts as $part) {
             if (($part->numberid - $firstPart) > ($this->config->messageBuffer / 4)) {

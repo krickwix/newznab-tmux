@@ -20,6 +20,8 @@ use Illuminate\Support\Facades\DB;
  */
 class ReleaseRemoverService
 {
+    private const int HASHED_REMOVAL_GRACE_MINUTES = 30;
+
     // Crap removal types
     private const string TYPE_BLACKLIST = 'blacklist';
 
@@ -366,9 +368,11 @@ class ReleaseRemoverService
             AND r.rarinnerfilecount = 0
             AND r.categories_id NOT IN (%d, %d)
             AND r.searchname REGEXP '[a-zA-Z0-9]{25,}'
+            AND r.adddate < %s
             %s",
             Category::OTHER_MISC,
             Category::OTHER_HASHED,
+            escapeString(Carbon::now()->subMinutes(self::HASHED_REMOVAL_GRACE_MINUTES)->format('Y-m-d H:i:s')),
             $this->crapTime
         ));
     }
@@ -876,8 +880,8 @@ class ReleaseRemoverService
      * data and cannot be used without the original content files.
      *
      * Three detection strategies are used:
-     * 1. The searchname contains a .par2 filename AND has no associated
-     *    release_files, or only par2 release_files. The character class after
+     * 1. The searchname contains a .par2 filename AND has associated
+     *    release_files, all of which are PAR2 files. The character class after
      *    .par2 includes underscore because the searchname sanitizer replaces
      *    quotes and special chars with underscores (e.g. .par2" becomes .par2_).
      *    Note: We intentionally do NOT match on r.name (raw Usenet subject)
@@ -895,7 +899,7 @@ class ReleaseRemoverService
     protected function removePar2Only(): bool|string
     {
         // Strategy 1: searchname contains a par2 filename pattern and has
-        // no non-par2 release_files. Matches .par2 (index) and .vol123+45.par2 (volumes)
+        // release_files, but none are non-par2. Matches .par2 (index) and .vol123+45.par2 (volumes)
         // followed by a delimiter char or end of string.
         // IMPORTANT: We use [.] and [+] instead of \. and \+ because MySQL's SQL
         // string parser silently strips backslashes before unrecognized escape chars
@@ -906,6 +910,10 @@ class ReleaseRemoverService
             "SELECT r.guid, r.searchname, r.id
             FROM releases r
             WHERE r.searchname REGEXP '[.](vol[0-9]+[+][0-9]+[.]par2|par2)([]\" _[)(>]|$)'
+            AND EXISTS (
+                SELECT 1 FROM release_files rf_any
+                WHERE rf_any.releases_id = r.id
+            )
             AND r.id NOT IN (
                 SELECT rf.releases_id FROM release_files rf
                 WHERE rf.name NOT REGEXP '[.]par2'
@@ -919,7 +927,7 @@ class ReleaseRemoverService
             "SELECT r.guid, r.searchname, r.id
             FROM releases r
             INNER JOIN release_files rf ON r.id = rf.releases_id
-            WHERE 1=1 %s
+            WHERE r.searchname NOT REGEXP '[.](vol[0-9]+[+][0-9]+[.]par2|par2)([]\" _[)(>]|$)' %s
             GROUP BY r.id, r.guid, r.searchname
             HAVING COUNT(*) = SUM(CASE WHEN rf.name REGEXP '[.]par2' THEN 1 ELSE 0 END)",
             $this->crapTime

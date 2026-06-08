@@ -140,6 +140,7 @@ final class CollectionHandler
      * Resolve collections for a chunk of headers with one bulk insert and one id lookup.
      *
      * @param  array<int, array<string, mixed>>  $headers
+     * @param  array<int, int>  $totalFilesByIndex
      * @return array<int, int> Collection ids keyed by header index
      */
     public function getOrCreateCollections(
@@ -153,13 +154,18 @@ final class CollectionHandler
         $pending = [];
         $indexByCollectionKey = [];
         $xrefsToPrefetch = [];
+        $cleanedBySubject = [];
 
         foreach ($headers as $index => $header) {
             $totalFiles = (int) ($totalFilesByIndex[$index] ?? 0);
-            $collMatch = $this->collectionsCleaning->collectionsCleaner(
-                $header['matches'][1],
-                $groupName
-            );
+            $subject = (string) $header['matches'][1];
+            if (! isset($cleanedBySubject[$subject])) {
+                $cleanedBySubject[$subject] = $this->collectionsCleaning->collectionsCleaner(
+                    $subject,
+                    $groupName
+                );
+            }
+            $collMatch = $cleanedBySubject[$subject];
 
             $collectionKey = $collMatch['name'].$totalFiles;
             if (isset($this->collectionIds[$collectionKey])) {
@@ -202,6 +208,7 @@ final class CollectionHandler
         }
 
         $this->prefetchExistingCollections($xrefsToPrefetch);
+
         foreach ($pending as $collectionKey => &$row) {
             $row['xref_append'] = implode(' ', $this->xrefService->diffNewTokens(
                 $this->existingXrefs[$collectionKey],

@@ -14,6 +14,7 @@ use App\Models\Settings;
 use App\Models\UsenetGroup;
 use App\Services\Categorization\CategorizationService;
 use App\Services\NNTP\NNTPService;
+use App\Services\Nzb\NzbBacklogCreationService;
 use App\Services\Nzb\NzbService;
 use App\Services\Releases\ReleaseBrowseService;
 use App\Services\Releases\ReleaseDuplicateFinder;
@@ -50,8 +51,6 @@ final class ReleaseProcessingService
     private const int BATCH_PAUSE_US = 10000;
 
     private const int CATEGORIZE_CHUNK_SIZE = 1000;
-
-    private const int NZB_CHUNK_SIZE = 100;
 
     private bool $echoCLI;
 
@@ -368,10 +367,11 @@ final class ReleaseProcessingService
         $whereSql = $this->buildGroupWhereSql($normalizedGroupId, 'c');
 
         $this->processStuckCollections($normalizedGroupId ?? 0);
+        $this->runCollectionFileCheckStage0($normalizedGroupId);
         $this->runCollectionFileCheckStage1($normalizedGroupId ?? 0);
         $this->runCollectionFileCheckStage2($normalizedGroupId ?? 0);
-        $this->runCollectionFileCheckStage3($whereSql);
-        $this->runCollectionFileCheckStage4($whereSql);
+        $this->runCollectionFileCheckStage3($normalizedGroupId);
+        $this->runCollectionFileCheckStage4($normalizedGroupId);
         $this->runCollectionFileCheckStage5($normalizedGroupId ?? 0);
         $this->runCollectionFileCheckStage6($whereSql);
 
@@ -536,35 +536,21 @@ final class ReleaseProcessingService
         $startTime = now()->toImmutable();
         $this->outputSubHeader('Creating NZB Files');
 
-        $query = Release::query()
-            ->with('category.parent')
-            ->where('nzbstatus', '=', NzbService::NZB_NONE)
-            ->select(['id', 'guid', 'name', 'categories_id']);
+        $result = app(NzbBacklogCreationService::class)->create(
+            groups: ! empty($groupID) ? [(string) $groupID] : [],
+            limit: $this->settings->releaseCreationLimit,
+            order: 'asc',
+            onCreated: fn (int $created, int $total): null => $this->outputProgress($created, $total, 'Creating NZBs')
+        );
 
-        if (! empty($groupID)) {
-            $query->where('releases.groups_id', $groupID);
+        if ($this->echoCLI && $result['failed'] > 0) {
+            cli()->warning('NZBs skipped or failed this pass: '.number_format($result['failed']));
         }
 
-        $nzbCount = 0;
-        $total = $query->count();
-
-        if ($total > 0) {
-            $query->chunkById(self::NZB_CHUNK_SIZE, function ($releases) use (&$nzbCount, $total): bool {
-                foreach ($releases as $release) {
-                    if ($this->nzb->writeNzbForReleaseId($release)) {
-                        $nzbCount++;
-                        $this->outputProgress($nzbCount, $total, 'Creating NZBs');
-                    }
-                }
-
-                return true;
-            });
-        }
-
-        $this->outputStat('NZBs created', $nzbCount);
+        $this->outputStat('NZBs created', $result['created']);
         $this->outputElapsedTime($startTime);
 
-        return $nzbCount;
+        return $result['created'];
     }
 
     /**
@@ -739,6 +725,15 @@ final class ReleaseProcessingService
         return $groupID !== null ? " AND {$alias}.groups_id = {$groupID} " : ' ';
     }
 
+    private function requiredCompletionPercent(): int
+    {
+        if ($this->settings->completion <= 0) {
+            return 100;
+        }
+
+        return min(100, $this->settings->completion);
+    }
+
     // ========================================================================
     // Collection Processing Stages
     // ========================================================================
@@ -746,16 +741,56 @@ final class ReleaseProcessingService
     /**
      * @throws Throwable
      */
+    private function runCollectionFileCheckStage0(?int $groupID): void
+    {
+        $completion = $this->requiredCompletionPercent();
+
+        $collectionIds = Collection::query()
+            ->select(['collections.id'])
+            ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+            ->where('collections.totalfiles', '=', 0)
+            ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
+            ->where('binaries.filenumber', '>', 0)
+            ->when($groupID !== null, static fn ($q) => $q->where('collections.groups_id', $groupID))
+            ->groupBy(['collections.id'])
+            ->havingRaw(
+                'COUNT(DISTINCT binaries.filenumber) >= GREATEST(1, CEIL(MAX(binaries.filenumber) * ? / 100))',
+                [$completion]
+            )
+            ->pluck('collections.id');
+
+        foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids) {
+            DB::transaction(static function () use ($ids): void {
+                Collection::query()
+                    ->whereIn('id', $ids->all())
+                    ->update([
+                        'filecheck' => CollectionFileCheckStatus::CompleteCollection->value,
+                        'totalfiles' => DB::raw(
+                            '(SELECT MAX(NULLIF(b2.filenumber, 0)) FROM binaries b2 WHERE b2.collections_id = collections.id)'
+                        ),
+                    ]);
+            }, 10);
+        }
+    }
+
+    /**
+     * @throws Throwable
+     */
     private function runCollectionFileCheckStage1(int $groupID): void
     {
-        DB::transaction(static function () use ($groupID): void {
+        $completion = $this->requiredCompletionPercent();
+
+        DB::transaction(static function () use ($groupID, $completion): void {
             $collectionsQuery = Collection::query()
                 ->select(['collections.id'])
                 ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
                 ->where('collections.totalfiles', '>', 0)
                 ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
                 ->groupBy(['binaries.collections_id', 'collections.totalfiles', 'collections.id'])
-                ->havingRaw('COUNT(binaries.id) IN (collections.totalfiles, collections.totalfiles + 1)');
+                ->havingRaw(
+                    'COUNT(binaries.id) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
+                    [$completion]
+                );
 
             if ($groupID !== 0) {
                 $collectionsQuery->where('collections.groups_id', $groupID);
@@ -851,79 +886,82 @@ final class ReleaseProcessingService
     /**
      * @throws Throwable
      */
-    private function runCollectionFileCheckStage3(string $whereSql): void
+    private function runCollectionFileCheckStage3(?int $groupID): void
     {
-        DB::transaction(static function () use ($whereSql): void {
-            $sql = <<<SQL
-                UPDATE binaries b
-                INNER JOIN (
-                    SELECT b.id
-                    FROM binaries b
-                    INNER JOIN collections c ON c.id = b.collections_id
-                    WHERE c.filecheck = ?
-                    AND b.partcheck = ? {$whereSql}
-                    AND b.currentparts = b.totalparts
-                    GROUP BY b.id, b.totalparts
-                ) r ON b.id = r.id
-                SET b.partcheck = ?
-            SQL;
+        $completion = $this->requiredCompletionPercent();
 
-            DB::update($sql, [
-                CollectionFileCheckStatus::TempComplete->value,
-                FileCompletionStatus::Incomplete->value,
-                FileCompletionStatus::Complete->value,
-            ]);
-        }, 10);
-
-        DB::transaction(static function () use ($whereSql): void {
-            $sql = <<<SQL
-                UPDATE binaries b
-                INNER JOIN (
-                    SELECT b.id
-                    FROM binaries b
-                    INNER JOIN collections c ON c.id = b.collections_id
-                    WHERE c.filecheck = ?
-                    AND b.partcheck = ? {$whereSql}
-                    AND b.currentparts >= (b.totalparts + 1)
-                    GROUP BY b.id, b.totalparts
-                ) r ON b.id = r.id
-                SET b.partcheck = ?
-            SQL;
-
-            DB::update($sql, [
-                CollectionFileCheckStatus::ZeroPart->value,
-                FileCompletionStatus::Incomplete->value,
-                FileCompletionStatus::Complete->value,
-            ]);
-        }, 10);
+        $this->markCompleteBinaries(
+            CollectionFileCheckStatus::TempComplete,
+            $groupID,
+            $completion
+        );
+        $this->markCompleteBinaries(
+            CollectionFileCheckStatus::ZeroPart,
+            $groupID,
+            $completion
+        );
     }
 
     /**
      * @throws Throwable
      */
-    private function runCollectionFileCheckStage4(string $whereSql): void
+    private function runCollectionFileCheckStage4(?int $groupID): void
     {
-        DB::transaction(static function () use ($whereSql): void {
-            $sql = <<<SQL
-                UPDATE collections c
-                INNER JOIN (
-                    SELECT c.id
-                    FROM collections c
-                    INNER JOIN binaries b ON c.id = b.collections_id
-                    WHERE b.partcheck = ? AND c.filecheck IN (?, ?) {$whereSql}
-                    GROUP BY b.collections_id, c.totalfiles, c.id
-                    HAVING COUNT(b.id) >= c.totalfiles
-                ) r ON c.id = r.id
-                SET filecheck = ?
-            SQL;
+        $completion = $this->requiredCompletionPercent();
 
-            DB::update($sql, [
-                FileCompletionStatus::Complete->value,
+        $collectionIds = DB::table('collections as c')
+            ->select(['c.id'])
+            ->join('binaries as b', 'c.id', '=', 'b.collections_id')
+            ->where('b.partcheck', FileCompletionStatus::Complete->value)
+            ->whereIn('c.filecheck', [
                 CollectionFileCheckStatus::TempComplete->value,
                 CollectionFileCheckStatus::ZeroPart->value,
-                CollectionFileCheckStatus::CompleteParts->value,
-            ]);
-        }, 10);
+            ])
+            ->when($groupID !== null, static fn ($q) => $q->where('c.groups_id', $groupID))
+            ->groupBy(['b.collections_id', 'c.totalfiles', 'c.id'])
+            ->havingRaw(
+                'COUNT(b.id) >= GREATEST(1, CEIL(c.totalfiles * ? / 100))',
+                [$completion]
+            )
+            ->pluck('c.id');
+
+        foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids) {
+            DB::transaction(static function () use ($ids): void {
+                Collection::query()
+                    ->whereIn('id', $ids->all())
+                    ->update([
+                        'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
+                        'totalfiles' => DB::raw(
+                            '(SELECT COUNT(b2.id) FROM binaries b2 WHERE b2.collections_id = collections.id)'
+                        ),
+                    ]);
+            }, 10);
+        }
+    }
+
+    private function markCompleteBinaries(
+        CollectionFileCheckStatus $collectionStatus,
+        ?int $groupID,
+        int $completion
+    ): void {
+        $binaryIds = DB::table('binaries as b')
+            ->select(['b.id'])
+            ->join('collections as c', 'c.id', '=', 'b.collections_id')
+            ->where('c.filecheck', $collectionStatus->value)
+            ->where('b.partcheck', FileCompletionStatus::Incomplete->value)
+            ->where('b.totalparts', '>', 0)
+            ->whereRaw('b.currentparts >= CEIL(b.totalparts * ? / 100)', [$completion])
+            ->when($groupID !== null, static fn ($q) => $q->where('c.groups_id', $groupID))
+            ->groupBy(['b.id', 'b.totalparts'])
+            ->pluck('b.id');
+
+        foreach ($binaryIds->chunk(self::BATCH_SIZE) as $ids) {
+            DB::transaction(static function () use ($ids): void {
+                DB::table('binaries')
+                    ->whereIn('id', $ids->all())
+                    ->update(['partcheck' => FileCompletionStatus::Complete->value]);
+            }, 10);
+        }
     }
 
     /**
@@ -951,21 +989,38 @@ final class ReleaseProcessingService
      */
     private function runCollectionFileCheckStage6(string $whereSql): void
     {
-        DB::transaction(function () use ($whereSql): void {
-            $sql = <<<SQL
-                UPDATE collections c
-                SET filecheck = ?, totalfiles = (SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = c.id)
-                WHERE c.dateadded < NOW() - INTERVAL ? HOUR
-                AND c.filecheck IN (?, ?, 10){$whereSql}
-            SQL;
-
-            DB::update($sql, [
-                CollectionFileCheckStatus::CompleteParts->value,
-                $this->settings->collectionDelayTime,
+        $normalizedGroupId = $this->extractGroupIdFromWhereSql($whereSql);
+        $collectionIds = Collection::query()
+            ->where('dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
+            ->whereIn('filecheck', [
                 CollectionFileCheckStatus::Default->value,
                 CollectionFileCheckStatus::CompleteCollection->value,
-            ]);
-        }, 10);
+                10,
+            ])
+            ->when($normalizedGroupId !== null, static fn ($q) => $q->where('groups_id', $normalizedGroupId))
+            ->pluck('id');
+
+        foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids) {
+            DB::transaction(static function () use ($ids): void {
+                Collection::query()
+                    ->whereIn('id', $ids->all())
+                    ->update([
+                        'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
+                        'totalfiles' => DB::raw(
+                            '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id)'
+                        ),
+                    ]);
+            }, 10);
+        }
+    }
+
+    private function extractGroupIdFromWhereSql(string $whereSql): ?int
+    {
+        if (preg_match('/groups_id\\s*=\\s*(\\d+)/', $whereSql, $matches) !== 1) {
+            return null;
+        }
+
+        return (int) $matches[1];
     }
 
     /**

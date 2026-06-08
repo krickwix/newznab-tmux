@@ -110,7 +110,7 @@ class XxxCategorizer extends AbstractCategorizer
 
     protected function isClassicMovieGroupRelease(ReleaseContext $context): bool
     {
-        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]?classic)/i')) {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]?classic)/i')) {
             return false;
         }
 

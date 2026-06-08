@@ -45,7 +45,7 @@ class MusicCategorizer extends AbstractCategorizer
 
     protected function looksLikeMoviePost(ReleaseContext $context): bool
     {
-        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:movies?|dvd|blu[.-]?ray|vintage[.-]?film|classic[.-]?film|old[.-]?movies?|documentaries)/i')) {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:movies?|dvd|blu[.-]?ray|vintage[.-]?film|classic[.-]?film|old[.-]?movies?|documentaries)/i')) {
             return false;
         }
 
@@ -59,7 +59,7 @@ class MusicCategorizer extends AbstractCategorizer
 
     protected function looksLikeTvVideoPost(ReleaseContext $context): bool
     {
-        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:tv|hdtv|tvseries)/i')) {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:tv|hdtv|tvseries)/i')) {
             return false;
         }
 
@@ -220,6 +220,7 @@ class MusicCategorizer extends AbstractCategorizer
         if (preg_match('/(?:^|[^a-zA-Z0-9])(?:MP3|320kbps|256kbps|192kbps|128kbps|CBR|VBR)|\b(?:MP3)\b|[\._-](?:MP3)[\._-]|\.mp3$/i', $name)) {
             if (preg_match('/\b(?:320|256|192|128)[._-]?kbps|\b(?:320|256|192|128)[._-]?K|\((?:320|256|192|128)\)|\[(?:320|256|192|128)\]|V0|V2|VBR/i', $name) ||
                 preg_match('/\b(?:CD[._-]?Rip|Web[._-]?Rip|WEB|iTunes|AmazonRip|Spotify[._-]?Rip|MP3\s*\-\s*\d{3}kbps)\b/i', $name) ||
+                preg_match('/(?:\.|\s)mp3$/i', $name) ||
                 preg_match('/\.(m3u|mp3)"|rip(?:192|256|320)|[._-]FM[._-].+MP3/i', $name)) {
 
                 if ($categorizeForeign && $this->checkForeign($name)) {

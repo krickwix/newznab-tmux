@@ -26,6 +26,8 @@ class NzbService
 
     public const NZB_ADDED = 1; // Release had an NZB file created.
 
+    public const NZB_FAILED = -1; // Release failed NZB creation and should not be retried by normal workers.
+
     protected const NZB_DTD_NAME = 'nzb';
 
     protected const NZB_DTD_PUBLIC = '-//newzBin//DTD NZB 1.1//EN';
@@ -87,6 +89,24 @@ class NzbService
      */
     public function writeNzbForReleaseId(Release $release): bool
     {
+        return $this->withReleaseNzbLock(
+            (int) $release->id,
+            fn (): bool => $this->writeNzbForReleaseIdUnlocked($release)
+        );
+    }
+
+    /**
+     * @throws \Throwable
+     */
+    private function writeNzbForReleaseIdUnlocked(Release $release): bool
+    {
+        $release = Release::query()
+            ->with('category.parent')
+            ->find((int) $release->id);
+        if ($release === null || (int) $release->nzbstatus !== self::NZB_NONE) {
+            return false;
+        }
+
         $collections = Collection::whereReleasesId($release->id)
             ->join('usenet_groups', 'collections.groups_id', '=', 'usenet_groups.id')
             ->select(['collections.*', DB::raw('UNIX_TIMESTAMP(collections.date) AS udate'), 'usenet_groups.name as groupname'])
@@ -172,6 +192,8 @@ class NzbService
                     foreach ($hits as $group) {
                         $XMLWriter->writeElement('group', $group);
                     }
+                } elseif (! empty($collection->groupname)) {
+                    $XMLWriter->writeElement('group', (string) $collection->groupname);
                 } else {
                     return false;
                 }
@@ -193,14 +215,19 @@ class NzbService
         $XMLWriter->endElement(); // nzb
         $XMLWriter->endDocument();
         $path = ($this->buildNzbPath($release->guid, $this->nzbSplitLevel, true).$release->guid.'.nzb.gz');
-        $fp = gzopen($path, 'wb7');
-        if (! $fp) {
-            return false;
+        if (File::isFile($path)) {
+            $release->update(['nzbstatus' => self::NZB_ADDED]);
+            $this->cleanupWrittenReleaseCollections((int) $release->id, $collectionIds);
+
+            return true;
         }
+
+        $fp = gzopen($path, 'wb7');
         gzwrite($fp, $XMLWriter->outputMemory());
         gzclose($fp);
         unset($XMLWriter);
-        if (! File::isFile($path)) {
+        clearstatcache(true, $path);
+        if (! is_file($path)) {
             echo "ERROR: $path does not exist.\n";
 
             return false;
@@ -208,8 +235,19 @@ class NzbService
         // Mark release as having NZB.
         $release->update(['nzbstatus' => self::NZB_ADDED]);
 
-        // Delete CBP (Collections, Binaries, Parts) for release that has its NZB created.
-        // Use a transaction to ensure cascading deletes complete properly.
+        $this->cleanupWrittenReleaseCollections((int) $release->id, $collectionIds);
+
+        // Chmod to fix issues some users have with file permissions.
+        chmod($path, 0777);
+
+        return true;
+    }
+
+    /**
+     * @param  array<int, int|string>  $collectionIds
+     */
+    private function cleanupWrittenReleaseCollections(int $releaseId, array $collectionIds): void
+    {
         try {
             $this->collectionCleanupService->deleteCollectionsAndDescendants(
                 $collectionIds,
@@ -218,13 +256,30 @@ class NzbService
             );
         } catch (\Throwable $e) {
             // Log the error but don't fail the NZB creation since the file was written successfully
-            Log::warning('Failed to delete collections for release '.$release->id.': '.$e->getMessage());
+            Log::warning('Failed to delete collections for release '.$releaseId.': '.$e->getMessage());
+        }
+    }
+
+    /**
+     * @throws \Throwable
+     */
+    private function withReleaseNzbLock(int $releaseId, callable $callback): bool
+    {
+        if (! in_array(DB::connection()->getDriverName(), ['mysql', 'mariadb'], true)) {
+            return $callback();
         }
 
-        // Chmod to fix issues some users have with file permissions.
-        chmod($path, 0777);
+        $lockName = 'nntmux:nzb:'.$releaseId;
+        $row = DB::selectOne('SELECT GET_LOCK(?, 0) AS acquired', [$lockName]);
+        if ((int) ($row->acquired ?? 0) !== 1) {
+            return false;
+        }
 
-        return true;
+        try {
+            return $callback();
+        } finally {
+            DB::selectOne('SELECT RELEASE_LOCK(?) AS released', [$lockName]);
+        }
     }
 
     /**

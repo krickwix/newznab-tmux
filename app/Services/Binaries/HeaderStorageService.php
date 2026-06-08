@@ -41,10 +41,10 @@ final class HeaderStorageService
     /**
      * Store parsed headers to the database.
      *
-     * @param  array<string, mixed>  $headers  Parsed headers with 'matches' already populated
+     * @param  array<int, array<string, mixed>>  $headers  Parsed headers with 'matches' already populated
      * @param  array<string, mixed>  $groupMySQL  Group info from database
      * @param  bool  $addToPartRepair  Whether to track failed inserts
-     * @return array<string, mixed> Article numbers that failed to insert
+     * @return list<int> Article numbers that failed to insert
      */
     public function store(array $headers, array $groupMySQL, bool $addToPartRepair = true): array
     {
@@ -77,7 +77,7 @@ final class HeaderStorageService
     /**
      * Store one bounded header chunk inside its own transaction.
      *
-     * @param  array<string, mixed>  $headers
+     * @param  array<int, array<string, mixed>>  $headers
      * @param  array<string, mixed>  $groupMySQL
      */
     private function storeChunk(array $headers, array $groupMySQL, bool $addToPartRepair): void
@@ -196,6 +196,13 @@ final class HeaderStorageService
      */
     private function extractFileNumberAndTotal(array $header): array
     {
+        if (array_key_exists('collection_file_number', $header) || array_key_exists('collection_total_files', $header)) {
+            return [
+                (int) ($header['collection_file_number'] ?? 0),
+                (int) ($header['collection_total_files'] ?? 0),
+            ];
+        }
+
         $fileCount = $this->getFileCount($header['matches'][1]);
         if ($fileCount[1] === 0 && $fileCount[3] === 0) {
             $fileCount = $this->getFileCount($header['matches'][0]);
@@ -211,60 +218,6 @@ final class HeaderStorageService
         if ($addToPartRepair && isset($header['Number'])) {
             $this->failedInserts[] = $header['Number'];
         }
-    }
-
-    /**
-     * @param  array<string, mixed>  $groupMySQL
-     * @param  array<string, mixed>  $header
-     */
-    private function processHeader(array $header, array $groupMySQL, HeaderStorageTransaction $transaction): bool
-    {
-        // Get file count from subject
-        $fileCount = $this->getFileCount($header['matches'][1]);
-        if ($fileCount[1] === 0 && $fileCount[3] === 0) {
-            $fileCount = $this->getFileCount($header['matches'][0]);
-        }
-
-        $totalFiles = (int) $fileCount[3];
-        $fileNumber = (int) $fileCount[1];
-
-        // Get or create collection
-        $collectionId = $this->collectionHandler->getOrCreateCollection(
-            $header,
-            $groupMySQL['id'],
-            $groupMySQL['name'],
-            $totalFiles,
-            $transaction->getBatchNoise()
-        );
-
-        if ($collectionId === null) {
-            $transaction->markError();
-
-            return false;
-        }
-
-        // Get or create binary
-        $binaryId = $this->binaryHandler->getOrCreateBinary(
-            $header,
-            $collectionId,
-            $groupMySQL['id'],
-            $fileNumber
-        );
-
-        if ($binaryId === null) {
-            $transaction->markError();
-
-            return false;
-        }
-
-        // Add part
-        if (! $this->partHandler->addPart($binaryId, $header)) {
-            $transaction->markError();
-
-            return false;
-        }
-
-        return true;
     }
 
     /**

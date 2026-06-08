@@ -29,7 +29,7 @@ final class MissedPartHandler
     /**
      * Add missing article numbers to the repair queue.
      *
-     * @param  array<string, mixed>  $numbers
+     * @param  list<int>  $numbers
      */
     public function addMissingParts(array $numbers, int $groupId): void
     {
@@ -49,7 +49,7 @@ final class MissedPartHandler
     }
 
     /**
-     * @param  array<string, mixed>  $numbers
+     * @param  list<int>  $numbers
      */
     private function addMissingPartsSqlite(array $numbers, int $groupId): void
     {
@@ -71,7 +71,7 @@ final class MissedPartHandler
     }
 
     /**
-     * @param  array<string, mixed>  $numbers
+     * @param  list<int>  $numbers
      */
     private function addMissingPartsMysql(array $numbers, int $groupId): void
     {
@@ -95,7 +95,7 @@ final class MissedPartHandler
     /**
      * Remove successfully repaired parts from the queue.
      *
-     * @param  array<string, mixed>  $numbers
+     * @param  list<int>  $numbers
      */
     public function removeRepairedParts(array $numbers, int $groupId): void
     {
@@ -120,7 +120,7 @@ final class MissedPartHandler
     /**
      * Get parts that need repair for a group.
      *
-     * @return array<string, mixed> Array of missed parts
+     * @return array<int, \stdClass> Array of missed parts
      */
     public function getMissingParts(int $groupId): array
     {

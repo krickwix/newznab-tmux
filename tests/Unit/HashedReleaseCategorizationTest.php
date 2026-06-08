@@ -91,6 +91,30 @@ class HashedReleaseCategorizationTest extends TestCase
             'All uppercase 20 chars' => ['ABCDEFGH1234567890XY', 'obfuscated_uppercase'],
             'Mixed alphanumeric random' => ['AA7Jl2toE8Q53yNZmQ5R6G', 'obfuscated_mixed_alphanumeric'],
             'Usenet obfuscated filename' => ['[01/10] - "xK9mR2pL4qW7nT3vB.part01.rar"', 'obfuscated_usenet_filename'],
+            'Short random PAR2 volume subject' => ['[3/11] "fik1dQWog9lP.vol000+001.par2"', 'obfuscated_usenet_par2_volume'],
+            'Short random PAR2 volume subject with larger volume numbers' => ['[105/105] "yf53NO8KPOag8.vol343+23.par2"', 'obfuscated_usenet_par2_volume'],
+            'Mixed-case random PAR2 index subject' => ['[3/11] "CeUAgZTrEkxI.par2"', 'obfuscated_usenet_par2_volume'],
+            'Short mixed-case random PAR2 index subject' => ['[1/11] "saQVypO.par2"', 'obfuscated_usenet_par2_volume'],
+            'Underscore random PAR2 subject' => ['[01/13] - "H8QHcaj_EneUwQLP7crJ.par2" - 157,04 MB', 'obfuscated_usenet_par2_volume'],
+            'Underscore random RAR part subject' => ['[02/12] - "x8aoZzoX_HQwuy8kKEb6.part01.rar" - 136,50 MB', 'obfuscated_usenet_filename'],
+            'Long underscore random PAR2 volume subject' => ['[52/53] - "igQq6o2ASHmp71qyi3Dp.vol27+27.par2" - 4,63 GB', 'obfuscated_usenet_par2_volume'],
+            'Extractor-normalized random PAR2 volume subject' => ['7Nbip2xEwf14TEpIaK05fqL vol00 01', 'obfuscated_extracted_par2_volume'],
+            'Extractor-normalized mixed-case PAR2 volume subject' => ['xAFVZaRgLXOm vol003 004', 'obfuscated_extracted_par2_volume'],
+            'Extractor-normalized digit-heavy PAR2 volume subject' => ['5918982TWA vol282 28', 'obfuscated_extracted_par2_volume'],
+            'Extractor-normalized underscore archive stem' => ['x8aoZzoX HQwuy8kKEb6', 'obfuscated_extracted_subject'],
+            'Extractor-normalized encrypted part stem' => ['FuRUbYFcVqJbZ9946AY cneg59 ene', 'obfuscated_extracted_subject'],
+            'Extractor-normalized mixed-case alpha stem' => ['CeUAgZTrEkxI', 'obfuscated_extracted_subject'],
+            'Extractor-normalized short mixed-case alpha stem' => ['saQVypO', 'obfuscated_extracted_subject'],
+            'Extractor-normalized short mixed alphanumeric stem' => ['fVkejF9', 'obfuscated_extracted_subject'],
+            'Extractor-normalized short-prefix mixed alphanumeric stem' => ['TDf qlmsuYu1tAGzTjei', 'obfuscated_extracted_subject'],
+            'Extractor-normalized short-prefix mixed alpha stem' => ['ooi eoEayWArrPUyhwoH', 'obfuscated_extracted_subject'],
+            'Extractor-normalized short-prefix numeric mixed stem' => ['pBJ 6FfldTu2JNsapi11', 'obfuscated_extracted_subject'],
+            'Extractor-normalized trailing uppercase short chunk stem' => ['LijiiBbj552dqwo ZUY', 'obfuscated_extracted_subject'],
+            'Extractor-normalized three-token underscore archive stem' => ['ahYJ8vj6 rz2XoKs BeY', 'obfuscated_extracted_subject'],
+            'Extractor-normalized underscore archive stem with leading digit chunk' => ['rsC4imR oh537b uJdaS', 'obfuscated_extracted_subject'],
+            'Extractor-normalized underscore archive stem with single-letter chunk' => ['v1grTcC a SdZmciSiE4', 'obfuscated_extracted_subject'],
+            'Extractor-normalized underscore PAR2 volume subject' => ['zG1b 1wiXgo3aHSXDtEp vol13 14', 'obfuscated_extracted_par2_volume'],
+            'Extractor-normalized long underscore PAR2 volume subject' => ['qw8i5n7WFUmf4pXA 2if vol47 45', 'obfuscated_extracted_par2_volume'],
             'Base64-like token' => ['VGhpc0lzTm90QVNob3dOYW1lMTIzNDU2Nzg5MA==', 'hash_base64_like'],
         ];
     }
@@ -174,6 +198,15 @@ class HashedReleaseCategorizationTest extends TestCase
             'Random archive part stem in movies group' => ['KJ9A5X4o0eW6mbnA.part01', 'alt.binaries.movies'],
             'Short random archive stem in classic DVD group' => ['EaytKMjYT7', 'alt.binaries.dvd.classics'],
             'Random file-of archive subject in classic DVD group' => ['rxeW3D5GEkKf5f9e4Nm - File 32 of 76: "EaytKMjYT7.part32.rar"', 'alt.binaries.dvd.classics'],
+            'Random PAR2 volume subject in movie group' => ['[3/11] "fik1dQWog9lP.vol000+001.par2"', 'alt.binaries.movies.classic'],
+            'Mixed-case random PAR2 subject in movie group' => ['[3/11] "CeUAgZTrEkxI.par2"', 'alt.binaries.movies.classic'],
+            'Underscore random PAR2 subject in movie group' => ['[01/13] - "H8QHcaj_EneUwQLP7crJ.par2" - 157,04 MB', 'alt.binaries.movies.classic'],
+            'Extractor-normalized random archive stem in movie group' => ['x8aoZzoX HQwuy8kKEb6', 'alt.binaries.movies.classic'],
+            'Extractor-normalized encrypted part stem in movie group' => ['FuRUbYFcVqJbZ9946AY cneg59 ene', 'alt.binaries.blu-ray'],
+            'Extractor-normalized short random stem in movie group' => ['fVkejF9', 'alt.binaries.movies.classic'],
+            'Extractor-normalized short-prefix random stem in movie group' => ['TDf qlmsuYu1tAGzTjei', 'alt.binaries.movies.classic'],
+            'Extractor-normalized three-token archive stem in movie group' => ['ahYJ8vj6 rz2XoKs BeY', 'alt.binaries.movies.classic'],
+            'Extractor-normalized underscore PAR2 volume in movie group' => ['zG1b 1wiXgo3aHSXDtEp vol13 14', 'alt.binaries.movies.classic'],
         ];
     }
 
@@ -293,6 +326,43 @@ class HashedReleaseCategorizationTest extends TestCase
         );
     }
 
+    public function test_obfuscated_release_in_explicit_movie_source_group_stays_hashed(): void
+    {
+        $passable = $this->runPipeline('ShEHoLSpIdWoM4491NL.part07.rar', 'alt.binaries.uhd');
+
+        $this->assertTrue($passable->lockedToMisc);
+        $this->assertSame(Category::OTHER_HASHED, $passable->bestResult->categoryId);
+        $this->assertNotSame('group_name_movie', $passable->bestResult->matchedBy);
+    }
+
+    public function test_generic_hash_release_in_explicit_movie_source_group_stays_hashed(): void
+    {
+        $passable = $this->runPipeline('4Q8EoUP1Hy4m3JYXasNAjQK99j2oL3OFJMHvgVkoJcOAllXCTk', 'alt.binaries.blu-ray');
+
+        $this->assertTrue($passable->lockedToMisc);
+        $this->assertSame(Category::OTHER_HASHED, $passable->bestResult->categoryId);
+        $this->assertNotSame('group_name_movie', $passable->bestResult->matchedBy);
+    }
+
+    public function test_encoded_movie_marker_subject_in_source_group_stays_hashed(): void
+    {
+        $passable = $this->runPipeline('NRTF1C17082171994L4R4240218MIDDLE DVDRip XviD NoGroup', 'alt.binaries.uhd');
+
+        $this->assertTrue($passable->lockedToMisc);
+        $this->assertSame(Category::OTHER_HASHED, $passable->bestResult->categoryId);
+        $this->assertNotSame('sd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_obfuscated_release_in_abbreviated_boneless_group_is_not_movie_special_cased(): void
+    {
+        $passable = $this->runPipeline('[2/9] - "a6w68o8mgsyc6umz.rar" yEnc', 'a.b.boneless');
+
+        $this->assertTrue($passable->lockedToMisc);
+        $this->assertContains($passable->bestResult->categoryId, [Category::OTHER_MISC, Category::OTHER_HASHED]);
+        $this->assertNotSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertNotSame('group_name_movie', $passable->bestResult->matchedBy);
+    }
+
     #[DataProvider('lowSignalGroupOnlyProvider')]
     public function test_group_only_low_signal_releases_fall_back_to_other_misc(string $name, string $groupName): void
     {
@@ -343,6 +413,15 @@ class HashedReleaseCategorizationTest extends TestCase
     public function test_readable_vintage_movie_title_without_year_is_not_hashed(): void
     {
         $passable = $this->runPipeline('G Men Vs The Black Dragon', 'alt.binaries.multimedia.vintage-film');
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('group_name_movie', $passable->bestResult->matchedBy);
+    }
+
+    public function test_abbreviated_vintage_movie_group_alias_is_movie_signal(): void
+    {
+        $passable = $this->runPipeline('G Men Vs The Black Dragon', 'a.b.multimedia.vintage-film');
 
         $this->assertFalse($passable->lockedToMisc);
         $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
@@ -440,6 +519,44 @@ class HashedReleaseCategorizationTest extends TestCase
         $this->assertFalse($passable->lockedToMisc);
         $this->assertSame(Category::MOVIE_SD, $passable->bestResult->categoryId);
         $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_software_release_beats_movie_group_name(): void
+    {
+        $passable = $this->runPipeline(
+            '[14/18] "Native instruments traktor pro 4.part6.rar"',
+            'alt.binaries.movies',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::PC_0DAY, $passable->bestResult->categoryId);
+        $this->assertSame('0day_software', $passable->bestResult->matchedBy);
+    }
+
+    public function test_standalone_mp3_release_beats_movie_group_name(): void
+    {
+        foreach ([
+            'Tranga Rugie - Waarom Prod Shafique Roman.Mp3',
+            'Tranga Rugie - Waarom Prod Shafique Roman Mp3',
+        ] as $releaseName) {
+            $passable = $this->runPipeline($releaseName, 'alt.binaries.movies');
+
+            $this->assertFalse($passable->lockedToMisc);
+            $this->assertSame(Category::MUSIC_MP3, $passable->bestResult->categoryId);
+            $this->assertSame('mp3', $passable->bestResult->matchedBy);
+        }
+    }
+
+    public function test_dated_bild_zeitung_issue_beats_movie_group_name(): void
+    {
+        $passable = $this->runPipeline(
+            '[2/4] - "Bild Zeitung vom 09 Dezember 2016.part1.rar" - 14,76 MB',
+            'alt.binaries.movies',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::BOOKS_MAGAZINES, $passable->bestResult->categoryId);
+        $this->assertSame('magazine_title', $passable->bestResult->matchedBy);
     }
 
     public function test_classic_movie_nfo_sidecar_is_not_audio_other(): void

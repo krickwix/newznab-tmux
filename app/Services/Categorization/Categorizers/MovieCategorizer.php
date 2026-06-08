@@ -134,7 +134,7 @@ class MovieCategorizer extends AbstractCategorizer
             return true;
         }
 
-        return $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?)/i');
+        return $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?)/i');
     }
 
     protected function extractTrailingYear(string $name): ?int
@@ -148,7 +148,7 @@ class MovieCategorizer extends AbstractCategorizer
 
     protected function looksLikeVintageFilmPost(string $name, ReleaseContext $context): bool
     {
-        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
             return false;
         }
 
@@ -160,9 +160,7 @@ class MovieCategorizer extends AbstractCategorizer
             return false;
         }
 
-        return (bool) preg_match('/(?:^|[._ \(-])(?:19|20)\d{2}(?:$|[._ -]|\)|\])/i', $name)
-            || preg_match('/\b(?:film|films|shorts?)\b/i', $name)
-            || $hasVideoEvidence;
+        return true;
     }
 
     protected function checkForeign(string $name): ?CategorizationResult
@@ -293,7 +291,7 @@ class MovieCategorizer extends AbstractCategorizer
 
     protected function checkVintageFilmSD(string $name, ReleaseContext $context): ?CategorizationResult
     {
-        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?)/i')) {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?)/i')) {
             return null;
         }
 
@@ -331,7 +329,7 @@ class MovieCategorizer extends AbstractCategorizer
 
     protected function looksLikeDocumentaryVideoPost(string $name, ReleaseContext $context): bool
     {
-        if (! $context->groupMatchesPattern('/alt\.binaries\.documentaries(?:\.|$)/i')) {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\.documentaries(?:\.|$)/i')) {
             return false;
         }
 

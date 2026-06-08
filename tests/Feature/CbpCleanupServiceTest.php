@@ -149,6 +149,74 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertSame(1, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
     }
 
+    public function test_nzb_creation_uses_collection_group_when_xref_is_empty(): void
+    {
+        $guid = str_repeat('f', 36);
+        DB::table('releases')->insert([
+            'id' => 20,
+            'name' => 'Empty.Xref.Release',
+            'searchname' => 'Empty.Xref.Release',
+            'totalpart' => 1,
+            'groups_id' => 1,
+            'adddate' => now()->format('Y-m-d H:i:s'),
+            'guid' => $guid,
+            'leftguid' => 'f',
+            'postdate' => now()->format('Y-m-d H:i:s'),
+            'fromname' => 'poster@example.com',
+            'size' => 500,
+            'passwordstatus' => 0,
+            'haspreview' => -1,
+            'categories_id' => 1,
+            'nfostatus' => -1,
+            'nzbstatus' => NzbService::NZB_NONE,
+            'isrenamed' => 1,
+            'iscategorized' => 1,
+            'predb_id' => 0,
+            'source' => null,
+        ]);
+        DB::table('collections')->insert([
+            'id' => 201,
+            'subject' => 'Empty.Xref.Release',
+            'fromname' => 'poster@example.com',
+            'date' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'dateadded' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'added' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'xref' => '',
+            'groups_id' => 1,
+            'totalfiles' => 1,
+            'filesize' => 500,
+            'filecheck' => CollectionFileCheckStatus::Inserted->value,
+            'collectionhash' => 'empty-xref-hash',
+            'collection_regexes_id' => 0,
+            'releases_id' => 20,
+            'noise' => '',
+        ]);
+        DB::table('binaries')->insert([
+            'id' => 2010,
+            'name' => 'Empty.Xref.Release yEnc',
+            'collections_id' => 201,
+            'totalparts' => 1,
+        ]);
+        DB::table('parts')->insert([
+            'binaries_id' => 2010,
+            'number' => 1,
+            'messageid' => '<empty-xref-1@example.com>',
+            'partnumber' => 1,
+            'size' => 10,
+        ]);
+
+        $release = Release::query()->findOrFail(20);
+        $release->setRelation('category', (object) ['title' => 'Misc', 'parent' => (object) ['title' => 'Other']]);
+
+        $written = app(NzbService::class)->writeNzbForReleaseId($release);
+
+        $this->assertTrue($written);
+        $nzbPath = app(NzbService::class)->nzbPath($guid);
+        $this->assertIsString($nzbPath);
+        $this->assertStringContainsString('<group>alt.test</group>', (string) gzdecode((string) file_get_contents($nzbPath)));
+        $this->assertSame(1, (int) DB::table('releases')->where('id', 20)->value('nzbstatus'));
+    }
+
     public function test_duplicate_release_path_cleans_up_collection_binary_and_parts(): void
     {
         DB::table('releases')->insert([

@@ -6,6 +6,7 @@ namespace App\Services\Releases;
 
 use App\Facades\Search;
 use App\Models\Release;
+use App\Services\CollectionCleanupService;
 use App\Services\Nzb\NzbService;
 use App\Services\ReleaseImageService;
 use App\Support\ReleaseSearchIndexSync;
@@ -69,10 +70,30 @@ class ReleaseManagementService
         // Delete from search index
         if (! empty($identifiers['i'])) {
             Search::deleteRelease((int) $identifiers['i']);
+            $this->deleteLinkedCollections((int) $identifiers['i']);
         }
 
         // Delete from DB.
         Release::whereGuid($identifiers['g'])->delete();
+    }
+
+    private function deleteLinkedCollections(int $releaseId): void
+    {
+        $collectionIds = DB::table('collections')
+            ->where('releases_id', $releaseId)
+            ->pluck('id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+
+        if ($collectionIds === []) {
+            return;
+        }
+
+        app(CollectionCleanupService::class)->deleteCollectionsAndDescendants(
+            $collectionIds,
+            'Release delete cleanup',
+            false
+        );
     }
 
     /**

@@ -42,6 +42,9 @@ return [
     'nzb_upload_folder' => env('NZB_UPLOAD_FOLDER'),
     'redis_fast_degrade' => (bool) env('REDIS_FAST_DEGRADE', true),
     'redis_tcp_check_seconds' => (float) env('REDIS_TCP_CHECK_SECONDS', 0.2),
+    'body_preamble_deobfuscate_groups' => env('NNTMUX_BODY_PREAMBLE_DEOBFUSCATE_GROUPS', ''),
+    'body_preamble_deobfuscate_limit' => (int) env('NNTMUX_BODY_PREAMBLE_DEOBFUSCATE_LIMIT', 0),
+    'body_preamble_line_limit' => (int) env('NNTMUX_BODY_PREAMBLE_LINE_LIMIT', 8),
     'categorization' => [
         'log' => (bool) env('NNTMUX_CATEGORIZATION_LOG', false),
     ],

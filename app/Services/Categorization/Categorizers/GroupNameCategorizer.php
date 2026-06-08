@@ -23,28 +23,28 @@ class GroupNameCategorizer extends AbstractCategorizer
         if (empty($groupName)) {
             return $this->noMatch();
         }
-        if (preg_match('/alt\.binaries\..*anime/i', $groupName)) {
+        if (preg_match('/(?:alt\.binaries|a\.b)\..*anime/i', $groupName)) {
             return $this->matched(Category::TV_ANIME, 0.8, 'group_name_anime');
         }
-        if (preg_match('/alt\.binaries\..*?(tv|hdtv|tvseries)/i', $groupName)) {
+        if (preg_match('/(?:alt\.binaries|a\.b)\..*?(tv|hdtv|tvseries)/i', $groupName)) {
             return $this->matched(Category::TV_OTHER, 0.6, 'group_name_tv');
         }
-        if (preg_match('/alt\.binaries\..*?(movies?|movie[.-]?classic|dvd[.-]classic|dvd[.-]movies?|dvd[.-]documentar|bluray|blu[.-]?ray|x264|vintage[.-]?film)/i', $groupName)) {
+        if (preg_match('/(?:alt\.binaries|a\.b)\..*?(movies?|movie[.-]?classic|dvd[.-]classic|dvd[.-]movies?|dvd[.-]documentar|bluray|blu[.-]?ray|uhd|x264|vintage[.-]?film)/i', $groupName)) {
             return $this->matched(Category::MOVIE_OTHER, 0.6, 'group_name_movie');
         }
-        if (preg_match('/alt\.binaries\..*?(erotica|pictures\.erotica|xxx)/i', $groupName)) {
+        if (preg_match('/(?:alt\.binaries|a\.b)\..*?(erotica|pictures\.erotica|xxx)/i', $groupName)) {
             return $this->matched(Category::XXX_OTHER, 0.7, 'group_name_xxx');
         }
-        if (preg_match('/alt\.binaries\..*?(sounds?|mp3|music|lossless)/i', $groupName)) {
+        if (preg_match('/(?:alt\.binaries|a\.b)\..*?(sounds?|mp3|music|lossless)/i', $groupName)) {
             return $this->matched(Category::MUSIC_OTHER, 0.6, 'group_name_music');
         }
-        if (preg_match('/alt\.binaries\..*?(games?|console|psx|nintendo)/i', $groupName)) {
+        if (preg_match('/(?:alt\.binaries|a\.b)\..*?(games?|console|psx|nintendo)/i', $groupName)) {
             return $this->matched(Category::GAME_OTHER, 0.6, 'group_name_game');
         }
-        if (preg_match('/alt\.binaries\..*?(warez|0day|apps?|software)/i', $groupName)) {
+        if (preg_match('/(?:alt\.binaries|a\.b)\..*?(warez|0day|apps?|software)/i', $groupName)) {
             return $this->matched(Category::PC_0DAY, 0.6, 'group_name_pc');
         }
-        if (preg_match('/alt\.binaries\..*?(e-?book|ebook|comics?)/i', $groupName)) {
+        if (preg_match('/(?:alt\.binaries|a\.b)\..*?(e-?book|ebook|comics?)/i', $groupName)) {
             return $this->matched(Category::BOOKS_EBOOK, 0.5, 'group_name_book');
         }
 

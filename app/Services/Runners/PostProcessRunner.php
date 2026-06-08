@@ -278,7 +278,10 @@ class PostProcessRunner extends BaseRunner
             SELECT id
             FROM releases
             WHERE categories_id BETWEEN 2000 AND 2999
-            AND '.imdb_id_needs_lookup_sql('imdbid').'
+            AND (
+                '.imdb_id_needs_lookup_sql('imdbid').'
+                OR '.movieinfo_needs_repair_sql('imdbid', 'movieinfo_id').'
+            )
             '.$condLookup.' '.$condRenamedOnly.'
             LIMIT 1';
         if (count(DB::select($checkSql)) === 0) {
@@ -293,7 +296,10 @@ class PostProcessRunner extends BaseRunner
             SELECT DISTINCT '.$bucketExpr.' AS id, '.$renamedFlag.' AS renamed
             FROM releases
             WHERE categories_id BETWEEN 2000 AND 2999
-            AND '.imdb_id_needs_lookup_sql('imdbid').'
+            AND (
+                '.imdb_id_needs_lookup_sql('imdbid').'
+                OR '.movieinfo_needs_repair_sql('imdbid', 'movieinfo_id').'
+            )
             '.$condLookup.' '.$condRenamedOnly.'
             LIMIT 16';
         $queue = DB::select($sql);
