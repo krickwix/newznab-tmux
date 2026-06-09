@@ -30,6 +30,10 @@ class GroupNameCategorizer extends AbstractCategorizer
             return $this->matched(Category::TV_OTHER, 0.6, 'group_name_tv');
         }
         if (preg_match('/(?:alt\.binaries|a\.b)\..*?(movies?|movie[.-]?classic|dvd[.-]classic|dvd[.-]movies?|dvd[.-]documentar|bluray|blu[.-]?ray|uhd|x264|vintage[.-]?film)/i', $groupName)) {
+            if (preg_match('/[._ -]s\d{1,3}[._ -]?(e|d(isc)?)\d{1,3}([._ -]|$)/i', $context->releaseName)) {
+                return $this->matched(Category::TV_OTHER, 0.75, 'group_name_movie_tv_episode');
+            }
+
             return $this->matched(Category::MOVIE_OTHER, 0.6, 'group_name_movie');
         }
         if (preg_match('/(?:alt\.binaries|a\.b)\..*?(erotica|pictures\.erotica|xxx)/i', $groupName)) {

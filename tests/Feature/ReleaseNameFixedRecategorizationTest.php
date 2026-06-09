@@ -388,6 +388,50 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(0, (int) $release->isrenamed);
     }
 
+    public function test_explicit_tv_episode_overrides_weak_movie_group_hint(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movie.classics',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => '[2/10] "Ma Sorciere Bien-Aimee S01E11-Transfert de pouvoir.rar" yEnc',
+            'searchname' => '[2/10] "Ma Sorciere Bien-Aimee S01E11-Transfert de pouvoir.rar" yEnc',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::MOVIE_OTHER,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('b', 40),
+            'leftguid' => 'b',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $service = app(ReleaseUpdateService::class);
+        $service->updateRelease(
+            $release->fresh(),
+            'Ma Sorciere Bien-Aimee S01E11-Transfert de pouvoir',
+            'fileCheck: Subject',
+            true,
+            'PAR2, ',
+            true,
+            false,
+        );
+
+        $release->refresh();
+
+        $this->assertSame('Ma Sorciere Bien-Aimee S01E11-Transfert De Pouvoir', $release->searchname);
+        $this->assertSame(Category::TV_OTHER, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(1, (int) $release->isrenamed);
+    }
+
     private function setEnvironmentValue(string $key, ?string $value): void
     {
         if ($value === null) {
