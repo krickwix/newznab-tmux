@@ -774,16 +774,22 @@ class BinariesService
                 : $this->postdate($scanSummary['lastArticleNumber'], $groupNNTP);
             $lastArticleDate = $lastArticleTimestamp !== false ? $lastArticleTimestamp : time();
 
-            UsenetGroup::query()->where('id', $groupMySQL['id'])->update([
-                'last_record' => $scanSummary['lastArticleNumber'],
-                'last_record_postdate' => Carbon::createFromTimestamp($lastArticleDate, date_default_timezone_get()),
-                'last_updated' => now(),
-            ]);
+            UsenetGroup::query()
+                ->where('id', $groupMySQL['id'])
+                ->where('last_record', '<', $scanSummary['lastArticleNumber'])
+                ->update([
+                    'last_record' => $scanSummary['lastArticleNumber'],
+                    'last_record_postdate' => Carbon::createFromTimestamp($lastArticleDate, date_default_timezone_get()),
+                    'last_updated' => now(),
+                ]);
         } else {
-            UsenetGroup::query()->where('id', $groupMySQL['id'])->update([
-                'last_record' => $last,
-                'last_updated' => now(),
-            ]);
+            UsenetGroup::query()
+                ->where('id', $groupMySQL['id'])
+                ->where('last_record', '<', $last)
+                ->update([
+                    'last_record' => $last,
+                    'last_updated' => now(),
+                ]);
         }
     }
 
