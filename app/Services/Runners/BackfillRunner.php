@@ -37,7 +37,7 @@ class BackfillRunner extends BaseRunner
             foreach ($work as $group) {
                 $commands[] = PHP_BINARY.' artisan update:backfill '.$group->name.(isset($group->max) ? (' '.$group->max) : '');
             }
-            $this->runStreamingCommands($commands, $maxProcesses, 'backfill'); // @phpstan-ignore argument.type
+            $this->runStreamingCommands($commands, $maxProcesses, 'backfill');
 
             return;
         }
@@ -97,6 +97,7 @@ class BackfillRunner extends BaseRunner
             AND g.first_record_postdate IS NOT NULL
             AND g.backfill = 1
             AND (NOW() - INTERVAL '.$backfilldays.' DAY ) < g.first_record_postdate
+            AND (g.first_record - a.first_record) >= '.$maxMessages.'
             GROUP BY a.name, a.last_record, g.name, g.first_record
             '.$orderby.' LIMIT '.$backfill_groups;
 
@@ -166,7 +167,7 @@ class BackfillRunner extends BaseRunner
             foreach ($queues as $queue) {
                 $commands[] = $this->buildDnrCommand($queue);
             }
-            $this->runStreamingCommands($commands, $threads, 'safe_backfill'); // @phpstan-ignore argument.type
+            $this->runStreamingCommands($commands, $threads, 'safe_backfill');
 
             return;
         }
