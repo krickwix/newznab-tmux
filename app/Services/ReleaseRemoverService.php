@@ -828,7 +828,7 @@ class ReleaseRemoverService
      */
     protected function removeCodecPoster(): bool|string
     {
-        $categories = $this->buildCategoryList([ // @phpstan-ignore argument.type
+        $categories = $this->buildCategoryList([
             Category::MOVIE_3D,
             Category::MOVIE_BLURAY,
             Category::MOVIE_DVD,
@@ -949,10 +949,11 @@ class ReleaseRemoverService
         $candidates = DB::select($this->cleanSpaces(sprintf(
             'SELECT r.guid, r.searchname, r.id
             FROM releases r
-            WHERE r.ishashed = 1
+            WHERE r.categories_id = %d
             AND r.isrenamed = 0
             %s
             ORDER BY r.id',
+            Category::OTHER_HASHED,
             $this->crapTime
         )));
 

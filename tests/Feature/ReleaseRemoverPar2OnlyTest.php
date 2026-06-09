@@ -51,7 +51,6 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
             'id' => 5987,
             'guid' => '532f279a-b05b-4978-bff0-936de949092a',
             'searchname' => 'RSdE2G1730664047EVHy9241103QfG.vol83+13.par2',
-            'ishashed' => 0,
             'isrenamed' => 0,
             'adddate' => now()->format('Y-m-d H:i:s'),
         ]);
@@ -75,7 +74,6 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
             'id' => 1,
             'guid' => 'par2-only-guid',
             'searchname' => 'Only.Repair.Files.vol001+02.par2',
-            'ishashed' => 0,
             'isrenamed' => 0,
             'adddate' => now()->format('Y-m-d H:i:s'),
         ]);
@@ -107,7 +105,6 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
             'id' => 2,
             'guid' => 'content-guid',
             'searchname' => 'Movie.Release.vol001+02.par2',
-            'ishashed' => 0,
             'isrenamed' => 0,
             'adddate' => now()->format('Y-m-d H:i:s'),
         ]);
@@ -136,7 +133,6 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
             'id' => 3,
             'guid' => 'fresh-hashed-guid',
             'searchname' => '[205/205] - "EKfaF21722054145d4Jim2407274qCtk.vol84+14.par2"',
-            'ishashed' => 0,
             'isrenamed' => 0,
             'adddate' => Carbon::now()->format('Y-m-d H:i:s'),
             'nfostatus' => 0,
@@ -165,7 +161,6 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
             'id' => 4,
             'guid' => 'old-hashed-guid',
             'searchname' => '[205/205] - "EKfaF21722054145d4Jim2407274qCtk.vol84+14.par2"',
-            'ishashed' => 0,
             'isrenamed' => 0,
             'adddate' => Carbon::now()->subMinutes(31)->format('Y-m-d H:i:s'),
             'nfostatus' => 0,
@@ -197,7 +192,6 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
             id INTEGER PRIMARY KEY,
             guid VARCHAR(40) NOT NULL,
             searchname VARCHAR(255) NOT NULL,
-            ishashed INTEGER NOT NULL DEFAULT 0,
             isrenamed INTEGER NOT NULL DEFAULT 0,
             nfostatus INTEGER NOT NULL DEFAULT 0,
             iscategorized INTEGER NOT NULL DEFAULT 0,
