@@ -7,6 +7,7 @@ namespace App\Services\Metrics;
 use App\Models\Category;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 class NntmuxPrometheusMetrics
@@ -195,14 +196,19 @@ class NntmuxPrometheusMetrics
     {
         $hour = (int) DB::table('releases')->where('adddate', '>=', now()->subHour())->count();
         $day = (int) DB::table('releases')->where('adddate', '>=', now()->subDay())->count();
-        $hashed = (int) DB::table('releases')->where('ishashed', 1)->count();
+        $hasLegacyHashedColumn = Schema::hasColumn('releases', 'ishashed');
+        $hashed = $hasLegacyHashedColumn ? (int) DB::table('releases')->where('ishashed', 1)->count() : 0;
         $hashedCategory = (int) DB::table('releases')->where('categories_id', Category::OTHER_HASHED)->count();
-        $hashedEffective = (int) DB::table('releases')
-            ->where(static function ($query): void {
+        $hashedEffectiveQuery = DB::table('releases');
+        if ($hasLegacyHashedColumn) {
+            $hashedEffectiveQuery->where(static function ($query): void {
                 $query->where('ishashed', 1)
                     ->orWhere('categories_id', Category::OTHER_HASHED);
-            })
-            ->count();
+            });
+        } else {
+            $hashedEffectiveQuery->where('categories_id', Category::OTHER_HASHED);
+        }
+        $hashedEffective = (int) $hashedEffectiveQuery->count();
         $renamed = (int) DB::table('releases')->where('isrenamed', 1)->count();
 
         return [

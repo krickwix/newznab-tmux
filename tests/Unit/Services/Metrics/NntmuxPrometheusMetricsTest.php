@@ -72,6 +72,26 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_releases_state_total{state="renamed"} 1', $output);
     }
 
+    public function test_release_metrics_work_after_legacy_ishashed_column_is_removed(): void
+    {
+        DB::statement('ALTER TABLE releases DROP COLUMN ishashed');
+
+        DB::table('releases')->insert([
+            ['id' => 1, 'adddate' => now(), 'isrenamed' => 0, 'categories_id' => Category::OTHER_HASHED],
+            ['id' => 2, 'adddate' => now(), 'isrenamed' => 1, 'categories_id' => Category::MOVIE_HD],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('releaseMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_releases_state_total{state="hashed"} 0', $output);
+        $this->assertStringContainsString('nntmux_releases_state_total{state="hashed_category"} 1', $output);
+        $this->assertStringContainsString('nntmux_releases_state_total{state="hashed_effective"} 1', $output);
+        $this->assertStringContainsString('nntmux_releases_state_total{state="renamed"} 1', $output);
+    }
+
     public function test_imdb_lookup_metrics_expose_reason_and_fallback_counters(): void
     {
         Redis::shouldReceive('keys')
