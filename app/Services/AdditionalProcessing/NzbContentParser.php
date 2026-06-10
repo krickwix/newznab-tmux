@@ -184,10 +184,7 @@ class NzbContentParser
                 }
 
                 // Compressed file detection
-                if (! $result['hasCompressedFile'] && preg_match(
-                    '/(\\.(part\\d+|[rz]\\d+|rar|0+|0*10?|zipr\\d{2,3}|zipx?)("|\\s*\\.rar)*($|[ ")]|-])|"[a-f0-9]{32}\\.[1-9]\\d{1,2}".*\\(\\d+\\/\\d{2,}\\)$)/i',
-                    $title
-                )) {
+                if (! $result['hasCompressedFile'] && CompressedArchiveDetector::titleLooksCompressed($title)) {
                     $result['hasCompressedFile'] = true;
                 }
 

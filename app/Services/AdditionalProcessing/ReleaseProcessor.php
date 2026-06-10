@@ -328,10 +328,7 @@ class ReleaseProcessor
             }
 
             $title = (string) ($nzbFile['title'] ?? '');
-            if (preg_match(
-                '/(\.(part\d+|[rz]\d+|rar|0+|0*10?|zipr\d{2,3}|zipx?)(\s*\.rar)*($|[ ")]|-])|"[a-f0-9]{32}\.[1-9]\d{1,2}".*\(\d+\/\d{2,}\)$)/i',
-                $title
-            ) !== 1) {
+            if (! CompressedArchiveDetector::titleLooksCompressed($title)) {
                 continue;
             }
 
@@ -434,7 +431,7 @@ class ReleaseProcessor
             $this->output->echoArchiveMarker($result['archiveMarker']);
         }
 
-        if ($reverse && ! empty($result['dataSummary'])) {
+        if (! empty($result['dataSummary'])) {
             $this->releaseManager->processReleaseNameFromRar($result['dataSummary'], $context);
         }
 

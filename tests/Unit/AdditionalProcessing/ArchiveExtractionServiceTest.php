@@ -51,4 +51,45 @@ class ArchiveExtractionServiceTest extends TestCase
         $this->assertSame('mp4', $service->detectStandaloneVideo($mp4));
         $this->assertNull($service->detectStandaloneVideo('tiny'));
     }
+
+    #[Test]
+    public function it_parses_7z_listing_output_into_release_file_rows(): void
+    {
+        $service = new ArchiveExtractionService(
+            $this->makeConfig(),
+            Mockery::mock(ArchiveInfo::class),
+            Mockery::mock(Par2Info::class)
+        );
+        $method = new \ReflectionMethod($service, 'parseSevenZipFileList');
+
+        $files = $method->invoke($service, <<<'LIST'
+Path = sample.7z.001
+Type = Split
+Physical Size = 202
+Volumes = 1
+
+Path = sample.7z
+Size = 202
+
+Path = sample.7z
+Type = 7z
+Physical Size = 202
+
+Path = Movie.Title.2026.1080p.BluRay.x264-GRP.mkv
+Size = 4
+Packed Size = 8
+Attributes = A -rw-r--r--
+CRC = D87F7E0C
+Encrypted = -
+LIST);
+
+        $this->assertSame([
+            [
+                'name' => 'Movie.Title.2026.1080p.BluRay.x264-GRP.mkv',
+                'size' => 4,
+                'pass' => false,
+                'crc32' => 'D87F7E0C',
+            ],
+        ], $files);
+    }
 }
