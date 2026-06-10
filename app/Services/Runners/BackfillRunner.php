@@ -65,20 +65,10 @@ class BackfillRunner extends BaseRunner
         $this->executeCommand(PHP_BINARY.' app/Services/Tmux/Scripts/update_groups.php');
 
         $backfill_qty = (int) Settings::settingValue('backfill_qty');
-        $backfill_order = (int) Settings::settingValue('backfill_order');
         $backfill_days = (int) Settings::settingValue('backfill_days');
         $backfill_groups = max(1, (int) Settings::settingValue('backfill_groups'));
         $maxMessages = (int) Settings::settingValue('maxmssgs');
         $threads = (int) Settings::settingValue('backfillthreads');
-
-        $orderby = match ($backfill_order) {
-            1 => 'ORDER BY first_record_postdate DESC',
-            2 => 'ORDER BY first_record_postdate ASC',
-            3 => 'ORDER BY name ASC',
-            4 => 'ORDER BY name DESC',
-            5 => 'ORDER BY a.last_record DESC',
-            default => 'ORDER BY a.last_record ASC',
-        };
 
         $backfilldays = '0';
         if ($backfill_days === 1) {
@@ -89,6 +79,7 @@ class BackfillRunner extends BaseRunner
 
         $sql = 'SELECT g.name,
                 g.first_record AS our_first,
+                g.first_record_postdate AS cursor_postdate,
                 MAX(a.first_record) AS their_first,
                 MAX(a.last_record) AS their_last
             FROM usenet_groups g
@@ -98,8 +89,9 @@ class BackfillRunner extends BaseRunner
             AND g.backfill = 1
             AND (NOW() - INTERVAL '.$backfilldays.' DAY ) < g.first_record_postdate
             AND (g.first_record - a.first_record) >= '.$maxMessages.'
-            GROUP BY a.name, a.last_record, g.name, g.first_record
-            '.$orderby.' LIMIT '.$backfill_groups;
+            GROUP BY a.name, a.last_record, g.name, g.first_record, g.first_record_postdate
+            ORDER BY g.first_record_postdate DESC, g.name ASC
+            LIMIT '.$backfill_groups;
 
         $data = DB::select($sql);
 
