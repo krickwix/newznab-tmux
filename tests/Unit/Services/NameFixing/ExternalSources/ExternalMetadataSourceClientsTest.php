@@ -34,6 +34,25 @@ class ExternalMetadataSourceClientsTest extends TestCase
         ], $details['files']);
     }
 
+    public function test_srrdb_client_searches_archive_crc_candidates(): void
+    {
+        Http::fake([
+            'api.srrdb.com/v1/search/*' => Http::response([
+                'results' => [
+                    ['release' => 'Movie.Name.2026.1080p.BluRay.x264-GRP', 'category' => 'x264'],
+                ],
+            ]),
+        ]);
+
+        $hits = (new SrrdbClient)->searchByArchiveCrc('aabbccdd', 15000000);
+
+        $this->assertCount(1, $hits);
+        $this->assertSame('srrdb', $hits[0]->source);
+        $this->assertSame('Movie.Name.2026.1080p.BluRay.x264-GRP', $hits[0]->title);
+
+        Http::assertSent(static fn ($request): bool => str_contains($request->url(), '/search/archive-crc:AABBCCDD/archive-size:15000000'));
+    }
+
     public function test_predb_net_client_parses_release_search_results(): void
     {
         Http::fake([
@@ -88,6 +107,8 @@ class ExternalMetadataSourceClientsTest extends TestCase
 
     public function test_nzbindex_client_parses_exact_obfuscated_collection_metadata_as_preview_only(): void
     {
+        config()->set('external_metadata.sources.nzbindex.api_key', 'nzbindex-api-key');
+
         Http::fake([
             'www.nzbindex.com/api/search*' => Http::response([
                 'data' => [
@@ -112,13 +133,15 @@ class ExternalMetadataSourceClientsTest extends TestCase
         $this->assertSame('nzbindex', $hits[0]->source);
         $this->assertFalse($hits[0]->autoRenameEligible);
         $this->assertSame('poster@example.test', $hits[0]->payloadSummary['poster']);
+
+        Http::assertSent(static fn ($request): bool => $request['key'] === 'nzbindex-api-key');
     }
 
     public function test_xrel_client_parses_scene_and_p2p_release_results_as_preview_only(): void
     {
         Http::fake([
-            'www.xrel.to/api/*' => Http::response([
-                'list' => [[
+            'api.xrel.to/v2/search/releases.json*' => Http::response([
+                'results' => [[
                     'dirname' => 'Movie.Name.2026.1080p.WEB-DL.H264-GRP',
                     'group_name' => 'GRP',
                     'type' => 'p2p',
@@ -133,5 +156,10 @@ class ExternalMetadataSourceClientsTest extends TestCase
         $this->assertSame('xrel-p2p', $hits[0]->source);
         $this->assertFalse($hits[0]->autoRenameEligible);
         $this->assertSame('Movie.Name.2026.1080p.WEB-DL.H264-GRP', $hits[0]->title);
+
+        Http::assertSent(static fn ($request): bool => str_starts_with($request->url(), 'https://api.xrel.to/v2/search/releases.json')
+            && $request['q'] === 'Movie Name'
+            && $request['scene'] === 0
+            && $request['p2p'] === 1);
     }
 }

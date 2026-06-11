@@ -207,6 +207,87 @@ class DistributedJobCatalogTest extends TestCase
         $this->assertSame('hashed', $plan['commands'][2]['arguments']['--category']);
     }
 
+    public function test_post_additional_runs_external_metadata_refresh_after_postprocess_when_hashed_backlog_exists(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('post-additional', $this->runVar(
+            [
+                'post' => 3,
+                'metadata_refresh' => 1,
+                'metadata_refresh_postprocess' => 1,
+                'metadata_refresh_postprocess_limit' => 7,
+                'metadata_refresh_sleep_ms' => 125,
+            ],
+            [
+                'work' => 5,
+                'processnfo' => 4,
+                'other_hashed' => 150,
+            ],
+        ));
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame([
+            'multiprocessing:postprocess',
+            'multiprocessing:postprocess',
+            'predb:refresh-external-metadata',
+            'releases:fix-names',
+            'releases:fix-names',
+        ], array_column($plan['commands'], 'command'));
+        $this->assertSame('add', $plan['commands'][0]['arguments']['type']);
+        $this->assertSame('nfo', $plan['commands'][1]['arguments']['type']);
+        $this->assertSame(['all'], $plan['commands'][2]['arguments']['--source']);
+        $this->assertSame(7, $plan['commands'][2]['arguments']['--limit']);
+        $this->assertSame(125, $plan['commands'][2]['arguments']['--sleep-ms']);
+        $this->assertSame(['20', '16'], array_map(
+            static fn (array $command): string => (string) $command['arguments']['method'],
+            array_slice($plan['commands'], 3, 2),
+        ));
+    }
+
+    public function test_post_additional_skips_external_metadata_refresh_when_postprocess_refresh_is_disabled(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('post-additional', $this->runVar(
+            [
+                'post' => 3,
+                'metadata_refresh_postprocess' => 0,
+            ],
+            [
+                'work' => 5,
+                'processnfo' => 4,
+                'other_hashed' => 150,
+            ],
+        ));
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame([
+            'multiprocessing:postprocess',
+            'multiprocessing:postprocess',
+        ], array_column($plan['commands'], 'command'));
+    }
+
+    public function test_post_additional_skips_external_metadata_refresh_when_hashed_backlog_is_below_threshold(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('post-additional', $this->runVar(
+            [
+                'post' => 3,
+                'metadata_refresh_postprocess' => 1,
+            ],
+            [
+                'work' => 5,
+                'processnfo' => 4,
+                'other_hashed' => 100,
+            ],
+        ));
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame([
+            'multiprocessing:postprocess',
+            'multiprocessing:postprocess',
+        ], array_column($plan['commands'], 'command'));
+    }
+
     public function test_metadata_refresh_is_disabled_when_not_enabled(): void
     {
         $catalog = new DistributedJobCatalog;

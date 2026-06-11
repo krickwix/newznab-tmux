@@ -14,14 +14,14 @@ class XrelClient
      */
     public function search(string $query, bool $p2p = false, int $limit = 10): array
     {
-        $endpoint = $p2p ? '/p2p/releases.json' : '/release/search.json';
-        $params = $p2p
-            ? ['dirname' => $query, 'limit' => $limit]
-            : ['dirname' => $query, 'limit' => $limit];
-
         $response = Http::timeout((int) config('external_metadata.timeout', 20))
             ->acceptJson()
-            ->get(rtrim((string) config('external_metadata.sources.xrel.base_url'), '/').$endpoint, $params);
+            ->get(rtrim((string) config('external_metadata.sources.xrel.base_url'), '/').'/search/releases.json', [
+                'q' => $query,
+                'scene' => $p2p ? 0 : 1,
+                'p2p' => $p2p ? 1 : 0,
+                'limit' => $limit,
+            ]);
 
         if (! $response->successful()) {
             return [];

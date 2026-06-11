@@ -14,11 +14,17 @@ class NzbIndexClient
      */
     public function search(string $query, int $limit = 10): array
     {
+        $apiKey = trim((string) config('external_metadata.sources.nzbindex.api_key', ''));
+        if ($apiKey === '') {
+            return [];
+        }
+
         $response = Http::timeout((int) config('external_metadata.timeout', 20))
             ->acceptJson()
             ->get(rtrim((string) config('external_metadata.sources.nzbindex.base_url'), '/').'/search', [
                 'q' => $query,
                 'max' => $limit,
+                'key' => $apiKey,
             ]);
 
         if (! $response->successful() || $response->json('error') === true) {

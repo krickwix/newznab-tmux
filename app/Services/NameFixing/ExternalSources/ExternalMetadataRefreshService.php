@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\NameFixing\ExternalSources;
 
+use App\Facades\Search;
 use App\Services\NameFixing\ExternalSources\Clients\NzbIndexClient;
 use App\Services\NameFixing\ExternalSources\Clients\PredbNetClient;
 use App\Services\NameFixing\ExternalSources\Clients\PredbOvhClient;
@@ -134,6 +135,67 @@ class ExternalMetadataRefreshService
             $source->imported += count($rows);
             $this->sleep($sleepMs);
         }
+
+        $this->refreshSrrdbArchiveCrcs($summary, $limit, $sleepMs, $dryRun);
+    }
+
+    private function refreshSrrdbArchiveCrcs(ExternalMetadataRefreshSummary $summary, int $limit, int $sleepMs, bool $dryRun): void
+    {
+        $source = $summary->source('srrdb');
+        if (! Schema::hasTable('release_files')) {
+            return;
+        }
+
+        $files = DB::table('release_files')
+            ->select(['crc32', 'size'])
+            ->where('crc32', '!=', '')
+            ->where('size', '>', 0)
+            ->orderByDesc('created_at')
+            ->limit(max($limit * 5, $limit))
+            ->get();
+
+        $seen = [];
+        $queried = 0;
+        foreach ($files as $file) {
+            if ($queried >= $limit) {
+                break;
+            }
+
+            $crc = strtoupper(trim((string) $file->crc32));
+            $size = (int) $file->size;
+            $key = $crc.'#'.$size;
+            if (isset($seen[$key]) || ! preg_match('/^[A-F0-9]{8}$/', $crc)) {
+                continue;
+            }
+            $seen[$key] = true;
+
+            if (DB::table('predb_crcs')->where('crchash', $crc)->where('filesize', $size)->exists()) {
+                continue;
+            }
+
+            $queried++;
+            $source->queried++;
+            $hits = $this->srrdbClient->searchByArchiveCrc($crc, $size);
+            if ($hits === []) {
+                $source->failed++;
+                $this->sleep($sleepMs);
+
+                continue;
+            }
+
+            foreach ($hits as $hit) {
+                if ($this->importPredbHit($hit, $dryRun)) {
+                    $source->imported++;
+                }
+
+                $preId = DB::table('predb')->where('title', $hit->title)->value('id');
+                if ($preId !== null && ! $dryRun && $this->insertPredbCrc((int) $preId, $crc, $size)) {
+                    $source->imported++;
+                }
+            }
+
+            $this->sleep($sleepMs);
+        }
     }
 
     /**
@@ -234,7 +296,7 @@ class ExternalMetadataRefreshService
             return true;
         }
 
-        DB::table('predb')->insertOrIgnore([
+        $inserted = DB::table('predb')->insertOrIgnore([
             'title' => $hit->title,
             'filename' => '',
             'source' => $hit->source,
@@ -250,7 +312,34 @@ class ExternalMetadataRefreshService
             'nfo' => null,
         ]);
 
+        if ($inserted <= 0) {
+            return false;
+        }
+
+        if ($inserted > 0) {
+            $id = DB::table('predb')->where('title', $hit->title)->value('id');
+            if ($id !== null) {
+                Search::insertPredb([
+                    'id' => (int) $id,
+                    'title' => $hit->title,
+                    'filename' => '',
+                    'source' => $hit->source,
+                ]);
+            }
+        }
+
         return true;
+    }
+
+    private function insertPredbCrc(int $preId, string $crc, int $size): bool
+    {
+        return DB::table('predb_crcs')->insertOrIgnore([
+            'predb_id' => $preId,
+            'crchash' => $crc,
+            'filesize' => $size,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]) > 0;
     }
 
     /**

@@ -406,6 +406,8 @@ class DistributedJobCatalog
             return $this->disabled('post-additional', 'no additional work or NFOs to process', $sleep);
         }
 
+        array_push($commands, ...$this->postprocessMetadataRefreshCommands($settings, $counts));
+
         return $this->job('post-additional', true, null, $commands, $sleep);
     }
 
@@ -423,16 +425,63 @@ class DistributedJobCatalog
             return $this->disabled('metadata-refresh', 'disabled in settings', $sleep);
         }
 
-        $commands = [[
+        $commands = [$this->metadataRefreshCommand(
+            (int) ($settings['metadata_refresh_limit'] ?? config('external_metadata.limit', 25)),
+            (int) ($settings['metadata_refresh_sleep_ms'] ?? config('external_metadata.sleep_ms', 500)),
+        )];
+
+        array_push($commands, ...$this->strongHashedFixNameCommands($counts));
+
+        return $this->job('metadata-refresh', true, null, $commands, $sleep);
+    }
+
+    /**
+     * @param  array<string, mixed>  $settings
+     * @param  array<string, mixed>  $counts
+     * @return list<array{command: string, arguments: array<string, mixed>}>
+     */
+    private function postprocessMetadataRefreshCommands(array $settings, array $counts): array
+    {
+        $enabled = (int) ($settings['metadata_refresh_postprocess'] ?? (
+            (bool) config('external_metadata.postprocess_enabled', false) ? 1 : 0
+        ));
+
+        if ($enabled !== 1 || (int) ($counts['other_hashed'] ?? 0) <= self::HASHED_FIXNAMES_THRESHOLD) {
+            return [];
+        }
+
+        return [
+            $this->metadataRefreshCommand(
+                (int) ($settings['metadata_refresh_postprocess_limit'] ?? config('external_metadata.postprocess_limit', 10)),
+                (int) ($settings['metadata_refresh_sleep_ms'] ?? config('external_metadata.sleep_ms', 500)),
+            ),
+            ...$this->strongHashedFixNameCommands($counts),
+        ];
+    }
+
+    /**
+     * @return array{command: string, arguments: array<string, mixed>}
+     */
+    private function metadataRefreshCommand(int $limit, int $sleepMs): array
+    {
+        return [
             'command' => 'predb:refresh-external-metadata',
             'arguments' => [
                 '--source' => ['all'],
-                '--limit' => (int) ($settings['metadata_refresh_limit'] ?? config('external_metadata.limit', 25)),
-                '--sleep-ms' => (int) ($settings['metadata_refresh_sleep_ms'] ?? config('external_metadata.sleep_ms', 500)),
+                '--limit' => max(1, $limit),
+                '--sleep-ms' => max(0, $sleepMs),
             ],
-        ]];
+        ];
+    }
 
+    /**
+     * @param  array<string, mixed>  $counts
+     * @return list<array{command: string, arguments: array<string, mixed>}>
+     */
+    private function strongHashedFixNameCommands(array $counts): array
+    {
         if ((int) ($counts['other_hashed'] ?? 0) > self::HASHED_FIXNAMES_THRESHOLD) {
+            $commands = [];
             foreach ([20, 16] as $method) {
                 $commands[] = [
                     'command' => 'releases:fix-names',
@@ -446,9 +495,11 @@ class DistributedJobCatalog
                     ],
                 ];
             }
+
+            return $commands;
         }
 
-        return $this->job('metadata-refresh', true, null, $commands, $sleep);
+        return [];
     }
 
     /**
