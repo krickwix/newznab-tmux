@@ -115,4 +115,38 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_imdb_lookup_total{outcome="failed",reason="waf_block",fallback_reason="fallback_min_interval_active",source="none"} 7', $output);
         $this->assertStringContainsString('nntmux_imdb_lookup_total{outcome="success",reason="none",fallback_reason="none",source="imdbapi_dev"} 3', $output);
     }
+
+    public function test_external_metadata_metrics_expose_srrdb_crc_rows_and_backlog(): void
+    {
+        DB::statement('CREATE TABLE predb (
+            id INTEGER PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            source VARCHAR(255) NOT NULL
+        )');
+
+        DB::statement('CREATE TABLE predb_crcs (
+            id INTEGER PRIMARY KEY,
+            predb_id INTEGER NOT NULL,
+            crchash VARCHAR(8) NOT NULL,
+            filesize INTEGER NOT NULL
+        )');
+
+        DB::table('predb')->insert([
+            ['id' => 1, 'title' => 'Matched.Release-GRP', 'source' => 'srrdb'],
+            ['id' => 2, 'title' => 'Missing.Crc-GRP', 'source' => 'srrdb'],
+            ['id' => 3, 'title' => 'Other.Source-GRP', 'source' => 'xrel'],
+        ]);
+        DB::table('predb_crcs')->insert([
+            ['id' => 1, 'predb_id' => 1, 'crchash' => 'AABBCCDD', 'filesize' => 15000000],
+            ['id' => 2, 'predb_id' => 1, 'crchash' => 'EEFF0011', 'filesize' => 15000000],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('externalMetadataMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_external_metadata_total{source="srrdb",state="crc_rows"} 2', $output);
+        $this->assertStringContainsString('nntmux_external_metadata_total{source="srrdb",state="predb_without_crc"} 1', $output);
+    }
 }

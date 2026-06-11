@@ -180,6 +180,46 @@ class DistributedJobCatalogTest extends TestCase
         }
     }
 
+    public function test_metadata_refresh_runs_external_source_refresh_before_strong_fixname_passes(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('metadata-refresh', $this->runVar(
+            [
+                'metadata_refresh' => 1,
+                'metadata_refresh_limit' => 25,
+                'metadata_refresh_sleep_ms' => 250,
+                'metadata_refresh_timer' => 900,
+            ],
+            ['other_hashed' => 150],
+        ));
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame(900, $plan['sleep']);
+        $this->assertSame('predb:refresh-external-metadata', $plan['commands'][0]['command']);
+        $this->assertSame(25, $plan['commands'][0]['arguments']['--limit']);
+        $this->assertSame(250, $plan['commands'][0]['arguments']['--sleep-ms']);
+        $this->assertSame(['all'], $plan['commands'][0]['arguments']['--source']);
+        $this->assertSame(['20', '16'], array_map(
+            static fn (array $command): string => (string) $command['arguments']['method'],
+            array_slice($plan['commands'], 1, 2),
+        ));
+        $this->assertSame('hashed', $plan['commands'][1]['arguments']['--category']);
+        $this->assertSame('hashed', $plan['commands'][2]['arguments']['--category']);
+    }
+
+    public function test_metadata_refresh_is_disabled_when_not_enabled(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('metadata-refresh', $this->runVar(
+            ['metadata_refresh' => 0],
+            ['other_hashed' => 150],
+        ));
+
+        $this->assertFalse($plan['enabled']);
+        $this->assertSame([], $plan['commands']);
+        $this->assertSame('disabled in settings', $plan['disabled_reason']);
+    }
+
     public function test_it_uses_sleep_metadata_without_shell_sleep_commands(): void
     {
         $catalog = new DistributedJobCatalog;

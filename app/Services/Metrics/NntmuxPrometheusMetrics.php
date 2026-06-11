@@ -19,6 +19,7 @@ class NntmuxPrometheusMetrics
         'parts',
         'releases',
         'predb',
+        'predb_crcs',
         'usenet_groups',
     ];
 
@@ -31,6 +32,7 @@ class NntmuxPrometheusMetrics
         'post_timer',
         'post_timer_non',
         'post_timer_amazon',
+        'metadata_refresh_timer',
         'seq_timer',
     ];
 
@@ -47,6 +49,7 @@ class NntmuxPrometheusMetrics
                 $this->tableEstimateMetrics(),
                 $this->groupMetrics(),
                 $this->releaseMetrics(),
+                $this->externalMetadataMetrics(),
                 $this->imdbLookupMetrics(),
                 $this->timerMetrics(),
                 $this->lockMetrics(),
@@ -263,6 +266,42 @@ class NntmuxPrometheusMetrics
     /**
      * @return list<string>
      */
+    private function externalMetadataMetrics(): array
+    {
+        $lines = [
+            '# HELP nntmux_external_metadata_total External metadata evidence rows and backlog counts.',
+            '# TYPE nntmux_external_metadata_total gauge',
+        ];
+
+        if (Schema::hasTable('predb_crcs')) {
+            $lines[] = $this->metric('nntmux_external_metadata_total', (int) DB::table('predb_crcs')->count(), [
+                'source' => 'srrdb',
+                'state' => 'crc_rows',
+            ]);
+        }
+
+        if (Schema::hasTable('predb') && Schema::hasTable('predb_crcs')) {
+            $withoutCrc = (int) DB::table('predb')
+                ->where('source', 'srrdb')
+                ->whereNotExists(function ($query): void {
+                    $query->selectRaw('1')
+                        ->from('predb_crcs')
+                        ->whereColumn('predb_crcs.predb_id', 'predb.id');
+                })
+                ->count();
+
+            $lines[] = $this->metric('nntmux_external_metadata_total', $withoutCrc, [
+                'source' => 'srrdb',
+                'state' => 'predb_without_crc',
+            ]);
+        }
+
+        return $lines;
+    }
+
+    /**
+     * @return list<string>
+     */
     private function timerMetrics(): array
     {
         $settings = DB::table('settings')
@@ -388,6 +427,6 @@ class NntmuxPrometheusMetrics
 
     private function escapeLabel(string $value): string
     {
-        return str_replace(["\\", "\n", '"'], ["\\\\", "\\n", '\\"'], $value);
+        return str_replace(['\\', "\n", '"'], ['\\\\', '\\n', '\\"'], $value);
     }
 }

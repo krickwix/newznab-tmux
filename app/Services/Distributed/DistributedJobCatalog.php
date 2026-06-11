@@ -21,6 +21,7 @@ class DistributedJobCatalog
             'hashed-fixnames' => 'Run full-history name fixing passes for Other > Hashed backlogs',
             'removecrap' => 'Remove configured unwanted releases',
             'post-additional' => 'Run additional and/or NFO post-processing',
+            'metadata-refresh' => 'Refresh external release-name evidence and run strong fix-name passes',
             'post-tv' => 'Run TV and anime post-processing',
             'post-movies' => 'Run movie post-processing',
             'post-amazon' => 'Run books, music, console, and games post-processing',
@@ -70,6 +71,7 @@ class DistributedJobCatalog
             'hashed-fixnames' => $this->hashedFixNames($settings, $counts),
             'removecrap' => $this->removeCrap($settings),
             'post-additional' => $this->postAdditional($settings, $counts),
+            'metadata-refresh' => $this->metadataRefresh($settings, $counts),
             'post-tv' => $this->postTv($settings, $counts),
             'post-movies' => $this->postMovies($settings, $counts),
             'post-amazon' => $this->postAmazon($settings, $counts),
@@ -110,6 +112,7 @@ class DistributedJobCatalog
             'fixnames', 'hashed-fixnames' => (int) ($settings['fix_timer'] ?? 300),
             'removecrap' => (int) ($settings['crap_timer'] ?? 300),
             'post-additional' => (int) ($settings['post_timer'] ?? 300),
+            'metadata-refresh' => (int) ($settings['metadata_refresh_timer'] ?? config('external_metadata.timer', 900)),
             'post-tv', 'post-movies' => (int) ($settings['post_timer_non'] ?? 300),
             'post-amazon' => (int) ($settings['post_timer_amazon'] ?? 300),
             'per-group' => (int) ($settings['seq_timer'] ?? 300),
@@ -404,6 +407,48 @@ class DistributedJobCatalog
         }
 
         return $this->job('post-additional', true, null, $commands, $sleep);
+    }
+
+    /**
+     * @param  array<string, mixed>  $settings
+     * @param  array<string, mixed>  $counts
+     * @return array<string, mixed>
+     */
+    private function metadataRefresh(array $settings, array $counts): array
+    {
+        $sleep = (int) ($settings['metadata_refresh_timer'] ?? config('external_metadata.timer', 900));
+        $enabled = (int) ($settings['metadata_refresh'] ?? ((bool) config('external_metadata.enabled', false) ? 1 : 0));
+
+        if ($enabled !== 1) {
+            return $this->disabled('metadata-refresh', 'disabled in settings', $sleep);
+        }
+
+        $commands = [[
+            'command' => 'predb:refresh-external-metadata',
+            'arguments' => [
+                '--source' => ['all'],
+                '--limit' => (int) ($settings['metadata_refresh_limit'] ?? config('external_metadata.limit', 25)),
+                '--sleep-ms' => (int) ($settings['metadata_refresh_sleep_ms'] ?? config('external_metadata.sleep_ms', 500)),
+            ],
+        ]];
+
+        if ((int) ($counts['other_hashed'] ?? 0) > self::HASHED_FIXNAMES_THRESHOLD) {
+            foreach ([20, 16] as $method) {
+                $commands[] = [
+                    'command' => 'releases:fix-names',
+                    'arguments' => [
+                        'method' => (string) $method,
+                        '--update' => true,
+                        '--category' => 'hashed',
+                        '--set-status' => true,
+                        '--limit' => 500,
+                        '--show' => true,
+                    ],
+                ];
+            }
+        }
+
+        return $this->job('metadata-refresh', true, null, $commands, $sleep);
     }
 
     /**
