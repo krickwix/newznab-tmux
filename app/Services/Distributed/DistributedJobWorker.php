@@ -227,6 +227,16 @@ class DistributedJobWorker
     {
         $parts = [];
         foreach ($arguments as $key => $value) {
+            if (is_array($value)) {
+                foreach ($value as $item) {
+                    $parts[] = is_string($key) && str_starts_with($key, '--')
+                        ? $key.'='.(string) $item
+                        : (string) $item;
+                }
+
+                continue;
+            }
+
             if (is_bool($value)) {
                 if ($value) {
                     $parts[] = (string) $key;
