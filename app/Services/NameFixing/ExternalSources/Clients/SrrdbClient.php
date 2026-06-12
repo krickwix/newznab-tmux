@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\NameFixing\ExternalSources\Clients;
 
 use App\Services\NameFixing\ExternalSources\ExternalReleaseHit;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 
 class SrrdbClient
@@ -14,10 +15,14 @@ class SrrdbClient
      */
     public function details(string $releaseTitle): ?array
     {
-        $response = Http::timeout((int) config('external_metadata.timeout', 20))
-            ->withUserAgent('nntmux-external-metadata/1.0')
-            ->acceptJson()
-            ->get(rtrim((string) config('external_metadata.sources.srrdb.base_url'), '/').'/details/'.rawurlencode($releaseTitle));
+        try {
+            $response = Http::timeout((int) config('external_metadata.timeout', 20))
+                ->withUserAgent('nntmux-external-metadata/1.0')
+                ->acceptJson()
+                ->get(rtrim((string) config('external_metadata.sources.srrdb.base_url'), '/').'/details/'.rawurlencode($releaseTitle));
+        } catch (ConnectionException) {
+            return null;
+        }
 
         if (! $response->successful()) {
             return null;
@@ -70,10 +75,14 @@ class SrrdbClient
             $path .= '/archive-size:'.$size;
         }
 
-        $response = Http::timeout((int) config('external_metadata.timeout', 20))
-            ->withUserAgent('nntmux-external-metadata/1.0')
-            ->acceptJson()
-            ->get(rtrim((string) config('external_metadata.sources.srrdb.base_url'), '/').$path);
+        try {
+            $response = Http::timeout((int) config('external_metadata.timeout', 20))
+                ->withUserAgent('nntmux-external-metadata/1.0')
+                ->acceptJson()
+                ->get(rtrim((string) config('external_metadata.sources.srrdb.base_url'), '/').$path);
+        } catch (ConnectionException) {
+            return [];
+        }
 
         if (! $response->successful()) {
             return [];

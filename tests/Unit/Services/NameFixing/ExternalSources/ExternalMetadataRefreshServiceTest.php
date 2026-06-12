@@ -7,6 +7,7 @@ namespace Tests\Unit\Services\NameFixing\ExternalSources;
 use App\Facades\Search;
 use App\Services\NameFixing\ExternalSources\ExternalMetadataRefreshService;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
@@ -108,6 +109,28 @@ class ExternalMetadataRefreshServiceTest extends TestCase
         $this->assertSame('Movie.Name.2026.1080p.BluRay.x264-GRP', DB::table('predb')->value('title'));
         $this->assertSame('AABBCCDD', DB::table('predb_crcs')->value('crchash'));
         $this->assertSame(15000000, DB::table('predb_crcs')->value('filesize'));
+    }
+
+    public function test_refresh_treats_srrdb_archive_timeout_as_failed_lookup(): void
+    {
+        DB::table('release_files')->insert([
+            'releases_id' => 10,
+            'name' => 'obfuscated.r00',
+            'size' => 15000000,
+            'crc32' => 'aabbccdd',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Http::fake([
+            'api.srrdb.com/v1/search/*' => fn () => throw new ConnectionException('Connection timed out'),
+        ]);
+
+        $summary = app(ExternalMetadataRefreshService::class)->refresh(['srrdb'], limit: 1, sleepMs: 0);
+
+        $this->assertSame(1, $summary->source('srrdb')->queried);
+        $this->assertSame(1, $summary->source('srrdb')->failed);
+        $this->assertSame(0, $summary->source('srrdb')->imported);
     }
 
     public function test_refresh_imports_candidate_predb_rows_without_renaming_releases(): void
