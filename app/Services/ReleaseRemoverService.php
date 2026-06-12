@@ -10,6 +10,7 @@ use App\Models\Category;
 use App\Models\Settings;
 use App\Services\Nzb\NzbParserService;
 use App\Services\Nzb\NzbService;
+use App\Services\Releases\ReleaseBrowseService;
 use App\Services\Releases\ReleaseManagementService;
 use Carbon\Carbon;
 use Exception;
@@ -464,14 +465,27 @@ class ReleaseRemoverService
         return $this->executeSimpleRemoval('Passworded', sprintf(
             'SELECT r.guid, r.searchname, r.id
             FROM releases r
-            WHERE r.searchname LIKE %s
+            WHERE (
+                r.passwordstatus = %d
+                OR EXISTS (
+                    SELECT 1
+                    FROM release_files rf
+                    WHERE rf.releases_id = r.id
+                    AND rf.passworded = %d
+                )
+                OR (
+                    r.searchname LIKE %s
             AND r.searchname NOT LIKE %s
             AND r.searchname NOT LIKE %s
             AND r.searchname NOT LIKE %s
             AND r.searchname NOT LIKE %s
             AND r.searchname NOT LIKE %s
             AND r.searchname NOT LIKE %s
-            AND r.categories_id NOT IN (%d, %d, %d, %d, %d, %d, %d, %d, %d) %s',
+                    AND r.categories_id NOT IN (%d, %d, %d, %d, %d, %d, %d, %d, %d)
+                )
+            ) %s',
+            ReleaseBrowseService::PASSWD_RAR,
+            ReleaseBrowseService::PASSWD_RAR,
             escapeString('%passwor%'),
             escapeString('%advanced%'),
             escapeString('%no password%'),
@@ -976,7 +990,7 @@ class ReleaseRemoverService
     /**
      * Build a comma-separated list of category IDs.
      *
-     * @param  array<string, mixed>  $categories
+     * @param  array<int|string, mixed>  $categories
      */
     private function buildCategoryList(array $categories): string
     {

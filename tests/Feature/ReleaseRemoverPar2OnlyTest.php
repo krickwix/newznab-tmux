@@ -186,6 +186,61 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
         $this->assertTrue($service->removeCrap(true, 'full', 'hashed'));
     }
 
+    public function test_passworded_removal_deletes_releases_marked_passworded_by_status_or_release_file(): void
+    {
+        DB::table('releases')->insert([
+            [
+                'id' => 5,
+                'guid' => 'password-status-guid',
+                'searchname' => 'Movie.Release.2024.1080p.BluRay.x264-GROUP',
+                'isrenamed' => 0,
+                'adddate' => Carbon::now()->subHours(2)->format('Y-m-d H:i:s'),
+                'passwordstatus' => 1,
+            ],
+            [
+                'id' => 6,
+                'guid' => 'password-file-guid',
+                'searchname' => 'Another.Movie.2024.1080p.BluRay.x264-GROUP',
+                'isrenamed' => 0,
+                'adddate' => Carbon::now()->subHours(2)->format('Y-m-d H:i:s'),
+                'passwordstatus' => 0,
+            ],
+            [
+                'id' => 7,
+                'guid' => 'clean-release-guid',
+                'searchname' => 'Clean.Movie.2024.1080p.BluRay.x264-GROUP',
+                'isrenamed' => 0,
+                'adddate' => Carbon::now()->subHours(2)->format('Y-m-d H:i:s'),
+                'passwordstatus' => 0,
+            ],
+        ]);
+        DB::table('release_files')->insert([
+            'id' => 3,
+            'releases_id' => 6,
+            'name' => 'Another.Movie.2024.part01.rar',
+            'passworded' => 1,
+        ]);
+
+        $releaseManagement = Mockery::mock(ReleaseManagementService::class);
+        $releaseManagement
+            ->shouldReceive('deleteSingleWithService')
+            ->once()
+            ->with(['g' => 'password-status-guid', 'i' => 5], Mockery::any(), Mockery::any());
+        $releaseManagement
+            ->shouldReceive('deleteSingleWithService')
+            ->once()
+            ->with(['g' => 'password-file-guid', 'i' => 6], Mockery::any(), Mockery::any());
+
+        $service = new ReleaseRemoverService(
+            releaseManagement: $releaseManagement,
+            nzb: Mockery::mock(NzbService::class),
+            nzbParser: Mockery::mock(NzbParserService::class),
+            releaseImage: Mockery::mock(ReleaseImageService::class)
+        );
+
+        $this->assertTrue($service->removeCrap(true, 'full', 'passworded'));
+    }
+
     private function createTables(): void
     {
         DB::statement('CREATE TABLE releases (
@@ -198,12 +253,14 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
             rarinnerfilecount INTEGER NOT NULL DEFAULT 0,
             categories_id INTEGER NOT NULL DEFAULT 10,
             nzbstatus INTEGER NOT NULL DEFAULT 0,
+            passwordstatus INTEGER NOT NULL DEFAULT 0,
             adddate DATETIME NULL
         )');
         DB::statement('CREATE TABLE release_files (
             id INTEGER PRIMARY KEY,
             releases_id INTEGER NOT NULL,
-            name VARCHAR(255) NOT NULL
+            name VARCHAR(255) NOT NULL,
+            passworded INTEGER NOT NULL DEFAULT 0
         )');
     }
 }
