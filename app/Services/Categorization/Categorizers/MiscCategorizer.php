@@ -189,6 +189,10 @@ class MiscCategorizer extends AbstractCategorizer
             return $this->matched(Category::OTHER_HASHED, 0.86, 'obfuscated_usenet_par2_volume');
         }
 
+        if ($this->isReadableVintageFilmSubject($name, $context)) {
+            return null;
+        }
+
         if ($this->isObfuscatedExtractedPar2Volume($name)) {
             return $this->matched(Category::OTHER_HASHED, 0.86, 'obfuscated_extracted_par2_volume');
         }
@@ -282,7 +286,7 @@ class MiscCategorizer extends AbstractCategorizer
 
     private function isReadableVintageFilmSidecarSubject(string $name, ReleaseContext $context): bool
     {
-        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
+        if (! $this->isExplicitVintageFilmGroup($context)) {
             return false;
         }
 
@@ -290,6 +294,26 @@ class MiscCategorizer extends AbstractCategorizer
 
         return preg_match('/\b(19|20)\d{2}\b/', $outsideQuotedFilename) === 1
             && $this->countAlphabeticWordTokens($outsideQuotedFilename) >= 2;
+    }
+
+    private function isReadableVintageFilmSubject(string $name, ReleaseContext $context): bool
+    {
+        if (! $this->isExplicitVintageFilmGroup($context)) {
+            return false;
+        }
+
+        if ($this->countAlphabeticWordTokens($name) < 2) {
+            return false;
+        }
+
+        return preg_match('/\b(19|20)\d{2}\b/', $name) === 1
+            || preg_match('/(?:\.|\b)(?:avi|mkv|mp4|mpg|mpeg|vob)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $name) === 1
+            || preg_match('/\b(?:480p|576p|720p|1080p|2160p|x264|x265|h\.?264|h\.?265|xvid|divx|dvdrip|vhsrip|tvrip|bdrip|bluray|dvd)\b/i', $name) === 1;
+    }
+
+    private function isExplicitVintageFilmGroup(ReleaseContext $context): bool
+    {
+        return $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i');
     }
 
     private function isObfuscatedExtractedPar2Volume(string $name): bool

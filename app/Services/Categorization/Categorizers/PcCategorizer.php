@@ -31,6 +31,9 @@ class PcCategorizer extends AbstractCategorizer
         if ($context->hasAdultMarkers()) {
             return true;
         }
+        if ($this->isExplicitVintageFilmVideo($context)) {
+            return true;
+        }
         // Skip TV shows (season patterns)
         if (preg_match('/[._ -]S\d{1,3}[._ -]?(E\d|Complete|Full|1080|720|480|2160|WEB|HDTV|BluRay)/i', $context->releaseName)) {
             return true;
@@ -168,5 +171,15 @@ class PcCategorizer extends AbstractCategorizer
         }
 
         return null;
+    }
+
+    private function isExplicitVintageFilmVideo(ReleaseContext $context): bool
+    {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
+            return false;
+        }
+
+        return preg_match('/(?:\.|\b)(?:avi|mkv|mp4|mpg|mpeg|vob)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $context->releaseName) === 1
+            || preg_match('/\b(?:480p|576p|720p|1080p|2160p|x264|x265|h\.?264|h\.?265|xvid|divx|dvdrip|vhsrip|tvrip|bdrip|bluray|dvd)\b/i', $context->releaseName) === 1;
     }
 }

@@ -485,6 +485,30 @@ class HashedReleaseCategorizationTest extends TestCase
         $this->assertSame('vintage_film_file', $passable->bestResult->matchedBy);
     }
 
+    public function test_readable_vintage_film_filename_is_not_obfuscated_extracted_subject(): void
+    {
+        $passable = $this->runPipeline(
+            'Cracked Nuts 1941.avi',
+            'alt.binaries.multimedia.vintage-film-pre-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_SD, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
+    }
+
+    public function test_readable_vintage_film_title_year_is_not_obfuscated_extracted_subject(): void
+    {
+        $passable = $this->runPipeline(
+            'Six Against The Rock 1987',
+            'alt.binaries.multimedia.vintage-film.post-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('group_name_movie', $passable->bestResult->matchedBy);
+    }
+
     public function test_normalized_vintage_film_nfo_subject_categorizes_as_movie_not_audio(): void
     {
         $passable = $this->runPipeline(
