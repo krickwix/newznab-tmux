@@ -432,6 +432,93 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(1, (int) $release->isrenamed);
     }
 
+    public function test_recategorize_releases_test_mode_with_category_selector_does_not_update(): void
+    {
+        Search::shouldReceive('updateRelease')->once();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('c', 40),
+            'leftguid' => 'c',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+            '--test' => true,
+        ])->expectsOutputToContain('Would have changed')
+            ->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::OTHER_HASHED, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_recategorize_releases_combines_category_and_group_selectors(): void
+    {
+        Search::shouldReceive('updateRelease')->times(3);
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $selected = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('6', 40),
+            'leftguid' => '6',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $alreadyMovie = Release::factory()->create([
+            'name' => 'Already Movie 1973',
+            'searchname' => 'Already Movie 1973',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::MOVIE_OTHER,
+            'iscategorized' => 1,
+            'guid' => str_repeat('7', 40),
+            'leftguid' => '7',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+            '--groups' => (string) $group->id,
+        ])->assertSuccessful();
+
+        $selected->refresh();
+        $alreadyMovie->refresh();
+
+        $this->assertSame(Category::MOVIE_OTHER, $selected->categories_id);
+        $this->assertSame(1, (int) $selected->iscategorized);
+        $this->assertSame(Category::MOVIE_OTHER, $alreadyMovie->categories_id);
+    }
+
     private function setEnvironmentValue(string $key, ?string $value): void
     {
         if ($value === null) {
@@ -453,6 +540,39 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
                 $table->string('name')->primary();
                 $table->text('value')->nullable();
             });
+        }
+
+        if (! Schema::hasTable('root_categories')) {
+            Schema::create('root_categories', function (Blueprint $table): void {
+                $table->increments('id');
+                $table->string('title');
+                $table->integer('status')->default(1);
+                $table->boolean('disablepreview')->default(false);
+            });
+
+            DB::table('root_categories')->insert([
+                ['id' => Category::OTHER_ROOT, 'title' => 'Other', 'status' => 1, 'disablepreview' => 0],
+                ['id' => Category::MOVIE_ROOT, 'title' => 'Movies', 'status' => 1, 'disablepreview' => 0],
+            ]);
+        }
+
+        if (! Schema::hasTable('categories')) {
+            Schema::create('categories', function (Blueprint $table): void {
+                $table->integer('id')->primary();
+                $table->string('title');
+                $table->integer('root_categories_id')->nullable();
+                $table->integer('status')->default(1);
+                $table->boolean('disablepreview')->default(false);
+                $table->integer('minsizetoformrelease')->default(0);
+                $table->integer('maxsizetoformrelease')->default(0);
+            });
+
+            DB::table('categories')->insert([
+                ['id' => Category::OTHER_MISC, 'title' => 'Misc', 'root_categories_id' => Category::OTHER_ROOT],
+                ['id' => Category::OTHER_HASHED, 'title' => 'Hashed', 'root_categories_id' => Category::OTHER_ROOT],
+                ['id' => Category::MOVIE_OTHER, 'title' => 'Other', 'root_categories_id' => Category::MOVIE_ROOT],
+                ['id' => Category::MOVIE_SD, 'title' => 'SD', 'root_categories_id' => Category::MOVIE_ROOT],
+            ]);
         }
 
         if (! Schema::hasTable('usenet_groups')) {
@@ -491,6 +611,7 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
                 $table->string('imdbid')->nullable();
                 $table->integer('musicinfo_id')->nullable();
                 $table->integer('consoleinfo_id')->nullable();
+                $table->integer('gamesinfo_id')->default(0);
                 $table->integer('bookinfo_id')->nullable();
                 $table->integer('anidbid')->nullable();
                 $table->unsignedInteger('predb_id')->default(0);

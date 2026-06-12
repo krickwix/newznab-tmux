@@ -39,30 +39,54 @@ class RecategorizeReleases extends Command
     public function handle(): void
     {
         $countQuery = Release::query();
+        $hasSelector = false;
         if ($this->option('misc')) {
             $countQuery->whereIn('categories_id', Category::OTHERS_GROUP);
-        } elseif ($this->option('all')) {
+            $hasSelector = true;
+        }
+
+        if ($this->option('all')) {
             if ($this->confirm('This will reset categorization on all releases and re-categorize them all from scratch. Are you sure? (y/n)', false)) {
-                Release::query()->where('iscategorized', 1)->update([
-                    'iscategorized' => 0,
-                ]);
+                if (! $this->option('test')) {
+                    Release::query()->where('iscategorized', 1)->update([
+                        'iscategorized' => 0,
+                    ]);
+                }
                 $countQuery->where('iscategorized', 0);
             } else {
                 $this->info('Reset script stopped.');
                 exit();
             }
 
-        } elseif ($this->option('group')) {
+            $hasSelector = true;
+        }
+
+        if ($this->option('group')) {
             $countQuery->where('groups_id', $this->option('group'));
-        } elseif ($this->option('groups')) {
+            $hasSelector = true;
+        }
+
+        if ($this->option('groups')) {
             $countQuery->whereIn('groups_id', explode(',', $this->option('groups')));
-        } elseif ($this->option('category')) {
+            $hasSelector = true;
+        }
+
+        if ($this->option('category')) {
             $countQuery->where('categories_id', $this->option('category'));
-        } elseif ($this->option('categories')) {
+            $hasSelector = true;
+        }
+
+        if ($this->option('categories')) {
             $countQuery->whereIn('categories_id', explode(',', $this->option('categories')));
-        } elseif ($this->option('test')) {
+            $hasSelector = true;
+        }
+
+        if (! $hasSelector && $this->option('test')) {
             $countQuery->where('iscategorized', 0);
-        } else {
+            $hasSelector = true;
+        }
+
+        if (! $hasSelector) {
             $this->error('You must specify at least one option. See: --help');
             exit();
         }
