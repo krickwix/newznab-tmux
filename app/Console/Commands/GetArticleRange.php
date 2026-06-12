@@ -76,7 +76,7 @@ class GetArticleRange extends Command
                 return self::SUCCESS;
             }
 
-            $this->updateGroupRecords($mode, $groupMySQL, $return);
+            $this->updateGroupRecords($mode, $groupMySQL, $return, $firstArticle);
 
             return self::SUCCESS;
         } catch (\Throwable $e) {
@@ -93,10 +93,8 @@ class GetArticleRange extends Command
      * @param  array<string, mixed>  $groupMySQL
      * @param  array<string, mixed>  $return
      */
-    private function updateGroupRecords(string $mode, array $groupMySQL, array $return): void
+    private function updateGroupRecords(string $mode, array $groupMySQL, array $return, int $rangeFirstArticle): void
     {
-        $columns = [];
-
         switch ($mode) {
             case 'binaries':
                 if ($return['lastArticleNumber'] <= $groupMySQL['last_record']) {
@@ -105,15 +103,14 @@ class GetArticleRange extends Command
                 $unixTime = is_numeric($return['lastArticleDate'])
                     ? $return['lastArticleDate']
                     : strtotime($return['lastArticleDate']);
-                $columns[1] = sprintf('last_record_postdate = FROM_UNIXTIME(%s)', $unixTime);
-                $columns[2] = sprintf('last_record = %s', $return['lastArticleNumber']);
-                $query = sprintf(
-                    'UPDATE usenet_groups SET %s, %s, last_updated = NOW() WHERE id = %d AND last_record < %s',
-                    $columns[1],
-                    $columns[2],
-                    $groupMySQL['id'],
-                    $return['lastArticleNumber']
-                );
+                DB::table('usenet_groups')
+                    ->where('id', $groupMySQL['id'])
+                    ->where('last_record', '<', $return['lastArticleNumber'])
+                    ->update([
+                        'last_record_postdate' => date('Y-m-d H:i:s', (int) $unixTime),
+                        'last_record' => $return['lastArticleNumber'],
+                        'last_updated' => now()->toDateTimeString(),
+                    ]);
                 break;
 
             case 'backfill':
@@ -123,22 +120,47 @@ class GetArticleRange extends Command
                 $unixTime = is_numeric($return['firstArticleDate'])
                     ? $return['firstArticleDate']
                     : strtotime($return['firstArticleDate']);
-                $columns[1] = sprintf('first_record_postdate = FROM_UNIXTIME(%s)', $unixTime);
-                $columns[2] = sprintf('first_record = %s', $return['firstArticleNumber']);
-                $query = sprintf(
-                    'UPDATE usenet_groups SET %s, %s, last_updated = NOW() WHERE id = %d AND first_record > %s',
-                    $columns[1],
-                    $columns[2],
-                    $groupMySQL['id'],
-                    $return['firstArticleNumber']
-                );
+                $updated = DB::table('usenet_groups')
+                    ->where('id', $groupMySQL['id'])
+                    ->where('first_record', '>', $return['firstArticleNumber'])
+                    ->update([
+                        'first_record_postdate' => date('Y-m-d H:i:s', (int) $unixTime),
+                        'first_record' => $return['firstArticleNumber'],
+                        'last_updated' => now()->toDateTimeString(),
+                    ]);
+
+                if ($updated > 0) {
+                    $this->disableBackfillIfProviderFloorReached($groupMySQL, (int) $return['firstArticleNumber'], $rangeFirstArticle);
+                }
                 break;
 
             default:
                 return;
         }
+    }
 
-        DB::update($query);
+    /**
+     * @param  array<string, mixed>  $groupMySQL
+     */
+    private function disableBackfillIfProviderFloorReached(array $groupMySQL, int $firstArticleNumber, int $rangeFirstArticle): void
+    {
+        if ((int) Settings::settingValue('disablebackfillgroup') !== 1) {
+            return;
+        }
+
+        $providerFirst = (int) DB::table('short_groups')->where('name', $groupMySQL['name'])->max('first_record');
+        if ($providerFirst <= 0) {
+            $providerFirst = $rangeFirstArticle;
+        }
+
+        if ($firstArticleNumber > $providerFirst) {
+            return;
+        }
+
+        DB::table('usenet_groups')->where('id', $groupMySQL['id'])->update([
+            'backfill' => 0,
+            'last_updated' => now()->toDateTimeString(),
+        ]);
     }
 
     /**

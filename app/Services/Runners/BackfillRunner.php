@@ -88,7 +88,7 @@ class BackfillRunner extends BaseRunner
             AND g.first_record_postdate IS NOT NULL
             AND g.backfill = 1
             AND (NOW() - INTERVAL '.$backfilldays.' DAY ) < g.first_record_postdate
-            AND (g.first_record - a.first_record) >= '.$maxMessages.'
+            AND (CAST(g.first_record AS SIGNED) - CAST(a.first_record AS SIGNED)) > 0
             GROUP BY a.name, a.last_record, g.name, g.first_record, g.first_record_postdate
             ORDER BY g.first_record_postdate DESC, g.name ASC
             LIMIT '.$backfill_groups;
@@ -101,51 +101,7 @@ class BackfillRunner extends BaseRunner
             return;
         }
 
-        $queuesByChunk = [];
-        $queueGroupsByChunk = [];
-        foreach ($data as $group) {
-            $ourFirst = (int) $group->our_first;
-            $theirFirst = max(1, (int) $group->their_first);
-            $count = $ourFirst - $theirFirst;
-
-            if ($count <= 0) {
-                if (config('nntmux.echocli')) {
-                    cli()->primary('No backfill needed for group '.$group->name);
-                }
-
-                continue;
-            }
-
-            $getEach = ($count > ($backfill_qty * $threads))
-                ? (int) ceil(($backfill_qty * $threads) / $maxMessages)
-                : (int) ceil($count / $maxMessages);
-
-            for ($i = 0; $i <= $getEach - 1; $i++) {
-                $end = $ourFirst - $i * $maxMessages - 1;
-                $start = max($theirFirst, $end - $maxMessages + 1);
-                if ($end < $theirFirst || $start > $end) {
-                    continue;
-                }
-
-                if ($start === $theirFirst && ($end - $start + 1) < $maxMessages) {
-                    continue;
-                }
-
-                $key = $group->name.'#'.($i + 1);
-                $queuesByChunk[$i][$key] = sprintf('get_range  backfill  %s  %s  %s  %s', $group->name, $start, $end, $i + 1);
-                $queueGroupsByChunk[$i][$key] = $group->name;
-            }
-        }
-
-        $queues = [];
-        $queueGroups = [];
-        ksort($queuesByChunk);
-        foreach ($queuesByChunk as $chunk => $chunkQueues) {
-            foreach ($chunkQueues as $key => $queue) {
-                $queues[$key] = $queue;
-                $queueGroups[$key] = $queueGroupsByChunk[$chunk][$key];
-            }
-        }
+        [$queues, $queueGroups] = $this->buildSafeBackfillQueues($data, $backfill_qty, $maxMessages, $threads);
 
         if ($queues === []) {
             $this->headerNone();
@@ -179,5 +135,56 @@ class BackfillRunner extends BaseRunner
             echo $output;
             cli()->primary('Backfilled group '.$queueGroups[$idx]);
         }
+    }
+
+    /**
+     * @param  array<int, object>  $data
+     * @return array{0: array<string, string>, 1: array<string, string>}
+     */
+    protected function buildSafeBackfillQueues(array $data, int $backfillQty, int $maxMessages, int $threads): array
+    {
+        $queuesByChunk = [];
+        $queueGroupsByChunk = [];
+        foreach ($data as $group) {
+            $ourFirst = (int) $group->our_first;
+            $theirFirst = max(1, (int) $group->their_first);
+            $count = $ourFirst - $theirFirst;
+
+            if ($count <= 0) {
+                if (config('nntmux.echocli')) {
+                    cli()->primary('No backfill needed for group '.$group->name);
+                }
+
+                continue;
+            }
+
+            $getEach = ($count > ($backfillQty * $threads))
+                ? (int) ceil(($backfillQty * $threads) / $maxMessages)
+                : (int) ceil($count / $maxMessages);
+
+            for ($i = 0; $i <= $getEach - 1; $i++) {
+                $end = $ourFirst - $i * $maxMessages - 1;
+                $start = max($theirFirst, $end - $maxMessages + 1);
+                if ($end < $theirFirst || $start > $end) {
+                    continue;
+                }
+
+                $key = $group->name.'#'.($i + 1);
+                $queuesByChunk[$i][$key] = sprintf('get_range  backfill  %s  %s  %s  %s', $group->name, $start, $end, $i + 1);
+                $queueGroupsByChunk[$i][$key] = $group->name;
+            }
+        }
+
+        $queues = [];
+        $queueGroups = [];
+        ksort($queuesByChunk);
+        foreach ($queuesByChunk as $chunk => $chunkQueues) {
+            foreach ($chunkQueues as $key => $queue) {
+                $queues[$key] = $queue;
+                $queueGroups[$key] = $queueGroupsByChunk[$chunk][$key];
+            }
+        }
+
+        return [$queues, $queueGroups];
     }
 }
