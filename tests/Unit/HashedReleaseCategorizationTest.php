@@ -473,6 +473,18 @@ class HashedReleaseCategorizationTest extends TestCase
         $this->assertSame('vintage_film_file', $passable->bestResult->matchedBy);
     }
 
+    public function test_vintage_film_par2_sidecar_with_readable_title_is_not_hashed(): void
+    {
+        $passable = $this->runPipeline(
+            '( Jack the Ripper - 1988 ) - - [23/24] - "JacRip1988.vol07+08.PAR2"',
+            'alt.binaries.multimedia.vintage-film.post-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_file', $passable->bestResult->matchedBy);
+    }
+
     public function test_normalized_vintage_film_nfo_subject_categorizes_as_movie_not_audio(): void
     {
         $passable = $this->runPipeline(

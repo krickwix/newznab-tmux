@@ -41,6 +41,16 @@ class ObfuscatedSubjectExtractorTest extends TestCase
     }
 
     #[Test]
+    public function it_does_not_replace_readable_movie_subject_with_short_par2_sidecar_stem(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        $result = $extractor->extract('( Jack the Ripper - 1988 ) - - [23/24] - "JacRip1988.vol07+08.PAR2"');
+
+        $this->assertNull($result);
+    }
+
+    #[Test]
     public function it_extracts_title_and_removes_part_rar_suffix(): void
     {
         $extractor = new ObfuscatedSubjectExtractor;

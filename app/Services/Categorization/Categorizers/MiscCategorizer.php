@@ -40,7 +40,7 @@ class MiscCategorizer extends AbstractCategorizer
         }
 
         // Check for obfuscated/encoded patterns
-        if ($result = $this->checkObfuscated($name)) {
+        if ($result = $this->checkObfuscated($context)) {
             return $result;
         }
 
@@ -157,8 +157,10 @@ class MiscCategorizer extends AbstractCategorizer
         return null;
     }
 
-    protected function checkObfuscated(string $name): ?CategorizationResult
+    protected function checkObfuscated(ReleaseContext $context): ?CategorizationResult
     {
+        $name = $context->releaseName;
+
         // Release names consisting only of uppercase letters and numbers
         if ($this->isObfuscatedUppercaseString($name)) {
             return $this->matched(Category::OTHER_HASHED, 0.7, 'obfuscated_uppercase');
@@ -180,6 +182,10 @@ class MiscCategorizer extends AbstractCategorizer
         }
 
         if ($this->isObfuscatedUsenetPar2Volume($name)) {
+            if ($this->isReadableVintageFilmSidecarSubject($name, $context)) {
+                return null;
+            }
+
             return $this->matched(Category::OTHER_HASHED, 0.86, 'obfuscated_usenet_par2_volume');
         }
 
@@ -272,6 +278,18 @@ class MiscCategorizer extends AbstractCategorizer
         }
 
         return $this->isRandomQuotedStem($matches['stem']);
+    }
+
+    private function isReadableVintageFilmSidecarSubject(string $name, ReleaseContext $context): bool
+    {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
+            return false;
+        }
+
+        $outsideQuotedFilename = trim((string) preg_replace('/"[^"]+"/', ' ', $name));
+
+        return preg_match('/\b(19|20)\d{2}\b/', $outsideQuotedFilename) === 1
+            && $this->countAlphabeticWordTokens($outsideQuotedFilename) >= 2;
     }
 
     private function isObfuscatedExtractedPar2Volume(string $name): bool

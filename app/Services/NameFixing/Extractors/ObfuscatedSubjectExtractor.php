@@ -50,9 +50,17 @@ final class ObfuscatedSubjectExtractor
         }
 
         if (preg_match('/"([^"]{3,240})"/', $normalized, $quoted) === 1) {
+            if ($this->hasReadableContextAroundShortPar2Sidecar($normalized, $quoted[1])) {
+                return null;
+            }
+
             $normalized = $quoted[1];
             $looksObfuscated = true;
         } elseif (preg_match("/'([^']{3,240})'/", $normalized, $quoted) === 1) {
+            if ($this->hasReadableContextAroundShortPar2Sidecar($normalized, $quoted[1])) {
+                return null;
+            }
+
             $normalized = $quoted[1];
             $looksObfuscated = true;
         }
@@ -74,6 +82,30 @@ final class ObfuscatedSubjectExtractor
         }
 
         return $normalized;
+    }
+
+    private function hasReadableContextAroundShortPar2Sidecar(string $subject, string $quotedFilename): bool
+    {
+        if (preg_match('/\.(?:vol\d+[+\-]\d+\.par2?|par2?)$/i', $quotedFilename) !== 1) {
+            return false;
+        }
+
+        $outsideQuotedFilename = trim((string) preg_replace('/["\'][^"\']+["\']/', ' ', $subject));
+        if (preg_match('/\b(19|20)\d{2}\b/', $outsideQuotedFilename) !== 1 || $this->countReadableWords($outsideQuotedFilename) < 2) {
+            return false;
+        }
+
+        $stem = preg_replace('/\.(?:vol\d+[+\-]\d+\.par2?|par2?)$/i', '', $quotedFilename) ?? $quotedFilename;
+        $stem = str_replace(['_', '.', '+'], ' ', $stem);
+
+        return $this->countReadableWords($stem) < 2;
+    }
+
+    private function countReadableWords(string $value): int
+    {
+        preg_match_all('/[A-Za-z]{3,}/', $value, $matches);
+
+        return count($matches[0]);
     }
 
     private function toReadableTitle(string $value): string
