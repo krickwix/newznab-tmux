@@ -260,6 +260,9 @@ class BinariesService
         $range = $this->calculateArticleRange($groupMySQL, $groupNNTP, $maxHeaders);
 
         if ($range['total'] <= 0) {
+            UsenetGroup::query()->where('id', $groupMySQL['id'])->update([
+                'last_updated' => now(),
+            ]);
             $this->outputNoNewArticles($groupMySQL, $groupNNTP, $range);
 
             return;
