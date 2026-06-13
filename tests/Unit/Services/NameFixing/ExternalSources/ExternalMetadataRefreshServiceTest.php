@@ -159,6 +159,20 @@ class ExternalMetadataRefreshServiceTest extends TestCase
         $this->assertSame('predb-net', DB::table('predb')->value('source'));
     }
 
+    public function test_refresh_treats_search_source_connection_failure_as_failed_lookup(): void
+    {
+        Http::fake([
+            'predb.ovh/*' => fn () => throw new ConnectionException('Could not resolve host: predb.ovh'),
+        ]);
+
+        $summary = app(ExternalMetadataRefreshService::class)->refresh(['predb-ovh'], limit: 5, sleepMs: 0, queries: ['Movie Name 2026']);
+
+        $this->assertSame(1, $summary->source('predb-ovh')->queried);
+        $this->assertSame(1, $summary->source('predb-ovh')->failed);
+        $this->assertSame(0, $summary->source('predb-ovh')->imported);
+        $this->assertSame(0, DB::table('predb')->count());
+    }
+
     public function test_refresh_indexes_new_candidate_predb_rows_for_name_fixing_search(): void
     {
         Http::fake([

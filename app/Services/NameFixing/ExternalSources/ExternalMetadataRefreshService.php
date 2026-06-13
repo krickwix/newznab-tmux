@@ -10,6 +10,7 @@ use App\Services\NameFixing\ExternalSources\Clients\PredbNetClient;
 use App\Services\NameFixing\ExternalSources\Clients\PredbOvhClient;
 use App\Services\NameFixing\ExternalSources\Clients\SrrdbClient;
 use App\Services\NameFixing\ExternalSources\Clients\XrelClient;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -228,7 +229,16 @@ class ExternalMetadataRefreshService
 
         foreach (array_slice($queries, 0, $limit) as $query) {
             $source->queried++;
-            $hits = $search($query, min(10, $limit));
+            try {
+                $hits = $search($query, min(10, $limit));
+            } catch (ConnectionException $e) {
+                $source->failed++;
+                $source->message($e->getMessage());
+                $this->sleep($sleepMs);
+
+                continue;
+            }
+
             foreach ($hits as $hit) {
                 if ($this->importPredbHit($hit, $dryRun)) {
                     $source->imported++;
