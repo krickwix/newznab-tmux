@@ -46,4 +46,45 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
             'Stage 0 should infer dense deobfuscated collections with totalfiles=0 from observed file numbers.'
         );
     }
+
+    public function test_stage6_uses_join_anti_join_instead_of_materialized_subqueries(): void
+    {
+        $serviceSource = file_get_contents(__DIR__.'/../../app/Services/ReleaseProcessingService.php');
+
+        self::assertIsString($serviceSource);
+        self::assertStringContainsString(
+            "->join('binaries as existing'",
+            $serviceSource,
+            'Stage 6 should prove a collection has binaries without materializing all binary collection IDs.'
+        );
+        self::assertStringContainsString(
+            "->leftJoin('binaries as incomplete'",
+            $serviceSource,
+            'Stage 6 should anti-join incomplete binaries through the collection index.'
+        );
+        self::assertStringContainsString(
+            "->whereNull('incomplete.id')",
+            $serviceSource,
+            'Stage 6 should keep only collections with no incomplete binaries.'
+        );
+        self::assertStringContainsString(
+            "->pluck('collections.id')",
+            $serviceSource,
+            'Stage 6 should pluck a qualified ID because the query joins binaries twice.'
+        );
+        self::assertStringNotContainsString(
+            'NOT EXISTS (',
+            $serviceSource,
+            'Stage 6 should not regress to MariaDB materialized NOT EXISTS scans.'
+        );
+    }
+
+    public function test_stage6_selection_index_is_declared(): void
+    {
+        $migrationSource = file_get_contents(__DIR__.'/../../database/migrations/2026_06_13_010000_add_release_stage6_selection_index.php');
+
+        self::assertIsString($migrationSource);
+        self::assertStringContainsString('ix_collections_release_stage6', $migrationSource);
+        self::assertStringContainsString("['groups_id', 'filecheck', 'dateadded', 'id']", $migrationSource);
+    }
 }

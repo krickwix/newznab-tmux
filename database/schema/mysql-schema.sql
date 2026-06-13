@@ -205,7 +205,8 @@ CREATE TABLE `collections` (
   KEY `groups_id` (`groups_id`),
   KEY `ix_collection_dateadded` (`dateadded`),
   KEY `ix_collection_filecheck` (`filecheck`),
-  KEY `ix_collection_releaseid` (`releases_id`)
+  KEY `ix_collection_releaseid` (`releases_id`),
+  KEY `ix_collections_release_stage6` (`groups_id`,`filecheck`,`dateadded`,`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
 
 DROP TABLE IF EXISTS `consoleinfo`;

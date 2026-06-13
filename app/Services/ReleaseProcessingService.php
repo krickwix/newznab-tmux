@@ -995,28 +995,26 @@ final class ReleaseProcessingService
     {
         $normalizedGroupId = $this->extractGroupIdFromWhereSql($whereSql);
         $completion = $this->requiredCompletionPercent();
-        $collectionIds = Collection::query()
-            ->where('dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
-            ->whereIn('filecheck', [
+        $collectionIds = DB::table('collections')
+            ->select('collections.id')
+            ->distinct()
+            ->join('binaries as existing', 'existing.collections_id', '=', 'collections.id')
+            ->leftJoin('binaries as incomplete', static function ($join) use ($completion): void {
+                $join->on('incomplete.collections_id', '=', 'collections.id')
+                    ->whereRaw(
+                        '(incomplete.currentparts < CEIL(incomplete.totalparts * ? / 100) OR incomplete.totalparts <= 0)',
+                        [$completion],
+                    );
+            })
+            ->where('collections.dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
+            ->whereIn('collections.filecheck', [
                 CollectionFileCheckStatus::Default->value,
                 CollectionFileCheckStatus::CompleteCollection->value,
                 10,
             ])
-            ->whereRaw(
-                'EXISTS (SELECT 1 FROM binaries b WHERE b.collections_id = collections.id LIMIT 1)'
-            )
-            ->whereRaw(
-                'NOT EXISTS (
-                    SELECT 1
-                    FROM binaries b
-                    WHERE b.collections_id = collections.id
-                    AND (b.currentparts < CEIL(b.totalparts * ? / 100) OR b.totalparts <= 0)
-                    LIMIT 1
-                )',
-                [$completion]
-            )
-            ->when($normalizedGroupId !== null, static fn ($q) => $q->where('groups_id', $normalizedGroupId))
-            ->pluck('id');
+            ->whereNull('incomplete.id')
+            ->when($normalizedGroupId !== null, static fn ($q) => $q->where('collections.groups_id', $normalizedGroupId))
+            ->pluck('collections.id');
 
         foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids) {
             DB::transaction(static function () use ($ids): void {
