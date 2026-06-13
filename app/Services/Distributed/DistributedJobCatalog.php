@@ -31,6 +31,12 @@ class DistributedJobCatalog
     }
 
     /**
+     * @param  array{
+     *     settings?: array<string, mixed>,
+     *     constants?: array<string, mixed>,
+     *     counts?: array{now?: array<string, mixed>},
+     *     killswitch?: array<string, mixed>
+     * }  $runVar
      * @return array{
      *     name: string,
      *     description: string,
@@ -91,6 +97,7 @@ class DistributedJobCatalog
                 [],
                 (int) ($settings['seq_timer'] ?? 300)
             ),
+            default => throw new \InvalidArgumentException("Unknown distributed job [{$job}]."),
         };
     }
 
@@ -184,7 +191,29 @@ class DistributedJobCatalog
             return $this->disabled('backfill', 'kill limit exceeded', $sleep);
         }
 
+        $groupWork = $this->backfillGroupWorkCount($settings, $counts);
+        if ($groupWork !== null && $groupWork === 0) {
+            return $this->disabled('backfill', 'no backfill groups to process', $sleep);
+        }
+
         return $this->simple('backfill', true, null, 'multiprocessing:safe', ['type' => 'backfill'], $sleep);
+    }
+
+    /**
+     * @param  array<string, mixed>  $settings
+     * @param  array<string, mixed>  $counts
+     */
+    private function backfillGroupWorkCount(array $settings, array $counts): ?int
+    {
+        $countKey = ((int) ($settings['backfill_days'] ?? 1)) === 2
+            ? 'backfill_groups_date'
+            : 'backfill_groups_days';
+
+        if (! array_key_exists($countKey, $counts)) {
+            return null;
+        }
+
+        return (int) $counts[$countKey];
     }
 
     /**
@@ -590,6 +619,7 @@ class DistributedJobCatalog
     }
 
     /**
+     * @param  array<string, mixed>  $arguments
      * @return array<string, mixed>
      */
     private function simple(string $job, bool $enabled, ?string $disabledReason, string $command, array $arguments, int $sleep): array

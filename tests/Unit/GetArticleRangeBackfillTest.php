@@ -90,23 +90,24 @@ final class GetArticleRangeBackfillTest extends TestCase
         $this->assertSame(1, (int) DB::table('usenet_groups')->where('id', 1)->value('backfill'));
     }
 
-    public function test_backfill_range_disables_group_when_provider_floor_was_scanned_without_lowering_cursor(): void
+    public function test_backfill_range_keeps_group_enabled_when_provider_floor_prefix_does_not_lower_cursor(): void
     {
         DB::table('settings')->insert(['name' => 'disablebackfillgroup', 'value' => '1']);
+        DB::table('usenet_groups')->where('id', 1)->update(['first_record' => 7349326361]);
 
         $this->updateGroupRecords('backfill', [
             'id' => 1,
             'name' => 'a.b.multimedia.vintage-film',
-            'first_record' => 3,
+            'first_record' => 7349326361,
         ], [
-            'firstArticleNumber' => 3,
+            'firstArticleNumber' => 7349326361,
             'firstArticleDate' => '2008-08-19 00:59:23',
         ], 2);
 
         $group = DB::table('usenet_groups')->where('id', 1)->first();
 
-        $this->assertSame(3, (int) $group->first_record);
-        $this->assertSame(0, (int) $group->backfill);
+        $this->assertSame(7349326361, (int) $group->first_record);
+        $this->assertSame(1, (int) $group->backfill);
     }
 
     /**

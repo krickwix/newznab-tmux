@@ -73,10 +73,6 @@ class GetArticleRange extends Command
             );
 
             if (empty($return)) {
-                if ($mode === 'backfill') {
-                    $this->disableBackfillIfProviderFloorScanned($groupMySQL, $firstArticle);
-                }
-
                 return self::SUCCESS;
             }
 
@@ -119,8 +115,6 @@ class GetArticleRange extends Command
 
             case 'backfill':
                 if ($return['firstArticleNumber'] >= $groupMySQL['first_record']) {
-                    $this->disableBackfillIfProviderFloorScanned($groupMySQL, $rangeFirstArticle);
-
                     return;
                 }
                 $unixTime = is_numeric($return['firstArticleDate'])
@@ -136,7 +130,7 @@ class GetArticleRange extends Command
                     ]);
 
                 if ($updated > 0) {
-                    $this->disableBackfillIfProviderFloorScanned($groupMySQL, $rangeFirstArticle);
+                    $this->disableBackfillIfProviderFloorReached($groupMySQL, (int) $return['firstArticleNumber']);
                 }
                 break;
 
@@ -148,7 +142,7 @@ class GetArticleRange extends Command
     /**
      * @param  array<string, mixed>  $groupMySQL
      */
-    private function disableBackfillIfProviderFloorScanned(array $groupMySQL, int $rangeFirstArticle): void
+    private function disableBackfillIfProviderFloorReached(array $groupMySQL, int $firstArticleNumber): void
     {
         if ((int) Settings::settingValue('disablebackfillgroup') !== 1) {
             return;
@@ -156,10 +150,10 @@ class GetArticleRange extends Command
 
         $providerFirst = (int) DB::table('short_groups')->where('name', $groupMySQL['name'])->max('first_record');
         if ($providerFirst <= 0) {
-            $providerFirst = $rangeFirstArticle;
+            $providerFirst = $firstArticleNumber;
         }
 
-        if ($rangeFirstArticle > $providerFirst) {
+        if ($firstArticleNumber > $providerFirst) {
             return;
         }
 

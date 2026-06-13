@@ -44,6 +44,24 @@ class DistributedJobCatalogTest extends TestCase
         }
     }
 
+    public function test_backfill_is_disabled_when_no_group_level_safe_backfill_work_exists(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('backfill', $this->runVar(
+            [
+                'backfill' => 4,
+                'backfill_days' => 1,
+            ],
+            [
+                'backfill_groups_days' => 0,
+            ],
+        ));
+
+        $this->assertFalse($plan['enabled']);
+        $this->assertSame('no backfill groups to process', $plan['disabled_reason']);
+        $this->assertSame([], $plan['commands']);
+    }
+
     public function test_it_matches_tmux_sequential_mode_one(): void
     {
         $catalog = new DistributedJobCatalog;
@@ -321,6 +339,7 @@ class DistributedJobCatalogTest extends TestCase
     /**
      * @param  array<string, mixed>  $settings
      * @param  array<string, mixed>  $counts
+     * @param  array<string, mixed>  $constants
      * @return array<string, mixed>
      */
     private function runVar(array $settings = [], array $counts = [], array $constants = []): array
