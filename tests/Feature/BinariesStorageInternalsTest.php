@@ -11,6 +11,7 @@ use App\Services\Binaries\HeaderStorageTransaction;
 use App\Services\Binaries\PartHandler;
 use App\Services\BlacklistService;
 use App\Services\CollectionsCleaningService;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Mockery;
@@ -209,6 +210,43 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame([], $resolved);
     }
 
+    public function test_collection_bulk_insert_retries_transient_mariadb_record_changed_errors(): void
+    {
+        $handler = $this->deterministicCollectionHandler();
+        $method = new \ReflectionMethod($handler, 'bulkInsertCollectionsMysql');
+
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(Mockery::type('string'), Mockery::type('array'))
+            ->andThrow(new QueryException(
+                'mariadb',
+                'INSERT INTO collections',
+                [],
+                new \RuntimeException('SQLSTATE[HY000]: General error: 1020 Record has changed since last read in table \'collections\'; try restarting transaction')
+            ));
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(Mockery::type('string'), Mockery::type('array'))
+            ->andReturn(true);
+
+        $method->invoke($handler, [
+            'retry-collection' => [
+                'subject' => 'Retry Collection',
+                'fromname' => 'poster@example.com',
+                'unixtime' => time(),
+                'xref' => 'alt.test:123',
+                'groups_id' => 1,
+                'totalfiles' => 2,
+                'collectionhash' => sha1('retry-collection'),
+                'collection_regexes_id' => 0,
+                'noise' => 'batch-noise',
+                'xref_append' => '',
+            ],
+        ], []);
+
+        $this->addToAssertionCount(1);
+    }
+
     public function test_binary_handler_logs_bulk_insert_failures_when_debug_is_disabled(): void
     {
         config(['app.debug' => false]);
@@ -241,6 +279,63 @@ class BinariesStorageInternalsTest extends TestCase
         ], 1);
 
         $this->assertSame([], $resolved);
+    }
+
+    public function test_binary_bulk_insert_retries_transient_mariadb_record_changed_errors(): void
+    {
+        $handler = new BinaryHandler;
+        $method = new \ReflectionMethod($handler, 'bulkInsertBinariesMysql');
+
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(Mockery::type('string'), Mockery::type('array'))
+            ->andThrow(new QueryException(
+                'mariadb',
+                'INSERT INTO binaries',
+                [],
+                new \RuntimeException('SQLSTATE[HY000]: General error: 1020 Record has changed since last read in table \'binaries\'; try restarting transaction')
+            ));
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(Mockery::type('string'), Mockery::type('array'))
+            ->andReturn(true);
+
+        $method->invoke($handler, [[
+            'hash' => md5('retry-binary'),
+            'name' => 'Retry.Binary',
+            'collections_id' => 1,
+            'totalparts' => 2,
+            'filenumber' => 1,
+            'partsize' => 100,
+        ]]);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_binary_aggregate_update_retries_transient_mariadb_record_changed_errors(): void
+    {
+        $handler = new BinaryHandler;
+        $method = new \ReflectionMethod($handler, 'flushUpdatesMysql');
+
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(Mockery::type('string'), Mockery::type('array'))
+            ->andThrow(new QueryException(
+                'mariadb',
+                'UPDATE binaries',
+                [],
+                new \RuntimeException('SQLSTATE[HY000]: General error: 1020 Record has changed since last read in table \'binaries\'; try restarting transaction')
+            ));
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(Mockery::type('string'), Mockery::type('array'))
+            ->andReturn(true);
+
+        $this->assertTrue($method->invoke($handler, [[
+            'id' => 1,
+            'partsize' => 100,
+            'currentparts' => 1,
+        ]], 1000));
     }
 
     public function test_header_storage_batch_reuses_collection_and_binary_for_parts(): void
@@ -283,6 +378,43 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(2, DB::table('parts')->count());
         $this->assertSame(2, (int) $binary->currentparts);
         $this->assertSame(250, (int) $binary->partsize);
+    }
+
+    public function test_header_storage_does_not_increment_binary_counts_for_duplicate_article_replay(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $service = new HeaderStorageService($this->deterministicCollectionHandler(), config: new BinariesConfig(partsChunkSize: 10));
+        $header = $this->parsedHeader(525, 1, 'Duplicate.Article.Replay', 125);
+
+        $this->assertSame([], $service->store([$header], ['id' => 1, 'name' => 'alt.test'], true));
+        $this->assertSame([], $service->store([$header], ['id' => 1, 'name' => 'alt.test'], true));
+
+        $binary = DB::table('binaries')->first();
+
+        $this->assertSame(1, DB::table('parts')->count());
+        $this->assertSame(1, (int) $binary->currentparts);
+        $this->assertSame(125, (int) $binary->partsize);
+    }
+
+    public function test_header_storage_does_not_increment_binary_counts_for_duplicate_multipart_replay(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $service = new HeaderStorageService($this->deterministicCollectionHandler(), config: new BinariesConfig(partsChunkSize: 10));
+        $headers = [
+            $this->parsedHeader(526, 1, 'Duplicate.Multipart.Replay', 125),
+            $this->parsedHeader(527, 2, 'Duplicate.Multipart.Replay', 175),
+        ];
+
+        $this->assertSame([], $service->store($headers, ['id' => 1, 'name' => 'alt.test'], true));
+        $this->assertSame([], $service->store($headers, ['id' => 1, 'name' => 'alt.test'], true));
+
+        $binary = DB::table('binaries')->first();
+
+        $this->assertSame(2, DB::table('parts')->count());
+        $this->assertSame(2, (int) $binary->currentparts);
+        $this->assertSame(300, (int) $binary->partsize);
     }
 
     public function test_header_storage_cleans_each_distinct_subject_once_per_chunk(): void

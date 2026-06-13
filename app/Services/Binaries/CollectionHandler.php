@@ -10,6 +10,7 @@ use App\Services\XrefService;
 use App\Support\Utf8;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Handles collection record creation and retrieval during header storage.
@@ -127,7 +128,7 @@ final class CollectionHandler
 
                 return $collectionId;
             }
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             Log::error('Collection insert failed', [
                 'driver' => DB::getDriverName(),
                 'group_id' => $groupId,
@@ -235,7 +236,7 @@ final class CollectionHandler
                     $resolved[$index] = $collectionId;
                 }
             }
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             Log::error('Bulk collection insert failed', [
                 'driver' => DB::getDriverName(),
                 'group_id' => $groupId,
@@ -393,12 +394,12 @@ final class CollectionHandler
             // "insert or do nothing" idiom that avoids re-writing existing
             // rows (and the redo/binlog churn that comes with it) while still
             // letting LAST_INSERT_ID() return the existing row's id.
-            DB::statement(
+            $this->runCollectionWriteWithRetry(fn (): bool => DB::statement(
                 'INSERT INTO collections (subject, fromname, date, xref, groups_id, totalfiles, collectionhash, collection_regexes_id, dateadded, noise) VALUES '
                 .implode(',', $placeholders)
                 .' ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)',
                 $bindings
-            );
+            ));
         }
 
         $this->batchAppendXrefs($rowsByCollectionKey, $existingHashes);
@@ -443,7 +444,7 @@ final class CollectionHandler
                 .'SET c.xref = CONCAT(c.xref, ?, u.xref_append)';
             $bindings[] = "\n";
 
-            DB::statement($sql, $bindings);
+            $this->runCollectionWriteWithRetry(fn (): bool => DB::statement($sql, $bindings));
         }
     }
 
@@ -594,7 +595,9 @@ final class CollectionHandler
         // append, or 2 when xref was actually appended). LAST_INSERT_ID(id) in
         // the ODKU clause makes lastInsertId() return the existing row id
         // even on a duplicate, so we can't rely on lastInsertId() alone.
-        $affected = (int) DB::affectingStatement($insertSql, $bindings);
+        $affected = (int) $this->runCollectionWriteWithRetry(
+            fn (): int => (int) DB::affectingStatement($insertSql, $bindings)
+        );
         $lastId = (int) DB::connection()->getPdo()->lastInsertId();
 
         if ($lastId > 0) {
@@ -606,6 +609,39 @@ final class CollectionHandler
         }
 
         return (int) (Collection::whereCollectionhash($collectionHash)->value('id') ?? 0);
+    }
+
+    private function runCollectionWriteWithRetry(callable $write): mixed
+    {
+        $attempts = 0;
+
+        while (true) {
+            try {
+                return $write();
+            } catch (Throwable $e) {
+                $attempts++;
+                if ($attempts >= 3 || ! $this->isTransientCollectionWriteFailure($e)) {
+                    throw $e;
+                }
+
+                usleep(25_000 * $attempts);
+            }
+        }
+    }
+
+    private function isTransientCollectionWriteFailure(Throwable $e): bool
+    {
+        $message = $e->getMessage();
+        $previous = $e->getPrevious();
+        if ($previous !== null) {
+            $message .= ' '.$previous->getMessage();
+        }
+
+        return str_contains($message, 'Record has changed since last read')
+            || str_contains($message, 'try restarting transaction')
+            || str_contains($message, 'Deadlock found')
+            || str_contains($message, 'Lock wait timeout')
+            || str_contains($message, 'SQLSTATE[40001]');
     }
 
     /**
