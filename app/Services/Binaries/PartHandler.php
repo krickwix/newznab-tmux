@@ -168,6 +168,10 @@ final class PartHandler
 
             return $totalInserted;
         } catch (\Throwable $e) {
+            if (TransientHeaderStorageFailure::is($e)) {
+                throw $e;
+            }
+
             Log::error('Parts chunk insert failed', [
                 'driver' => $driver,
                 'attempted' => \count($parts),

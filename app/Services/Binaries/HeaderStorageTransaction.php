@@ -83,12 +83,21 @@ final class HeaderStorageTransaction
         } catch (\Throwable $e) {
             $this->rollbackAndCleanup();
 
+            if (TransientHeaderStorageFailure::is($e)) {
+                throw $e;
+            }
+
             if (config('app.debug') === true) {
                 Log::error('HeaderStorageTransaction commit failed: '.$e->getMessage());
             }
 
             return false;
         }
+    }
+
+    public function abort(): void
+    {
+        $this->rollbackAndCleanup();
     }
 
     /**

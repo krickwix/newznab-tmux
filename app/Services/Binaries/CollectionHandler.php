@@ -237,6 +237,10 @@ final class CollectionHandler
                 }
             }
         } catch (Throwable $e) {
+            if (TransientHeaderStorageFailure::is($e)) {
+                throw $e;
+            }
+
             Log::error('Bulk collection insert failed', [
                 'driver' => DB::getDriverName(),
                 'group_id' => $groupId,
@@ -620,28 +624,13 @@ final class CollectionHandler
                 return $write();
             } catch (Throwable $e) {
                 $attempts++;
-                if ($attempts >= 3 || ! $this->isTransientCollectionWriteFailure($e)) {
+                if ($attempts >= 3 || ! TransientHeaderStorageFailure::canRetryStatement($e)) {
                     throw $e;
                 }
 
                 usleep(25_000 * $attempts);
             }
         }
-    }
-
-    private function isTransientCollectionWriteFailure(Throwable $e): bool
-    {
-        $message = $e->getMessage();
-        $previous = $e->getPrevious();
-        if ($previous !== null) {
-            $message .= ' '.$previous->getMessage();
-        }
-
-        return str_contains($message, 'Record has changed since last read')
-            || str_contains($message, 'try restarting transaction')
-            || str_contains($message, 'Deadlock found')
-            || str_contains($message, 'Lock wait timeout')
-            || str_contains($message, 'SQLSTATE[40001]');
     }
 
     /**

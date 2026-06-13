@@ -12,6 +12,8 @@ namespace App\Services\Binaries;
  */
 final class HeaderStorageService
 {
+    private const MAX_CHUNK_ATTEMPTS = 3;
+
     private CollectionHandler $collectionHandler;
 
     private BinaryHandler $binaryHandler;
@@ -82,15 +84,57 @@ final class HeaderStorageService
      */
     private function storeChunk(array $headers, array $groupMySQL, bool $addToPartRepair): void
     {
-        $this->collectionHandler->reset();
-        $this->binaryHandler->reset();
-        $this->partHandler->reset();
-        $this->partHandler->setAddToPartRepair($addToPartRepair);
-
         $chunkNumbers = array_values(array_filter(array_map(
             static fn (array $header): mixed => $header['Number'] ?? null,
             $headers
         )));
+
+        $failedBaseCount = \count($this->failedInserts);
+
+        for ($attempt = 1; $attempt <= self::MAX_CHUNK_ATTEMPTS; $attempt++) {
+            try {
+                if ($this->storeChunkOnce($headers, $groupMySQL, $addToPartRepair, $chunkNumbers)) {
+                    return;
+                }
+
+                return;
+            } catch (\Throwable $e) {
+                $this->failedInserts = \array_slice($this->failedInserts, 0, $failedBaseCount);
+
+                if (! TransientHeaderStorageFailure::is($e)) {
+                    throw $e;
+                }
+
+                if ($attempt >= self::MAX_CHUNK_ATTEMPTS) {
+                    if ($addToPartRepair) {
+                        $this->failedInserts = array_merge(
+                            $this->failedInserts,
+                            $chunkNumbers,
+                            $this->partHandler->getFailedNumbers()
+                        );
+                    }
+
+                    return;
+                }
+
+                usleep(50_000 * $attempt);
+            }
+        }
+    }
+
+    /**
+     * Store one bounded header chunk attempt inside its own transaction.
+     *
+     * @param  array<int, array<string, mixed>>  $headers
+     * @param  array<string, mixed>  $groupMySQL
+     * @param  list<int>  $chunkNumbers
+     */
+    private function storeChunkOnce(array $headers, array $groupMySQL, bool $addToPartRepair, array $chunkNumbers): bool
+    {
+        $this->collectionHandler->reset();
+        $this->binaryHandler->reset();
+        $this->partHandler->reset();
+        $this->partHandler->setAddToPartRepair($addToPartRepair);
 
         // Create transaction
         $transaction = new HeaderStorageTransaction(
@@ -99,41 +143,49 @@ final class HeaderStorageService
             $this->partHandler
         );
 
-        $transaction->begin();
+        try {
+            $transaction->begin();
 
-        $this->processHeaderChunk($headers, $groupMySQL, $transaction, $addToPartRepair);
+            $this->processHeaderChunk($headers, $groupMySQL, $transaction, $addToPartRepair);
 
-        // Flush remaining parts
-        if ($this->partHandler->hasPending()) {
-            if (! $this->partHandler->flush()) {
-                $transaction->markError();
-            }
-        }
-
-        // Flush binary aggregate updates
-        if (! $transaction->hasErrors()) {
-            if (! $this->binaryHandler->flushUpdates($this->config->binariesUpdateChunkSize)) {
-                $transaction->markError();
-            }
-        }
-
-        // Finish transaction
-        if (! $transaction->finish()) {
-            if ($addToPartRepair) {
-                $this->failedInserts = array_merge(
-                    $this->failedInserts,
-                    $chunkNumbers,
-                    $this->partHandler->getFailedNumbers()
-                );
+            // Flush remaining parts
+            if ($this->partHandler->hasPending()) {
+                if (! $this->partHandler->flush()) {
+                    $transaction->markError();
+                }
             }
 
-            return;
+            // Flush binary aggregate updates
+            if (! $transaction->hasErrors()) {
+                if (! $this->binaryHandler->flushUpdates($this->config->binariesUpdateChunkSize)) {
+                    $transaction->markError();
+                }
+            }
+
+            // Finish transaction
+            if (! $transaction->finish()) {
+                if ($addToPartRepair) {
+                    $this->failedInserts = array_merge(
+                        $this->failedInserts,
+                        $chunkNumbers,
+                        $this->partHandler->getFailedNumbers()
+                    );
+                }
+
+                return false;
+            }
+        } catch (\Throwable $e) {
+            $transaction->abort();
+
+            throw $e;
         }
 
         $this->failedInserts = array_merge(
             $this->failedInserts,
             $this->partHandler->getFailedNumbers()
         );
+
+        return true;
     }
 
     /**

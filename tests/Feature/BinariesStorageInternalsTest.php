@@ -9,6 +9,7 @@ use App\Services\Binaries\HeaderParser;
 use App\Services\Binaries\HeaderStorageService;
 use App\Services\Binaries\HeaderStorageTransaction;
 use App\Services\Binaries\PartHandler;
+use App\Services\Binaries\TransientHeaderStorageFailure;
 use App\Services\BlacklistService;
 use App\Services\CollectionsCleaningService;
 use Illuminate\Database\QueryException;
@@ -178,6 +179,149 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame([702], $handler->getFailedNumbers());
     }
 
+    public function test_transient_header_storage_failure_classifies_database_lock_errors(): void
+    {
+        foreach ([
+            'SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction',
+            'SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded; try restarting transaction',
+            'SQLSTATE[HY000]: General error: 1020 Record has changed since last read in table \'collections\'; try restarting transaction',
+            'WSREP detected deadlock/conflict and aborted the transaction. Try restarting the transaction',
+            'The process has been chosen as the deadlock victim',
+        ] as $message) {
+            $this->assertTrue(TransientHeaderStorageFailure::is($this->transientQueryException($message)), $message);
+        }
+
+        $this->assertFalse(TransientHeaderStorageFailure::is(new QueryException(
+            'sqlite',
+            'INSERT INTO collections',
+            [],
+            new \RuntimeException('SQLSTATE[42S02]: Base table or view not found: missing table')
+        )));
+    }
+
+    public function test_binary_statement_retry_does_not_retry_inside_transaction(): void
+    {
+        $handler = new BinaryHandler;
+        $method = new \ReflectionMethod($handler, 'runBinaryWriteWithRetry');
+        $calls = 0;
+
+        DB::beginTransaction();
+
+        try {
+            $method->invoke($handler, function () use (&$calls): void {
+                $calls++;
+
+                throw $this->transientQueryException('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction');
+            });
+
+            $this->fail('Transient failures inside a transaction must bubble to the chunk retry wrapper.');
+        } catch (QueryException) {
+            $this->assertSame(1, $calls);
+        } finally {
+            while (DB::transactionLevel() > 0) {
+                DB::rollBack();
+            }
+        }
+    }
+
+    public function test_header_storage_retries_entire_chunk_after_transient_transaction_failure(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $cleaner = new class extends CollectionsCleaningService
+        {
+            public int $calls = 0;
+
+            public function __construct()
+            {
+                parent::__construct();
+            }
+
+            public function collectionsCleaner(string $subject, string $groupName = ''): array
+            {
+                $this->calls++;
+
+                if ($this->calls === 1) {
+                    throw new QueryException(
+                        'mariadb',
+                        'INSERT INTO collections',
+                        [],
+                        new \RuntimeException('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction')
+                    );
+                }
+
+                return ['id' => 0, 'name' => $subject];
+            }
+        };
+
+        $service = new HeaderStorageService(
+            new CollectionHandler($cleaner),
+            config: new BinariesConfig(partsChunkSize: 10, headerChunkSize: 10)
+        );
+
+        $failed = $service->store([
+            $this->parsedHeader(751, 1, 'Transient.Chunk.Retry', 100),
+            $this->parsedHeader(752, 2, 'Transient.Chunk.Retry', 150),
+        ], ['id' => 1, 'name' => 'alt.test'], true);
+
+        $binary = DB::table('binaries')->first();
+
+        $this->assertSame([], $failed);
+        $this->assertSame(2, $cleaner->calls);
+        $this->assertSame(1, DB::table('collections')->count());
+        $this->assertSame(1, DB::table('binaries')->count());
+        $this->assertSame(2, DB::table('parts')->count());
+        $this->assertSame(2, (int) $binary->currentparts);
+        $this->assertSame(250, (int) $binary->partsize);
+        $this->assertSame(0, DB::transactionLevel());
+    }
+
+    public function test_header_storage_exhausts_transient_chunk_retries_without_partial_rows(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $cleaner = new class extends CollectionsCleaningService
+        {
+            public int $calls = 0;
+
+            public function __construct()
+            {
+                parent::__construct();
+            }
+
+            public function collectionsCleaner(string $subject, string $groupName = ''): array
+            {
+                $this->calls++;
+
+                throw new QueryException(
+                    'mariadb',
+                    'INSERT INTO collections',
+                    [],
+                    new \RuntimeException('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction')
+                );
+            }
+        };
+
+        $service = new HeaderStorageService(
+            new CollectionHandler($cleaner),
+            config: new BinariesConfig(partsChunkSize: 10, headerChunkSize: 10)
+        );
+
+        $failed = $service->store([
+            $this->parsedHeader(761, 1, 'Transient.Chunk.Exhausted', 100),
+            $this->parsedHeader(762, 2, 'Transient.Chunk.Exhausted', 150),
+        ], ['id' => 1, 'name' => 'alt.test'], true);
+
+        sort($failed);
+
+        $this->assertSame([761, 762], $failed);
+        $this->assertSame(3, $cleaner->calls);
+        $this->assertSame(0, DB::table('collections')->count());
+        $this->assertSame(0, DB::table('binaries')->count());
+        $this->assertSame(0, DB::table('parts')->count());
+        $this->assertSame(0, DB::transactionLevel());
+    }
+
     public function test_collection_handler_logs_bulk_insert_failures_when_debug_is_disabled(): void
     {
         config(['app.debug' => false]);
@@ -336,6 +480,28 @@ class BinariesStorageInternalsTest extends TestCase
             'partsize' => 100,
             'currentparts' => 1,
         ]], 1000));
+    }
+
+    public function test_binary_aggregate_update_bubbles_transient_failures_inside_transaction(): void
+    {
+        $handler = new BinaryHandler;
+        $this->setPrivateProperty($handler, 'binariesUpdate', [
+            1 => ['Size' => 100, 'Parts' => 1],
+        ]);
+
+        $connection = Mockery::mock();
+        $connection->shouldReceive('transactionLevel')->once()->andReturn(1);
+
+        DB::shouldReceive('getDriverName')->once()->andReturn('mysql');
+        DB::shouldReceive('connection')->once()->andReturn($connection);
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(Mockery::type('string'), Mockery::type('array'))
+            ->andThrow($this->transientQueryException('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction'));
+
+        $this->expectException(QueryException::class);
+
+        $handler->flushUpdates();
     }
 
     public function test_header_storage_batch_reuses_collection_and_binary_for_parts(): void
@@ -617,5 +783,15 @@ class BinariesStorageInternalsTest extends TestCase
     {
         $reflection = new \ReflectionProperty($object, $property);
         $reflection->setValue($object, $value);
+    }
+
+    private function transientQueryException(string $message): QueryException
+    {
+        return new QueryException(
+            'mariadb',
+            'INSERT INTO collections',
+            [],
+            new \RuntimeException($message)
+        );
     }
 }

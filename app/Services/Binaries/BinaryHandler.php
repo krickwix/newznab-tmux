@@ -206,6 +206,10 @@ final class BinaryHandler
                 }
             }
         } catch (Throwable $e) {
+            if (TransientHeaderStorageFailure::is($e)) {
+                throw $e;
+            }
+
             Log::error('Bulk binary insert failed', [
                 'driver' => DB::getDriverName(),
                 'group_id' => $groupId,
@@ -627,6 +631,10 @@ final class BinaryHandler
 
             return $this->flushUpdatesMysql($updates, $chunkSize); // @phpstan-ignore argument.type
         } catch (Throwable $e) {
+            if (TransientHeaderStorageFailure::is($e)) {
+                throw $e;
+            }
+
             Log::error('Binaries aggregate update failed', [
                 'driver' => $driver,
                 'updates' => \count($updates),
@@ -695,28 +703,13 @@ final class BinaryHandler
                 return $write();
             } catch (Throwable $e) {
                 $attempts++;
-                if ($attempts >= 3 || ! $this->isTransientBinaryWriteFailure($e)) {
+                if ($attempts >= 3 || ! TransientHeaderStorageFailure::canRetryStatement($e)) {
                     throw $e;
                 }
 
                 usleep(25_000 * $attempts);
             }
         }
-    }
-
-    private function isTransientBinaryWriteFailure(Throwable $e): bool
-    {
-        $message = $e->getMessage();
-        $previous = $e->getPrevious();
-        if ($previous !== null) {
-            $message .= ' '.$previous->getMessage();
-        }
-
-        return str_contains($message, 'Record has changed since last read')
-            || str_contains($message, 'try restarting transaction')
-            || str_contains($message, 'Deadlock found')
-            || str_contains($message, 'Lock wait timeout')
-            || str_contains($message, 'SQLSTATE[40001]');
     }
 
     /**
