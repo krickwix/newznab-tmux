@@ -437,12 +437,18 @@ final class ReleaseProcessingService
         $stats = ['minSize' => 0, 'maxSize' => 0, 'minFiles' => 0, 'par2Only' => 0];
 
         // Delete collections where ALL binaries are par2 files (no actual content)
-        $par2OnlyCollectionIds = DB::table('collections as c')
+        $par2OnlyQuery = DB::table('collections as c')
             ->join('binaries as b', 'c.id', '=', 'b.collections_id')
             ->where('c.filecheck', CollectionFileCheckStatus::Sized->value)
             ->where('c.filesize', '>', 0)
             ->groupBy('c.id')
-            ->havingRaw("COUNT(b.id) = SUM(CASE WHEN b.name REGEXP '\\\\.(vol[0-9]+\\\\+[0-9]+\\\\.par2|par2)' THEN 1 ELSE 0 END)")
+            ->havingRaw("COUNT(b.id) = SUM(CASE WHEN b.name REGEXP '\\\\.(vol[0-9]+\\\\+[0-9]+\\\\.par2|par2)' THEN 1 ELSE 0 END)");
+
+        if ($normalizedGroupId !== null) {
+            $par2OnlyQuery->where('c.groups_id', $normalizedGroupId);
+        }
+
+        $par2OnlyCollectionIds = $par2OnlyQuery
             ->pluck('c.id')
             ->all();
 
@@ -455,17 +461,19 @@ final class ReleaseProcessingService
         }
 
         foreach ($groupIDs as $grpID) {
-            $groupSettings = UsenetGroup::getGroupByID($grpID['id']);
+            $currentGroupId = (int) $grpID['id'];
+            $groupSettings = UsenetGroup::getGroupByID($currentGroupId);
             $groupMinSize = (int) ($groupSettings['minsizetoformrelease'] ?? 0);
             $groupMinFiles = (int) ($groupSettings['minfilestoformrelease'] ?? 0);
 
-            if (! $this->hasSizedCollections()) {
+            if (! $this->hasSizedCollections($currentGroupId)) {
                 continue;
             }
 
             $effectiveMinSize = max($groupMinSize, $this->settings->minSizeToFormRelease);
             if ($effectiveMinSize > 0) {
                 $ids = Collection::query()
+                    ->where('groups_id', $currentGroupId)
                     ->where('filecheck', CollectionFileCheckStatus::Sized->value)
                     ->where('filesize', '>', 0)
                     ->where('filesize', '<', $effectiveMinSize)
@@ -480,6 +488,7 @@ final class ReleaseProcessingService
 
             if ($this->settings->maxSizeToFormRelease > 0) {
                 $ids = Collection::query()
+                    ->where('groups_id', $currentGroupId)
                     ->where('filecheck', CollectionFileCheckStatus::Sized->value)
                     ->where('filesize', '>', $this->settings->maxSizeToFormRelease)
                     ->pluck('id')
@@ -494,6 +503,7 @@ final class ReleaseProcessingService
             $effectiveMinFiles = max($groupMinFiles, $this->settings->minFilesToFormRelease);
             if ($effectiveMinFiles > 0) {
                 $ids = Collection::query()
+                    ->where('groups_id', $currentGroupId)
                     ->where('filecheck', CollectionFileCheckStatus::Sized->value)
                     ->where('filesize', '>', 0)
                     ->where('totalfiles', '<', $effectiveMinFiles)
@@ -701,12 +711,17 @@ final class ReleaseProcessingService
         return $query->count('id');
     }
 
-    private function hasSizedCollections(): bool
+    private function hasSizedCollections(?int $groupId = null): bool
     {
-        return Collection::query()
+        $query = Collection::query()
             ->where('filecheck', CollectionFileCheckStatus::Sized->value)
-            ->where('filesize', '>', 0)
-            ->exists();
+            ->where('filesize', '>', 0);
+
+        if ($groupId !== null) {
+            $query->where('groups_id', $groupId);
+        }
+
+        return $query->exists();
     }
 
     private function normalizeGroupId(int|string|null $groupID): ?int

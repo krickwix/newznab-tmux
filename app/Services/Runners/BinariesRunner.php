@@ -90,30 +90,9 @@ class BinariesRunner extends BaseRunner
         $i = 1;
         $queues = [];
         foreach ($groups as $group) {
-            if ((int) $group->our_last === 0) {
-                $queues[$i] = sprintf('update_group_headers  %s', $group->groupname);
+            foreach ($this->safeBinaryQueueEntries($group, $maxMessages, $maxHeaders) as $queueFactory) {
+                $queues[$i] = $queueFactory($i);
                 $i++;
-            } else {
-                $count = $group->their_last - $group->our_last - 20000; // skip first 20k
-                if ($count <= $maxMessages * 2) {
-                    $queues[$i] = sprintf('update_group_headers  %s', $group->groupname);
-                    $i++;
-                } else {
-                    $queues[$i] = sprintf('part_repair  %s', $group->groupname);
-                    $i++;
-                    $getEach = (int) floor(min($count, $maxHeaders) / $maxMessages);
-                    $remaining = (int) (min($count, $maxHeaders) - $getEach * $maxMessages);
-                    for ($j = 0; $j < $getEach; $j++) {
-                        $queues[$i] = sprintf('get_range  binaries  %s  %s  %s  %s', $group->groupname, $group->our_last + $j * $maxMessages + 1, $group->our_last + $j * $maxMessages + $maxMessages, $i);
-                        $i++;
-                    }
-                    if ($remaining > 0) {
-                        $start = $group->our_last + $getEach * $maxMessages + 1;
-                        $end = $start + $remaining;
-                        $queues[$i] = sprintf('get_range  binaries  %s  %s  %s  %s', $group->groupname, $start, $end, $i);
-                        $i++;
-                    }
-                }
             }
         }
 
@@ -149,5 +128,58 @@ class BinariesRunner extends BaseRunner
                 cli()->primary('Updated group '.$group);
             }
         }
+    }
+
+    /**
+     * @return list<callable(int): string>
+     */
+    public function safeBinaryQueueEntries(object $group, int $maxMessages, int $maxHeaders): array
+    {
+        if ((int) $group->our_last === 0) {
+            return [
+                static fn (int $index): string => sprintf('update_group_headers  %s', $group->groupname),
+            ];
+        }
+
+        $count = (int) $group->their_last - (int) $group->our_last - 20000; // skip first 20k
+        if ($count <= $maxMessages * 2) {
+            return [
+                static fn (int $index): string => sprintf('update_group_headers  %s', $group->groupname),
+            ];
+        }
+
+        $limit = min($count, $maxHeaders);
+        $fullChunks = (int) floor($limit / $maxMessages);
+        $remaining = (int) ($limit - $fullChunks * $maxMessages);
+
+        $queues = [
+            static fn (int $index): string => sprintf('part_repair  %s', $group->groupname),
+        ];
+
+        for ($j = 0; $j < $fullChunks; $j++) {
+            $start = (int) $group->our_last + $j * $maxMessages + 1;
+            $end = (int) $group->our_last + $j * $maxMessages + $maxMessages;
+            $queues[] = static fn (int $index): string => sprintf(
+                'get_range  binaries  %s  %s  %s  %s',
+                $group->groupname,
+                $start,
+                $end,
+                $index
+            );
+        }
+
+        if ($remaining > 0) {
+            $start = (int) $group->our_last + $fullChunks * $maxMessages + 1;
+            $end = $start + $remaining - 1;
+            $queues[] = static fn (int $index): string => sprintf(
+                'get_range  binaries  %s  %s  %s  %s',
+                $group->groupname,
+                $start,
+                $end,
+                $index
+            );
+        }
+
+        return $queues;
     }
 }
