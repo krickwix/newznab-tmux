@@ -98,7 +98,13 @@ final class NzbBacklogCreationService
                     ->whereColumn('collections.releases_id', 'releases.id')
                     ->where(function ($query) use ($completion): void {
                         $query->whereRaw('binaries.currentparts < CEIL(binaries.totalparts * ? / 100)', [$completion])
-                            ->orWhere('binaries.totalparts', '<=', 0);
+                            ->orWhere('binaries.totalparts', '<=', 0)
+                            ->orWhereNotExists(function ($query): void {
+                                $query->selectRaw('1')
+                                    ->from('parts')
+                                    ->whereColumn('parts.binaries_id', 'binaries.id')
+                                    ->limit(1);
+                            });
                     })
                     ->limit(1);
             })

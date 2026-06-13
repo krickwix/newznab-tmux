@@ -211,6 +211,37 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
     }
 
+    public function test_command_skips_release_when_any_collection_binary_has_no_parts(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+        DB::table('binaries')->insert([
+            'id' => 101,
+            'name' => 'Release 1 sibling yEnc',
+            'collections_id' => 10,
+            'currentparts' => 1,
+            'totalparts' => 1,
+        ]);
+        $this->seedRelease(2, groupId: 1, leftGuid: 'a');
+
+        $writtenIds = [];
+        $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+            DB::table('releases')->where('id', $release->id)->update(['nzbstatus' => NzbService::NZB_ADDED]);
+
+            return true;
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--groups' => 'alt.binaries.boneless',
+            '--leftguid' => 'a',
+            '--limit' => 1,
+            '--sleep' => 0,
+        ])->assertSuccessful();
+
+        $this->assertSame([2], $writtenIds);
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
     public function test_command_rejects_invalid_leftguid_partition(): void
     {
         $this->bindNzbWriter(static function (): bool {
