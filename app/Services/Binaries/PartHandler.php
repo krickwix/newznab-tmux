@@ -121,6 +121,17 @@ final class PartHandler
             }
         }
 
+        $failedCount = \count($this->failedPartNumbers);
+        if ($failedCount > 0) {
+            Log::warning('Parts insert partially failed', [
+                'driver' => DB::getDriverName(),
+                'attempted' => \count($this->parts),
+                'inserted' => $insertedCount,
+                'failed' => $failedCount,
+                'failed_numbers' => array_slice(array_values($this->failedPartNumbers), 0, 10),
+            ]);
+        }
+
         $this->parts = [];
 
         return empty($this->failedPartNumbers);
@@ -157,9 +168,12 @@ final class PartHandler
 
             return $totalInserted;
         } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Parts chunk insert failed: '.$e->getMessage());
-            }
+            Log::error('Parts chunk insert failed', [
+                'driver' => $driver,
+                'attempted' => \count($parts),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
 
             return null;
         }

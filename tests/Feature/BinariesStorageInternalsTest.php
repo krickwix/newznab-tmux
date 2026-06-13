@@ -12,6 +12,8 @@ use App\Services\Binaries\PartHandler;
 use App\Services\BlacklistService;
 use App\Services\CollectionsCleaningService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Mockery;
 use Tests\TestCase;
 
 class BinariesStorageInternalsTest extends TestCase
@@ -143,6 +145,101 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(1, DB::table('binaries')->count());
         $this->assertSame(2, DB::table('parts')->count());
         $this->assertSame([301, 302], DB::table('parts')->orderBy('number')->pluck('number')->all());
+    }
+
+    public function test_part_handler_logs_partial_insert_failures_when_debug_is_disabled(): void
+    {
+        config(['app.debug' => false]);
+        DB::statement('CREATE TABLE parts (
+            binaries_id INT,
+            number INT,
+            messageid VARCHAR(255),
+            partnumber INT,
+            size INT CHECK(size < 500),
+            UNIQUE(binaries_id, number)
+        )');
+
+        Log::shouldReceive('warning')
+            ->once()
+            ->with(
+                'Parts insert partially failed',
+                Mockery::on(static fn (array $context): bool => $context['attempted'] === 2
+                    && $context['inserted'] === 1
+                    && $context['failed'] === 1
+                    && $context['failed_numbers'] === [702])
+            );
+
+        $handler = new PartHandler(100);
+        $this->assertTrue($handler->addPart(1, $this->parsedHeader(701, 1, 'Partial.Insert', 100)));
+        $this->assertTrue($handler->addPart(1, $this->parsedHeader(702, 2, 'Partial.Insert', 999)));
+
+        $this->assertFalse($handler->flush());
+        $this->assertSame([702], $handler->getFailedNumbers());
+    }
+
+    public function test_collection_handler_logs_bulk_insert_failures_when_debug_is_disabled(): void
+    {
+        config(['app.debug' => false]);
+        DB::statement('CREATE TABLE collections (
+            id INTEGER PRIMARY KEY,
+            collectionhash VARCHAR(40) UNIQUE,
+            xref TEXT DEFAULT \'\'
+        )');
+
+        Log::shouldReceive('error')
+            ->once()
+            ->with(
+                'Bulk collection insert failed',
+                Mockery::on(static fn (array $context): bool => $context['driver'] === 'sqlite'
+                    && $context['group_id'] === 1
+                    && $context['pending'] === 1
+                    && $context['exception'] !== ''
+                    && str_contains($context['message'], 'collection_regexes_id'))
+            );
+
+        $handler = $this->deterministicCollectionHandler();
+        $resolved = $handler->getOrCreateCollections(
+            [$this->parsedHeader(801, 1, 'Collection.Log', 100)],
+            1,
+            'alt.test',
+            [0 => 2],
+            'batch-noise'
+        );
+
+        $this->assertSame([], $resolved);
+    }
+
+    public function test_binary_handler_logs_bulk_insert_failures_when_debug_is_disabled(): void
+    {
+        config(['app.debug' => false]);
+        DB::statement('CREATE TABLE binaries (
+            id INTEGER PRIMARY KEY,
+            binaryhash BLOB,
+            collections_id INT,
+            UNIQUE(binaryhash, collections_id)
+        )');
+
+        Log::shouldReceive('error')
+            ->once()
+            ->with(
+                'Bulk binary insert failed',
+                Mockery::on(static fn (array $context): bool => $context['driver'] === 'sqlite'
+                    && $context['group_id'] === 1
+                    && $context['pending'] === 1
+                    && $context['exception'] !== ''
+                    && str_contains($context['message'], 'currentparts'))
+            );
+
+        $handler = new BinaryHandler;
+        $resolved = $handler->getOrCreateBinaries([
+            0 => [
+                'header' => $this->parsedHeader(901, 1, 'Binary.Log', 100),
+                'collection_id' => 1,
+                'file_number' => 1,
+            ],
+        ], 1);
+
+        $this->assertSame([], $resolved);
     }
 
     public function test_header_storage_batch_reuses_collection_and_binary_for_parts(): void

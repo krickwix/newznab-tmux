@@ -128,9 +128,13 @@ final class CollectionHandler
                 return $collectionId;
             }
         } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Collection insert failed: '.$e->getMessage());
-            }
+            Log::error('Collection insert failed', [
+                'driver' => DB::getDriverName(),
+                'group_id' => $groupId,
+                'subject' => $subject,
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
         }
 
         return null;
@@ -232,9 +236,14 @@ final class CollectionHandler
                 }
             }
         } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Bulk collection insert failed: '.$e->getMessage());
-            }
+            Log::error('Bulk collection insert failed', [
+                'driver' => DB::getDriverName(),
+                'group_id' => $groupId,
+                'pending' => \count($pending),
+                'sample_hashes' => array_slice(array_column($pending, 'collectionhash'), 0, 5),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
         }
 
         return $resolved;

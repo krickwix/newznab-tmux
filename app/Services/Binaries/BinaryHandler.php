@@ -87,9 +87,14 @@ final class BinaryHandler
                 return $binaryId;
             }
         } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Binary insert failed: '.$e->getMessage());
-            }
+            Log::error('Binary insert failed', [
+                'driver' => DB::getDriverName(),
+                'collection_id' => $collectionId,
+                'group_id' => $groupId,
+                'hash' => $hash,
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
         }
 
         return null;
@@ -178,9 +183,14 @@ final class BinaryHandler
                 }
             }
         } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Bulk binary insert failed: '.$e->getMessage());
-            }
+            Log::error('Bulk binary insert failed', [
+                'driver' => DB::getDriverName(),
+                'group_id' => $groupId,
+                'pending' => \count($pending),
+                'sample_hashes' => array_slice(array_column($pending, 'hash'), 0, 5),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
         }
 
         return $resolved;
@@ -451,9 +461,12 @@ final class BinaryHandler
 
             return $this->flushUpdatesMysql($updates, $chunkSize); // @phpstan-ignore argument.type
         } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Binaries aggregate update failed: '.$e->getMessage());
-            }
+            Log::error('Binaries aggregate update failed', [
+                'driver' => $driver,
+                'updates' => \count($updates),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
 
             return false;
         }
