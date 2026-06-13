@@ -94,12 +94,12 @@ class RecategorizeReleases extends Command
         $count = $countQuery->count();
 
         $cat = new CategorizationService;
-        $results = $countQuery->select(['id', 'searchname', 'fromname', 'groups_id', 'categories_id'])->get();
+        $results = $countQuery->select(['id', 'name', 'searchname', 'fromname', 'groups_id', 'categories_id'])->get();
         $bar = $this->output->createProgressBar($count);
         $bar->start();
         foreach ($results as $result) {
             $bar->advance();
-            $catId = $cat->determineCategory($result->groups_id, $result->searchname, $result->fromname);
+            $catId = $this->determineBestCategory($cat, $result);
             if ((int) $result->categories_id !== (int) $catId['categories_id']) {
                 if ($this->option('test')) {
                     $this->info('Would have changed '.$result->searchname.' from '.$result->categories_id.' to '.$catId['categories_id']);
@@ -135,5 +135,60 @@ class RecategorizeReleases extends Command
             }
         }
         $bar->finish();
+    }
+
+    /**
+     * @param  object{id:int,name?:string,searchname:string,fromname?:string|null,groups_id:int|string,categories_id:int|string}  $release
+     * @return array<string, mixed>
+     */
+    private function determineBestCategory(CategorizationService $categorization, object $release): array
+    {
+        $poster = ! empty($release->fromname) ? (string) $release->fromname : '';
+        $searchResult = $categorization->determineCategory($release->groups_id, (string) $release->searchname, $poster, true);
+
+        if (! in_array((int) $release->categories_id, Category::OTHERS_GROUP, true)) {
+            return $searchResult;
+        }
+
+        $subject = trim((string) ($release->name ?? ''));
+        if ($subject === '' || strcasecmp($subject, (string) $release->searchname) === 0) {
+            return $searchResult;
+        }
+
+        $subjectResult = $categorization->determineCategory($release->groups_id, $subject, $poster, true);
+        if (! $this->isContentCategory($subjectResult)) {
+            if ((int) $release->categories_id === Category::OTHER_HASHED
+                && (int) ($searchResult['categories_id'] ?? Category::OTHER_MISC) === Category::OTHER_HASHED
+                && $this->isWeakGroupFallback($subjectResult)) {
+                return $subjectResult;
+            }
+
+            return $searchResult;
+        }
+
+        if (! $this->isContentCategory($searchResult) || $this->isWeakGroupFallback($searchResult)) {
+            return $subjectResult;
+        }
+
+        return $searchResult;
+    }
+
+    /**
+     * @param  array<string, mixed>  $categoryResult
+     */
+    private function isContentCategory(array $categoryResult): bool
+    {
+        return ! in_array((int) ($categoryResult['categories_id'] ?? Category::OTHER_MISC), Category::OTHERS_GROUP, true);
+    }
+
+    /**
+     * @param  array<string, mixed>  $categoryResult
+     */
+    private function isWeakGroupFallback(array $categoryResult): bool
+    {
+        $matchedBy = (string) ($categoryResult['debug']['matched_by'] ?? '');
+
+        return str_starts_with($matchedBy, 'group_name_')
+            || $matchedBy === 'classic_movie_title';
     }
 }

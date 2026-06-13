@@ -153,6 +153,7 @@ class MovieCategorizer extends AbstractCategorizer
         }
 
         $hasVideoEvidence = (bool) preg_match('/(?:\.|\b)(?:nfo|rar|par2|avi|mkv|mp4|mpg|mpeg|vob|iso|nzb)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $name)
+            || $this->looksLikeNumberedImageVideoSidecar($name)
             || preg_match('/\b(?:480p|576p|720p|1080p|x264|x265|h\.?264|h\.?265|xvid|divx|avi|mkv|mp4|mpg|mpeg|vcd|svcd|dvdrip|vhsrip|dvd|disc|film|films|shorts?)\b/i', $name)
             || preg_match('/\b(?:19|20)\d{2}-\d{1,3}(?:-\d{1,3})?mn\b/i', $name);
 
@@ -297,8 +298,13 @@ class MovieCategorizer extends AbstractCategorizer
 
         if (preg_match('/(?:^|[._ \(-])(?:19|20)\d{2}(?:$|[._ -]|\)|\])/i', $name) &&
             (preg_match('/(?:\.|\b)(?:avi|mkv|mp4|mpg|mpeg|vob)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $name)
+                || $this->looksLikeNumberedImageVideoSidecar($name)
                 || preg_match('/\b(?:VCD|SVCD)[._ -]?(?:Collection|Disc|Movie|Film)\b/i', $name)
                 || preg_match('/\b(?:19|20)\d{2}-\d{1,3}(?:-\d{1,3})?mn\b/i', $name))) {
+            return $this->matched(Category::MOVIE_SD, 0.82, 'vintage_film_sd');
+        }
+
+        if ($this->looksLikeNumberedImageVideoSidecar($name)) {
             return $this->matched(Category::MOVIE_SD, 0.82, 'vintage_film_sd');
         }
 
@@ -325,6 +331,11 @@ class MovieCategorizer extends AbstractCategorizer
         }
 
         return (bool) preg_match('/(?:19|20)\d{2}|\bmovie\b|\bfilm\b/i', $name);
+    }
+
+    protected function looksLikeNumberedImageVideoSidecar(string $name): bool
+    {
+        return preg_match('/\b(?:avi|mkv|mp4|mpg|mpeg|vob)[._ -]\d{1,4}[._ -](?:jpe?g|png)\b/i', $name) === 1;
     }
 
     protected function looksLikeDocumentaryVideoPost(string $name, ReleaseContext $context): bool

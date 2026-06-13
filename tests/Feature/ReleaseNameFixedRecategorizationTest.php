@@ -519,6 +519,108 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(Category::MOVIE_OTHER, $alreadyMovie->categories_id);
     }
 
+    public function test_recategorize_releases_uses_original_subject_when_searchname_lost_category_evidence(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.dvd.classics',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'DVDFab v12.4.2.5 (x64) + Fix - [02/15] - "DVDFab v12.4.2.5 (x64) + Fix.par2" yEnc',
+            'searchname' => 'DVDFabActivator20221206.Cmd',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('9', 40),
+            'leftguid' => '9',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::PC_0DAY, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_recategorize_releases_moves_readable_vintage_subject_out_of_hashed(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.multimedia.vintage-film.post-1960',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'Hellfighters [0769/1127] "hellfighters.1080.vol085+2.PAR2.bad" yEnc',
+            'searchname' => 'hellfighters.1080',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('8', 40),
+            'leftguid' => '8',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::MOVIE_OTHER, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_recategorize_releases_handles_vintage_video_image_sidecar_subject(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.multimedia.vintage-film.post-1960',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'THE WRONG BOX.1966.Xvid-KG.[02/87] - "WrongBox.avi.2.jpg" yEnc',
+            'searchname' => 'THE WRONG BOX.1966.Xvid-KG.[02/87] - "WrongBox.avi.2.jpg"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('7', 40),
+            'leftguid' => '7',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::MOVIE_SD, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
     private function setEnvironmentValue(string $key, ?string $value): void
     {
         if ($value === null) {
@@ -572,6 +674,7 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
                 ['id' => Category::OTHER_HASHED, 'title' => 'Hashed', 'root_categories_id' => Category::OTHER_ROOT],
                 ['id' => Category::MOVIE_OTHER, 'title' => 'Other', 'root_categories_id' => Category::MOVIE_ROOT],
                 ['id' => Category::MOVIE_SD, 'title' => 'SD', 'root_categories_id' => Category::MOVIE_ROOT],
+                ['id' => Category::PC_0DAY, 'title' => '0day', 'root_categories_id' => Category::PC_ROOT],
             ]);
         }
 

@@ -327,6 +327,10 @@ class FileNameExtractor
         $candidate = trim((string) preg_replace('/\s+-\s*$/', '', $candidate));
         $candidate = trim($candidate, " \t\n\r\0\x0B.-_[]");
 
+        if ($candidate !== '' && $this->isBracketedBareYearSubjectTitle($candidate, $subject)) {
+            return NameFixResult::fromMatch($candidate, 'yEnc subject title', 'File');
+        }
+
         if ($candidate === '' || ! $this->cleaner->isPlausibleReleaseTitle($candidate)) {
             if ($supportFileResult = $this->extractQuotedClassicMovieSupportFilename($subject)) {
                 return $supportFileResult;
@@ -344,6 +348,14 @@ class FileNameExtractor
         }
 
         return NameFixResult::fromMatch($candidate, 'yEnc subject title', 'File');
+    }
+
+    private function isBracketedBareYearSubjectTitle(string $candidate, string $subject): bool
+    {
+        return preg_match('/\b(19|20)\d{2}\b/u', $candidate) === 1
+            && preg_match_all('/[\pL\pN]{3,}/u', $candidate) >= 2
+            && ! $this->isLowInformationName($candidate)
+            && preg_match('/^\['.preg_quote($candidate, '/').'\]\s+yEnc\s*$/iu', trim($subject)) === 1;
     }
 
     private function extractBareMovieSubjectTitle(string $candidate, string $subject): ?NameFixResult

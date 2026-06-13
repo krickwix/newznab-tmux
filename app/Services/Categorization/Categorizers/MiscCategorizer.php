@@ -307,8 +307,14 @@ class MiscCategorizer extends AbstractCategorizer
         }
 
         return preg_match('/\b(19|20)\d{2}\b/', $name) === 1
+            || $this->looksLikeNumberedImageVideoSidecar($name)
             || preg_match('/(?:\.|\b)(?:avi|mkv|mp4|mpg|mpeg|vob)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $name) === 1
             || preg_match('/\b(?:480p|576p|720p|1080p|2160p|x264|x265|h\.?264|h\.?265|xvid|divx|dvdrip|vhsrip|tvrip|bdrip|bluray|dvd)\b/i', $name) === 1;
+    }
+
+    private function looksLikeNumberedImageVideoSidecar(string $name): bool
+    {
+        return preg_match('/\b(?:avi|mkv|mp4|mpg|mpeg|vob)[._ -]\d{1,4}[._ -](?:jpe?g|png)\b/i', $name) === 1;
     }
 
     private function isExplicitVintageFilmGroup(ReleaseContext $context): bool

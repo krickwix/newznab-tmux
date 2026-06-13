@@ -497,6 +497,18 @@ class HashedReleaseCategorizationTest extends TestCase
         $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
     }
 
+    public function test_normalized_vintage_film_video_image_sidecar_is_not_obfuscated(): void
+    {
+        $passable = $this->runPipeline(
+            'WrongBox avi 2 jpg',
+            'alt.binaries.multimedia.vintage-film.post-1960',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_SD, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
+    }
+
     public function test_readable_vintage_film_title_year_is_not_obfuscated_extracted_subject(): void
     {
         $passable = $this->runPipeline(
