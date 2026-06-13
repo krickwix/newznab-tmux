@@ -87,6 +87,7 @@ final class NzbBacklogCreationService
                 $query->selectRaw('1')
                     ->from('collections')
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                    ->join('parts', 'parts.binaries_id', '=', 'binaries.id')
                     ->whereColumn('collections.releases_id', 'releases.id')
                     ->limit(1);
             })
@@ -174,6 +175,14 @@ final class NzbBacklogCreationService
         return DB::table('releases')
             ->where('id', $releaseId)
             ->where('nzbstatus', NzbService::NZB_NONE)
+            ->whereExists(function ($query): void {
+                $query->selectRaw('1')
+                    ->from('collections')
+                    ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                    ->join('parts', 'parts.binaries_id', '=', 'binaries.id')
+                    ->whereColumn('collections.releases_id', 'releases.id')
+                    ->limit(1);
+            })
             ->update(['nzbstatus' => NzbService::NZB_FAILED]) === 1;
     }
 }

@@ -10,6 +10,8 @@ use App\Services\ReleaseProcessingService;
 use Illuminate\Support\Facades\DB;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
+use Mockery\MockInterface;
+use ReflectionMethod;
 use Tests\TestCase;
 
 final class NzbCreateBacklogCommandTest extends TestCase
@@ -102,6 +104,25 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertSame(NzbService::NZB_FAILED, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
     }
 
+    public function test_command_does_not_mark_failed_when_payload_disappears_before_failure_update(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+
+        $this->bindNzbWriter(static function (): bool {
+            DB::table('parts')->delete();
+
+            return false;
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--groups' => 'alt.binaries.boneless',
+            '--leftguid' => 'a',
+            '--mark-failed' => true,
+        ])->assertSuccessful();
+
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
     public function test_command_loop_continues_after_marking_failed_rows(): void
     {
         $this->seedRelease(1, groupId: 1, leftGuid: 'a');
@@ -172,15 +193,12 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 2)->value('nzbstatus'));
     }
 
-    public function test_command_selection_does_not_require_parts_table_payload(): void
+    public function test_command_selection_requires_parts_table_payload(): void
     {
         $this->seedRelease(1, groupId: 1, leftGuid: 'a', withParts: false);
 
-        $writtenIds = [];
-        $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
-            $writtenIds[] = (int) $release->id;
-
-            return false;
+        $this->bindNzbWriter(static function (): bool {
+            self::fail('NZB writer should not be called without parts payload.');
         });
 
         $this->artisan('nntmux:nzb-create-backlog', [
@@ -190,7 +208,6 @@ final class NzbCreateBacklogCommandTest extends TestCase
             '--sleep' => 0,
         ])->assertSuccessful();
 
-        $this->assertSame([1], $writtenIds);
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
     }
 
@@ -229,12 +246,35 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 3)->value('nzbstatus'));
     }
 
+    public function test_stuck_collection_cleanup_preserves_payload_for_release_waiting_on_nzb(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+        DB::table('collections')->where('releases_id', 1)->update([
+            'added' => now()->subHours(72)->format('Y-m-d H:i:s'),
+        ]);
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+
+        $method = new ReflectionMethod($service, 'deleteStuckCollectionBatch');
+        $method->setAccessible(true);
+        $deleted = $method->invoke($service, 1, now());
+
+        $this->assertSame(0, $deleted);
+        $this->assertSame(1, DB::table('parts')->count());
+        $this->assertSame(1, DB::table('binaries')->count());
+        $this->assertSame(1, DB::table('collections')->count());
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
     /**
      * @param  callable(Release): bool  $callback
      */
     private function bindNzbWriter(callable $callback): NzbService
     {
+        /** @var NzbService&MockInterface $nzb */
         $nzb = Mockery::mock(NzbService::class);
+        // @phpstan-ignore-next-line Mockery fluent expectations expose zeroOrMoreTimes() dynamically.
         $nzb->shouldReceive('writeNzbForReleaseId')->zeroOrMoreTimes()->andReturnUsing($callback);
         $this->app->instance(NzbService::class, $nzb);
 

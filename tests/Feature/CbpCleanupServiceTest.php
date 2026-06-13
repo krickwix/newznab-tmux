@@ -81,6 +81,69 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertSame(0, DB::table('collections')->count());
     }
 
+    public function test_retention_cleanup_preserves_payload_for_release_waiting_on_nzb(): void
+    {
+        DB::table('releases')->insert([
+            'id' => 30,
+            'name' => 'Pending.Nzb.Release',
+            'searchname' => 'Pending.Nzb.Release',
+            'totalpart' => 1,
+            'groups_id' => 1,
+            'adddate' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'guid' => str_repeat('a', 36),
+            'leftguid' => 'a',
+            'postdate' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'fromname' => 'poster@example.com',
+            'size' => 500,
+            'passwordstatus' => 0,
+            'haspreview' => -1,
+            'categories_id' => 1,
+            'nfostatus' => -1,
+            'nzbstatus' => NzbService::NZB_NONE,
+            'isrenamed' => 1,
+            'iscategorized' => 1,
+            'predb_id' => 0,
+            'source' => null,
+        ]);
+        DB::table('collections')->insert([
+            'id' => 101,
+            'subject' => 'Pending.Nzb.Release',
+            'fromname' => 'poster@example.com',
+            'date' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'dateadded' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'added' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'xref' => 'alt.test:101',
+            'groups_id' => 1,
+            'totalfiles' => 1,
+            'filesize' => 500,
+            'filecheck' => CollectionFileCheckStatus::Sized->value,
+            'collectionhash' => 'pending-nzb-retention',
+            'collection_regexes_id' => 0,
+            'releases_id' => 30,
+            'noise' => '',
+        ]);
+        DB::table('binaries')->insert([
+            'id' => 1010,
+            'name' => 'Pending.Nzb.Release.par2',
+            'collections_id' => 101,
+            'totalparts' => 1,
+        ]);
+        DB::table('parts')->insert([
+            'binaries_id' => 1010,
+            'number' => 1,
+            'messageid' => '<pending-nzb-1@example.com>',
+            'partnumber' => 1,
+            'size' => 10,
+        ]);
+
+        app(CollectionCleanupService::class)->deleteFinishedAndOrphans(false);
+
+        $this->assertSame(1, DB::table('parts')->count());
+        $this->assertSame(1, DB::table('binaries')->count());
+        $this->assertSame(1, DB::table('collections')->count());
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 30)->value('nzbstatus'));
+    }
+
     public function test_nzb_creation_cleans_up_collection_binary_and_parts_explicitly(): void
     {
         DB::table('releases')->insert([

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Models\Settings;
+use App\Services\Nzb\NzbService;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -58,11 +59,15 @@ class CollectionCleanupService
         $cutoff = now()->subHours(Settings::settingValue('partretentionhours'));
         $batchDeleted = 0;
         do {
-            $ids = DB::table('collections')
-                ->where('dateadded', '<', $cutoff)
-                ->orderBy('id')
+            $ids = DB::table('collections as c')
+                ->where('c.dateadded', '<', $cutoff)
+                ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
+                    ->from('releases as r')
+                    ->whereColumn('r.id', 'c.releases_id')
+                    ->where('r.nzbstatus', '=', NzbService::NZB_NONE))
+                ->orderBy('c.id')
                 ->limit(self::MAX_SQL_ROWS_PER_STATEMENT)
-                ->pluck('id')
+                ->pluck('c.id')
                 ->all();
 
             if ($ids === []) {
@@ -151,6 +156,10 @@ class CollectionCleanupService
 
         for ($i = 0; $i < $maxBatches; $i++) {
             $ids = DB::table('collections as c')
+                ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
+                    ->from('releases as r')
+                    ->whereColumn('r.id', 'c.releases_id')
+                    ->where('r.nzbstatus', '=', NzbService::NZB_NONE))
                 ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
                     ->from('binaries as b')
                     ->whereColumn('b.collections_id', 'c.id'))

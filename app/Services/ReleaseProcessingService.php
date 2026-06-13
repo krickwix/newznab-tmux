@@ -1088,15 +1088,19 @@ final class ReleaseProcessingService
 
         do {
             try {
-                $query = DB::table('collections')
-                    ->where('added', '<', $cutoff)
-                    ->orderBy('id')
+                $query = DB::table('collections as c')
+                    ->where('c.added', '<', $cutoff)
+                    ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
+                        ->from('releases as r')
+                        ->whereColumn('r.id', 'c.releases_id')
+                        ->where('r.nzbstatus', '=', NzbService::NZB_NONE))
+                    ->orderBy('c.id')
                     ->limit(self::BATCH_SIZE);
                 if ($groupID !== 0) {
-                    $query->where('groups_id', '=', $groupID);
+                    $query->where('c.groups_id', '=', $groupID);
                 }
 
-                $ids = $query->pluck('id')->all();
+                $ids = $query->pluck('c.id')->all();
                 if ($ids === []) {
                     break;
                 }
