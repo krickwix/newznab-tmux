@@ -1269,17 +1269,28 @@ final class ReleaseProcessingService
             return $stats;
         }
 
-        $releases = Release::query()
-            ->where('adddate', '>', now()->subHours($this->settings->crossPostTime))
+        $cutoff = now()->subHours($this->settings->crossPostTime);
+        $duplicateClusters = Release::query()
+            ->where('adddate', '>', $cutoff)
             ->groupBy(['name', 'fromname'])
             ->havingRaw('COUNT(name) > 1 AND COUNT(fromname) > 1')
-            ->select(['id', 'guid'])
-            ->get();
+            ->select(['name', 'fromname']);
 
-        foreach ($releases as $release) {
-            $this->deleteSingleRelease($release);
-            $stats = $stats->increment('duplicate');
-        }
+        Release::query()
+            ->joinSub($duplicateClusters, 'duplicate_releases', function ($join): void {
+                $join->on('releases.name', '=', 'duplicate_releases.name')
+                    ->on('releases.fromname', '=', 'duplicate_releases.fromname');
+            })
+            ->where('releases.adddate', '>', $cutoff)
+            ->select(['releases.id', 'releases.guid'])
+            ->chunkById(self::BATCH_SIZE, function ($releases) use (&$stats): bool {
+                foreach ($releases as $release) {
+                    $this->deleteSingleRelease($release);
+                    $stats = $stats->increment('duplicate');
+                }
+
+                return true;
+            }, 'releases.id', 'id');
 
         return $stats;
     }

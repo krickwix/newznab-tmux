@@ -32,10 +32,14 @@ final class ObfuscatedSubjectExtractor
         '/\.\d{3}$/',
     ];
 
-    public function extract(string $value): ?string
+    public function extract(string $value, string $groupName = ''): ?string
     {
         $original = trim($value);
         if ($original === '') {
+            return null;
+        }
+
+        if ($this->isVintageClassicGroup($groupName) && $this->hasReadableContextOutsideQuotedFilename($original)) {
             return null;
         }
 
@@ -82,6 +86,29 @@ final class ObfuscatedSubjectExtractor
         }
 
         return $normalized;
+    }
+
+    private function isVintageClassicGroup(string $groupName): bool
+    {
+        return preg_match('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|movie[.-]?classic|dvd[.-]?classic)/i', $groupName) === 1;
+    }
+
+    private function hasReadableContextOutsideQuotedFilename(string $subject): bool
+    {
+        if (preg_match('/["\'][^"\']+\.(?:part\d+\.rar|r\d{2,4}|rar|par2?|nfo|sfv|nzb|srr|srs)["\']/i', $subject) !== 1) {
+            return false;
+        }
+
+        $outsideQuotedFilename = trim((string) preg_replace('/["\'][^"\']+["\']/', ' ', $subject));
+        $hasMediaEvidence = preg_match('/\b(?:avi|xvid|divx|dvd(?:-?[59])?|dvdrip|vhsrip|480p|576p|720p|1080p|mkv|mp4|mpg|mpeg|vob|iso)\b/i', $outsideQuotedFilename) === 1;
+        $outsideQuotedFilename = preg_replace('/\[[\d\/]+\]/', ' ', $outsideQuotedFilename) ?? $outsideQuotedFilename;
+        $outsideQuotedFilename = preg_replace('/\b(?:yEnc|NMR|repost(?:ed)?|posted|file|part|vol|par2?|rar|nfo|sfv|nzb|srr|srs|dvd(?:-?[59])?|avi|xvid|divx|dvdrip|vhsrip)\b/i', ' ', $outsideQuotedFilename) ?? $outsideQuotedFilename;
+
+        $readableWords = $this->countReadableWords($outsideQuotedFilename);
+
+        return $readableWords >= 3
+            || ($readableWords >= 2 && $hasMediaEvidence)
+            || preg_match('/\b(?:19|20)\d{2}\b/', $outsideQuotedFilename) === 1;
     }
 
     private function hasReadableContextAroundShortPar2Sidecar(string $subject, string $quotedFilename): bool

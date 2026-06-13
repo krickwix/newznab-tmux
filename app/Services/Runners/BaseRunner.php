@@ -347,15 +347,6 @@ abstract class BaseRunner
         while (! empty($running)) {
             foreach ($running as $key => $proc) {
                 if (! $proc->isRunning()) {
-                    // Print any remaining buffered output
-                    $out = $proc->getIncrementalOutput();
-                    $err = $proc->getIncrementalErrorOutput();
-                    if ($out !== '') {
-                        echo $out;
-                    }
-                    if ($err !== '') {
-                        echo $err;
-                    }
                     unset($running[$key]);
                     $finished++;
                     if (config('nntmux.echocli')) {
