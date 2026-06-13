@@ -14,6 +14,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\View\View;
+use Mockery;
 use PDO;
 use ReflectionClass;
 use Tests\TestCase;
@@ -109,6 +110,44 @@ class AdminGroupControllerTest extends TestCase
         $this->assertSame('No group list provided.', $response->getData()['groupmsglist']);
     }
 
+    /**
+     * @runInSeparateProcess
+     *
+     * @preserveGlobalState disabled
+     */
+    public function test_create_bulk_persists_requested_backfill_target(): void
+    {
+        $nntp = Mockery::mock('overload:App\Services\NNTP\NNTPService');
+        $nntp->shouldReceive('doConnect')->once()->andReturn(true);
+        $nntp->shouldReceive('getGroups')->once()->andReturn([
+            ['group' => 'alt.binaries.example'],
+            ['group' => 'alt.binaries.other'],
+        ]);
+        $nntp->shouldReceive('doQuit')->once()->andReturn(true);
+        $nntp->shouldReceive('isError')->once()->andReturn(false);
+
+        $request = Request::create('/admin/group-bulk', 'POST', [
+            'action' => 'submit',
+            'groupfilter' => 'alt\.binaries\.example',
+            'active' => '1',
+            'backfill' => '1',
+            'backfill_target' => '7305',
+        ]);
+
+        $response = app(AdminGroupController::class)->createBulk($request);
+
+        $this->assertInstanceOf(View::class, $response);
+        $this->assertDatabaseHas('usenet_groups', [
+            'name' => 'alt.binaries.example',
+            'active' => 1,
+            'backfill' => 1,
+            'backfill_target' => 7305,
+        ]);
+        $this->assertDatabaseMissing('usenet_groups', [
+            'name' => 'alt.binaries.other',
+        ]);
+    }
+
     private function setEnvironmentValue(string $key, ?string $value): void
     {
         if ($value === null) {
@@ -144,6 +183,21 @@ class AdminGroupControllerTest extends TestCase
                 $table->integer('status')->default(Content::STATUS_ENABLED);
                 $table->integer('ordinal')->nullable();
                 $table->integer('role')->default(Content::ROLE_EVERYONE);
+            });
+        }
+
+        if (! Schema::hasTable('usenet_groups')) {
+            Schema::create('usenet_groups', function (Blueprint $table): void {
+                $table->increments('id');
+                $table->string('name')->unique();
+                $table->string('description')->default('');
+                $table->integer('backfill_target')->default(1);
+                $table->bigInteger('first_record')->default(0);
+                $table->bigInteger('last_record')->default(0);
+                $table->boolean('active')->default(false);
+                $table->boolean('backfill')->default(false);
+                $table->integer('minsizetoformrelease')->nullable();
+                $table->integer('minfilestoformrelease')->nullable();
             });
         }
     }

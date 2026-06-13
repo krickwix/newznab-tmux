@@ -150,6 +150,10 @@ class BackfillRunner extends BaseRunner
      */
     protected function buildSafeBackfillQueues(array $data, int $backfillQty, int $maxMessages, int $threads): array
     {
+        if ($maxMessages < 1) {
+            $maxMessages = 20000;
+        }
+
         $queuesByChunk = [];
         $queueGroupsByChunk = [];
         foreach ($data as $group) {

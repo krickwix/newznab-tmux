@@ -411,7 +411,7 @@ class UsenetGroup extends Model
      *
      * @throws \Exception
      */
-    public static function addBulk(string $groupList, int $active = 1, int $backfill = 1)
+    public static function addBulk(string $groupList, int $active = 1, int $backfill = 1, int $backfillTarget = 1)
     {
         if (preg_match('/^\s*$/m', $groupList)) {
             $ret = 'No group list provided.';
@@ -440,6 +440,7 @@ class UsenetGroup extends Model
                                 'name' => $group['group'],
                                 'active' => $active,
                                 'backfill' => $backfill,
+                                'backfill_target' => max(1, $backfillTarget),
                                 'description' => 'Added by bulkAdd',
                             ]
                         );

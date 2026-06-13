@@ -39,8 +39,9 @@ class AdminGroupController extends BasePageController
             if (is_string($groupFilter) && $groupFilter !== '') {
                 $active = $request->has('active') ? $request->integer('active') : 1;
                 $backfill = $request->has('backfill') ? $request->integer('backfill') : 1;
+                $backfillTarget = max(1, $request->has('backfill_target') ? $request->integer('backfill_target') : 1);
 
-                $groupmsglist = UsenetGroup::addBulk($groupFilter, $active, $backfill);
+                $groupmsglist = UsenetGroup::addBulk($groupFilter, $active, $backfill, $backfillTarget);
             }
         }
 
