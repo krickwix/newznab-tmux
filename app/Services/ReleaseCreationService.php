@@ -137,36 +137,18 @@ class ReleaseCreationService
                         'naming_regex_id' => $namingRegexId,
                     ]);
 
+                    self::linkReleaseToGroup($releaseID, (int) $collection->groups_id);
+
                     if (preg_match_all('#(\S+):\S+#', $collection->xref, $hits)) {
                         foreach ($hits[1] as $grp) {
                             $grpTmp = UsenetGroup::isValidGroup($grp);
                             if ($grpTmp !== false) {
                                 $xrefGrpID = UsenetGroup::getIDByName($grpTmp);
-                                if ($xrefGrpID === '') {
-                                    $xrefGrpID = UsenetGroup::addGroup([
-                                        'name' => $grpTmp,
-                                        'description' => 'Added by Release processing',
-                                        'backfill_target' => 1,
-                                        'first_record' => 0,
-                                        'last_record' => 0,
-                                        'active' => 0,
-                                        'backfill' => 0,
-                                        'minfilestoformrelease' => '',
-                                        'minsizetoformrelease' => '',
-                                    ]);
+                                if ($xrefGrpID === false) {
+                                    continue;
                                 }
 
-                                $relGroupsChk = ReleasesGroups::query()->where([
-                                    ['releases_id', '=', $releaseID],
-                                    ['groups_id', '=', $xrefGrpID],
-                                ])->first();
-
-                                if ($relGroupsChk === null) {
-                                    ReleasesGroups::query()->insert([
-                                        'releases_id' => $releaseID,
-                                        'groups_id' => $xrefGrpID,
-                                    ]);
-                                }
+                                self::linkReleaseToGroup($releaseID, (int) $xrefGrpID);
                             }
                         }
                     }
@@ -214,5 +196,17 @@ class ReleaseCreationService
         }
 
         return ['added' => $returnCount, 'dupes' => $duplicate];
+    }
+
+    private static function linkReleaseToGroup(int $releaseID, int $groupID): void
+    {
+        if ($releaseID <= 0 || $groupID <= 0) {
+            return;
+        }
+
+        ReleasesGroups::query()->insertOrIgnore([
+            'releases_id' => $releaseID,
+            'groups_id' => $groupID,
+        ]);
     }
 }

@@ -217,6 +217,80 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertSame(1, (int) DB::table('releases')->where('id', 20)->value('nzbstatus'));
     }
 
+    public function test_release_creation_links_collection_group_when_xref_is_empty(): void
+    {
+        DB::table('collections')->insert([
+            'id' => 202,
+            'subject' => 'Source.Group.Release',
+            'fromname' => 'poster@example.com',
+            'date' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'dateadded' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'added' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'xref' => '',
+            'groups_id' => 1,
+            'totalfiles' => 1,
+            'filesize' => 500,
+            'filecheck' => CollectionFileCheckStatus::Sized->value,
+            'collectionhash' => 'source-group-link-hash',
+            'collection_regexes_id' => 0,
+            'releases_id' => null,
+            'noise' => '',
+        ]);
+
+        $service = new ReleaseCreationService(
+            app(ReleaseCleaningService::class),
+            app(CollectionCleanupService::class),
+            app(ReleaseDuplicateFinder::class)
+        );
+        $result = $service->createReleases(null, 10, false);
+
+        $releaseId = (int) DB::table('releases')->where('searchname', 'Source.Group.Release')->value('id');
+        $this->assertSame(['added' => 1, 'dupes' => 0], $result);
+        $this->assertGreaterThan(0, $releaseId);
+        $this->assertTrue(DB::table('releases_groups')->where([
+            'releases_id' => $releaseId,
+            'groups_id' => 1,
+        ])->exists());
+    }
+
+    public function test_release_creation_skips_unknown_xref_group_without_zero_group_link(): void
+    {
+        DB::table('collections')->insert([
+            'id' => 203,
+            'subject' => 'Unknown.Xref.Group.Release',
+            'fromname' => 'poster@example.com',
+            'date' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'dateadded' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'added' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'xref' => 'a.b.newgroup:203',
+            'groups_id' => 1,
+            'totalfiles' => 1,
+            'filesize' => 500,
+            'filecheck' => CollectionFileCheckStatus::Sized->value,
+            'collectionhash' => 'unknown-xref-group-link-hash',
+            'collection_regexes_id' => 0,
+            'releases_id' => null,
+            'noise' => '',
+        ]);
+
+        $service = new ReleaseCreationService(
+            app(ReleaseCleaningService::class),
+            app(CollectionCleanupService::class),
+            app(ReleaseDuplicateFinder::class)
+        );
+        $result = $service->createReleases(null, 10, false);
+
+        $releaseId = (int) DB::table('releases')->where('searchname', 'Unknown.Xref.Group.Release')->value('id');
+        $this->assertSame(['added' => 1, 'dupes' => 0], $result);
+        $this->assertGreaterThan(0, $releaseId);
+        $this->assertFalse(DB::table('usenet_groups')->where('name', 'alt.binaries.newgroup')->exists());
+        $this->assertSame(0, DB::table('releases_groups')->where('groups_id', 0)->count());
+        $this->assertTrue(DB::table('releases_groups')->where([
+            'releases_id' => $releaseId,
+            'groups_id' => 1,
+        ])->exists());
+    }
+
     public function test_duplicate_release_path_cleans_up_collection_binary_and_parts(): void
     {
         DB::table('releases')->insert([
@@ -443,7 +517,18 @@ class CbpCleanupServiceTest extends TestCase
     private function createTables(): void
     {
         DB::statement('CREATE TABLE settings (name VARCHAR(255) PRIMARY KEY, value TEXT)');
-        DB::statement('CREATE TABLE usenet_groups (id INTEGER PRIMARY KEY, name VARCHAR(255))');
+        DB::statement('CREATE TABLE usenet_groups (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255),
+            description VARCHAR(255) NULL,
+            backfill_target INTEGER DEFAULT 1,
+            first_record INTEGER DEFAULT 0,
+            last_record INTEGER DEFAULT 0,
+            active INTEGER DEFAULT 0,
+            backfill INTEGER DEFAULT 0,
+            minsizetoformrelease VARCHAR(255) NULL,
+            minfilestoformrelease VARCHAR(255) NULL
+        )');
         DB::statement('CREATE TABLE categories (id INTEGER PRIMARY KEY, title VARCHAR(255), parent_categories_id INTEGER NULL)');
         DB::statement('CREATE TABLE releases (
             id INTEGER PRIMARY KEY,
@@ -503,6 +588,17 @@ class CbpCleanupServiceTest extends TestCase
             regex VARCHAR(255),
             status INTEGER DEFAULT 1,
             ordinal INTEGER DEFAULT 0
+        )');
+        DB::statement('CREATE TABLE release_regexes (
+            releases_id INTEGER,
+            collection_regex_id INTEGER,
+            naming_regex_id INTEGER,
+            PRIMARY KEY (releases_id, collection_regex_id, naming_regex_id)
+        )');
+        DB::statement('CREATE TABLE releases_groups (
+            releases_id INTEGER,
+            groups_id INTEGER,
+            PRIMARY KEY (releases_id, groups_id)
         )');
         DB::statement('CREATE TABLE collection_regexes (
             id INTEGER PRIMARY KEY,

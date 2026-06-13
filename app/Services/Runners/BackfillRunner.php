@@ -7,6 +7,7 @@ namespace App\Services\Runners;
 use App\Models\Settings;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class BackfillRunner extends BaseRunner
 {
@@ -35,7 +36,7 @@ class BackfillRunner extends BaseRunner
         if ((bool) config('nntmux.stream_fork_output', false) === true) {
             $commands = [];
             foreach ($work as $group) {
-                $commands[] = PHP_BINARY.' artisan update:backfill '.$group->name.(isset($group->max) ? (' '.$group->max) : '');
+                $commands[$group->name] = PHP_BINARY.' artisan update:backfill '.$group->name.(isset($group->max) ? (' '.$group->max) : '');
             }
             $this->runStreamingCommands($commands, $maxProcesses, 'backfill');
 
@@ -96,6 +97,7 @@ class BackfillRunner extends BaseRunner
         $data = DB::select($sql);
 
         if (empty($data)) {
+            $this->reportSafeBackfillNoWork($backfilldays);
             $this->headerNone();
 
             return;
@@ -104,6 +106,7 @@ class BackfillRunner extends BaseRunner
         [$queues, $queueGroups] = $this->buildSafeBackfillQueues($data, $backfill_qty, $maxMessages, $threads);
 
         if ($queues === []) {
+            $this->reportSafeBackfillNoWork($backfilldays);
             $this->headerNone();
 
             return;
@@ -112,8 +115,8 @@ class BackfillRunner extends BaseRunner
         // Streaming mode
         if ((bool) config('nntmux.stream_fork_output', false) === true) {
             $commands = [];
-            foreach ($queues as $queue) {
-                $commands[] = $this->buildDnrCommand($queue);
+            foreach ($queues as $idx => $queue) {
+                $commands[$idx] = $this->buildDnrCommand($queue);
             }
             $this->runStreamingCommands($commands, $threads, 'safe_backfill');
 
@@ -186,5 +189,45 @@ class BackfillRunner extends BaseRunner
         }
 
         return [$queues, $queueGroups];
+    }
+
+    private function reportSafeBackfillNoWork(string $backfilldays): void
+    {
+        $context = [
+            'enabled_backfill_groups' => $this->countScalar(
+                'SELECT COUNT(*) FROM usenet_groups WHERE backfill = 1'
+            ),
+            'enabled_missing_cursor' => $this->countScalar(
+                'SELECT COUNT(*) FROM usenet_groups WHERE backfill = 1 AND (first_record IS NULL OR first_record = 0 OR first_record_postdate IS NULL)'
+            ),
+            'active_disabled_with_target' => $this->countScalar(
+                'SELECT COUNT(*) FROM usenet_groups WHERE active = 1 AND backfill = 0 AND backfill_target > 0'
+            ),
+            'enabled_without_provider_row' => $this->countScalar(
+                'SELECT COUNT(*) FROM usenet_groups g LEFT JOIN short_groups a ON a.name = g.name WHERE g.backfill = 1 AND a.name IS NULL'
+            ),
+            'enabled_at_provider_floor' => $this->countScalar(
+                'SELECT COUNT(*) FROM usenet_groups g INNER JOIN short_groups a ON a.name = g.name WHERE g.backfill = 1 AND CAST(g.first_record AS SIGNED) <= CAST(a.first_record AS SIGNED)'
+            ),
+            'enabled_target_reached' => $this->countScalar(
+                'SELECT COUNT(*) FROM usenet_groups g WHERE g.backfill = 1 AND g.first_record_postdate IS NOT NULL AND (NOW() - INTERVAL '.$backfilldays.' DAY) >= g.first_record_postdate'
+            ),
+        ];
+
+        Log::info('Safe backfill found no eligible groups', $context);
+        cli()->warning(sprintf(
+            'Safe backfill diagnostics: enabled=%d, missing_cursor=%d, disabled_with_target=%d, no_provider_row=%d, at_provider_floor=%d, target_reached=%d.',
+            $context['enabled_backfill_groups'],
+            $context['enabled_missing_cursor'],
+            $context['active_disabled_with_target'],
+            $context['enabled_without_provider_row'],
+            $context['enabled_at_provider_floor'],
+            $context['enabled_target_reached'],
+        ));
+    }
+
+    private function countScalar(string $sql): int
+    {
+        return (int) DB::scalar($sql);
     }
 }
