@@ -156,18 +156,21 @@ final class BinaryHandler
             $idsByKey = $result['ids'];
             $existingKeys = $result['existing'];
             $driver = DB::getDriverName();
+            $seenLookupKeys = [];
             foreach ($pending as $articleKey => $row) {
-                $lookupKey = $this->binaryLookupKey($row['hash'], (int) $row['collections_id']);
-                $binaryId = $idsByKey[$lookupKey] ?? 0;
+                $hashLookupKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
+                $fileLookupKey = $this->binaryFileLookupKey((int) $row['collections_id'], (int) $row['filenumber']);
+                $binaryId = $idsByKey[$hashLookupKey] ?? $idsByKey[$fileLookupKey] ?? 0;
                 if ($binaryId <= 0) {
                     continue;
                 }
 
                 $this->binariesUpdate[$binaryId] = $this->binariesUpdate[$binaryId] ?? ['Size' => 0, 'Parts' => 0];
-                if ($driver === 'sqlite' && isset($existingKeys[$lookupKey])) {
+                if (isset($existingKeys[$hashLookupKey]) || ($driver === 'sqlite' && isset($seenLookupKeys[$fileLookupKey]))) {
                     $this->binariesUpdate[$binaryId]['Size'] += (int) $row['partsize'];
                     $this->binariesUpdate[$binaryId]['Parts']++;
                 }
+                $seenLookupKeys[$fileLookupKey] = true;
                 if (isset($extraUpdatesByArticleKey[$articleKey])) {
                     $this->binariesUpdate[$binaryId]['Size'] += $extraUpdatesByArticleKey[$articleKey]['Size'];
                     $this->binariesUpdate[$binaryId]['Parts'] += $extraUpdatesByArticleKey[$articleKey]['Parts'];
@@ -207,30 +210,44 @@ final class BinaryHandler
         // One SELECT establishes both "did this row exist?" and "what is its
         // id?", instead of two identical SELECTs (existingBinaryKeys +
         // resolveBinaryIds) that the previous implementation issued.
-        $idsByKey = $this->selectBinaryIdsByKey($lookupRows);
+        $idsByKey = $this->selectBinaryIdsByHash($lookupRows);
+        $idsByFileKeyBeforeInsert = $this->selectBinaryIdsByFileNumber($lookupRows);
         $existingKeys = [];
         foreach ($idsByKey as $key => $_id) {
             $existingKeys[$key] = true;
         }
+        foreach ($idsByFileKeyBeforeInsert as $key => $id) {
+            $idsByKey[$key] = $id;
+            $existingKeys[$key] = true;
+        }
+
+        $insertRows = [];
+        foreach ($lookupRows as $row) {
+            $hashKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
+            if (! isset($idsByKey[$hashKey])) {
+                $insertRows[] = $row;
+            }
+        }
 
         if (DB::getDriverName() === 'sqlite') {
-            $this->bulkInsertBinariesSqlite($lookupRows);
+            $this->bulkInsertBinariesSqlite($insertRows);
         } else {
-            $this->bulkInsertBinariesMysql($lookupRows);
+            $this->bulkInsertBinariesMysql($insertRows);
         }
 
         // Only re-query for rows we couldn't satisfy from the prefetch
         // (i.e. those that didn't exist before the bulk INSERT).
         $missingRows = [];
-        foreach ($lookupRows as $row) {
-            $key = $this->binaryLookupKey((string) $row['hash'], (int) $row['collections_id']);
-            if (! isset($idsByKey[$key])) {
+        foreach ($insertRows as $row) {
+            $hashKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
+            $fileKey = $this->binaryFileLookupKey((int) $row['collections_id'], (int) $row['filenumber']);
+            if (! isset($idsByKey[$hashKey]) && ! isset($idsByKey[$fileKey])) {
                 $missingRows[] = $row;
             }
         }
 
         if ($missingRows !== []) {
-            foreach ($this->selectBinaryIdsByKey($missingRows) as $key => $id) {
+            foreach ($this->selectBinaryIdsByFileNumber($missingRows) as $key => $id) {
                 $idsByKey[$key] = $id;
             }
         }
@@ -246,13 +263,27 @@ final class BinaryHandler
 
     /**
      * @param  list<array<string, mixed>>  $rows
-     * @return array<string, int> id keyed by binaryLookupKey(hash, collectionId)
+     * @return array<string, int> id keyed by binaryHashLookupKey(hash, collectionId)
      */
-    private function selectBinaryIdsByKey(array $rows): array
+    private function selectBinaryIdsByHash(array $rows): array
     {
         $resolved = [];
-        foreach ($this->selectBinaryRows($rows) as $row) {
-            $resolved[$this->binaryLookupKey((string) $row->hashvalue, (int) $row->collections_id)] = (int) $row->id;
+        foreach ($this->selectBinaryRowsByHash($rows) as $row) {
+            $resolved[$this->binaryHashLookupKey((string) $row->hashvalue, (int) $row->collections_id)] = (int) $row->id;
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $rows
+     * @return array<string, int> id keyed by binaryFileLookupKey(collectionId, fileNumber)
+     */
+    private function selectBinaryIdsByFileNumber(array $rows): array
+    {
+        $resolved = [];
+        foreach ($this->selectBinaryRowsByFileNumber($rows) as $row) {
+            $resolved[$this->binaryFileLookupKey((int) $row->collections_id, (int) $row->filenumber)] = (int) $row->id;
         }
 
         return $resolved;
@@ -311,7 +342,7 @@ final class BinaryHandler
      * @param  list<array<string, mixed>>  $rows
      * @return list<object>
      */
-    private function selectBinaryRows(array $rows): array
+    private function selectBinaryRowsByHash(array $rows): array
     {
         if ($rows === []) {
             return [];
@@ -353,9 +384,52 @@ final class BinaryHandler
         return $results;
     }
 
-    private function binaryLookupKey(string $hash, int $collectionId): string
+    /**
+     * @param  list<array<string, mixed>>  $rows
+     * @return list<object>
+     */
+    private function selectBinaryRowsByFileNumber(array $rows): array
     {
-        return strtolower($hash).':'.$collectionId;
+        if ($rows === []) {
+            return [];
+        }
+
+        $rowsByCollection = [];
+        foreach ($rows as $row) {
+            $rowsByCollection[(int) $row['collections_id']][] = (int) $row['filenumber'];
+        }
+
+        $results = [];
+        foreach ($rowsByCollection as $collectionId => $fileNumbers) {
+            $fileNumbers = array_values(array_unique($fileNumbers));
+            foreach (array_chunk($fileNumbers, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
+                $placeholders = implode(',', array_fill(0, \count($chunk), '?'));
+                $bindings = $chunk;
+                $bindings[] = $collectionId;
+
+                $rowsResult = DB::select(
+                    'SELECT id, filenumber, collections_id FROM binaries '
+                    ."WHERE filenumber IN ({$placeholders}) AND collections_id = ?",
+                    $bindings
+                );
+
+                foreach ($rowsResult as $r) {
+                    $results[] = $r;
+                }
+            }
+        }
+
+        return $results;
+    }
+
+    private function binaryHashLookupKey(string $hash, int $collectionId): string
+    {
+        return strtolower($hash).':hash:'.$collectionId;
+    }
+
+    private function binaryFileLookupKey(int $collectionId, int $fileNumber): string
+    {
+        return $collectionId.':file:'.$fileNumber;
     }
 
     /**
@@ -404,8 +478,8 @@ final class BinaryHandler
         }
 
         $bin = DB::selectOne(
-            'SELECT id FROM binaries WHERE binaryhash = ? AND collections_id = ? LIMIT 1',
-            [$hash, $collectionId]
+            'SELECT id FROM binaries WHERE collections_id = ? AND filenumber = ? LIMIT 1',
+            [$collectionId, $fileNumber]
         );
 
         return (int) ($bin->id ?? 0);
@@ -435,8 +509,8 @@ final class BinaryHandler
         }
 
         $bin = DB::selectOne(
-            'SELECT id FROM binaries WHERE binaryhash = UNHEX(?) AND collections_id = ? LIMIT 1',
-            [$hash, $collectionId]
+            'SELECT id FROM binaries WHERE collections_id = ? AND filenumber = ? LIMIT 1',
+            [$collectionId, $fileNumber]
         );
 
         return (int) ($bin->id ?? 0);

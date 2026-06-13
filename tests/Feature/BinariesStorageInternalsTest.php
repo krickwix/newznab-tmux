@@ -81,7 +81,7 @@ class BinariesStorageInternalsTest extends TestCase
             currentparts INT,
             filenumber INT,
             partsize INT,
-            UNIQUE(binaryhash, collections_id)
+            UNIQUE(collections_id, filenumber)
         )');
 
         $handler = new BinaryHandler;
@@ -216,6 +216,7 @@ class BinariesStorageInternalsTest extends TestCase
             id INTEGER PRIMARY KEY,
             binaryhash BLOB,
             collections_id INT,
+            filenumber INT,
             UNIQUE(binaryhash, collections_id)
         )');
 
@@ -346,6 +347,30 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame([1, 1], $binaries->pluck('currentparts')->map(static fn ($value): int => (int) $value)->all());
     }
 
+    public function test_header_storage_resolves_duplicate_filenumber_with_different_binary_hash(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $service = new HeaderStorageService($this->singleCollectionHandler(), config: new BinariesConfig(partsChunkSize: 10));
+        $first = $this->parsedHeaderWithTotal(1001, 1, 2, 'Same.File.Name.One', 100);
+        $first['collection_file_number'] = 1;
+        $first['collection_total_files'] = 1;
+        $second = $this->parsedHeaderWithTotal(1002, 2, 2, 'Same.File.Name.Two', 150);
+        $second['collection_file_number'] = 1;
+        $second['collection_total_files'] = 1;
+
+        $failed = $service->store([$first, $second], ['id' => 1, 'name' => 'alt.test'], true);
+
+        $binary = DB::table('binaries')->first();
+
+        $this->assertSame([], $failed);
+        $this->assertSame(1, DB::table('collections')->count());
+        $this->assertSame(1, DB::table('binaries')->count());
+        $this->assertSame(2, DB::table('parts')->count());
+        $this->assertSame(2, (int) $binary->currentparts);
+        $this->assertSame(250, (int) $binary->partsize);
+    }
+
     private function rawHeader(int $number, string $subject): array
     {
         return [
@@ -403,7 +428,7 @@ class BinariesStorageInternalsTest extends TestCase
             currentparts INT,
             filenumber INT,
             partsize INT,
-            UNIQUE(binaryhash, collections_id)
+            UNIQUE(collections_id, filenumber)
         )');
 
         DB::statement('CREATE TABLE parts (
@@ -436,6 +461,22 @@ class BinariesStorageInternalsTest extends TestCase
             public function collectionsCleaner(string $subject, string $groupName = ''): array
             {
                 return ['id' => 0, 'name' => $subject];
+            }
+        });
+    }
+
+    private function singleCollectionHandler(): CollectionHandler
+    {
+        return new CollectionHandler(new class extends CollectionsCleaningService
+        {
+            public function __construct()
+            {
+                parent::__construct();
+            }
+
+            public function collectionsCleaner(string $subject, string $groupName = ''): array
+            {
+                return ['id' => 0, 'name' => 'single-cleaned-collection'];
             }
         });
     }
