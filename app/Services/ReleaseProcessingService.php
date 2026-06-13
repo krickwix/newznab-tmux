@@ -599,6 +599,10 @@ final class ReleaseProcessingService
      */
     public function deleteCollections(int|string|null $groupID): void
     {
+        if ($groupID !== null && $groupID !== '') {
+            return;
+        }
+
         $this->collectionCleanupService->deleteFinishedAndOrphans($this->echoCLI);
     }
 
