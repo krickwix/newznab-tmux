@@ -278,12 +278,12 @@ final class HeaderStorageService
     private function getFileCount(string $subject): array
     {
         $patterns = [
-            '/\bFile\s+(\d{1,5})\s+of\s+(\d{1,5})\b/i',
+            '/\bFile[\s_]+(\d{1,5})[\s_]+of[\s_]+(\d{1,5})\b/i',
             '/[\[(]\s*(\d{1,5})\s*\/\s*(\d{1,5})\s*[\])]/',
-            '/[\[(]\s*(\d{1,5})\s+of\s+(\d{1,5})\s*[\])]/i',
+            '/[\[(]\s*(\d{1,5})(?:\s+|_)of(?:\s+|_)(\d{1,5})\s*[\])]/i',
             '/[\[(]\s*(\d{1,5})\s*-\s*(\d{1,5})\s*[\])]/',
             '/(?:^|[\s:])(\d{1,5})\s*\/\s*(\d{1,5})(?:[\s$:)]|$)/',
-            '/(?:^|[\s:])(\d{1,5})\s+of\s+(\d{1,5})(?:[\s$:)]|$)/i',
+            '/(?:^|[\s:])(\d{1,5})(?:\s+|_)of(?:\s+|_)(\d{1,5})(?:[\s$:)]|$)/i',
         ];
 
         foreach ($patterns as $pattern) {

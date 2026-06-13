@@ -708,6 +708,27 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(782, (int) DB::table('binaries')->value('totalparts'));
     }
 
+    public function test_header_storage_accepts_legacy_underscore_of_file_counts(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $header = $this->parsedHeaderWithTotal(
+            705,
+            23,
+            23,
+            'Legacy underscore count [008_of_031] - "legacy.part007.rar" yEnc',
+            100
+        );
+
+        $service = new HeaderStorageService($this->deterministicCollectionHandler(), config: new BinariesConfig(partsChunkSize: 10));
+        $failed = $service->store([$header], ['id' => 1, 'name' => 'alt.test'], true);
+
+        $this->assertSame([], $failed);
+        $this->assertSame(31, (int) DB::table('collections')->value('totalfiles'));
+        $this->assertSame(8, (int) DB::table('binaries')->value('filenumber'));
+        $this->assertSame(23, (int) DB::table('binaries')->value('totalparts'));
+    }
+
     public function test_header_storage_resolves_duplicate_filenumber_with_different_binary_hash(): void
     {
         $this->createHeaderStorageTables();
