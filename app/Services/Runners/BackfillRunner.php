@@ -70,6 +70,7 @@ class BackfillRunner extends BaseRunner
         $backfill_groups = max(1, (int) Settings::settingValue('backfill_groups'));
         $maxMessages = (int) Settings::settingValue('maxmssgs');
         $threads = (int) Settings::settingValue('backfillthreads');
+        $minimumSafeRange = $this->minimumSafeBackfillRange();
 
         $backfilldays = '0';
         if ($backfill_days === 1) {
@@ -86,10 +87,13 @@ class BackfillRunner extends BaseRunner
             FROM usenet_groups g
             INNER JOIN short_groups a ON g.name = a.name
             WHERE g.first_record IS NOT NULL
+            AND CAST(g.first_record AS SIGNED) > 0
             AND g.first_record_postdate IS NOT NULL
             AND g.backfill = 1
             AND (NOW() - INTERVAL '.$backfilldays.' DAY ) < g.first_record_postdate
-            AND (CAST(g.first_record AS SIGNED) - CAST(a.first_record AS SIGNED)) > 0
+            AND CAST(a.first_record AS SIGNED) > 0
+            AND CAST(a.last_record AS SIGNED) >= CAST(a.first_record AS SIGNED)
+            AND (CAST(g.first_record AS SIGNED) - CAST(a.first_record AS SIGNED)) >= '.$minimumSafeRange.'
             GROUP BY a.name, a.last_record, g.name, g.first_record, g.first_record_postdate
             ORDER BY g.first_record_postdate DESC, g.name ASC
             LIMIT '.$backfill_groups;
@@ -150,12 +154,30 @@ class BackfillRunner extends BaseRunner
         $queueGroupsByChunk = [];
         foreach ($data as $group) {
             $ourFirst = (int) $group->our_first;
-            $theirFirst = max(1, (int) $group->their_first);
+            $theirFirst = (int) $group->their_first;
+            $theirLast = isset($group->their_last) ? (int) $group->their_last : $theirFirst;
+
+            if ($ourFirst <= 0 || $theirFirst <= 0 || $theirLast < $theirFirst) {
+                if (config('nntmux.echocli')) {
+                    cli()->warning('Skipping invalid safe backfill cursor for group '.$group->name);
+                }
+
+                continue;
+            }
+
             $count = $ourFirst - $theirFirst;
 
             if ($count <= 0) {
                 if (config('nntmux.echocli')) {
                     cli()->primary('No backfill needed for group '.$group->name);
+                }
+
+                continue;
+            }
+
+            if ($count < $this->minimumSafeBackfillRange()) {
+                if (config('nntmux.echocli')) {
+                    cli()->warning('Skipping near-floor safe backfill range for group '.$group->name);
                 }
 
                 continue;
@@ -200,6 +222,9 @@ class BackfillRunner extends BaseRunner
             'enabled_missing_cursor' => $this->countScalar(
                 'SELECT COUNT(*) FROM usenet_groups WHERE backfill = 1 AND (first_record IS NULL OR first_record = 0 OR first_record_postdate IS NULL)'
             ),
+            'enabled_invalid_provider_cursor' => $this->countScalar(
+                'SELECT COUNT(*) FROM usenet_groups g INNER JOIN short_groups a ON a.name = g.name WHERE g.backfill = 1 AND (CAST(a.first_record AS SIGNED) <= 0 OR CAST(a.last_record AS SIGNED) < CAST(a.first_record AS SIGNED))'
+            ),
             'active_disabled_with_target' => $this->countScalar(
                 'SELECT COUNT(*) FROM usenet_groups WHERE active = 1 AND backfill = 0 AND backfill_target > 0'
             ),
@@ -209,6 +234,9 @@ class BackfillRunner extends BaseRunner
             'enabled_at_provider_floor' => $this->countScalar(
                 'SELECT COUNT(*) FROM usenet_groups g INNER JOIN short_groups a ON a.name = g.name WHERE g.backfill = 1 AND CAST(g.first_record AS SIGNED) <= CAST(a.first_record AS SIGNED)'
             ),
+            'enabled_near_provider_floor' => $this->countScalar(
+                'SELECT COUNT(*) FROM usenet_groups g INNER JOIN short_groups a ON a.name = g.name WHERE g.backfill = 1 AND CAST(g.first_record AS SIGNED) > CAST(a.first_record AS SIGNED) AND (CAST(g.first_record AS SIGNED) - CAST(a.first_record AS SIGNED)) < '.$this->minimumSafeBackfillRange()
+            ),
             'enabled_target_reached' => $this->countScalar(
                 'SELECT COUNT(*) FROM usenet_groups g WHERE g.backfill = 1 AND g.first_record_postdate IS NOT NULL AND (NOW() - INTERVAL '.$backfilldays.' DAY) >= g.first_record_postdate'
             ),
@@ -216,12 +244,14 @@ class BackfillRunner extends BaseRunner
 
         Log::info('Safe backfill found no eligible groups', $context);
         cli()->warning(sprintf(
-            'Safe backfill diagnostics: enabled=%d, missing_cursor=%d, disabled_with_target=%d, no_provider_row=%d, at_provider_floor=%d, target_reached=%d.',
+            'Safe backfill diagnostics: enabled=%d, missing_cursor=%d, invalid_provider_cursor=%d, disabled_with_target=%d, no_provider_row=%d, at_provider_floor=%d, near_provider_floor=%d, target_reached=%d.',
             $context['enabled_backfill_groups'],
             $context['enabled_missing_cursor'],
+            $context['enabled_invalid_provider_cursor'],
             $context['active_disabled_with_target'],
             $context['enabled_without_provider_row'],
             $context['enabled_at_provider_floor'],
+            $context['enabled_near_provider_floor'],
             $context['enabled_target_reached'],
         ));
     }
@@ -229,5 +259,10 @@ class BackfillRunner extends BaseRunner
     private function countScalar(string $sql): int
     {
         return (int) DB::scalar($sql);
+    }
+
+    private function minimumSafeBackfillRange(): int
+    {
+        return max(1, (int) config('nntmux.safe_backfill_min_articles', 100));
     }
 }

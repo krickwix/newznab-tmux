@@ -9,6 +9,7 @@ use App\Services\Metrics\NntmuxPrometheusMetrics;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Mockery;
+use Mockery\MockInterface;
 use ReflectionClass;
 use Tests\TestCase;
 
@@ -94,14 +95,34 @@ class NntmuxPrometheusMetricsTest extends TestCase
 
     public function test_imdb_lookup_metrics_expose_reason_and_fallback_counters(): void
     {
-        Redis::shouldReceive('keys')
+        config([
+            'cache.prefix' => 'nntmux-cache-',
+            'cache.stores.redis.connection' => 'cache',
+            'database.redis.options.prefix' => 'nntmux_database_',
+        ]);
+
+        /** @var MockInterface $connection */
+        $connection = Mockery::mock();
+        Redis::shouldReceive('keys')->never();
+        Redis::shouldReceive('connection')
+            ->with('cache')
+            ->andReturn($connection);
+        $connection->shouldReceive('scan')
+            // @phpstan-ignore-next-line Mockery fluent expectations expose once() dynamically.
             ->once()
-            ->with('*metrics:imdb_lookup*')
-            ->andReturn([
+            ->with('0', ['match' => 'nntmux_database_nntmux-cache-metrics:imdb_lookup*', 'count' => 1000])
+            ->andReturn(['12', [
                 'nntmux_database_nntmux-cache-metrics:imdb_lookup:outcome:failed:reason:waf_block:fallback:fallback_min_interval_active:source:none',
+            ]]);
+        $connection->shouldReceive('scan')
+            // @phpstan-ignore-next-line Mockery fluent expectations expose once() dynamically.
+            ->once()
+            ->with('12', ['match' => 'nntmux_database_nntmux-cache-metrics:imdb_lookup*', 'count' => 1000])
+            ->andReturn(['0', [
                 'nntmux_database_nntmux-cache-metrics:imdb_lookup:outcome:success:reason:none:fallback:none:source:imdbapi_dev',
-            ]);
-        Redis::shouldReceive('get')
+            ]]);
+        $connection->shouldReceive('get')
+            // @phpstan-ignore-next-line Mockery fluent expectations expose with() dynamically.
             ->with(Mockery::type('string'))
             ->andReturnUsing(static function (string $key): int {
                 return str_contains($key, 'success') ? 3 : 7;
@@ -114,6 +135,42 @@ class NntmuxPrometheusMetricsTest extends TestCase
 
         $this->assertStringContainsString('nntmux_imdb_lookup_total{outcome="failed",reason="waf_block",fallback_reason="fallback_min_interval_active",source="none"} 7', $output);
         $this->assertStringContainsString('nntmux_imdb_lookup_total{outcome="success",reason="none",fallback_reason="none",source="imdbapi_dev"} 3', $output);
+    }
+
+    public function test_lock_metrics_scan_lock_connection_without_keys(): void
+    {
+        config([
+            'cache.prefix' => 'nntmux-cache-',
+            'cache.stores.redis.lock_connection' => 'default',
+            'database.redis.options.prefix' => 'nntmux_database_',
+        ]);
+
+        /** @var MockInterface $connection */
+        $connection = Mockery::mock();
+        Redis::shouldReceive('keys')->never();
+        Redis::shouldReceive('connection')
+            ->with('default')
+            ->andReturn($connection);
+        $connection->shouldReceive('scan')
+            // @phpstan-ignore-next-line Mockery fluent expectations expose once() dynamically.
+            ->once()
+            ->with('0', ['match' => 'nntmux_database_nntmux-cache-nntmux:distributed-worker:*', 'count' => 1000])
+            ->andReturn(['0', [
+                'nntmux_database_nntmux-cache-nntmux:distributed-worker:releases',
+            ]]);
+        $connection->shouldReceive('ttl')
+            // @phpstan-ignore-next-line Mockery fluent expectations expose with() dynamically.
+            ->with(Mockery::type('string'))
+            ->andReturnUsing(static function (string $key): int {
+                return str_ends_with($key, 'releases') ? 42 : -2;
+            });
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('lockMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_worker_lock_ttl_seconds{job="releases",prefix="nntmux-cache-"} 42', $output);
     }
 
     public function test_external_metadata_metrics_expose_srrdb_crc_rows_and_backlog(): void

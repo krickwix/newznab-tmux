@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Metrics;
 
 use App\Models\Category;
+use Illuminate\Redis\Connections\PhpRedisConnection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Schema;
@@ -76,14 +77,15 @@ class NntmuxPrometheusMetrics
         ];
 
         try {
-            foreach (Redis::keys('*metrics:imdb_lookup*') as $key) {
+            $connectionName = (string) config('cache.stores.redis.connection', 'cache');
+            foreach ($this->scanRedisKeys($connectionName, $this->redisPhysicalPattern('metrics:imdb_lookup*')) as $key) {
                 $key = (string) $key;
                 $labels = $this->parseImdbMetricLabels($key);
                 if ($labels === null) {
                     continue;
                 }
 
-                $lines[] = $this->metric('nntmux_imdb_lookup_total', $this->redisValue($key), $labels);
+                $lines[] = $this->metric('nntmux_imdb_lookup_total', $this->redisValue($key, $connectionName), $labels);
             }
         } catch (Throwable) {
             $lines[] = $this->metric('nntmux_imdb_lookup_total', 0, [
@@ -338,11 +340,13 @@ class NntmuxPrometheusMetrics
 
         try {
             $prefix = (string) config('cache.prefix');
-            $keys = Redis::keys('*distributed-worker*');
-            foreach ($keys as $key) {
+            $connectionName = (string) (config('cache.stores.redis.lock_connection')
+                ?: config('cache.stores.redis.connection', 'default')
+                ?: 'default');
+            foreach ($this->scanRedisKeys($connectionName, $this->redisPhysicalPattern('nntmux:distributed-worker:*')) as $key) {
                 $key = (string) $key;
                 $job = preg_replace('/^.*distributed-worker:/', '', $key) ?: $key;
-                $ttl = $this->redisTtl($key, $prefix);
+                $ttl = $this->redisTtl($key, $prefix, $connectionName);
 
                 $lines[] = $this->metric('nntmux_worker_lock_ttl_seconds', $ttl, [
                     'job' => $job,
@@ -359,10 +363,10 @@ class NntmuxPrometheusMetrics
         return $lines;
     }
 
-    private function redisTtl(string $key, string $prefix): int
+    private function redisTtl(string $key, string $prefix, string $connectionName): int
     {
         foreach ($this->redisKeyCandidates($key, $prefix) as $candidate) {
-            $ttl = (int) Redis::ttl($candidate);
+            $ttl = (int) Redis::connection($connectionName)->ttl($candidate);
             if ($ttl !== -2) {
                 return $ttl;
             }
@@ -371,16 +375,71 @@ class NntmuxPrometheusMetrics
         return -2;
     }
 
-    private function redisValue(string $key): int
+    private function redisValue(string $key, string $connectionName): int
     {
         foreach ($this->redisKeyCandidates($key, (string) config('cache.prefix')) as $candidate) {
-            $value = Redis::get($candidate);
+            $value = Redis::connection($connectionName)->get($candidate);
             if ($value !== null) {
                 return (int) $value;
             }
         }
 
         return 0;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function scanRedisKeys(string $connectionName, string $pattern, int $count = 1000): array
+    {
+        $connection = Redis::connection($connectionName);
+        $defaultCursor = $this->defaultRedisScanCursor($connection);
+        $cursor = $defaultCursor;
+        $keys = [];
+        $iterations = 0;
+
+        do {
+            // Laravel's Redis connection exposes SCAN dynamically with the same options shape used by RedisStore.
+            /** @phpstan-ignore-next-line */
+            $scanResult = $connection->scan($cursor, ['match' => $pattern, 'count' => $count]);
+            if (! is_array($scanResult)) {
+                break;
+            }
+
+            [$cursor, $chunk] = $scanResult;
+            if (! is_array($chunk)) {
+                break;
+            }
+
+            foreach ($chunk as $key) {
+                $keys[] = (string) $key;
+            }
+
+            $iterations++;
+        } while (! $this->redisScanComplete($cursor, $defaultCursor) && $iterations < 1000);
+
+        return array_values(array_unique($keys));
+    }
+
+    private function redisPhysicalPattern(string $logicalPattern): string
+    {
+        return (string) config('database.redis.options.prefix').(string) config('cache.prefix').$logicalPattern;
+    }
+
+    private function defaultRedisScanCursor(mixed $connection): mixed
+    {
+        return $connection instanceof PhpRedisConnection && version_compare((string) phpversion('redis'), '6.1.0', '>=')
+            ? null
+            : '0';
+    }
+
+    private function redisScanComplete(mixed $cursor, mixed $defaultCursor): bool
+    {
+        if ($defaultCursor === null) {
+            return $cursor === null || $cursor === 0 || $cursor === '0';
+        }
+
+        return (string) $cursor === (string) $defaultCursor;
     }
 
     /**
