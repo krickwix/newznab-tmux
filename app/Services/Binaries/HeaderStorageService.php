@@ -277,9 +277,24 @@ final class HeaderStorageService
      */
     private function getFileCount(string $subject): array
     {
-        if (! preg_match('/[[(\s](\d{1,5})(\/|[\s_]of[\s_]|-)(\d{1,5})[])[\s$:]/i', $subject, $fileCount)) {
-            $fileCount[1] = $fileCount[3] = 0;
+        $patterns = [
+            '/\bFile\s+(\d{1,5})\s+of\s+(\d{1,5})\b/i',
+            '/[\[(]\s*(\d{1,5})\s*\/\s*(\d{1,5})\s*[\])]/',
+            '/[\[(]\s*(\d{1,5})\s+of\s+(\d{1,5})\s*[\])]/i',
+            '/[\[(]\s*(\d{1,5})\s*-\s*(\d{1,5})\s*[\])]/',
+            '/(?:^|[\s:])(\d{1,5})\s*\/\s*(\d{1,5})(?:[\s$:)]|$)/',
+            '/(?:^|[\s:])(\d{1,5})\s+of\s+(\d{1,5})(?:[\s$:)]|$)/i',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $subject, $fileCount) === 1) {
+                $fileCount[3] = $fileCount[2];
+
+                return $fileCount;
+            }
         }
+
+        $fileCount[1] = $fileCount[3] = 0;
 
         return $fileCount;
     }

@@ -666,6 +666,48 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame([2, 2], $binaries->pluck('filenumber')->map(static fn ($value): int => (int) $value)->all());
     }
 
+    public function test_header_storage_prefers_bracketed_file_counts_over_year_ranges(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $header = $this->parsedHeaderWithTotal(
+            703,
+            148,
+            148,
+            'Joni Mitchell Archives Vol. 4 Asylum Years 1976-1980 2024 - [159/194]  - "Joni Mitchell Archives Vol. 4 Asylum Years 1976-1980 2024.part158.rar" yEnc',
+            100
+        );
+
+        $service = new HeaderStorageService($this->deterministicCollectionHandler(), config: new BinariesConfig(partsChunkSize: 10));
+        $failed = $service->store([$header], ['id' => 1, 'name' => 'alt.test'], true);
+
+        $this->assertSame([], $failed);
+        $this->assertSame(194, (int) DB::table('collections')->value('totalfiles'));
+        $this->assertSame(159, (int) DB::table('binaries')->value('filenumber'));
+        $this->assertSame(148, (int) DB::table('binaries')->value('totalparts'));
+    }
+
+    public function test_header_storage_prefers_file_count_marker_over_disc_count_marker(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $header = $this->parsedHeaderWithTotal(
+            704,
+            782,
+            782,
+            'AsianDVDClub.org - Rideback (2009) AVC 1080p BD50 Disk 2 of 2 - File 36 of 59: "adc-rbb.r33" yEnc',
+            100
+        );
+
+        $service = new HeaderStorageService($this->deterministicCollectionHandler(), config: new BinariesConfig(partsChunkSize: 10));
+        $failed = $service->store([$header], ['id' => 1, 'name' => 'alt.test'], true);
+
+        $this->assertSame([], $failed);
+        $this->assertSame(59, (int) DB::table('collections')->value('totalfiles'));
+        $this->assertSame(36, (int) DB::table('binaries')->value('filenumber'));
+        $this->assertSame(782, (int) DB::table('binaries')->value('totalparts'));
+    }
+
     public function test_header_storage_resolves_duplicate_filenumber_with_different_binary_hash(): void
     {
         $this->createHeaderStorageTables();
