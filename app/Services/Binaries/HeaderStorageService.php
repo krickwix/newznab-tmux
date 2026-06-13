@@ -248,7 +248,7 @@ final class HeaderStorageService
      */
     private function extractFileNumberAndTotal(array $header): array
     {
-        if (array_key_exists('collection_file_number', $header) || array_key_exists('collection_total_files', $header)) {
+        if (array_key_exists('collection_file_number', $header) && array_key_exists('collection_total_files', $header)) {
             return [
                 (int) ($header['collection_file_number'] ?? 0),
                 (int) ($header['collection_total_files'] ?? 0),

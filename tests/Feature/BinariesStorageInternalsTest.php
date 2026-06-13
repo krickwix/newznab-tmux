@@ -645,6 +645,27 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame([1, 1], $binaries->pluck('currentparts')->map(static fn ($value): int => (int) $value)->all());
     }
 
+    public function test_header_storage_falls_back_to_subject_counts_when_collection_metadata_is_partial(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $onlyFileNumber = $this->parsedHeaderWithTotal(701, 2, 3, 'Partial.Metadata.File', 100);
+        $onlyFileNumber['collection_file_number'] = 99;
+
+        $onlyTotalFiles = $this->parsedHeaderWithTotal(702, 2, 3, 'Partial.Metadata.Total', 150);
+        $onlyTotalFiles['collection_total_files'] = 99;
+
+        $service = new HeaderStorageService($this->deterministicCollectionHandler(), config: new BinariesConfig(partsChunkSize: 10));
+        $failed = $service->store([$onlyFileNumber, $onlyTotalFiles], ['id' => 1, 'name' => 'alt.test'], true);
+
+        $collections = DB::table('collections')->orderBy('subject')->get();
+        $binaries = DB::table('binaries')->orderBy('name')->get();
+
+        $this->assertSame([], $failed);
+        $this->assertSame([3, 3], $collections->pluck('totalfiles')->map(static fn ($value): int => (int) $value)->all());
+        $this->assertSame([2, 2], $binaries->pluck('filenumber')->map(static fn ($value): int => (int) $value)->all());
+    }
+
     public function test_header_storage_resolves_duplicate_filenumber_with_different_binary_hash(): void
     {
         $this->createHeaderStorageTables();
