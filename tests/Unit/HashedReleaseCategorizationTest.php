@@ -569,6 +569,28 @@ class HashedReleaseCategorizationTest extends TestCase
         $this->assertSame('group_name_music', $passable->bestResult->matchedBy);
     }
 
+    public function test_readable_lossless_group_title_categorizes_as_lossless(): void
+    {
+        foreach ([
+            'Fred Hersch Surrounding Green 2025',
+            'Introducing Kristin Korb 1996',
+            'IntroducingKristinKorb1996',
+            'Theo Croker Dream Manifest 2025',
+            'TheoCrokerDreamManifest2025',
+            'James Zitos Jump 2025',
+            'JamesZitosJump2025',
+        ] as $releaseName) {
+            $passable = $this->runPipeline(
+                $releaseName,
+                'alt.binaries.sounds.lossless.jazz',
+            );
+
+            $this->assertFalse($passable->lockedToMisc, "Expected readable lossless title not to lock: $releaseName");
+            $this->assertSame(Category::MUSIC_LOSSLESS, $passable->bestResult->categoryId, $releaseName);
+            $this->assertSame('group_name_lossless', $passable->bestResult->matchedBy, $releaseName);
+        }
+    }
+
     public function test_classic_movie_with_mp3_audio_token_beats_audio_category(): void
     {
         $passable = $this->runPipeline(

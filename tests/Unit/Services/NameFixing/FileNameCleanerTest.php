@@ -48,4 +48,18 @@ class FileNameCleanerTest extends TestCase
             $cleaner->formatSearchName('Southern Charm S11E12 Even Further South 720p AMZN WEB-DL DDP2 0 H 264-NTb.mkv')
         );
     }
+
+    public function test_year_plus_audio_format_is_plausible(): void
+    {
+        $cleaner = new FileNameCleaner;
+
+        $this->assertTrue($cleaner->isPlausibleReleaseTitle('New Dimensions in Banjo and Bluegrass 1963 LP mono flac'));
+    }
+
+    public function test_audio_format_without_year_is_not_enough_for_plausibility(): void
+    {
+        $cleaner = new FileNameCleaner;
+
+        $this->assertFalse($cleaner->isPlausibleReleaseTitle('grier-house to myself flac'));
+    }
 }

@@ -39,7 +39,10 @@ class GroupNameCategorizer extends AbstractCategorizer
         if (preg_match('/(?:alt\.binaries|a\.b)\..*?(erotica|pictures\.erotica|xxx)/i', $groupName)) {
             return $this->matched(Category::XXX_OTHER, 0.7, 'group_name_xxx');
         }
-        if (preg_match('/(?:alt\.binaries|a\.b)\..*?(sounds?|mp3|music|lossless)/i', $groupName)) {
+        if (preg_match('/(?:alt\.binaries|a\.b)\..*?lossless/i', $groupName)) {
+            return $this->matched(Category::MUSIC_LOSSLESS, 0.65, 'group_name_lossless');
+        }
+        if (preg_match('/(?:alt\.binaries|a\.b)\..*?(sounds?|mp3|music)/i', $groupName)) {
             return $this->matched(Category::MUSIC_OTHER, 0.6, 'group_name_music');
         }
         if (preg_match('/(?:alt\.binaries|a\.b)\..*?(games?|console|psx|nintendo)/i', $groupName)) {

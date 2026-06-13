@@ -28,13 +28,17 @@ class MiscCategorizer extends AbstractCategorizer
     public function categorize(ReleaseContext $context): CategorizationResult
     {
         $name = $context->releaseName;
+        $analysis = $this->inspectSignals($name);
+
+        if ($this->isReadableCompactTitleWithYear($analysis['coreName'])) {
+            return $this->noMatch();
+        }
 
         // Check for hash patterns first
         if ($result = $this->checkHash($name)) {
             return $result;
         }
 
-        $analysis = $this->inspectSignals($name);
         if ($this->isZeroVowelLongToken($analysis['coreName'])) {
             return $this->matched(Category::OTHER_HASHED, 0.78, 'gibberish_zero_vowels');
         }
@@ -103,6 +107,7 @@ class MiscCategorizer extends AbstractCategorizer
         $lowSignal = $signalScore === 0
             && $isCoreToken
             && strlen($coreName) >= 12
+            && ! $this->isReadableCompactTitleWithYear($coreName)
             && ! $this->hasStrongWordStructure($name, $coreName);
 
         return [
@@ -415,6 +420,10 @@ class MiscCategorizer extends AbstractCategorizer
             return false;
         }
 
+        if ($this->isReadableCompactTitleWithYear($stem)) {
+            return false;
+        }
+
         if (preg_match('/\b(19|20)\d{2}\b/', $stem) || preg_match('/^[A-Z][a-z]+([A-Z][a-z]+)+$/', $stem)) {
             return false;
         }
@@ -447,6 +456,24 @@ class MiscCategorizer extends AbstractCategorizer
             return false;
         }
 
+        if ($this->isReadableCompactTitleWithYear($joined)) {
+            return false;
+        }
+
+        $wordTokens = array_filter(
+            $tokens,
+            static fn (string $token): bool => preg_match('/^[\pL]{3,}$/u', $token) === 1
+        );
+        $hasNoiseToken = count(array_filter(
+            $tokens,
+            static fn (string $token): bool => preg_match('/^[\pL]{3,}$/u', $token) !== 1
+                && preg_match('/^(?:19|20)\d{2}$/', $token) !== 1
+        )) > 0;
+
+        if (count($wordTokens) >= 3 && ! $hasNoiseToken) {
+            return false;
+        }
+
         if (preg_match('/\b(19|20)\d{2}\b/', $joined)) {
             return false;
         }
@@ -468,6 +495,17 @@ class MiscCategorizer extends AbstractCategorizer
             || $this->hasInsufficientWordStructure($joined)
             || $this->isDigitHeavyArchiveStem($joined)
             || $this->isMixedCaseNoiseArchiveStem($joined);
+    }
+
+    private function isReadableCompactTitleWithYear(string $stem): bool
+    {
+        if (! preg_match('/^(?P<title>(?:[A-Z][a-z]{2,}){2,})(?P<year>(?:19|20)\d{2})$/', $stem, $matches)) {
+            return false;
+        }
+
+        preg_match_all('/[A-Z][a-z]{2,}/', $matches['title'], $words);
+
+        return count($words[0]) >= 3;
     }
 
     /**

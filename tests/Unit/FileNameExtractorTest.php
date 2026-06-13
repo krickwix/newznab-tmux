@@ -280,6 +280,17 @@ class FileNameExtractorTest extends TestCase
         $this->assertSame('Bare movie subject title', $result->method);
     }
 
+    public function test_extracts_lossless_music_title_from_yenc_subject_prefix(): void
+    {
+        $extractor = new FileNameExtractor;
+
+        $result = $extractor->extractFromFile('New Dimensions in Banjo and Bluegrass 1963 LP (mono) flac [8 of 31] "newdimensions.vol000+01.par2" yEnc');
+
+        $this->assertNotNull($result);
+        $this->assertSame('New Dimensions in Banjo and Bluegrass 1963 LP (mono) flac', $result->newName);
+        $this->assertSame('yEnc subject title', $result->method);
+    }
+
     public function test_strips_terminal_video_extension_from_bare_movie_candidate(): void
     {
         $extractor = new FileNameExtractor;

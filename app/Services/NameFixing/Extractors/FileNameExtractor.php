@@ -300,7 +300,7 @@ class FileNameExtractor
         }
 
         $candidate = null;
-        if (preg_match('/^(?:REQ[:\s]*)?(.+?\b(?:19|20)\d{2}\b.*?)(?:[._\s-]*\[\d+\/\d+\]\s*(?:-|\")|\s+-\s+"|\s+yEnc\b)/iu', $subject, $match)) {
+        if (preg_match('/^(?:REQ[:\s]*)?(.+?\b(?:19|20)\d{2}\b.*?)(?:[._\s-]*\[\d+(?:\/|\s+of\s+)\d+\]\s*(?:-|\")|\s+-\s+"|\s+yEnc\b)/iu', $subject, $match)) {
             $candidate = $match[1];
         } elseif (preg_match('/^(?:REQ[:\s]*)?(.+?\b(?:19|20)\d{2}\b.*?)[._\s-]+\[[^\]]+\]/iu', $subject, $match)) {
             $candidate = $match[1];
