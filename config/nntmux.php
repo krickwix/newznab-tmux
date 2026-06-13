@@ -21,6 +21,7 @@ return [
     'distributed_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_LOCK_SECONDS', 900),
     'distributed_long_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_LONG_LOCK_SECONDS', 3600),
     'distributed_lock_store' => env('NNTMUX_DISTRIBUTED_LOCK_STORE', 'redis'),
+    'allow_large_cbp_fk_restore' => (bool) env('NNTMUX_ALLOW_LARGE_CBP_FK_RESTORE', false),
     'purge_inactive_users' => env('PURGE_INACTIVE_USERS', false),
     'purge_inactive_users_days' => env('PURGE_INACTIVE_USERS_DAYS', 180),
     'mysql_search_fallback' => env('MYSQL_SEARCH_FALLBACK', false), // Disable MySQL LIKE fallback when Manticore/Elasticsearch return no results
