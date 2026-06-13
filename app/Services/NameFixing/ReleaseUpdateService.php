@@ -144,8 +144,18 @@ class ReleaseUpdateService
 
             // Determine if the source is trusted enough to bypass plausibility checks
             $trustedSource = $this->isTrustedSource($type, $method, $preId);
+            $preferredSubjectTitle = false;
 
-            if (! $trustedSource && ! $this->fileNameCleaner->isPlausibleReleaseTitle($normalizedName)) {
+            if (! $trustedSource) {
+                $subjectTitle = $this->preferClassicMovieSubjectTitle($release, $newName);
+                if ($subjectTitle !== $newName) {
+                    $newName = $subjectTitle;
+                    $normalizedName = $this->fileNameCleaner->normalizeCandidateTitle($newName);
+                    $preferredSubjectTitle = true;
+                }
+            }
+
+            if (! $trustedSource && ! $preferredSubjectTitle && ! $this->fileNameCleaner->isPlausibleReleaseTitle($normalizedName)) {
                 // Skip low-quality rename candidates for untrusted sources
                 $this->done = true;
 
@@ -212,6 +222,67 @@ class ReleaseUpdateService
             }
         }
         $this->done = true;
+    }
+
+    protected function preferClassicMovieSubjectTitle(object $release, string $candidate): string
+    {
+        $groupName = UsenetGroup::getNameByID($release->groups_id);
+        if (! $this->isClassicMovieGroup($groupName)) {
+            return $candidate;
+        }
+
+        if (! $this->looksLikeCompactFilenameStem($candidate)) {
+            return $candidate;
+        }
+
+        $subject = (string) ($release->name ?? $release->searchname ?? '');
+        $title = $this->extractReadableSubjectMovieTitle($subject);
+
+        return $title === null ? $candidate : $title;
+    }
+
+    protected function isClassicMovieGroup(string $groupName): bool
+    {
+        return preg_match('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|dvd[.-]?classic|movies?[.-]?classic|movie[.-]?classic)/i', $groupName) === 1;
+    }
+
+    protected function looksLikeCompactFilenameStem(string $candidate): bool
+    {
+        $normalized = preg_replace('/[^\pL\pN]+/u', '', $candidate) ?? $candidate;
+
+        return strlen($normalized) >= 8
+            && preg_match('/\s/u', $candidate) !== 1
+            && preg_match('/[a-z]/u', $normalized) !== 1
+            && preg_match('/[A-Z]{4,}/u', $normalized) === 1;
+    }
+
+    protected function extractReadableSubjectMovieTitle(string $subject): ?string
+    {
+        if ($subject === '' || preg_match('/\b(?:19|20)\d{2}\b/', $subject) !== 1) {
+            return null;
+        }
+
+        $withoutQuotedFiles = preg_replace('/["\'][^"\']+["\']/', ' ', $subject) ?? $subject;
+        $withoutQuotedFiles = preg_replace('/\[[0-9]+\/[0-9]+\]/', ' ', $withoutQuotedFiles) ?? $withoutQuotedFiles;
+        $withoutQuotedFiles = preg_replace('/\byEnc\b/i', ' ', $withoutQuotedFiles) ?? $withoutQuotedFiles;
+        $withoutQuotedFiles = preg_replace('/\b1\s*:\s*1\b/i', ' ', $withoutQuotedFiles) ?? $withoutQuotedFiles;
+        $withoutQuotedFiles = preg_replace('/\s+-\s*$/', '', trim($withoutQuotedFiles)) ?? $withoutQuotedFiles;
+        $withoutQuotedFiles = preg_replace('/\s{2,}/', ' ', $withoutQuotedFiles) ?? $withoutQuotedFiles;
+        $title = trim($withoutQuotedFiles, " \t\n\r\0\x0B-_.");
+
+        if (preg_match('/^(.+?\b(?:19|20)\d{2}\b\)?)/u', $title, $hit) === 1) {
+            $title = $hit[1];
+        }
+
+        $title = preg_replace('/\(((?:19|20)\d{2})\)/', ' $1', $title) ?? $title;
+        $title = preg_replace('/\s{2,}/', ' ', $title) ?? $title;
+        $title = trim($title, " \t\n\r\0\x0B-_.");
+
+        if (preg_match_all('/[\pL]{3,}/u', $title) < 1 || preg_match('/\b(?:19|20)\d{2}\b/', $title) !== 1) {
+            return null;
+        }
+
+        return $title;
     }
 
     /**

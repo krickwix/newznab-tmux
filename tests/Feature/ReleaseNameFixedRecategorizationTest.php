@@ -300,6 +300,96 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(1, (int) $release->isrenamed);
     }
 
+    public function test_classic_movie_filename_stem_prefers_readable_subject_title_for_recategorization(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.dvd.classics',
+            'active' => 1,
+            'backfill' => 1,
+        ]);
+
+        $subject = 'A Letter to Three Wives (1949) 1:1 - [18/50] - "ALETTERTOTHREEWIVES.part16.rar" yEnc';
+        $release = Release::factory()->create([
+            'name' => $subject,
+            'searchname' => $subject,
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('f', 40),
+            'leftguid' => 'f',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $service = app(ReleaseUpdateService::class);
+        $service->updateRelease(
+            $release->fresh(),
+            'ALETTERTOTHREEWIVES',
+            'RarInfo FileName Match',
+            true,
+            'Filenames, ',
+            true,
+            false,
+        );
+
+        $release->refresh();
+
+        $this->assertSame('A Letter to Three Wives 1949', $release->searchname);
+        $this->assertSame(Category::MOVIE_OTHER, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(1, (int) $release->isrenamed);
+    }
+
+    public function test_one_word_classic_movie_filename_stem_prefers_subject_title_with_year(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.dvd.classics',
+            'active' => 1,
+            'backfill' => 1,
+        ]);
+
+        $subject = 'Humoresque (1946) 1:1 - [03/42] - "HUMORESQUE.par2" yEnc';
+        $release = Release::factory()->create([
+            'name' => $subject,
+            'searchname' => $subject,
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('0', 40),
+            'leftguid' => '0',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $service = app(ReleaseUpdateService::class);
+        $service->updateRelease(
+            $release->fresh(),
+            'HUMORESQUE',
+            'RarInfo FileName Match',
+            true,
+            'Filenames, ',
+            true,
+            false,
+        );
+
+        $release->refresh();
+
+        $this->assertSame('Humoresque 1946', $release->searchname);
+        $this->assertSame(Category::MOVIE_OTHER, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(1, (int) $release->isrenamed);
+    }
+
     public function test_par2_archive_part_name_prefers_subject_title_and_year(): void
     {
         Search::shouldReceive('updateRelease')->twice();

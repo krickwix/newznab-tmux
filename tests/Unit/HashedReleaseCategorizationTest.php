@@ -521,6 +521,18 @@ class HashedReleaseCategorizationTest extends TestCase
         $this->assertSame('group_name_movie', $passable->bestResult->matchedBy);
     }
 
+    public function test_one_word_classic_movie_title_with_year_is_not_obfuscated_extracted_subject(): void
+    {
+        $passable = $this->runPipeline(
+            'Humoresque 1946',
+            'alt.binaries.dvd.classics',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_OTHER, $passable->bestResult->categoryId);
+        $this->assertSame('group_name_movie', $passable->bestResult->matchedBy);
+    }
+
     public function test_normalized_vintage_film_nfo_subject_categorizes_as_movie_not_audio(): void
     {
         $passable = $this->runPipeline(

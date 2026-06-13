@@ -302,14 +302,24 @@ class MiscCategorizer extends AbstractCategorizer
             return false;
         }
 
-        if ($this->countAlphabeticWordTokens($name) < 2) {
+        $hasYear = preg_match('/\b(19|20)\d{2}\b/', $name) === 1;
+        if ($this->countAlphabeticWordTokens($name) < 2 && ! ($hasYear && $this->hasReadableSingleWordMovieTitle($name))) {
             return false;
         }
 
-        return preg_match('/\b(19|20)\d{2}\b/', $name) === 1
+        return $hasYear
             || $this->looksLikeNumberedImageVideoSidecar($name)
             || preg_match('/(?:\.|\b)(?:avi|mkv|mp4|mpg|mpeg|vob)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $name) === 1
             || preg_match('/\b(?:480p|576p|720p|1080p|2160p|x264|x265|h\.?264|h\.?265|xvid|divx|dvdrip|vhsrip|tvrip|bdrip|bluray|dvd)\b/i', $name) === 1;
+    }
+
+    private function hasReadableSingleWordMovieTitle(string $name): bool
+    {
+        if (! preg_match('/^\s*(?<title>\p{Lu}\p{Ll}{3,}(?:[\'-]\p{L}{2,})?)\s+\b(?:19|20)\d{2}\b\s*$/u', $name, $matches)) {
+            return false;
+        }
+
+        return preg_match('/[aeiouy]/i', $matches['title']) === 1;
     }
 
     private function looksLikeNumberedImageVideoSidecar(string $name): bool
