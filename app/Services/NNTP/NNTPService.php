@@ -363,15 +363,28 @@ class NNTPService extends NntpClient
      */
     public function doQuit(bool $force = false): mixed
     {
-        $this->_resetProperties();
+        if ($force) {
+            if (is_resource($this->_socket)) {
+                fclose($this->_socket);
+            }
 
-        // Check if we are connected to usenet.
-        if ($force || parent::_isConnected()) {
-            // Disconnect from usenet.
-            return $this->disconnect();
+            $this->_resetProperties();
+
+            return true;
         }
 
-        return true;
+        $result = true;
+        if (parent::_isConnected()) {
+            $result = $this->disconnect();
+        }
+
+        if ($result !== true && is_resource($this->_socket)) {
+            fclose($this->_socket);
+        }
+
+        $this->_resetProperties();
+
+        return $result;
     }
 
     /**
@@ -764,7 +777,7 @@ class NNTPService extends NntpClient
      */
     public function getYencBodyPreambleLines(string $groupName, mixed $identifier, int $maxLines = 8): array|NntpError
     {
-        $connected = $this->_checkConnection();
+        $connected = $this->_checkConnection(false);
         if ($connected !== true) {
             return $connected;
         }
