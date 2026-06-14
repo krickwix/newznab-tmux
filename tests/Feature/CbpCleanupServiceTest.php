@@ -10,8 +10,10 @@ use App\Services\ReleaseCleaningService;
 use App\Services\ReleaseCreationService;
 use App\Services\ReleaseProcessingService;
 use App\Services\Releases\ReleaseDuplicateFinder;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use ReflectionClass;
+use ReflectionMethod;
 use Tests\TestCase;
 
 class CbpCleanupServiceTest extends TestCase
@@ -81,6 +83,20 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertSame(0, DB::table('parts')->count());
         $this->assertSame(0, DB::table('binaries')->count());
         $this->assertSame(0, DB::table('collections')->count());
+    }
+
+    public function test_cleanup_retry_classifies_mariadb_record_changed_error_as_transient(): void
+    {
+        $service = new CollectionCleanupService;
+        $method = new ReflectionMethod($service, 'isLockError');
+        $method->setAccessible(true);
+
+        $this->assertTrue($method->invoke($service, new QueryException(
+            'mariadb',
+            'DELETE FROM collections WHERE id IN (?)',
+            [123],
+            new \RuntimeException("SQLSTATE[HY000]: General error: 123 Got error 123 when reading table './nntmux/collections'")
+        )));
     }
 
     public function test_retention_cleanup_preserves_payload_for_release_waiting_on_nzb(): void

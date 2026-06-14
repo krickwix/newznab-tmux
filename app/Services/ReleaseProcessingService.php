@@ -23,8 +23,8 @@ use App\Support\Data\ProcessReleasesSettings;
 use App\Support\Data\ReleaseCreationResult;
 use App\Support\Data\ReleaseDeleteStats;
 use App\Support\ReleaseSearchIndexSync;
+use App\Support\TransientDatabaseError;
 use DateTimeInterface;
-use Illuminate\Database\QueryException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Throwable;
@@ -754,6 +754,32 @@ final class ReleaseProcessingService
         return min(100, $this->settings->completion);
     }
 
+    /**
+     * @template T
+     *
+     * @param  callable():T  $operation
+     * @return T
+     *
+     * @throws Throwable
+     */
+    private function retryTransientCollectionOperation(callable $operation): mixed
+    {
+        $attempt = 0;
+
+        while (true) {
+            try {
+                return $operation();
+            } catch (Throwable $e) {
+                if (! TransientDatabaseError::is($e) || $attempt >= self::MAX_RETRIES) {
+                    throw $e;
+                }
+
+                $attempt++;
+                usleep(self::RETRY_BASE_DELAY_US * (2 ** $attempt));
+            }
+        }
+    }
+
     // ========================================================================
     // Collection Processing Stages
     // ========================================================================
@@ -768,37 +794,41 @@ final class ReleaseProcessingService
         $lastCollectionId = 0;
 
         do {
-            $collectionIds = Collection::query()
-                ->select(['collections.id'])
-                ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
-                ->where('collections.id', '>', $lastCollectionId)
-                ->where('collections.totalfiles', '=', 0)
-                ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
-                ->where('binaries.filenumber', '>', 0)
-                ->when($groupID !== null, static fn ($q) => $q->where('collections.groups_id', $groupID))
-                ->groupBy(['collections.id'])
-                ->havingRaw(
-                    'COUNT(DISTINCT binaries.filenumber) >= GREATEST(1, CEIL(MAX(binaries.filenumber) * ? / 100))',
-                    [$completion]
-                )
-                ->orderBy('collections.id')
-                ->limit(self::BATCH_SIZE)
-                ->pluck('collections.id');
+            $collectionIds = $this->retryTransientCollectionOperation(
+                static fn () => Collection::query()
+                    ->select(['collections.id'])
+                    ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                    ->where('collections.id', '>', $lastCollectionId)
+                    ->where('collections.totalfiles', '=', 0)
+                    ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
+                    ->where('binaries.filenumber', '>', 0)
+                    ->when($groupID !== null, static fn ($q) => $q->where('collections.groups_id', $groupID))
+                    ->groupBy(['collections.id'])
+                    ->havingRaw(
+                        'COUNT(DISTINCT binaries.filenumber) >= GREATEST(1, CEIL(MAX(binaries.filenumber) * ? / 100))',
+                        [$completion]
+                    )
+                    ->orderBy('collections.id')
+                    ->limit(self::BATCH_SIZE)
+                    ->pluck('collections.id')
+            );
 
             if ($collectionIds->isEmpty()) {
                 break;
             }
 
-            DB::transaction(static function () use ($collectionIds): void {
-                Collection::query()
-                    ->whereIn('id', $collectionIds->all())
-                    ->update([
-                        'filecheck' => CollectionFileCheckStatus::CompleteCollection->value,
-                        'totalfiles' => DB::raw(
-                            '(SELECT MAX(NULLIF(b2.filenumber, 0)) FROM binaries b2 WHERE b2.collections_id = collections.id)'
-                        ),
-                    ]);
-            }, 10);
+            $this->retryTransientCollectionOperation(
+                static fn () => DB::transaction(static function () use ($collectionIds): void {
+                    Collection::query()
+                        ->whereIn('id', $collectionIds->all())
+                        ->update([
+                            'filecheck' => CollectionFileCheckStatus::CompleteCollection->value,
+                            'totalfiles' => DB::raw(
+                                '(SELECT MAX(NULLIF(b2.filenumber, 0)) FROM binaries b2 WHERE b2.collections_id = collections.id)'
+                            ),
+                        ]);
+                }, 10)
+            );
 
             $lastCollectionId = (int) $collectionIds->max();
 
@@ -816,48 +846,52 @@ final class ReleaseProcessingService
         $lastCollectionId = 0;
 
         do {
-            $collectionIds = Collection::query()
-                ->select(['collections.id'])
-                ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
-                ->where('collections.id', '>', $lastCollectionId)
-                ->where('collections.totalfiles', '>', 0)
-                ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
-                ->when($groupID !== 0, static fn ($q) => $q->where('collections.groups_id', $groupID))
-                ->groupBy(['binaries.collections_id', 'collections.totalfiles', 'collections.id'])
-                ->havingRaw(
-                    'COUNT(binaries.id) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
-                    [$completion]
-                )
-                ->orderBy('collections.id')
-                ->limit(self::BATCH_SIZE)
-                ->pluck('collections.id');
+            $collectionIds = $this->retryTransientCollectionOperation(
+                static fn () => Collection::query()
+                    ->select(['collections.id'])
+                    ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                    ->where('collections.id', '>', $lastCollectionId)
+                    ->where('collections.totalfiles', '>', 0)
+                    ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
+                    ->when($groupID !== 0, static fn ($q) => $q->where('collections.groups_id', $groupID))
+                    ->groupBy(['binaries.collections_id', 'collections.totalfiles', 'collections.id'])
+                    ->havingRaw(
+                        'COUNT(binaries.id) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
+                        [$completion]
+                    )
+                    ->orderBy('collections.id')
+                    ->limit(self::BATCH_SIZE)
+                    ->pluck('collections.id')
+            );
 
             if ($collectionIds->isEmpty()) {
                 break;
             }
 
             foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids) {
-                DB::transaction(static function () use ($ids, $completion): void {
-                    $eligibleCollectionsQuery = Collection::query()
-                        ->select(['collections.id'])
-                        ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
-                        ->whereIn('collections.id', $ids->all())
-                        ->where('collections.totalfiles', '>', 0)
-                        ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
-                        ->groupBy(['binaries.collections_id', 'collections.totalfiles', 'collections.id'])
-                        ->havingRaw(
-                            'COUNT(binaries.id) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
-                            [$completion]
-                        );
+                $this->retryTransientCollectionOperation(
+                    static fn () => DB::transaction(static function () use ($ids, $completion): void {
+                        $eligibleCollectionsQuery = Collection::query()
+                            ->select(['collections.id'])
+                            ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                            ->whereIn('collections.id', $ids->all())
+                            ->where('collections.totalfiles', '>', 0)
+                            ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
+                            ->groupBy(['binaries.collections_id', 'collections.totalfiles', 'collections.id'])
+                            ->havingRaw(
+                                'COUNT(binaries.id) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
+                                [$completion]
+                            );
 
-                    Collection::query()
-                        ->joinSub(
-                            $eligibleCollectionsQuery,
-                            'eligible_collections',
-                            static fn ($join) => $join->on('collections.id', '=', 'eligible_collections.id')
-                        )
-                        ->update(['collections.filecheck' => CollectionFileCheckStatus::CompleteCollection->value]);
-                }, 10);
+                        Collection::query()
+                            ->joinSub(
+                                $eligibleCollectionsQuery,
+                                'eligible_collections',
+                                static fn ($join) => $join->on('collections.id', '=', 'eligible_collections.id')
+                            )
+                            ->update(['collections.filecheck' => CollectionFileCheckStatus::CompleteCollection->value]);
+                    }, 10)
+                );
             }
 
             $lastCollectionId = (int) $collectionIds->max();
@@ -871,7 +905,7 @@ final class ReleaseProcessingService
      */
     private function runCollectionFileCheckStage2(int $groupID): void
     {
-        DB::transaction(static function () use ($groupID): void {
+        $this->retryTransientCollectionOperation(static fn () => DB::transaction(static function () use ($groupID): void {
             $collectionsQuery = Collection::query()
                 ->select(['collections.id'])
                 ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
@@ -887,7 +921,7 @@ final class ReleaseProcessingService
             Collection::query()
                 ->joinSub($collectionsQuery, 'r', static fn ($join) => $join->on('collections.id', '=', 'r.id'))
                 ->update(['collections.filecheck' => CollectionFileCheckStatus::ZeroPart->value]);
-        }, 10);
+        }, 10));
 
         $this->updateCollectionsFilecheckInChunks(
             $groupID,
@@ -933,11 +967,8 @@ final class ReleaseProcessingService
                 } while ($updated === self::BATCH_SIZE);
 
                 return;
-            } catch (QueryException $e) {
-                $isDeadlock = ($e->errorInfo[1] ?? 0) === 1213
-                    || str_contains($e->getMessage(), 'Deadlock');
-
-                if ($isDeadlock && $attempt < $maxAttempts - 1) {
+            } catch (Throwable $e) {
+                if (TransientDatabaseError::is($e) && $attempt < $maxAttempts - 1) {
                     $attempt++;
                     usleep(self::RETRY_BASE_DELAY_US * (2 ** $attempt));
                 } else {
@@ -976,39 +1007,43 @@ final class ReleaseProcessingService
         $lastCollectionId = 0;
 
         do {
-            $collectionIds = DB::table('collections as c')
-                ->select(['c.id'])
-                ->join('binaries as b', 'c.id', '=', 'b.collections_id')
-                ->where('c.id', '>', $lastCollectionId)
-                ->where('b.partcheck', FileCompletionStatus::Complete->value)
-                ->whereIn('c.filecheck', [
-                    CollectionFileCheckStatus::TempComplete->value,
-                    CollectionFileCheckStatus::ZeroPart->value,
-                ])
-                ->when($groupID !== null, static fn ($q) => $q->where('c.groups_id', $groupID))
-                ->groupBy(['b.collections_id', 'c.totalfiles', 'c.id'])
-                ->havingRaw(
-                    'COUNT(b.id) >= GREATEST(1, CEIL(c.totalfiles * ? / 100))',
-                    [$completion]
-                )
-                ->orderBy('c.id')
-                ->limit(self::BATCH_SIZE)
-                ->pluck('c.id');
+            $collectionIds = $this->retryTransientCollectionOperation(
+                static fn () => DB::table('collections as c')
+                    ->select(['c.id'])
+                    ->join('binaries as b', 'c.id', '=', 'b.collections_id')
+                    ->where('c.id', '>', $lastCollectionId)
+                    ->where('b.partcheck', FileCompletionStatus::Complete->value)
+                    ->whereIn('c.filecheck', [
+                        CollectionFileCheckStatus::TempComplete->value,
+                        CollectionFileCheckStatus::ZeroPart->value,
+                    ])
+                    ->when($groupID !== null, static fn ($q) => $q->where('c.groups_id', $groupID))
+                    ->groupBy(['b.collections_id', 'c.totalfiles', 'c.id'])
+                    ->havingRaw(
+                        'COUNT(b.id) >= GREATEST(1, CEIL(c.totalfiles * ? / 100))',
+                        [$completion]
+                    )
+                    ->orderBy('c.id')
+                    ->limit(self::BATCH_SIZE)
+                    ->pluck('c.id')
+            );
 
             if ($collectionIds->isEmpty()) {
                 break;
             }
 
-            DB::transaction(static function () use ($collectionIds): void {
-                Collection::query()
-                    ->whereIn('id', $collectionIds->all())
-                    ->update([
-                        'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
-                        'totalfiles' => DB::raw(
-                            '(SELECT COUNT(b2.id) FROM binaries b2 WHERE b2.collections_id = collections.id)'
-                        ),
-                    ]);
-            }, 10);
+            $this->retryTransientCollectionOperation(
+                static fn () => DB::transaction(static function () use ($collectionIds): void {
+                    Collection::query()
+                        ->whereIn('id', $collectionIds->all())
+                        ->update([
+                            'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
+                            'totalfiles' => DB::raw(
+                                '(SELECT COUNT(b2.id) FROM binaries b2 WHERE b2.collections_id = collections.id)'
+                            ),
+                        ]);
+                }, 10)
+            );
 
             $lastCollectionId = (int) $collectionIds->max();
 
@@ -1024,29 +1059,33 @@ final class ReleaseProcessingService
         $lastBinaryId = 0;
 
         do {
-            $binaryIds = DB::table('binaries as b')
-                ->select(['b.id'])
-                ->join('collections as c', 'c.id', '=', 'b.collections_id')
-                ->where('b.id', '>', $lastBinaryId)
-                ->where('c.filecheck', $collectionStatus->value)
-                ->where('b.partcheck', FileCompletionStatus::Incomplete->value)
-                ->where('b.totalparts', '>', 0)
-                ->whereRaw('b.currentparts >= CEIL(b.totalparts * ? / 100)', [$completion])
-                ->when($groupID !== null, static fn ($q) => $q->where('c.groups_id', $groupID))
-                ->groupBy(['b.id', 'b.totalparts'])
-                ->orderBy('b.id')
-                ->limit(self::BATCH_SIZE)
-                ->pluck('b.id');
+            $binaryIds = $this->retryTransientCollectionOperation(
+                static fn () => DB::table('binaries as b')
+                    ->select(['b.id'])
+                    ->join('collections as c', 'c.id', '=', 'b.collections_id')
+                    ->where('b.id', '>', $lastBinaryId)
+                    ->where('c.filecheck', $collectionStatus->value)
+                    ->where('b.partcheck', FileCompletionStatus::Incomplete->value)
+                    ->where('b.totalparts', '>', 0)
+                    ->whereRaw('b.currentparts >= CEIL(b.totalparts * ? / 100)', [$completion])
+                    ->when($groupID !== null, static fn ($q) => $q->where('c.groups_id', $groupID))
+                    ->groupBy(['b.id', 'b.totalparts'])
+                    ->orderBy('b.id')
+                    ->limit(self::BATCH_SIZE)
+                    ->pluck('b.id')
+            );
 
             if ($binaryIds->isEmpty()) {
                 break;
             }
 
-            DB::transaction(static function () use ($binaryIds): void {
-                DB::table('binaries')
-                    ->whereIn('id', $binaryIds->all())
-                    ->update(['partcheck' => FileCompletionStatus::Complete->value]);
-            }, 10);
+            $this->retryTransientCollectionOperation(
+                static fn () => DB::transaction(static function () use ($binaryIds): void {
+                    DB::table('binaries')
+                        ->whereIn('id', $binaryIds->all())
+                        ->update(['partcheck' => FileCompletionStatus::Complete->value]);
+                }, 10)
+            );
 
             $lastBinaryId = (int) $binaryIds->max();
 
@@ -1059,7 +1098,7 @@ final class ReleaseProcessingService
      */
     private function runCollectionFileCheckStage5(int $groupId): void
     {
-        DB::transaction(static function () use ($groupId): void {
+        $this->retryTransientCollectionOperation(static fn () => DB::transaction(static function () use ($groupId): void {
             $query = Collection::query()
                 ->whereIn('filecheck', [
                     CollectionFileCheckStatus::TempComplete->value,
@@ -1071,7 +1110,7 @@ final class ReleaseProcessingService
             }
 
             $query->update(['filecheck' => CollectionFileCheckStatus::CompleteCollection->value]);
-        }, 10);
+        }, 10));
     }
 
     /**
@@ -1091,19 +1130,23 @@ final class ReleaseProcessingService
                 break;
             }
 
-            $completeIds = $this->filterStage6CompleteCollectionIds($candidateIds, $completion);
+            $completeIds = $this->retryTransientCollectionOperation(
+                fn () => $this->filterStage6CompleteCollectionIds($candidateIds, $completion)
+            );
 
             if ($completeIds !== []) {
-                DB::transaction(static function () use ($completeIds): void {
-                    Collection::query()
-                        ->whereIn('id', $completeIds)
-                        ->update([
-                            'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
-                            'totalfiles' => DB::raw(
-                                '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id)'
-                            ),
-                        ]);
-                }, 10);
+                $this->retryTransientCollectionOperation(
+                    static fn () => DB::transaction(static function () use ($completeIds): void {
+                        Collection::query()
+                            ->whereIn('id', $completeIds)
+                            ->update([
+                                'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
+                                'totalfiles' => DB::raw(
+                                    '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id)'
+                                ),
+                            ]);
+                    }, 10)
+                );
             }
 
             $lastCollectionId = max($candidateIds);
@@ -1117,21 +1160,23 @@ final class ReleaseProcessingService
      */
     private function stage6CandidateCollectionIds(int $lastCollectionId, ?int $normalizedGroupId): array
     {
-        return DB::table('collections')
-            ->select('collections.id')
-            ->where('collections.id', '>', $lastCollectionId)
-            ->where('collections.dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
-            ->whereIn('collections.filecheck', [
-                CollectionFileCheckStatus::Default->value,
-                CollectionFileCheckStatus::CompleteCollection->value,
-                10,
-            ])
-            ->when($normalizedGroupId !== null, static fn ($q) => $q->where('collections.groups_id', $normalizedGroupId))
-            ->orderBy('collections.id')
-            ->limit(self::BATCH_SIZE)
-            ->pluck('collections.id')
-            ->map(static fn ($id): int => (int) $id)
-            ->all();
+        return $this->retryTransientCollectionOperation(
+            fn (): array => DB::table('collections')
+                ->select('collections.id')
+                ->where('collections.id', '>', $lastCollectionId)
+                ->where('collections.dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
+                ->whereIn('collections.filecheck', [
+                    CollectionFileCheckStatus::Default->value,
+                    CollectionFileCheckStatus::CompleteCollection->value,
+                    10,
+                ])
+                ->when($normalizedGroupId !== null, static fn ($q) => $q->where('collections.groups_id', $normalizedGroupId))
+                ->orderBy('collections.id')
+                ->limit(self::BATCH_SIZE)
+                ->pluck('collections.id')
+                ->map(static fn ($id): int => (int) $id)
+                ->all()
+        );
     }
 
     /**

@@ -58,7 +58,7 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
             'Stage 6 should page collection candidates before probing binaries.'
         );
         self::assertStringContainsString(
-            '$completeIds = $this->filterStage6CompleteCollectionIds(',
+            'fn () => $this->filterStage6CompleteCollectionIds(',
             $stageSource,
             'Stage 6 should filter only the bounded candidate page through the binary anti-join.'
         );
@@ -128,8 +128,18 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
         self::assertStringContainsString('->limit(self::BATCH_SIZE)', $stageSource);
         self::assertStringContainsString('$eligibleCollectionsQuery = Collection::query()', $stageSource);
         self::assertStringContainsString("->whereIn('collections.id', \$ids->all())", $stageSource);
-        self::assertStringContainsString("->joinSub(\n                            \$eligibleCollectionsQuery", $stageSource);
+        self::assertStringContainsString('$eligibleCollectionsQuery,', $stageSource);
         self::assertStringNotContainsString('->joinSub($collectionsQuery', $stageSource);
+    }
+
+    public function test_collection_stages_use_shared_transient_database_retry_classifier(): void
+    {
+        $serviceSource = file_get_contents(__DIR__.'/../../app/Services/ReleaseProcessingService.php');
+
+        self::assertIsString($serviceSource);
+        self::assertStringContainsString('use App\Support\TransientDatabaseError;', $serviceSource);
+        self::assertStringContainsString('retryTransientCollectionOperation', $serviceSource);
+        self::assertStringContainsString('TransientDatabaseError::is($e)', $serviceSource);
     }
 
     public function test_release_filecheck_stages_page_candidate_ids_before_updating(): void

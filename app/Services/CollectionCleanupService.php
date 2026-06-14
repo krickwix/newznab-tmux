@@ -6,7 +6,7 @@ namespace App\Services;
 
 use App\Models\Settings;
 use App\Services\Nzb\NzbService;
-use Illuminate\Database\QueryException;
+use App\Support\TransientDatabaseError;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -18,19 +18,6 @@ class CollectionCleanupService
      * Maximum number of retries for a lock-related DB error before giving up.
      */
     private const LOCK_RETRY_MAX = 5;
-
-    /**
-     * SQLSTATE returned by InnoDB on deadlock (1213).
-     */
-    private const SQLSTATE_DEADLOCK = '40001';
-
-    /**
-     * MySQL/MariaDB driver error codes we treat as transient lock contention
-     * and therefore safe to retry: 1213 = deadlock, 1205 = lock wait timeout.
-     *
-     * @var int[]
-     */
-    private const LOCK_DRIVER_CODES = [1213, 1205];
 
     public function __construct() {}
 
@@ -327,29 +314,6 @@ class CollectionCleanupService
      */
     private function isLockError(\Throwable $e): bool
     {
-        if ($e instanceof QueryException) {
-            $sqlState = (string) $e->getCode();
-            $driverCode = (int) ($e->errorInfo[1] ?? 0);
-
-            if ($sqlState === self::SQLSTATE_DEADLOCK) {
-                return true;
-            }
-
-            if (in_array($driverCode, self::LOCK_DRIVER_CODES, true)) {
-                return true;
-            }
-        }
-
-        // Some drivers surface PDOException directly; fall back to the message.
-        $message = $e->getMessage();
-        if (str_contains($message, 'Deadlock found')) {
-            return true;
-        }
-
-        if (str_contains($message, 'Lock wait timeout exceeded')) {
-            return true;
-        }
-
-        return false;
+        return TransientDatabaseError::is($e);
     }
 }

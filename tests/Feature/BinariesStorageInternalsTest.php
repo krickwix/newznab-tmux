@@ -207,6 +207,7 @@ class BinariesStorageInternalsTest extends TestCase
         foreach ([
             'SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction',
             'SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded; try restarting transaction',
+            "SQLSTATE[HY000]: General error: 123 Got error 123 when reading table './nntmux/collections'",
             'SQLSTATE[HY000]: General error: 1020 Record has changed since last read in table \'collections\'; try restarting transaction',
             'WSREP detected deadlock/conflict and aborted the transaction. Try restarting the transaction',
             'The process has been chosen as the deadlock victim',
