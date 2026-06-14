@@ -368,6 +368,7 @@ final class ReleaseProcessingService
 
         $this->processStuckCollections($normalizedGroupId ?? 0);
         $this->runCollectionFileCheckStage0($normalizedGroupId);
+        $this->repairObservedTotalFilesForDefaultCollections($normalizedGroupId);
         $this->runCollectionFileCheckStage1($normalizedGroupId ?? 0);
         $this->runCollectionFileCheckStage2($normalizedGroupId ?? 0);
         $this->runCollectionFileCheckStage3($normalizedGroupId);
@@ -785,6 +786,56 @@ final class ReleaseProcessingService
     // ========================================================================
 
     /**
+     * Backfill collection totals from stored binary file numbers without
+     * advancing filecheck. Older BODY-recovered rows can have usable filenumber
+     * data while collections.totalfiles is still zero, which keeps them out of
+     * later completion predicates indefinitely.
+     *
+     * @throws Throwable
+     */
+    private function repairObservedTotalFilesForDefaultCollections(?int $groupID): void
+    {
+        $lastCollectionId = 0;
+
+        do {
+            $collectionIds = $this->retryTransientCollectionOperation(
+                static fn () => Collection::query()
+                    ->select(['collections.id'])
+                    ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                    ->where('collections.id', '>', $lastCollectionId)
+                    ->where('collections.totalfiles', '=', 0)
+                    ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
+                    ->where('binaries.filenumber', '>', 0)
+                    ->when($groupID !== null, static fn ($q) => $q->where('collections.groups_id', $groupID))
+                    ->groupBy(['collections.id'])
+                    ->orderBy('collections.id')
+                    ->limit(self::BATCH_SIZE)
+                    ->pluck('collections.id')
+            );
+
+            if ($collectionIds->isEmpty()) {
+                break;
+            }
+
+            $this->retryTransientCollectionOperation(
+                static fn () => DB::transaction(static function () use ($collectionIds): void {
+                    Collection::query()
+                        ->whereIn('id', $collectionIds->all())
+                        ->update([
+                            'totalfiles' => DB::raw(
+                                '(SELECT MAX(NULLIF(b2.filenumber, 0)) FROM binaries b2 WHERE b2.collections_id = collections.id)'
+                            ),
+                        ]);
+                }, 10)
+            );
+
+            $lastCollectionId = (int) $collectionIds->max();
+
+            usleep(self::BATCH_PAUSE_US);
+        } while ($collectionIds->count() === self::BATCH_SIZE);
+    }
+
+    /**
      * @throws Throwable
      */
     private function runCollectionFileCheckStage0(?int $groupID): void
@@ -856,7 +907,7 @@ final class ReleaseProcessingService
                     ->when($groupID !== 0, static fn ($q) => $q->where('collections.groups_id', $groupID))
                     ->groupBy(['binaries.collections_id', 'collections.totalfiles', 'collections.id'])
                     ->havingRaw(
-                        'COUNT(binaries.id) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
+                        'COUNT(DISTINCT CASE WHEN binaries.filenumber > 0 THEN binaries.filenumber ELSE binaries.id END) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
                         [$completion]
                     )
                     ->orderBy('collections.id')
@@ -879,7 +930,7 @@ final class ReleaseProcessingService
                             ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
                             ->groupBy(['binaries.collections_id', 'collections.totalfiles', 'collections.id'])
                             ->havingRaw(
-                                'COUNT(binaries.id) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
+                                'COUNT(DISTINCT CASE WHEN binaries.filenumber > 0 THEN binaries.filenumber ELSE binaries.id END) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
                                 [$completion]
                             );
 

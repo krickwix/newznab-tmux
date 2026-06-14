@@ -49,6 +49,12 @@ final class HeaderParser
         $parsed = [];
         $headersRepaired = [];
         $receivedNumbers = [];
+        $missingPartLookup = $missingParts === null
+            ? null
+            : array_fill_keys(
+                array_map(static fn (mixed $number): string => (string) $number, $missingParts),
+                true
+            );
 
         foreach ($headers as $header) {
             // Check if we got the article
@@ -59,11 +65,10 @@ final class HeaderParser
             $receivedNumbers[] = $header['Number'];
 
             // For part repair, only process missing parts
-            if ($partRepair && $missingParts !== null) {
-                if (! \in_array($header['Number'], $missingParts, true)) {
+            if ($partRepair && $missingPartLookup !== null) {
+                if (! isset($missingPartLookup[(string) $header['Number']])) {
                     continue;
                 }
-                $headersRepaired[] = $header['Number'];
             }
 
             // Parse subject to get base name and part/total like "(12/45)"
@@ -96,6 +101,9 @@ final class HeaderParser
                 'header' => $header,
                 'repaired' => $partRepair,
             ];
+            if ($partRepair) {
+                $headersRepaired[] = $header['Number'];
+            }
         }
 
         return [

@@ -50,7 +50,39 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
         $this->assertSame(CollectionFileCheckStatus::CompleteParts->value, (int) $dense->filecheck);
         $this->assertSame(96, (int) $dense->totalfiles);
         $this->assertSame(CollectionFileCheckStatus::Default->value, (int) $sparse->filecheck);
-        $this->assertSame(0, (int) $sparse->totalfiles);
+        $this->assertSame(70, (int) $sparse->totalfiles);
+    }
+
+    public function test_totalfile_zero_sparse_collection_records_observed_total_without_promotion(): void
+    {
+        $this->seedCollection(7, 'legacy-sparse-obfuscated', 0);
+        $this->seedBinary(7001, 7, 70, currentParts: 1, totalParts: 1);
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        $service->processIncompleteCollections(null);
+
+        $collection = DB::table('collections')->where('id', 7)->first();
+
+        $this->assertSame(CollectionFileCheckStatus::Default->value, (int) $collection->filecheck);
+        $this->assertSame(70, (int) $collection->totalfiles);
+    }
+
+    public function test_totalfile_zero_repair_does_not_promote_duplicate_file_numbers(): void
+    {
+        $this->seedCollection(8, 'duplicate-file-number-obfuscated', 0);
+        for ($index = 0; $index < 67; $index++) {
+            $this->seedBinary(8000 + $index, 8, 70, currentParts: 1, totalParts: 1);
+        }
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        $service->processIncompleteCollections(null);
+
+        $collection = DB::table('collections')->where('id', 8)->first();
+
+        $this->assertSame(CollectionFileCheckStatus::Default->value, (int) $collection->filecheck);
+        $this->assertSame(70, (int) $collection->totalfiles);
     }
 
     public function test_binary_part_completion_honors_configured_completion_percent(): void

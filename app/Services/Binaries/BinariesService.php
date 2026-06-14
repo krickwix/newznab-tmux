@@ -332,9 +332,7 @@ class BinariesService
 
         // Extract article range info
         $returnArray = $this->headerParser->getArticleRange($headers);
-        if (! $partRepair) {
-            $headers = $this->deobfuscateBodyPreambleHeaders($headers, $groupMySQL['name']);
-        }
+        $headers = $this->deobfuscateBodyPreambleHeaders($headers, $groupMySQL['name']);
 
         // Parse and filter headers
         $this->headerParser->reset();
