@@ -1085,49 +1085,82 @@ final class ReleaseProcessingService
         $lastCollectionId = 0;
 
         do {
-            $collectionIds = DB::table('collections')
-                ->select('collections.id')
-                ->distinct()
-                ->join('binaries as existing', 'existing.collections_id', '=', 'collections.id')
-                ->leftJoin('binaries as incomplete', static function ($join) use ($completion): void {
-                    $join->on('incomplete.collections_id', '=', 'collections.id')
-                        ->whereRaw(
-                            '(incomplete.currentparts < CEIL(incomplete.totalparts * ? / 100) OR incomplete.totalparts <= 0)',
-                            [$completion],
-                        );
-                })
-                ->where('collections.id', '>', $lastCollectionId)
-                ->where('collections.dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
-                ->whereIn('collections.filecheck', [
-                    CollectionFileCheckStatus::Default->value,
-                    CollectionFileCheckStatus::CompleteCollection->value,
-                    10,
-                ])
-                ->whereNull('incomplete.id')
-                ->when($normalizedGroupId !== null, static fn ($q) => $q->where('collections.groups_id', $normalizedGroupId))
-                ->orderBy('collections.id')
-                ->limit(self::BATCH_SIZE)
-                ->pluck('collections.id');
+            $candidateIds = $this->stage6CandidateCollectionIds($lastCollectionId, $normalizedGroupId);
 
-            if ($collectionIds->isEmpty()) {
+            if ($candidateIds === []) {
                 break;
             }
 
-            DB::transaction(static function () use ($collectionIds): void {
-                Collection::query()
-                    ->whereIn('id', $collectionIds->all())
-                    ->update([
-                        'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
-                        'totalfiles' => DB::raw(
-                            '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id)'
-                        ),
-                    ]);
-            }, 10);
+            $completeIds = $this->filterStage6CompleteCollectionIds($candidateIds, $completion);
 
-            $lastCollectionId = (int) $collectionIds->max();
+            if ($completeIds !== []) {
+                DB::transaction(static function () use ($completeIds): void {
+                    Collection::query()
+                        ->whereIn('id', $completeIds)
+                        ->update([
+                            'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
+                            'totalfiles' => DB::raw(
+                                '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id)'
+                            ),
+                        ]);
+                }, 10);
+            }
+
+            $lastCollectionId = max($candidateIds);
 
             usleep(self::BATCH_PAUSE_US);
-        } while ($collectionIds->count() === self::BATCH_SIZE);
+        } while (\count($candidateIds) === self::BATCH_SIZE);
+    }
+
+    /**
+     * @return list<int>
+     */
+    private function stage6CandidateCollectionIds(int $lastCollectionId, ?int $normalizedGroupId): array
+    {
+        return DB::table('collections')
+            ->select('collections.id')
+            ->where('collections.id', '>', $lastCollectionId)
+            ->where('collections.dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
+            ->whereIn('collections.filecheck', [
+                CollectionFileCheckStatus::Default->value,
+                CollectionFileCheckStatus::CompleteCollection->value,
+                10,
+            ])
+            ->when($normalizedGroupId !== null, static fn ($q) => $q->where('collections.groups_id', $normalizedGroupId))
+            ->orderBy('collections.id')
+            ->limit(self::BATCH_SIZE)
+            ->pluck('collections.id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+    }
+
+    /**
+     * @param  list<int>  $candidateIds
+     * @return list<int>
+     */
+    private function filterStage6CompleteCollectionIds(array $candidateIds, int $completion): array
+    {
+        if ($candidateIds === []) {
+            return [];
+        }
+
+        return DB::table('collections')
+            ->select('collections.id')
+            ->distinct()
+            ->join('binaries as existing', 'existing.collections_id', '=', 'collections.id')
+            ->leftJoin('binaries as incomplete', static function ($join) use ($completion): void {
+                $join->on('incomplete.collections_id', '=', 'collections.id')
+                    ->whereRaw(
+                        '(incomplete.currentparts < CEIL(incomplete.totalparts * ? / 100) OR incomplete.totalparts <= 0)',
+                        [$completion],
+                    );
+            })
+            ->whereIn('collections.id', $candidateIds)
+            ->whereNull('incomplete.id')
+            ->orderBy('collections.id')
+            ->pluck('collections.id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
     }
 
     private function extractGroupIdFromWhereSql(string $whereSql): ?int

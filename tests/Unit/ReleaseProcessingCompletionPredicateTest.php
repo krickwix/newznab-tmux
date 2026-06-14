@@ -47,34 +47,54 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
         );
     }
 
-    public function test_stage6_uses_join_anti_join_instead_of_materialized_subqueries(): void
+    public function test_stage6_filters_a_bounded_candidate_page_instead_of_joining_before_limit(): void
     {
-        $serviceSource = file_get_contents(__DIR__.'/../../app/Services/ReleaseProcessingService.php');
+        $stageSource = $this->releaseProcessingMethodSource('runCollectionFileCheckStage6');
+        $filterSource = $this->releaseProcessingMethodSource('filterStage6CompleteCollectionIds');
 
-        self::assertIsString($serviceSource);
+        self::assertStringContainsString(
+            '$candidateIds = $this->stage6CandidateCollectionIds(',
+            $stageSource,
+            'Stage 6 should page collection candidates before probing binaries.'
+        );
+        self::assertStringContainsString(
+            '$completeIds = $this->filterStage6CompleteCollectionIds(',
+            $stageSource,
+            'Stage 6 should filter only the bounded candidate page through the binary anti-join.'
+        );
+        self::assertStringNotContainsString(
+            "->join('binaries as existing'",
+            $stageSource,
+            'Stage 6 candidate paging should not join binaries before LIMIT.'
+        );
         self::assertStringContainsString(
             "->join('binaries as existing'",
-            $serviceSource,
+            $filterSource,
             'Stage 6 should prove a collection has binaries without materializing all binary collection IDs.'
         );
         self::assertStringContainsString(
             "->leftJoin('binaries as incomplete'",
-            $serviceSource,
+            $filterSource,
             'Stage 6 should anti-join incomplete binaries through the collection index.'
         );
         self::assertStringContainsString(
             "->whereNull('incomplete.id')",
-            $serviceSource,
+            $filterSource,
             'Stage 6 should keep only collections with no incomplete binaries.'
         );
         self::assertStringContainsString(
+            "->whereIn('collections.id', \$candidateIds)",
+            $filterSource,
+            'Stage 6 should restrict binary probes to the current candidate page.'
+        );
+        self::assertStringContainsString(
             "->pluck('collections.id')",
-            $serviceSource,
+            $filterSource,
             'Stage 6 should pluck a qualified ID because the query joins binaries twice.'
         );
         self::assertStringNotContainsString(
             'NOT EXISTS (',
-            $serviceSource,
+            $filterSource,
             'Stage 6 should not regress to MariaDB materialized NOT EXISTS scans.'
         );
     }
@@ -116,22 +136,30 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
     {
         $stage0Source = $this->releaseProcessingMethodSource('runCollectionFileCheckStage0');
         $stage4Source = $this->releaseProcessingMethodSource('runCollectionFileCheckStage4');
-        $stage6Source = $this->releaseProcessingMethodSource('runCollectionFileCheckStage6');
+        $stage6CandidateSource = $this->releaseProcessingMethodSource('stage6CandidateCollectionIds');
         $binaryStageSource = $this->releaseProcessingMethodSource('markCompleteBinaries');
 
         foreach ([
             'stage0' => [$stage0Source, 'collections.id', '$lastCollectionId'],
             'stage4' => [$stage4Source, 'c.id', '$lastCollectionId'],
-            'stage6' => [$stage6Source, 'collections.id', '$lastCollectionId'],
+            'stage6 candidate paging' => [$stage6CandidateSource, 'collections.id', '$lastCollectionId'],
             'binary completion' => [$binaryStageSource, 'b.id', '$lastBinaryId'],
         ] as $label => [$source, $idColumn, $cursorName]) {
-            self::assertStringContainsString($cursorName.' = 0', $source, $label.' should initialize a cursor.');
             self::assertStringContainsString("->where('{$idColumn}', '>', {$cursorName})", $source, $label.' should page after the last seen id.');
             self::assertStringContainsString("->orderBy('{$idColumn}')", $source, $label.' should use stable id ordering.');
             self::assertStringContainsString('->limit(self::BATCH_SIZE)', $source, $label.' should bound each candidate query.');
-            self::assertStringContainsString($cursorName.' = (int)', $source, $label.' should advance the cursor after each batch.');
-            self::assertStringContainsString('} while ($', $source, $label.' should continue only while a full batch is returned.');
+            if ($label !== 'stage6 candidate paging') {
+                self::assertStringContainsString($cursorName.' = 0', $source, $label.' should initialize a cursor.');
+                self::assertStringContainsString($cursorName.' = (int)', $source, $label.' should advance the cursor after each batch.');
+                self::assertStringContainsString('} while ($', $source, $label.' should continue only while a full batch is returned.');
+            }
         }
+
+        $stage6Source = $this->releaseProcessingMethodSource('runCollectionFileCheckStage6');
+
+        self::assertStringContainsString('$lastCollectionId = 0', $stage6Source);
+        self::assertStringContainsString('$lastCollectionId = max($candidateIds)', $stage6Source);
+        self::assertStringContainsString('} while (\count($candidateIds) === self::BATCH_SIZE)', $stage6Source);
     }
 
     private function releaseProcessingMethodSource(string $methodName): string
