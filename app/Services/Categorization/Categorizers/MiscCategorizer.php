@@ -34,6 +34,10 @@ class MiscCategorizer extends AbstractCategorizer
             return $this->noMatch();
         }
 
+        if ($this->isReadableKnownContentSubject($context)) {
+            return $this->noMatch();
+        }
+
         // Check for hash patterns first
         if ($result = $this->checkHash($name)) {
             return $result;
@@ -335,6 +339,34 @@ class MiscCategorizer extends AbstractCategorizer
     private function isExplicitVintageFilmGroup(ReleaseContext $context): bool
     {
         return $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i');
+    }
+
+    private function isReadableKnownContentSubject(ReleaseContext $context): bool
+    {
+        $name = $context->releaseName;
+
+        if ($this->isReadableSoftwareSubject($name)) {
+            return true;
+        }
+
+        if ($this->countAlphabeticWordTokens($name) < 2 || preg_match('/\b(?:19|20)\d{2}\b/', $name) !== 1) {
+            return false;
+        }
+
+        if ($this->isExplicitVintageFilmGroup($context)) {
+            return preg_match('/\b(?:dvd(?:-?[59])?|ntsc|pal|xvid|divx|dvdrip|vhsrip|tvrip|bluray|blu[.-]?ray|480p|576p|720p|1080p|2160p|nfo|par2?|rar|iso|avi|mkv|mp4|vob)\b/i', $name) === 1;
+        }
+
+        if ($context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:sounds?|music|mp3|lossless)/i')) {
+            return preg_match('/\b(?:flac|mp3|lossless|ape|wav|alac|aac|ogg|m4a|cd|album|track)\b/i', $name) === 1;
+        }
+
+        return false;
+    }
+
+    private function isReadableSoftwareSubject(string $name): bool
+    {
+        return preg_match('/\b(?:Microsoft\s*)?Office[._ -](?:19|20)\d{2}(?:[._ -]\d{3,6}){1,3}[._ -](?:32|64)Bit\b/i', $name) === 1;
     }
 
     private function isObfuscatedExtractedPar2Volume(string $name): bool

@@ -170,7 +170,7 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $method->setAccessible(true);
         $output = implode("\n", $method->invoke($metrics));
 
-        $this->assertStringContainsString('nntmux_worker_lock_ttl_seconds{job="releases",prefix="nntmux-cache-"} 42', $output);
+        $this->assertStringContainsString('nntmux_worker_lock_ttl_seconds{worker="releases",prefix="nntmux-cache-"} 42', $output);
     }
 
     public function test_external_metadata_metrics_expose_srrdb_crc_rows_and_backlog(): void

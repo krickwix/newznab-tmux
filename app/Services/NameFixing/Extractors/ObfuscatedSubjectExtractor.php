@@ -43,6 +43,10 @@ final class ObfuscatedSubjectExtractor
             return null;
         }
 
+        if ($this->isAudioGroup($groupName) && $this->hasReadableContextOutsideQuotedAudioFilename($original)) {
+            return null;
+        }
+
         $normalized = $original;
         $looksObfuscated = false;
         foreach (self::PREFIX_PATTERNS as $pattern) {
@@ -91,6 +95,24 @@ final class ObfuscatedSubjectExtractor
     private function isVintageClassicGroup(string $groupName): bool
     {
         return preg_match('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|movie[.-]?classic|dvd[.-]?classic)/i', $groupName) === 1;
+    }
+
+    private function isAudioGroup(string $groupName): bool
+    {
+        return preg_match('/(?:alt\.binaries|a\.b)\..*?(?:sounds?|music|mp3|lossless)/i', $groupName) === 1;
+    }
+
+    private function hasReadableContextOutsideQuotedAudioFilename(string $subject): bool
+    {
+        if (preg_match('/["\'][^"\']+\.(?:flac|mp3|m4a|aac|ogg|wav|ape)["\']/i', $subject) !== 1) {
+            return false;
+        }
+
+        $outsideQuotedFilename = trim((string) preg_replace('/["\'][^"\']+["\']/', ' ', $subject));
+        $outsideQuotedFilename = preg_replace('/\[[\d\/]+\]|\b(?:yEnc|NMR|repost(?:ed)?|posted|file|part)\b/i', ' ', $outsideQuotedFilename) ?? $outsideQuotedFilename;
+
+        return $this->countReadableWords($outsideQuotedFilename) >= 2
+            && preg_match('/\b(?:19|20)\d{2}\b/', $outsideQuotedFilename) === 1;
     }
 
     private function hasReadableContextOutsideQuotedFilename(string $subject): bool

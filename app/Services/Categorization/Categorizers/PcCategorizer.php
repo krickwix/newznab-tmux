@@ -155,6 +155,10 @@ class PcCategorizer extends AbstractCategorizer
             return $this->matched(Category::PC_0DAY, 0.9, '0day_msix_installer');
         }
 
+        if (preg_match('/\b(?:Microsoft[._ -])?Office[._ -](?:19|20)\d{2}(?:[._ -]\d{3,6}){1,3}[._ -](?:32|64)Bit\b/i', $name)) {
+            return $this->matched(Category::PC_0DAY, 0.88, '0day_office_build');
+        }
+
         // Explicit 0day indicators
         if (preg_match('/[._ -]exe$|[._ -](utorrent|Virtualbox)[._ -]|\b0DAY\b|incl.+crack| DRM$|>DRM</i', $name)) {
             return $this->matched(Category::PC_0DAY, 0.9, '0day_explicit');

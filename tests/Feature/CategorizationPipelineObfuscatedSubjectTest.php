@@ -29,6 +29,8 @@ final class CategorizationPipelineObfuscatedSubjectTest extends TestCase
         DB::table('usenet_groups')->insert([
             ['id' => 1, 'name' => 'alt.binaries.multimedia.vintage-film.pre-1960'],
             ['id' => 2, 'name' => 'alt.binaries.blu-ray'],
+            ['id' => 3, 'name' => 'alt.binaries.dvd.classics'],
+            ['id' => 4, 'name' => 'alt.binaries.sounds.lossless'],
         ]);
     }
 
@@ -57,5 +59,44 @@ final class CategorizationPipelineObfuscatedSubjectTest extends TestCase
 
         $this->assertSame(Category::OTHER_HASHED, $result['categories_id']);
         $this->assertTrue($result['debug']['locked_to_misc']);
+    }
+
+    public function test_readable_classic_dvd_subject_is_not_locked_as_base64_hash(): void
+    {
+        $result = app(CategorizationService::class)->determineCategory(
+            3,
+            '(01/53) - Attack of the Muppet People (1958) NTSC DVD5 Midnite Movies [repopo] - "ATTACK_OF_THE_PUPPET_PEOPLE_NTSC_DVD5_repopo.nfo" - 4,10 GB - yEnc',
+            '',
+            true,
+        );
+
+        $this->assertSame(Category::MOVIE_DVD, $result['categories_id']);
+        $this->assertFalse($result['debug']['locked_to_misc']);
+    }
+
+    public function test_lossless_album_subject_keeps_context_around_quoted_track_filename(): void
+    {
+        foreach ([
+            'Eric Clapton - Journeyman (1989): "05 Hard Times.flac" yEnc',
+            'Gilmour, David - (2006) On An Island [NMR] [05/22] "03 The Blue.flac" yEnc',
+        ] as $releaseName) {
+            $result = app(CategorizationService::class)->determineCategory(4, $releaseName, '', true);
+
+            $this->assertSame(Category::MUSIC_LOSSLESS, $result['categories_id'], $releaseName);
+            $this->assertFalse($result['debug']['locked_to_misc'], $releaseName);
+        }
+    }
+
+    public function test_readable_office_filename_is_not_locked_as_extracted_obfuscation(): void
+    {
+        $result = app(CategorizationService::class)->determineCategory(
+            2,
+            '(Rick Moranis randomly punched in the head by a man in NYC) [19/80] - "Office.2021.18129.20158.64Bit.part18.rar" yEnc',
+            '',
+            true,
+        );
+
+        $this->assertSame(Category::PC_0DAY, $result['categories_id']);
+        $this->assertFalse($result['debug']['locked_to_misc']);
     }
 }

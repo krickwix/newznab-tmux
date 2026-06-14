@@ -349,13 +349,13 @@ class NntmuxPrometheusMetrics
                 $ttl = $this->redisTtl($key, $prefix, $connectionName);
 
                 $lines[] = $this->metric('nntmux_worker_lock_ttl_seconds', $ttl, [
-                    'job' => $job,
+                    'worker' => $job,
                     'prefix' => $prefix,
                 ]);
             }
         } catch (Throwable) {
             $lines[] = $this->metric('nntmux_worker_lock_ttl_seconds', -1, [
-                'job' => 'redis_unavailable',
+                'worker' => 'redis_unavailable',
                 'prefix' => '',
             ]);
         }
