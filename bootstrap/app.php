@@ -1,5 +1,6 @@
 <?php
 
+use App\Console\Commands\CollectionSplitDiagnostics;
 use App\Http\Middleware\BlockAbusiveServices;
 use App\Http\Middleware\ClearanceMiddleware;
 use App\Http\Middleware\ContentSecurityPolicy;
@@ -45,6 +46,9 @@ return Application::configure(basePath: dirname(__DIR__))
                 ->group(base_path('routes/rss.php'));
         },
     )
+    ->withCommands([
+        CollectionSplitDiagnostics::class,
+    ])
     ->withMiddleware(function (Middleware $middleware) {
         $middleware->redirectTo(
             guests: fn () => route('login'),
