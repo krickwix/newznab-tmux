@@ -6,6 +6,7 @@ namespace App\Services\Distributed;
 
 use App\Models\Settings;
 use App\Services\Tmux\TmuxMonitorService;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -79,7 +80,20 @@ class DistributedJobWorker
     {
         $lockName = 'nntmux:distributed-worker:'.$plan['name'];
         $lockStore = (string) config('nntmux.distributed_lock_store', 'redis');
-        $lock = Cache::store($lockStore)->lock($lockName, $lockSeconds);
+        $cacheStore = Cache::store($lockStore);
+
+        if (! $cacheStore instanceof LockProvider) {
+            $output->writeln(sprintf(
+                '[%s] skipped %s: %s cache store does not support distributed locks',
+                now()->toDateTimeString(),
+                $plan['name'],
+                $lockStore,
+            ));
+
+            return 1;
+        }
+
+        $lock = $cacheStore->lock($lockName, $lockSeconds);
 
         try {
             $acquired = $lock->get();
@@ -175,13 +189,7 @@ class DistributedJobWorker
                 : SIG_DFL;
 
             pcntl_signal($signal, function (int $receivedSignal) use ($lock, $lockName, $job, $output): void {
-                $output->writeln(sprintf(
-                    '[%s] received signal %d while running %s; releasing %s before exit',
-                    now()->toDateTimeString(),
-                    $receivedSignal,
-                    $job,
-                    $lockName,
-                ));
+                $output->writeln($this->formatTerminationSignalMessage($receivedSignal, $job, $lockName));
 
                 try {
                     $lock->release();
@@ -208,6 +216,17 @@ class DistributedJobWorker
                 pcntl_async_signals($previousAsyncSignals);
             }
         };
+    }
+
+    private function formatTerminationSignalMessage(int $signal, string $job, string $lockName): string
+    {
+        return sprintf(
+            '[%s] received signal %d while running %s; releasing %s before exit',
+            now()->toDateTimeString(),
+            $signal,
+            $job,
+            $lockName,
+        );
     }
 
     /**
