@@ -823,11 +823,26 @@ final class ReleaseProcessingService
             }
 
             foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids) {
-                DB::transaction(static function () use ($ids): void {
+                DB::transaction(static function () use ($ids, $completion): void {
+                    $eligibleCollectionsQuery = Collection::query()
+                        ->select(['collections.id'])
+                        ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                        ->whereIn('collections.id', $ids->all())
+                        ->where('collections.totalfiles', '>', 0)
+                        ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
+                        ->groupBy(['binaries.collections_id', 'collections.totalfiles', 'collections.id'])
+                        ->havingRaw(
+                            'COUNT(binaries.id) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
+                            [$completion]
+                        );
+
                     Collection::query()
-                        ->whereIn('id', $ids->all())
-                        ->where('filecheck', CollectionFileCheckStatus::Default->value)
-                        ->update(['filecheck' => CollectionFileCheckStatus::CompleteCollection->value]);
+                        ->joinSub(
+                            $eligibleCollectionsQuery,
+                            'eligible_collections',
+                            static fn ($join) => $join->on('collections.id', '=', 'eligible_collections.id')
+                        )
+                        ->update(['collections.filecheck' => CollectionFileCheckStatus::CompleteCollection->value]);
                 }, 10);
             }
 

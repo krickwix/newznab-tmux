@@ -113,6 +113,43 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
         $this->assertSame(4, (int) $tooSparse->totalfiles);
     }
 
+    public function test_totalfiles_collection_promotion_processes_sparse_windows_past_batch_size(): void
+    {
+        DB::table('settings')->where('name', 'completionpercent')->update(['value' => '75']);
+
+        for ($collectionId = 1000; $collectionId < 1605; $collectionId++) {
+            if ($collectionId === 1250) {
+                $this->seedCollection($collectionId, 'sparse-middle', 4);
+                $this->seedBinary($collectionId * 10, $collectionId, 1, currentParts: 1, totalParts: 1);
+                $this->seedBinary($collectionId * 10 + 1, $collectionId, 2, currentParts: 1, totalParts: 1);
+
+                continue;
+            }
+
+            $this->seedCollection($collectionId, 'complete-window-'.$collectionId, 4);
+            $this->seedBinary($collectionId * 10, $collectionId, 1, currentParts: 1, totalParts: 1);
+            $this->seedBinary($collectionId * 10 + 1, $collectionId, 2, currentParts: 1, totalParts: 1);
+            $this->seedBinary($collectionId * 10 + 2, $collectionId, 3, currentParts: 1, totalParts: 1);
+        }
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        $service->processIncompleteCollections(null);
+
+        $remainingDefault = DB::table('collections')
+            ->where('filecheck', CollectionFileCheckStatus::Default->value)
+            ->pluck('id')
+            ->all();
+
+        $this->assertSame([1250], $remainingDefault);
+        $this->assertSame(
+            604,
+            DB::table('collections')
+                ->where('filecheck', CollectionFileCheckStatus::CompleteParts->value)
+                ->count()
+        );
+    }
+
     private function seedCollection(
         int $id,
         string $subject,

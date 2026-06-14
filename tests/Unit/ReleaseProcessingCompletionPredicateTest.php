@@ -97,6 +97,9 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
         self::assertStringContainsString("->where('collections.id', '>', \$lastCollectionId)", $stageSource);
         self::assertStringContainsString("->orderBy('collections.id')", $stageSource);
         self::assertStringContainsString('->limit(self::BATCH_SIZE)', $stageSource);
+        self::assertStringContainsString('$eligibleCollectionsQuery = Collection::query()', $stageSource);
+        self::assertStringContainsString("->whereIn('collections.id', \$ids->all())", $stageSource);
+        self::assertStringContainsString("->joinSub(\n                            \$eligibleCollectionsQuery", $stageSource);
         self::assertStringNotContainsString('->joinSub($collectionsQuery', $stageSource);
     }
 
