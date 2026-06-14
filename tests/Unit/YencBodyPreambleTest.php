@@ -35,6 +35,18 @@ class YencBodyPreambleTest extends TestCase
         $this->assertFalse($metadata->isUsefulForCollection());
     }
 
+    public function test_standalone_payload_is_file_one_of_one_for_collection_grouping(): void
+    {
+        $metadata = YencBodyPreamble::fromLines([
+            '=ybegin part=33377 total=62540 line=128 size=45362642923 name=Isle.of.Dogs.2018.Blu-ray.CEE.1080p.AVC.DTS-HD.MA.5.1-CapBd.iso',
+            '=ypart begin=24681357901 end=24682097916',
+        ]);
+
+        $this->assertSame(1, $metadata?->collectionFileNumber());
+        $this->assertSame(1, $metadata->collectionTotalFiles());
+        $this->assertTrue($metadata->isUsefulForCollection());
+    }
+
     public function test_rejects_text_without_required_ybegin_name_and_size(): void
     {
         $this->assertNull(YencBodyPreamble::fromLines([

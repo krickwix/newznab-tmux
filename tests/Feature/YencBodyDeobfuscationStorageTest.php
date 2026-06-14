@@ -227,6 +227,57 @@ class YencBodyDeobfuscationStorageTest extends TestCase
         $this->assertSame(22, (int) DB::table('parts')->value('partnumber'));
     }
 
+    public function test_scan_marks_standalone_body_payload_as_single_collection_file(): void
+    {
+        $nntp = Mockery::mock(NNTPService::class);
+        $nntp->shouldReceive('getXOVER')
+            ->once()
+            ->with('7676259507-7676259507')
+            ->andReturn([[
+                'Number' => '7676259507',
+                'Subject' => '[12/99] - "xrGg4N90wddrrVu6vtrc74eODKjeOP9w5r2tNN7lAjdB.TQz" yEnc (33377/62540)',
+                'From' => 'poster@example.invalid',
+                'Date' => 'Sun, 14 Jun 2026 11:24:21 +0000',
+                'Message-ID' => '<7676259507@example.invalid>',
+                'Bytes' => '740016',
+                'Xref' => 'news.example alt.binaries.blu-ray:7676259507',
+            ]]);
+        $nntp->shouldReceive('getYencBodyPreambleLines')
+            ->once()
+            ->with('alt.binaries.blu-ray', '7676259507', 10)
+            ->andReturn([
+                '=ybegin part=33377 total=62540 line=128 size=45362642923 name=Isle.of.Dogs.2018.Blu-ray.CEE.1080p.AVC.DTS-HD.MA.5.1-CapBd.iso',
+                '=ypart begin=24681357901 end=24682097916',
+            ]);
+
+        $service = new BinariesService(
+            new BinariesConfig(
+                partsChunkSize: 10,
+                headerChunkSize: 10,
+                bodyPreambleDeobfuscateGroups: ['alt.binaries.blu-ray'],
+                bodyPreambleDeobfuscateLimit: 10,
+                bodyPreambleLineLimit: 10
+            ),
+            headerParser: new HeaderParser(new class extends BlacklistService
+            {
+                public function isBlackListed(array $msg, string $groupName): bool
+                {
+                    return false;
+                }
+            }),
+            headerStorage: $this->deterministicHeaderStorage(),
+            nntp: $nntp
+        );
+
+        $service->scan(['id' => 5, 'name' => 'alt.binaries.blu-ray'], 7676259507, 7676259507);
+
+        $this->assertSame('"Isle.of.Dogs.2018.Blu-ray.CEE.1080p.AVC.DTS-HD.MA.5.1-CapBd.iso"', DB::table('collections')->value('subject'));
+        $this->assertSame(1, (int) DB::table('collections')->value('totalfiles'));
+        $this->assertSame(1, (int) DB::table('binaries')->value('filenumber'));
+        $this->assertSame(62540, (int) DB::table('binaries')->value('totalparts'));
+        $this->assertSame(33377, (int) DB::table('parts')->value('partnumber'));
+    }
+
     public function test_scan_keeps_original_subject_when_body_preamble_name_is_not_useful(): void
     {
         $nntp = Mockery::mock(NNTPService::class);

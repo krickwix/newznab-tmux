@@ -440,7 +440,7 @@ class BinariesService
             $headers[$index]['Original-Subject'] = $header['Subject'] ?? '';
             $headers[$index]['Subject'] = $metadata->toSyntheticSubject();
             $headers[$index]['collection_file_number'] = $metadata->collectionFileNumber();
-            $headers[$index]['collection_total_files'] = 0;
+            $headers[$index]['collection_total_files'] = $metadata->collectionTotalFiles();
             $this->bodyPreambleStats['applied']++;
         }
 

@@ -62,13 +62,27 @@ final readonly class YencBodyPreamble
             return (int) $match[1] + 1;
         }
 
+        if ($this->isStandalonePayload()) {
+            return 1;
+        }
+
         return 0;
+    }
+
+    public function collectionTotalFiles(): int
+    {
+        return $this->isStandalonePayload() ? 1 : 0;
     }
 
     public function isUsefulForCollection(): bool
     {
         return $this->collectionFileNumber() > 0
             || preg_match('/\.(?:7z|avi|iso|m2ts|mkv|mp4|nfo|par2|rar|rev|sfv|zip)$/i', $this->name) === 1;
+    }
+
+    private function isStandalonePayload(): bool
+    {
+        return preg_match('/\.(?:7z|avi|iso|m2ts|mkv|mp4|zip)$/i', $this->name) === 1;
     }
 
     /**
