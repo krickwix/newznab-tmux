@@ -74,6 +74,48 @@ final class CategorizationPipelineObfuscatedSubjectTest extends TestCase
         $this->assertFalse($result['debug']['locked_to_misc']);
     }
 
+    public function test_vintage_film_par2_sidecar_with_readable_title_without_year_is_not_hashed(): void
+    {
+        $result = app(CategorizationService::class)->determineCategory(
+            1,
+            '[East Side Kids - Pride of the Bowery- Avi Xvid] [01/39] yEnc - "PRIDEOFTHEBOWERY.par2" yEnc',
+            '',
+            true,
+        );
+
+        $this->assertSame(Category::MOVIE_OTHER, $result['categories_id']);
+        $this->assertFalse($result['debug']['locked_to_misc']);
+        $this->assertSame('vintage_film_file', $result['debug']['matched_by']);
+    }
+
+    public function test_vintage_film_compact_title_archive_subject_is_not_hashed(): void
+    {
+        $result = app(CategorizationService::class)->determineCategory(
+            1,
+            '[210/333] - "Airport77.part36.rar" yEnc',
+            '',
+            true,
+        );
+
+        $this->assertSame(Category::MOVIE_OTHER, $result['categories_id']);
+        $this->assertFalse($result['debug']['locked_to_misc']);
+        $this->assertSame('vintage_film_file', $result['debug']['matched_by']);
+    }
+
+    public function test_vintage_film_repeated_title_archive_subject_is_not_hashed(): void
+    {
+        $result = app(CategorizationService::class)->determineCategory(
+            1,
+            'JOE.McDOAKES.(4of6) [03/32] - "Joe McDoakes D4of6.part01.rar" yEnc',
+            '',
+            true,
+        );
+
+        $this->assertSame(Category::MOVIE_OTHER, $result['categories_id']);
+        $this->assertFalse($result['debug']['locked_to_misc']);
+        $this->assertSame('vintage_film_file', $result['debug']['matched_by']);
+    }
+
     public function test_lossless_album_subject_keeps_context_around_quoted_track_filename(): void
     {
         foreach ([

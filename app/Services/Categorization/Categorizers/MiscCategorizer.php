@@ -190,11 +190,11 @@ class MiscCategorizer extends AbstractCategorizer
             return $this->matched(Category::OTHER_HASHED, 0.86, 'obfuscated_prefixed_media_token');
         }
 
-        if ($this->isObfuscatedUsenetPar2Volume($name)) {
-            if ($this->isReadableVintageFilmSidecarSubject($name, $context)) {
-                return null;
-            }
+        if ($this->isReadableVintageFilmSidecarSubject($name, $context)) {
+            return null;
+        }
 
+        if ($this->isObfuscatedUsenetPar2Volume($name)) {
             return $this->matched(Category::OTHER_HASHED, 0.86, 'obfuscated_usenet_par2_volume');
         }
 
@@ -301,8 +301,17 @@ class MiscCategorizer extends AbstractCategorizer
 
         $outsideQuotedFilename = trim((string) preg_replace('/"[^"]+"/', ' ', $name));
 
-        return preg_match('/\b(19|20)\d{2}\b/', $outsideQuotedFilename) === 1
-            && $this->countAlphabeticWordTokens($outsideQuotedFilename) >= 2;
+        if (
+            $this->countAlphabeticWordTokens($outsideQuotedFilename) >= 2
+            && (
+                preg_match('/\b(19|20)\d{2}\b/', $outsideQuotedFilename) === 1
+                || preg_match('/\b(?:avi|xvid|divx|mkv|mp4|mpg|mpeg|vob|dvd|dvdrip|vhsrip|tvrip|bluray|blu[.-]?ray|480p|576p|720p|1080p|2160p)\b/i', $outsideQuotedFilename) === 1
+            )
+        ) {
+            return true;
+        }
+
+        return $this->hasReadableVintageFilmQuotedStem($name);
     }
 
     private function isReadableVintageFilmSubject(string $name, ReleaseContext $context): bool
@@ -320,6 +329,41 @@ class MiscCategorizer extends AbstractCategorizer
             || $this->looksLikeNumberedImageVideoSidecar($name)
             || preg_match('/(?:\.|\b)(?:avi|mkv|mp4|mpg|mpeg|vob)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $name) === 1
             || preg_match('/\b(?:480p|576p|720p|1080p|2160p|x264|x265|h\.?264|h\.?265|xvid|divx|dvdrip|vhsrip|tvrip|bdrip|bluray|dvd)\b/i', $name) === 1;
+    }
+
+    private function hasReadableVintageFilmQuotedStem(string $name): bool
+    {
+        if (! preg_match('/"(?P<filename>[^"]+)"/', $name, $matches)) {
+            return false;
+        }
+
+        $stem = (string) preg_replace(
+            '/\.(?:part\d+\.rar|vol\d{1,4}\+\d{1,4}\.par2|par2|rar|zip|7z(?:\.\d{1,4})?)$/i',
+            '',
+            $matches['filename'],
+        );
+
+        $stem = str_replace(['_', '.', '-'], ' ', $stem);
+
+        if ($this->countReadableStemWordTokens($stem) >= 2) {
+            return true;
+        }
+
+        $compactStem = preg_replace('/\s+/', '', $stem) ?? $stem;
+
+        return preg_match('/^[A-Z][a-z]{3,}(?:\d{2,4})?$/', $compactStem) === 1
+            && preg_match('/[aeiouy]/i', $compactStem) === 1;
+    }
+
+    private function countReadableStemWordTokens(string $stem): int
+    {
+        $tokens = preg_split('/[.\s_-]+/', $stem) ?: [];
+
+        return count(array_filter(
+            $tokens,
+            static fn (string $token): bool => preg_match('/^[A-Z]?[a-z]{2,}(?:[\'-][A-Z]?[a-z]{2,})?$/', $token) === 1
+                && preg_match('/[aeiouy]/i', $token) === 1
+        ));
     }
 
     private function hasReadableSingleWordMovieTitle(string $name): bool
@@ -349,12 +393,20 @@ class MiscCategorizer extends AbstractCategorizer
             return true;
         }
 
-        if ($this->countAlphabeticWordTokens($name) < 2 || preg_match('/\b(?:19|20)\d{2}\b/', $name) !== 1) {
-            return false;
+        if ($this->isExplicitVintageFilmGroup($context)) {
+            if (! str_contains($name, '"') && $this->isReadableVintageFilmNormalizedArchiveStem($name)) {
+                return true;
+            }
+
+            if ($this->countAlphabeticWordTokens($name) < 2 || preg_match('/\b(?:19|20)\d{2}\b/', $name) !== 1) {
+                return false;
+            }
+
+            return preg_match('/\b(?:dvd(?:-?[59])?|ntsc|pal|xvid|divx|dvdrip|vhsrip|tvrip|bluray|blu[.-]?ray|480p|576p|720p|1080p|2160p|nfo|par2?|rar|iso|avi|mkv|mp4|vob)\b/i', $name) === 1;
         }
 
-        if ($this->isExplicitVintageFilmGroup($context)) {
-            return preg_match('/\b(?:dvd(?:-?[59])?|ntsc|pal|xvid|divx|dvdrip|vhsrip|tvrip|bluray|blu[.-]?ray|480p|576p|720p|1080p|2160p|nfo|par2?|rar|iso|avi|mkv|mp4|vob)\b/i', $name) === 1;
+        if ($this->countAlphabeticWordTokens($name) < 2 || preg_match('/\b(?:19|20)\d{2}\b/', $name) !== 1) {
+            return false;
         }
 
         if ($context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:sounds?|music|mp3|lossless)/i')) {
@@ -368,6 +420,21 @@ class MiscCategorizer extends AbstractCategorizer
     {
         return preg_match('/\b(?:Microsoft\s*)?Office[._ -](?:19|20)\d{2}(?:[._ -]\d{3,6}){1,3}[._ -](?:32|64)Bit\b/i', $name) === 1
             || preg_match('/\b(?:AcroRdr|CorelDRAW|CyberLink|DVDFab|Navicat|PotPlayer|PowerDVD|SQLiteExpert|Topaz|[A-Za-z][A-Za-z0-9]+Setup(?:64|32)?)[\w.\' -]*(?:Installer|Setup|KeyGen|Crack|Activator|Patch|Portable|x64|x86|Pro|Enterprise)\b/i', $name) === 1;
+    }
+
+    private function isReadableVintageFilmNormalizedArchiveStem(string $name): bool
+    {
+        $trimmed = trim($name);
+
+        if (
+            preg_match('/^[A-Z][a-z]{3,}\d{1,4}$/', $trimmed) === 1
+            && preg_match('/[aeiouy]/i', $trimmed) === 1
+        ) {
+            return true;
+        }
+
+        return $this->countAlphabeticWordTokens($trimmed) >= 2
+            && preg_match('/\b(?:D?\d+of\d+|part\d+)\b/i', $trimmed) === 1;
     }
 
     private function isObfuscatedExtractedPar2Volume(string $name): bool
