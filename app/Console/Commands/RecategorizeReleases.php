@@ -23,6 +23,9 @@ class RecategorizeReleases extends Command
     {--test : Test only, no updates}
     {--group= : Re-categorize all releases in a group}
     {--groups= : Re-categorize all releases in a list of groups}
+    {--id= : Re-categorize a single release by id}
+    {--ids= : Re-categorize all releases in a list of release ids}
+    {--limit= : Re-categorize at most this many selected releases}
     {--category= : Re-categorize all releases in a category}
     {--categories= : Re-categorize all releases in a list of categories}';
 
@@ -36,10 +39,21 @@ class RecategorizeReleases extends Command
     /**
      * Execute the console command.
      */
-    public function handle(): void
+    public function handle(): int
     {
         $countQuery = Release::query();
         $hasSelector = false;
+        $limit = $this->parsePositiveIntegerOption('limit');
+        if ($limit === false) {
+            return self::FAILURE;
+        }
+
+        if ($this->option('all') && ($this->hasScopedSelector() || $limit !== null)) {
+            $this->error('Cannot combine --all with scoped selectors or --limit.');
+
+            return self::FAILURE;
+        }
+
         if ($this->option('misc')) {
             $countQuery->whereIn('categories_id', Category::OTHERS_GROUP);
             $hasSelector = true;
@@ -55,7 +69,8 @@ class RecategorizeReleases extends Command
                 $countQuery->where('iscategorized', 0);
             } else {
                 $this->info('Reset script stopped.');
-                exit();
+
+                return self::FAILURE;
             }
 
             $hasSelector = true;
@@ -67,7 +82,17 @@ class RecategorizeReleases extends Command
         }
 
         if ($this->option('groups')) {
-            $countQuery->whereIn('groups_id', explode(',', $this->option('groups')));
+            $countQuery->whereIn('groups_id', $this->parseIntegerList((string) $this->option('groups')));
+            $hasSelector = true;
+        }
+
+        if ($this->option('id')) {
+            $countQuery->where('id', (int) $this->option('id'));
+            $hasSelector = true;
+        }
+
+        if ($this->option('ids')) {
+            $countQuery->whereIn('id', $this->parseIntegerList((string) $this->option('ids')));
             $hasSelector = true;
         }
 
@@ -77,7 +102,7 @@ class RecategorizeReleases extends Command
         }
 
         if ($this->option('categories')) {
-            $countQuery->whereIn('categories_id', explode(',', $this->option('categories')));
+            $countQuery->whereIn('categories_id', $this->parseIntegerList((string) $this->option('categories')));
             $hasSelector = true;
         }
 
@@ -88,13 +113,24 @@ class RecategorizeReleases extends Command
 
         if (! $hasSelector) {
             $this->error('You must specify at least one option. See: --help');
-            exit();
+
+            return self::FAILURE;
         }
 
         $count = $countQuery->count();
+        if ($limit !== null) {
+            $count = min($count, $limit);
+        }
 
         $cat = new CategorizationService;
-        $results = $countQuery->select(['id', 'name', 'searchname', 'fromname', 'groups_id', 'categories_id'])->get();
+        $resultsQuery = $countQuery
+            ->select(['id', 'name', 'searchname', 'fromname', 'groups_id', 'categories_id'])
+            ->orderBy('id');
+        if ($limit !== null) {
+            $resultsQuery->limit($limit);
+        }
+
+        $results = $resultsQuery->get();
         $bar = $this->output->createProgressBar($count);
         $bar->start();
         foreach ($results as $result) {
@@ -135,6 +171,8 @@ class RecategorizeReleases extends Command
             }
         }
         $bar->finish();
+
+        return self::SUCCESS;
     }
 
     /**
@@ -190,5 +228,43 @@ class RecategorizeReleases extends Command
 
         return str_starts_with($matchedBy, 'group_name_')
             || $matchedBy === 'classic_movie_title';
+    }
+
+    /**
+     * @return list<int>
+     */
+    private function parseIntegerList(string $value): array
+    {
+        return array_values(array_filter(array_map(
+            static fn (string $item): int => (int) trim($item),
+            explode(',', $value)
+        )));
+    }
+
+    private function parsePositiveIntegerOption(string $option): int|false|null
+    {
+        $value = $this->option($option);
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (! is_string($value) || ! preg_match('/^[1-9]\d*$/', $value)) {
+            $this->error('--'.$option.' must be a positive integer.');
+
+            return false;
+        }
+
+        return (int) $value;
+    }
+
+    private function hasScopedSelector(): bool
+    {
+        foreach (['misc', 'group', 'groups', 'id', 'ids', 'category', 'categories'] as $option) {
+            if ($this->option($option)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

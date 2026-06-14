@@ -15,6 +15,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use PDO;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ReleaseNameFixedRecategorizationTest extends TestCase
@@ -607,6 +608,191 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(Category::MOVIE_OTHER, $selected->categories_id);
         $this->assertSame(1, (int) $selected->iscategorized);
         $this->assertSame(Category::MOVIE_OTHER, $alreadyMovie->categories_id);
+    }
+
+    public function test_recategorize_releases_limit_bounds_selected_updates(): void
+    {
+        Search::shouldReceive('updateRelease')->times(3);
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $first = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('a', 40),
+            'leftguid' => 'a',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $second = Release::factory()->create([
+            'name' => 'The Proud Rebel - [02/10] - "The Proud Rebel 1958.part001.rar" yEnc',
+            'searchname' => 'The Proud Rebel - [02/10] - "The Proud Rebel 1958.part001.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('b', 40),
+            'leftguid' => 'b',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+            '--groups' => (string) $group->id,
+            '--limit' => '1',
+        ])->assertSuccessful();
+
+        $first->refresh();
+        $second->refresh();
+
+        $this->assertSame(Category::MOVIE_OTHER, $first->categories_id);
+        $this->assertSame(Category::OTHER_HASHED, $second->categories_id);
+    }
+
+    public function test_recategorize_releases_ids_selects_specific_releases(): void
+    {
+        Search::shouldReceive('updateRelease')->times(3);
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $selected = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('d', 40),
+            'leftguid' => 'd',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $unselected = Release::factory()->create([
+            'name' => 'The Proud Rebel - [02/10] - "The Proud Rebel 1958.part001.rar" yEnc',
+            'searchname' => 'The Proud Rebel - [02/10] - "The Proud Rebel 1958.part001.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('e', 40),
+            'leftguid' => 'e',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+            '--ids' => (string) $selected->id,
+        ])->assertSuccessful();
+
+        $selected->refresh();
+        $unselected->refresh();
+
+        $this->assertSame(Category::MOVIE_OTHER, $selected->categories_id);
+        $this->assertSame(Category::OTHER_HASHED, $unselected->categories_id);
+    }
+
+    public function test_recategorize_releases_rejects_all_with_limit_without_resetting_unselected_rows(): void
+    {
+        Search::shouldReceive('updateRelease')->once();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('f', 40),
+            'leftguid' => 'f',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--all' => true,
+            '--limit' => '1',
+        ])->expectsOutputToContain('Cannot combine --all')
+            ->assertFailed();
+
+        $release->refresh();
+
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(Category::OTHER_HASHED, $release->categories_id);
+    }
+
+    #[DataProvider('invalidRecategorizeLimitProvider')]
+    public function test_recategorize_releases_rejects_invalid_limit(string $limit): void
+    {
+        Search::shouldReceive('updateRelease')->once();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('1', 40),
+            'leftguid' => '1',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+            '--limit' => $limit,
+        ])->expectsOutputToContain('--limit must be a positive integer')
+            ->assertFailed();
+
+        $release->refresh();
+
+        $this->assertSame(Category::OTHER_HASHED, $release->categories_id);
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function invalidRecategorizeLimitProvider(): array
+    {
+        return [
+            'zero' => ['0'],
+            'negative' => ['-5'],
+            'nonnumeric' => ['abc'],
+        ];
     }
 
     public function test_recategorize_releases_uses_original_subject_when_searchname_lost_category_evidence(): void
