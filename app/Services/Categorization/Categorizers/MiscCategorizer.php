@@ -366,7 +366,8 @@ class MiscCategorizer extends AbstractCategorizer
 
     private function isReadableSoftwareSubject(string $name): bool
     {
-        return preg_match('/\b(?:Microsoft\s*)?Office[._ -](?:19|20)\d{2}(?:[._ -]\d{3,6}){1,3}[._ -](?:32|64)Bit\b/i', $name) === 1;
+        return preg_match('/\b(?:Microsoft\s*)?Office[._ -](?:19|20)\d{2}(?:[._ -]\d{3,6}){1,3}[._ -](?:32|64)Bit\b/i', $name) === 1
+            || preg_match('/\b(?:AcroRdr|CorelDRAW|CyberLink|DVDFab|Navicat|PotPlayer|PowerDVD|SQLiteExpert|Topaz|[A-Za-z][A-Za-z0-9]+Setup(?:64|32)?)[\w.\' -]*(?:Installer|Setup|KeyGen|Crack|Activator|Patch|Portable|x64|x86|Pro|Enterprise)\b/i', $name) === 1;
     }
 
     private function isObfuscatedExtractedPar2Volume(string $name): bool

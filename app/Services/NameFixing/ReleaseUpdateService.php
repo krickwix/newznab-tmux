@@ -175,32 +175,32 @@ class ReleaseUpdateService
                 }
             }
 
-            if (strtolower($newName) !== strtolower($release->searchname)) {
+            if ($type === 'PAR2, ') {
+                $newName = ucwords($newName);
+                if (preg_match('/(.+?)\.[a-z0-9]{2,3}(PAR2)?$/i', $name, $hit)) {
+                    $newName = $hit[1];
+                }
+            }
+
+            // Split on path separator backslash to strip any path
+            $newName = explode('\\', $newName);
+            $newName = preg_replace(['/^[=_.:\s-]+/', '/[=_.:\s-]+$/'], '', $newName[0]);
+
+            $newTitle = substr($newName, 0, 299);
+
+            $allowedCategories = (array) ($release->allowed_categories ?? []);
+            $determinedCategory = $this->category->determineCategory(
+                $release->groups_id,
+                $newTitle,
+                ! empty($release->fromname) ? $release->fromname : ''
+            );
+
+            $categoryChanged = (int) $release->categories_id === Category::OTHER_HASHED
+                && (int) $release->categories_id !== (int) $determinedCategory['categories_id'];
+
+            if (strtolower($newTitle) !== strtolower($release->searchname) || $categoryChanged) {
                 $this->matched = true;
                 $this->relid = (int) $release->releases_id;
-
-                if ($type === 'PAR2, ') {
-                    $newName = ucwords($newName);
-                    if (preg_match('/(.+?)\.[a-z0-9]{2,3}(PAR2)?$/i', $name, $hit)) {
-                        $newName = $hit[1];
-                    }
-                }
-
-                // Split on path separator backslash to strip any path
-                $newName = explode('\\', $newName);
-                $newName = preg_replace(['/^[=_.:\s-]+/', '/[=_.:\s-]+$/'], '', $newName[0]);
-
-                $newTitle = substr($newName, 0, 299);
-
-                $determinedCategory = null;
-                $allowedCategories = (array) ($release->allowed_categories ?? []);
-                if (($this->echoOutput && $show) || $allowedCategories !== []) {
-                    $determinedCategory = $this->category->determineCategory(
-                        $release->groups_id,
-                        $newTitle,
-                        ! empty($release->fromname) ? $release->fromname : ''
-                    );
-                }
 
                 if ($allowedCategories !== [] && ! in_array((int) $determinedCategory['categories_id'], $allowedCategories, true)) {
                     $this->matched = false;
@@ -217,7 +217,7 @@ class ReleaseUpdateService
                 }
 
                 if ($echo === true) {
-                    $this->performDatabaseUpdate($release, $newTitle, $type, $nameStatus, $preId);
+                    $this->performDatabaseUpdate($release, $newTitle, $type, $nameStatus, $preId, (int) $determinedCategory['categories_id']);
                 }
             }
         }
@@ -340,6 +340,7 @@ class ReleaseUpdateService
             $type === 'CRC32, ' ||
             $type === 'SRR, ' ||
             stripos($method, 'Title Match') !== false ||
+            stripos($method, 'App:') !== false ||
             stripos($method, 'Classic movie support filename') !== false ||
             stripos($method, 'file matched source') !== false ||
             stripos($method, 'PreDb') !== false ||
@@ -400,9 +401,10 @@ class ReleaseUpdateService
         string $newTitle,
         string $type,
         bool $nameStatus,
-        int $preId
+        int $preId,
+        int $categoryId
     ): void {
-        DB::transaction(function () use ($release, $newTitle, $type, $nameStatus, $preId): void {
+        DB::transaction(function () use ($release, $newTitle, $type, $nameStatus, $preId, $categoryId): void {
             if ($nameStatus === true) {
                 $status = $this->getStatusColumnsForType($type);
 
@@ -416,6 +418,7 @@ class ReleaseUpdateService
                     'anidbid' => '',
                     'predb_id' => $preId,
                     'searchname' => $newTitle,
+                    'categories_id' => $categoryId,
                 ];
 
                 if (! empty($status)) {
@@ -440,6 +443,7 @@ class ReleaseUpdateService
                         'anidbid' => null,
                         'predb_id' => $preId,
                         'searchname' => $newTitle,
+                        'categories_id' => $categoryId,
                         'iscategorized' => 1,
                     ]);
             }

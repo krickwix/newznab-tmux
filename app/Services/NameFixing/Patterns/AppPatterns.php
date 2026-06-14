@@ -57,6 +57,12 @@ final class AppPatterns
      */
     public const MICROSOFT = '/\w[\-\w.\',;& ]*(Microsoft|Office|Windows|Visual[._ -]?Studio)[._ -]\d{2,4}[._ -][\-\w.\',;& ]+\w/i';
 
+    /**
+     * Installer-style application titles without a formal version.
+     * Example: PotPlayerSetup64 Pro Installer
+     */
+    public const INSTALLER = '/\w[\-\w.\',;& ]*(?:AcroRdr|CorelDRAW|CyberLink|DVDFab|Navicat|PotPlayer|PowerDVD|SQLiteExpert|Topaz|[A-Za-z][A-Za-z0-9]+Setup(?:64|32)?)[\-\w.\',;& ]*(?:Installer|Setup|KeyGen|Crack|Activator|Patch|Portable|x64|x86|Pro|Enterprise)[\-\w.\',;& ]*\w/i';
+
     // ========================================================================
     // GENERIC PATTERNS
     // ========================================================================
@@ -126,6 +132,7 @@ final class AppPatterns
             'LINUX' => self::LINUX,
             'ADOBE' => self::ADOBE,
             'MICROSOFT' => self::MICROSOFT,
+            'INSTALLER' => self::INSTALLER,
             'WITH_VERSION' => self::WITH_VERSION,
         ];
     }
@@ -154,6 +161,7 @@ final class AppPatterns
         return [
             'ADOBE' => self::ADOBE,
             'MICROSOFT' => self::MICROSOFT,
+            'INSTALLER' => self::INSTALLER,
         ];
     }
 }

@@ -39,6 +39,7 @@ class AppNameChecker extends AbstractNameChecker
             'LINUX' => 'Linux apps',
             'ADOBE' => 'Adobe apps',
             'MICROSOFT' => 'Microsoft apps',
+            'INSTALLER' => 'Installer app',
             'WITH_VERSION' => 'Software with version',
         ];
 

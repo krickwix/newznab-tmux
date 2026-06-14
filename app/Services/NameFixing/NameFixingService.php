@@ -348,17 +348,24 @@ class NameFixingService
 
         $query = sprintf(
             'SELECT rel.id AS releases_id, rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id,
-                COALESCE(NULLIF(rel.searchname, \'\'), rel.name) AS textstring
+                COALESCE(NULLIF(rel.name, \'\'), rel.searchname) AS textstring
             FROM releases rel
-            WHERE rel.isrenamed = %d
+            WHERE (
+                rel.isrenamed = %d
+                OR (rel.categories_id = %d AND rel.name REGEXP %s)
+            )
             AND rel.predb_id = 0
             AND (
                 rel.proc_files = %d
-                OR COALESCE(NULLIF(rel.searchname, \'\'), rel.name) REGEXP %s
+                OR COALESCE(NULLIF(rel.name, \'\'), rel.searchname) REGEXP %s
+                OR COALESCE(NULLIF(rel.name, \'\'), rel.searchname) REGEXP %s
             )',
             self::IS_RENAMED_NONE,
+            Category::OTHER_HASHED,
+            escapeString($this->readableSoftwareSubjectRegex()),
             self::PROC_FILES_NONE,
-            escapeString('(^|[^[:alnum:]])(19|20)[0-9]{2}([^[:alnum:]]|$)')
+            escapeString('(^|[^[:alnum:]])(19|20)[0-9]{2}([^[:alnum:]]|$)'),
+            escapeString($this->readableSoftwareSubjectRegex())
         );
 
         $releases = $this->getReleases($time, $cats, $query, $limit);
@@ -429,6 +436,11 @@ class NameFixingService
             $candidates[] = $subject;
         }
 
+        if (preg_match('/^\(([^()"]{4,180})\)\s*\[\d+(?:\/|\s+of\s+)\d+\]/u', $subject, $match)
+            && preg_match('/'.$this->readableSoftwareSubjectRegex().'/iu', $match[1])) {
+            $candidates[] = $match[1];
+        }
+
         if (preg_match_all('/"([^"]+)"/', $subject, $matches)) {
             foreach ($matches[1] as $quoted) {
                 $candidates[] = $quoted;
@@ -445,6 +457,11 @@ class NameFixingService
             static fn (string $candidate): string => trim($candidate),
             $candidates
         ))));
+    }
+
+    protected function readableSoftwareSubjectRegex(): string
+    {
+        return '(^|[^[:alnum:]])(Adobe|AcroRdr|AutoCAD|Autodesk|Corel|CorelDRAW|CyberLink|DVDFab|Foxit|Microsoft|Navicat|Office|Photoshop|PotPlayer|PowerDVD|SQLiteExpert|Topaz|Visual[._ -]?Studio|VMware|Windows|Setup|Installer|KeyGen|Crack|Activator|Patch|Portable|Multilingual|x64|x86)([^[:alnum:]]|$)';
     }
 
     protected function isSafeMovieFilenameResult(string $method, string $name): bool

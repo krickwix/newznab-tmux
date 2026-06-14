@@ -174,6 +174,10 @@ class PcCategorizer extends AbstractCategorizer
             return $this->matched(Category::PC_0DAY, 0.85, '0day_software');
         }
 
+        if (preg_match('/\b(?:AcroRdr|CorelDRAW|CyberLink|DVDFab|Navicat|PotPlayer|PowerDVD|SQLiteExpert|Topaz|[A-Za-z][A-Za-z0-9]+Setup(?:64|32)?)[\w.\' -]*(?:Installer|Setup|KeyGen|Crack|Activator|Patch|Portable|x64|x86|Pro|Enterprise)\b/i', $name)) {
+            return $this->matched(Category::PC_0DAY, 0.85, '0day_installer');
+        }
+
         return null;
     }
 

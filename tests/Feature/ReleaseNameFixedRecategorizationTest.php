@@ -71,6 +71,21 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
 
         DB::purge();
         DB::reconnect();
+        DB::connection()->getPdo()->sqliteCreateFunction(
+            'REGEXP',
+            static function (?string $pattern, ?string $subject): int {
+                if ($pattern === null || $subject === null || $pattern === '') {
+                    return 0;
+                }
+
+                set_error_handler(static fn (): true => true);
+                $matched = @preg_match('~'.$pattern.'~i', $subject);
+                restore_error_handler();
+
+                return $matched === 1 ? 1 : 0;
+            },
+            2
+        );
 
         $this->createSchema();
     }
@@ -829,6 +844,132 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(1, (int) $release->iscategorized);
     }
 
+    public function test_hashed_subject_fix_revisits_readable_software_subject_after_file_pass_miss(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.sounds.lossless',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => '(PotPlayerSetup64 Pro Installer) [2/7] - "PotPlayerSetup64.rar.par2" yEnc',
+            'searchname' => '(PotPlayerSetup64 Pro Installer) [2/7] - "PotPlayerSetup64.rar.par2"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'proc_files' => 1,
+            'proc_par2' => 1,
+            'guid' => str_repeat('6', 40),
+            'leftguid' => '6',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('releases:fix-names', [
+            'method' => 21,
+            '--category' => 'hashed',
+            '--update' => true,
+            '--set-status' => true,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame('PotPlayerSetup64 Pro Installer', $release->searchname);
+        $this->assertSame(Category::PC_0DAY, $release->categories_id);
+        $this->assertSame(1, (int) $release->isrenamed);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_hashed_subject_fix_uses_original_software_subject_when_searchname_lost_evidence(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.sounds.lossless',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => '(Microsoft Office Professional Plus (2024) - x64 - Multilingual [Latest Package] v24.05 64) [19/34] - "Microsoft Office (2024) - Professional x64 - German Latest Package English Plus.part18.rar" yEnc',
+            'searchname' => 'Configurationx64.Xml',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 1,
+            'proc_files' => 1,
+            'proc_par2' => 1,
+            'guid' => str_repeat('5', 40),
+            'leftguid' => '5',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('releases:fix-names', [
+            'method' => 21,
+            '--category' => 'hashed',
+            '--update' => true,
+            '--set-status' => true,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertStringContainsString('Microsoft Office Professional Plus', $release->searchname);
+        $this->assertSame(Category::PC_0DAY, $release->categories_id);
+        $this->assertSame(1, (int) $release->isrenamed);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_hashed_subject_fix_recategorizes_when_searchname_was_already_repaired(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.sounds.lossless',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => '(PotPlayerSetup64 Pro Installer) [2/7] - "PotPlayerSetup64.rar.par2" yEnc',
+            'searchname' => 'PotPlayerSetup64 Pro Installer',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 1,
+            'proc_files' => 1,
+            'proc_par2' => 1,
+            'guid' => str_repeat('4', 40),
+            'leftguid' => '4',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('releases:fix-names', [
+            'method' => 21,
+            '--category' => 'hashed',
+            '--update' => true,
+            '--set-status' => true,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame('PotPlayerSetup64 Pro Installer', $release->searchname);
+        $this->assertSame(Category::PC_0DAY, $release->categories_id);
+        $this->assertSame(1, (int) $release->isrenamed);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
     public function test_recategorize_releases_moves_readable_vintage_subject_out_of_hashed(): void
     {
         Search::shouldReceive('updateRelease')->twice();
@@ -952,6 +1093,15 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
                 ['id' => Category::MOVIE_SD, 'title' => 'SD', 'root_categories_id' => Category::MOVIE_ROOT],
                 ['id' => Category::PC_0DAY, 'title' => '0day', 'root_categories_id' => Category::PC_ROOT],
             ]);
+        }
+
+        if (! Schema::hasTable('predb')) {
+            Schema::create('predb', function (Blueprint $table): void {
+                $table->increments('id');
+                $table->string('title')->default('');
+                $table->dateTime('predate')->nullable();
+                $table->tinyInteger('searched')->default(0);
+            });
         }
 
         if (! Schema::hasTable('usenet_groups')) {
