@@ -5,8 +5,12 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Enums\CollectionFileCheckStatus;
+use App\Services\Nzb\NzbService;
+use App\Services\ReleaseImageService;
 use App\Services\ReleaseProcessingService;
+use App\Services\Releases\ReleaseManagementService;
 use Illuminate\Support\Facades\DB;
+use Mockery;
 use Tests\TestCase;
 
 final class ReleaseProcessingUnwantedCollectionScopeTest extends TestCase
@@ -67,6 +71,86 @@ final class ReleaseProcessingUnwantedCollectionScopeTest extends TestCase
         $this->assertSame(0, DB::table('collections')->where('groups_id', 1)->count());
         $this->assertSame(4, DB::table('collections')->where('groups_id', 2)->count());
         $this->assertSame(4, DB::table('binaries')->whereIn('collections_id', [201, 202, 203, 204])->count());
+    }
+
+    public function test_explicit_group_zero_disables_site_minimum_collection_cleanup(): void
+    {
+        DB::table('usenet_groups')->insert([
+            'id' => 3,
+            'name' => 'alt.explicit-zero',
+            'active' => 1,
+            'minsizetoformrelease' => 0,
+            'minfilestoformrelease' => 0,
+        ]);
+
+        $this->seedCollection(301, 3, 'Explicit.Zero.Too.Small', 'Explicit.Zero.Too.Small.mkv', 50, 3);
+        $this->seedCollection(302, 3, 'Explicit.Zero.One.File', 'Explicit.Zero.One.File.iso', 500, 1);
+        $this->seedCollection(303, 3, 'Explicit.Zero.Par2.Only', 'Explicit.Zero.Par2.Only.par2', 500, 3);
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+
+        $service->deleteUnwantedCollections(3);
+
+        $this->assertSame([301, 302], DB::table('collections')->where('groups_id', 3)->orderBy('id')->pluck('id')->all());
+        $this->assertFalse(DB::table('binaries')->where('collections_id', 303)->exists());
+        $this->assertFalse(DB::table('parts')->where('binaries_id', 3030)->exists());
+    }
+
+    public function test_explicit_group_zero_disables_site_minimum_release_cleanup(): void
+    {
+        DB::table('usenet_groups')->insert([
+            [
+                'id' => 3,
+                'name' => 'alt.explicit-zero',
+                'active' => 1,
+                'minsizetoformrelease' => 0,
+                'minfilestoformrelease' => 0,
+            ],
+            [
+                'id' => 4,
+                'name' => 'alt.global-fallback',
+                'active' => 1,
+                'minsizetoformrelease' => null,
+                'minfilestoformrelease' => null,
+            ],
+        ]);
+        DB::table('releases')->insert([
+            $this->release(401, 3, 'explicit-too-small', 50, 3),
+            $this->release(402, 3, 'explicit-one-file', 500, 1),
+            $this->release(403, 4, 'global-one-file', 500, 1),
+            $this->release(404, 4, 'global-too-small', 50, 3),
+        ]);
+
+        $releaseManagement = new RecordingReleaseManagementServiceForUnwantedCollections;
+        /** @var NzbService $nzb */
+        $nzb = Mockery::mock(NzbService::class);
+        /** @var ReleaseImageService $releaseImage */
+        $releaseImage = Mockery::mock(ReleaseImageService::class);
+        $service = new ReleaseProcessingService(
+            nzb: $nzb,
+            releaseManagement: $releaseManagement,
+            releaseImage: $releaseImage,
+        );
+        $service->setEchoCLI(false);
+
+        $service->deletedReleasesByGroup();
+
+        $this->assertEqualsCanonicalizing([403, 404], $releaseManagement->deletedIds);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function release(int $id, int $groupId, string $guid, int $size, int $totalParts): array
+    {
+        return [
+            'id' => $id,
+            'guid' => $guid,
+            'groups_id' => $groupId,
+            'size' => $size,
+            'totalpart' => $totalParts,
+        ];
     }
 
     private function seedCollection(
@@ -155,5 +239,25 @@ final class ReleaseProcessingUnwantedCollectionScopeTest extends TestCase
             id INTEGER PRIMARY KEY,
             binaries_id INTEGER
         )');
+        DB::statement('CREATE TABLE releases (
+            id INTEGER PRIMARY KEY,
+            guid VARCHAR(64),
+            groups_id INTEGER,
+            size INTEGER,
+            totalpart INTEGER
+        )');
+    }
+}
+
+final class RecordingReleaseManagementServiceForUnwantedCollections extends ReleaseManagementService
+{
+    /**
+     * @var list<int>
+     */
+    public array $deletedIds = [];
+
+    public function deleteSingle(array $identifiers, NzbService $nzb, ReleaseImageService $releaseImage): void
+    {
+        $this->deletedIds[] = (int) $identifiers['i'];
     }
 }

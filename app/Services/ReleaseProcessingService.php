@@ -464,14 +464,15 @@ final class ReleaseProcessingService
         foreach ($groupIDs as $grpID) {
             $currentGroupId = (int) $grpID['id'];
             $groupSettings = UsenetGroup::getGroupByID($currentGroupId);
-            $groupMinSize = (int) ($groupSettings['minsizetoformrelease'] ?? 0);
-            $groupMinFiles = (int) ($groupSettings['minfilestoformrelease'] ?? 0);
 
             if (! $this->hasSizedCollections($currentGroupId)) {
                 continue;
             }
 
-            $effectiveMinSize = max($groupMinSize, $this->settings->minSizeToFormRelease);
+            $effectiveMinSize = $this->effectiveGroupThreshold(
+                $groupSettings?->getAttribute('minsizetoformrelease'),
+                $this->settings->minSizeToFormRelease
+            );
             if ($effectiveMinSize > 0) {
                 $ids = Collection::query()
                     ->where('groups_id', $currentGroupId)
@@ -501,7 +502,10 @@ final class ReleaseProcessingService
                 );
             }
 
-            $effectiveMinFiles = max($groupMinFiles, $this->settings->minFilesToFormRelease);
+            $effectiveMinFiles = $this->effectiveGroupThreshold(
+                $groupSettings?->getAttribute('minfilestoformrelease'),
+                $this->settings->minFilesToFormRelease
+            );
             if ($effectiveMinFiles > 0) {
                 $ids = Collection::query()
                     ->where('groups_id', $currentGroupId)
@@ -1364,15 +1368,20 @@ final class ReleaseProcessingService
      */
     private function deleteReleasesUnderMinSize(int|string $groupId, array &$stats): void
     {
+        $effectiveMinSize = $this->effectiveGroupThresholdForGroup(
+            $groupId,
+            'minsizetoformrelease',
+            $this->settings->minSizeToFormRelease
+        );
+
+        if ($effectiveMinSize <= 0) {
+            return;
+        }
+
         $releases = Release::query()
-            ->where('releases.groups_id', $groupId)
-            ->join('usenet_groups', 'usenet_groups.id', '=', 'releases.groups_id')
-            ->whereRaw(
-                'GREATEST(IFNULL(usenet_groups.minsizetoformrelease, 0), ?) > 0 '.
-                'AND releases.size < GREATEST(IFNULL(usenet_groups.minsizetoformrelease, 0), ?)',
-                [$this->settings->minSizeToFormRelease, $this->settings->minSizeToFormRelease]
-            )
-            ->select(['releases.id', 'releases.guid'])
+            ->where('groups_id', $groupId)
+            ->where('size', '<', $effectiveMinSize)
+            ->select(['id', 'guid'])
             ->get();
 
         foreach ($releases as $release) {
@@ -1407,25 +1416,43 @@ final class ReleaseProcessingService
      */
     private function deleteReleasesUnderMinFiles(int|string $groupId, array &$stats): void
     {
-        if ($this->settings->minFilesToFormRelease <= 0) {
+        $effectiveMinFiles = $this->effectiveGroupThresholdForGroup(
+            $groupId,
+            'minfilestoformrelease',
+            $this->settings->minFilesToFormRelease
+        );
+
+        if ($effectiveMinFiles <= 0) {
             return;
         }
 
         $releases = Release::query()
-            ->where('releases.groups_id', $groupId)
-            ->join('usenet_groups', 'usenet_groups.id', '=', 'releases.groups_id')
-            ->whereRaw(
-                'GREATEST(IFNULL(usenet_groups.minfilestoformrelease, 0), ?) > 0 '.
-                'AND releases.totalpart < GREATEST(IFNULL(usenet_groups.minfilestoformrelease, 0), ?)',
-                [$this->settings->minFilesToFormRelease, $this->settings->minFilesToFormRelease]
-            )
-            ->select(['releases.id', 'releases.guid'])
+            ->where('groups_id', $groupId)
+            ->where('totalpart', '<', $effectiveMinFiles)
+            ->select(['id', 'guid'])
             ->get();
 
         foreach ($releases as $release) {
             $this->deleteSingleRelease($release);
             $stats['minFiles']++;
         }
+    }
+
+    private function effectiveGroupThresholdForGroup(int|string $groupId, string $column, int $siteThreshold): int
+    {
+        return $this->effectiveGroupThreshold(
+            UsenetGroup::query()->where('id', $groupId)->value($column),
+            $siteThreshold
+        );
+    }
+
+    private function effectiveGroupThreshold(mixed $groupThreshold, int $siteThreshold): int
+    {
+        if ($groupThreshold === null || $groupThreshold === '') {
+            return $siteThreshold;
+        }
+
+        return (int) $groupThreshold;
     }
 
     private function deleteReleasesOverRetention(ReleaseDeleteStats $stats): ReleaseDeleteStats
