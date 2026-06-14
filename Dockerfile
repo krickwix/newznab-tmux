@@ -15,7 +15,7 @@ COPY --from=composer-base --link /usr/bin/composer /usr/bin/composer
 RUN apt update \
  && apt install -y --no-install-recommends \
      unrar-free lame libcap2-bin python3 gettext-base \
-     curl zip unzip git nano bash-completion sudo wget tmux time fonts-powerline \
+     curl zip unzip 7zip git nano bash-completion sudo wget tmux time fonts-powerline \
      gnupg libpng-dev dnsutils jq htop iputils-ping net-tools ffmpeg \
      jpegoptim webp optipng pngquant libavif-bin watch iproute2 nmon \
      libonig-dev libxml2-dev libicu-dev libjpeg-dev libfreetype6-dev libxslt-dev $MYSQL_CLIENT libcurl4-openssl-dev \

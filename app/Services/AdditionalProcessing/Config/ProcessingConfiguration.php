@@ -27,6 +27,8 @@ final readonly class ProcessingConfiguration
 
     public string|false $unzipPath;
 
+    public string|false $sevenZipPath;
+
     public string|false $timeoutPath;
 
     public int $timeoutSeconds;
@@ -107,6 +109,7 @@ final readonly class ProcessingConfiguration
         $this->fetchLastFiles = (bool) config('nntmux_settings.fetch_last_file');
         $this->unrarPath = config('nntmux_settings.unrar_path') ?: false;
         $this->unzipPath = config('nntmux_settings.unzip_path') ?: false;
+        $this->sevenZipPath = $this->resolveExistingBinary(config('nntmux_settings.sevenzip_path') ?: false);
         $this->timeoutPath = config('nntmux_settings.timeout_path') ?: false;
         $this->timeoutSeconds = (int) Settings::settingValue('timeoutseconds');
         $this->queryLimit = (int) (Settings::settingValue('maxaddprocessed') ?: 25);
@@ -164,5 +167,14 @@ final readonly class ProcessingConfiguration
         }
 
         return '"';
+    }
+
+    private function resolveExistingBinary(mixed $path): string|false
+    {
+        if (! is_string($path) || $path === '') {
+            return false;
+        }
+
+        return is_file($path) && is_executable($path) ? $path : false;
     }
 }

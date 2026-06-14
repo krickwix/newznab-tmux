@@ -5,7 +5,8 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Models\Settings;
-use Illuminate\Database\QueryException;
+use App\Services\Nzb\NzbService;
+use App\Support\TransientDatabaseError;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -18,19 +19,6 @@ class CollectionCleanupService
      */
     private const LOCK_RETRY_MAX = 5;
 
-    /**
-     * SQLSTATE returned by InnoDB on deadlock (1213).
-     */
-    private const SQLSTATE_DEADLOCK = '40001';
-
-    /**
-     * MySQL/MariaDB driver error codes we treat as transient lock contention
-     * and therefore safe to retry: 1213 = deadlock, 1205 = lock wait timeout.
-     *
-     * @var int[]
-     */
-    private const LOCK_DRIVER_CODES = [1213, 1205];
-
     public function __construct() {}
 
     /**
@@ -39,7 +27,7 @@ class CollectionCleanupService
      *
      * @return int total deleted rows across operations (approximate)
      */
-    public function deleteFinishedAndOrphans(bool $echoCLI): int
+    public function deleteFinishedAndOrphans(bool $echoCLI, ?int $groupId = null): int
     {
         $startTime = now()->toImmutable();
         $deletedCount = 0;
@@ -58,11 +46,16 @@ class CollectionCleanupService
         $cutoff = now()->subHours(Settings::settingValue('partretentionhours'));
         $batchDeleted = 0;
         do {
-            $ids = DB::table('collections')
-                ->where('dateadded', '<', $cutoff)
-                ->orderBy('id')
+            $ids = DB::table('collections as c')
+                ->where('c.dateadded', '<', $cutoff)
+                ->when($groupId !== null, static fn ($q) => $q->where('c.groups_id', $groupId))
+                ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
+                    ->from('releases as r')
+                    ->whereColumn('r.id', 'c.releases_id')
+                    ->where('r.nzbstatus', '=', NzbService::NZB_NONE))
+                ->orderBy('c.id')
                 ->limit(self::MAX_SQL_ROWS_PER_STATEMENT)
-                ->pluck('id')
+                ->pluck('c.id')
                 ->all();
 
             if ($ids === []) {
@@ -98,7 +91,7 @@ class CollectionCleanupService
                 cli()->primary('Deleting orphaned collections.', true);
         }
 
-        $orphanDeleted = $this->deleteOrphanCollections($echoCLI);
+        $orphanDeleted = $this->deleteOrphanCollections($echoCLI, $groupId);
         $deletedCount += $orphanDeleted;
 
         if ($echoCLI) {
@@ -118,7 +111,7 @@ class CollectionCleanupService
             cli()->primary('Deleting collections that were missed after NZB creation.', true);
         }
 
-        $missedDeleted = $this->deleteCollectionsMissedAfterNzb($echoCLI);
+        $missedDeleted = $this->deleteCollectionsMissedAfterNzb($echoCLI, $groupId);
         $deletedCount += $missedDeleted;
 
         $totalTime = now()->diffInSeconds($startTime, true);
@@ -143,7 +136,7 @@ class CollectionCleanupService
      * avoids cross-table lock acquisition between `collections` and
      * `binaries`, which can deadlock against concurrent BinaryHandler writes.
      */
-    private function deleteOrphanCollections(bool $echoCLI): int
+    private function deleteOrphanCollections(bool $echoCLI, ?int $groupId): int
     {
         $deleted = 0;
         $maxBatches = 20; // hard cap per cycle; bounded backlog drain
@@ -151,6 +144,11 @@ class CollectionCleanupService
 
         for ($i = 0; $i < $maxBatches; $i++) {
             $ids = DB::table('collections as c')
+                ->when($groupId !== null, static fn ($q) => $q->where('c.groups_id', $groupId))
+                ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
+                    ->from('releases as r')
+                    ->whereColumn('r.id', 'c.releases_id')
+                    ->where('r.nzbstatus', '=', NzbService::NZB_NONE))
                 ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
                     ->from('binaries as b')
                     ->whereColumn('b.collections_id', 'c.id'))
@@ -192,7 +190,7 @@ class CollectionCleanupService
      * multiple `multiprocessing:releases` workers ran in parallel against
      * `NzbService::writeNzbForReleaseId()` on the same DB.
      */
-    private function deleteCollectionsMissedAfterNzb(bool $echoCLI): int
+    private function deleteCollectionsMissedAfterNzb(bool $echoCLI, ?int $groupId): int
     {
         $deleted = 0;
         $maxBatches = 20;
@@ -202,6 +200,7 @@ class CollectionCleanupService
             $ids = DB::table('collections as c')
                 ->join('releases as r', 'r.id', '=', 'c.releases_id')
                 ->where('r.nzbstatus', '=', 1)
+                ->when($groupId !== null, static fn ($q) => $q->where('c.groups_id', $groupId))
                 ->orderBy('c.id')
                 ->limit($batchSize)
                 ->pluck('c.id')
@@ -315,29 +314,6 @@ class CollectionCleanupService
      */
     private function isLockError(\Throwable $e): bool
     {
-        if ($e instanceof QueryException) {
-            $sqlState = (string) $e->getCode();
-            $driverCode = (int) ($e->errorInfo[1] ?? 0);
-
-            if ($sqlState === self::SQLSTATE_DEADLOCK) {
-                return true;
-            }
-
-            if (in_array($driverCode, self::LOCK_DRIVER_CODES, true)) {
-                return true;
-            }
-        }
-
-        // Some drivers surface PDOException directly; fall back to the message.
-        $message = $e->getMessage();
-        if (str_contains($message, 'Deadlock found')) {
-            return true;
-        }
-
-        if (str_contains($message, 'Lock wait timeout exceeded')) {
-            return true;
-        }
-
-        return false;
+        return TransientDatabaseError::is($e);
     }
 }

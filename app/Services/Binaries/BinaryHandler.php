@@ -7,6 +7,7 @@ namespace App\Services\Binaries;
 use App\Support\Utf8;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Handles binary record creation and updates during header storage.
@@ -86,10 +87,15 @@ final class BinaryHandler
 
                 return $binaryId;
             }
-        } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Binary insert failed: '.$e->getMessage());
-            }
+        } catch (Throwable $e) {
+            Log::error('Binary insert failed', [
+                'driver' => DB::getDriverName(),
+                'collection_id' => $collectionId,
+                'group_id' => $groupId,
+                'hash' => $hash,
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
         }
 
         return null;
@@ -125,8 +131,10 @@ final class BinaryHandler
 
             $indexesByArticleKey[$articleKey][] = $index;
             if (isset($pending[$articleKey])) {
-                $extraUpdatesByArticleKey[$articleKey]['Size'] = ($extraUpdatesByArticleKey[$articleKey]['Size'] ?? 0) + (int) $header['Bytes'];
-                $extraUpdatesByArticleKey[$articleKey]['Parts'] = ($extraUpdatesByArticleKey[$articleKey]['Parts'] ?? 0) + 1;
+                $extraUpdatesByArticleKey[$articleKey][] = [
+                    'number' => (int) $header['Number'],
+                    'partsize' => (int) $header['Bytes'],
+                ];
 
                 continue;
             }
@@ -139,6 +147,7 @@ final class BinaryHandler
                 'totalparts' => (int) $header['matches'][3],
                 'filenumber' => $fileNumber,
                 'partsize' => (int) $header['Bytes'],
+                'number' => (int) $header['Number'],
             ];
         }
 
@@ -150,22 +159,41 @@ final class BinaryHandler
             $result = $this->bulkInsertAndResolve($pending);
             $idsByKey = $result['ids'];
             $existingKeys = $result['existing'];
-            $driver = DB::getDriverName();
+            $existingPartKeys = $this->existingPartKeysForResolvedRows($pending, $idsByKey, $extraUpdatesByArticleKey);
+            $seenLookupKeys = [];
+            $seenPartKeys = [];
             foreach ($pending as $articleKey => $row) {
-                $lookupKey = $this->binaryLookupKey($row['hash'], (int) $row['collections_id']);
-                $binaryId = $idsByKey[$lookupKey] ?? 0;
+                $hashLookupKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
+                $fileLookupKey = $this->binaryFileLookupKey((int) $row['collections_id'], (int) $row['filenumber']);
+                $binaryId = $idsByKey[$hashLookupKey] ?? $idsByKey[$fileLookupKey] ?? 0;
                 if ($binaryId <= 0) {
                     continue;
                 }
 
                 $this->binariesUpdate[$binaryId] = $this->binariesUpdate[$binaryId] ?? ['Size' => 0, 'Parts' => 0];
-                if ($driver === 'sqlite' && isset($existingKeys[$lookupKey])) {
-                    $this->binariesUpdate[$binaryId]['Size'] += (int) $row['partsize'];
-                    $this->binariesUpdate[$binaryId]['Parts']++;
+                if (isset($existingKeys[$hashLookupKey])
+                    || isset($existingKeys[$fileLookupKey])
+                    || isset($seenLookupKeys[$fileLookupKey])
+                ) {
+                    $this->addBinaryUpdateForNewPart(
+                        $binaryId,
+                        (int) $row['number'],
+                        (int) $row['partsize'],
+                        $existingPartKeys,
+                        $seenPartKeys
+                    );
+                } else {
+                    $seenPartKeys[$this->partKey($binaryId, (int) $row['number'])] = true;
                 }
-                if (isset($extraUpdatesByArticleKey[$articleKey])) {
-                    $this->binariesUpdate[$binaryId]['Size'] += $extraUpdatesByArticleKey[$articleKey]['Size'];
-                    $this->binariesUpdate[$binaryId]['Parts'] += $extraUpdatesByArticleKey[$articleKey]['Parts'];
+                $seenLookupKeys[$fileLookupKey] = true;
+                foreach ($extraUpdatesByArticleKey[$articleKey] ?? [] as $extraPart) {
+                    $this->addBinaryUpdateForNewPart(
+                        $binaryId,
+                        (int) $extraPart['number'],
+                        (int) $extraPart['partsize'],
+                        $existingPartKeys,
+                        $seenPartKeys
+                    );
                 }
 
                 $this->articles[$articleKey] = [
@@ -177,10 +205,19 @@ final class BinaryHandler
                     $resolved[$index] = $binaryId;
                 }
             }
-        } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Bulk binary insert failed: '.$e->getMessage());
+        } catch (Throwable $e) {
+            if (TransientHeaderStorageFailure::is($e)) {
+                throw $e;
             }
+
+            Log::error('Bulk binary insert failed', [
+                'driver' => DB::getDriverName(),
+                'group_id' => $groupId,
+                'pending' => \count($pending),
+                'sample_hashes' => array_slice(array_column($pending, 'hash'), 0, 5),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
         }
 
         return $resolved;
@@ -197,30 +234,45 @@ final class BinaryHandler
         // One SELECT establishes both "did this row exist?" and "what is its
         // id?", instead of two identical SELECTs (existingBinaryKeys +
         // resolveBinaryIds) that the previous implementation issued.
-        $idsByKey = $this->selectBinaryIdsByKey($lookupRows);
+        $idsByKey = $this->selectBinaryIdsByHash($lookupRows);
+        $idsByFileKeyBeforeInsert = $this->selectBinaryIdsByFileNumber($lookupRows);
         $existingKeys = [];
         foreach ($idsByKey as $key => $_id) {
             $existingKeys[$key] = true;
         }
+        foreach ($idsByFileKeyBeforeInsert as $key => $id) {
+            $idsByKey[$key] = $id;
+            $existingKeys[$key] = true;
+        }
+
+        $insertRows = [];
+        foreach ($lookupRows as $row) {
+            $hashKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
+            $fileKey = $this->binaryFileLookupKey((int) $row['collections_id'], (int) $row['filenumber']);
+            if (! isset($idsByKey[$hashKey]) && ! isset($idsByKey[$fileKey])) {
+                $insertRows[] = $row;
+            }
+        }
 
         if (DB::getDriverName() === 'sqlite') {
-            $this->bulkInsertBinariesSqlite($lookupRows);
+            $this->bulkInsertBinariesSqlite($insertRows);
         } else {
-            $this->bulkInsertBinariesMysql($lookupRows);
+            $this->bulkInsertBinariesMysql($insertRows);
         }
 
         // Only re-query for rows we couldn't satisfy from the prefetch
         // (i.e. those that didn't exist before the bulk INSERT).
         $missingRows = [];
-        foreach ($lookupRows as $row) {
-            $key = $this->binaryLookupKey((string) $row['hash'], (int) $row['collections_id']);
-            if (! isset($idsByKey[$key])) {
+        foreach ($insertRows as $row) {
+            $hashKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
+            $fileKey = $this->binaryFileLookupKey((int) $row['collections_id'], (int) $row['filenumber']);
+            if (! isset($idsByKey[$hashKey]) && ! isset($idsByKey[$fileKey])) {
                 $missingRows[] = $row;
             }
         }
 
         if ($missingRows !== []) {
-            foreach ($this->selectBinaryIdsByKey($missingRows) as $key => $id) {
+            foreach ($this->selectBinaryIdsByFileNumber($missingRows) as $key => $id) {
                 $idsByKey[$key] = $id;
             }
         }
@@ -236,13 +288,27 @@ final class BinaryHandler
 
     /**
      * @param  list<array<string, mixed>>  $rows
-     * @return array<string, int> id keyed by binaryLookupKey(hash, collectionId)
+     * @return array<string, int> id keyed by binaryHashLookupKey(hash, collectionId)
      */
-    private function selectBinaryIdsByKey(array $rows): array
+    private function selectBinaryIdsByHash(array $rows): array
     {
         $resolved = [];
-        foreach ($this->selectBinaryRows($rows) as $row) {
-            $resolved[$this->binaryLookupKey((string) $row->hashvalue, (int) $row->collections_id)] = (int) $row->id;
+        foreach ($this->selectBinaryRowsByHash($rows) as $row) {
+            $resolved[$this->binaryHashLookupKey((string) $row->hashvalue, (int) $row->collections_id)] = (int) $row->id;
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $rows
+     * @return array<string, int> id keyed by binaryFileLookupKey(collectionId, fileNumber)
+     */
+    private function selectBinaryIdsByFileNumber(array $rows): array
+    {
+        $resolved = [];
+        foreach ($this->selectBinaryRowsByFileNumber($rows) as $row) {
+            $resolved[$this->binaryFileLookupKey((int) $row->collections_id, (int) $row->filenumber)] = (int) $row->id;
         }
 
         return $resolved;
@@ -288,12 +354,12 @@ final class BinaryHandler
                 );
             }
 
-            DB::statement(
+            $this->runBinaryWriteWithRetry(fn (): bool => DB::statement(
                 'INSERT INTO binaries (binaryhash, name, collections_id, totalparts, currentparts, filenumber, partsize) VALUES '
                 .implode(',', $placeholders)
-                .' ON DUPLICATE KEY UPDATE currentparts = currentparts + 1, partsize = partsize + VALUES(partsize)',
+                .' ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)',
                 $bindings
-            );
+            ));
         }
     }
 
@@ -301,7 +367,7 @@ final class BinaryHandler
      * @param  list<array<string, mixed>>  $rows
      * @return list<object>
      */
-    private function selectBinaryRows(array $rows): array
+    private function selectBinaryRowsByHash(array $rows): array
     {
         if ($rows === []) {
             return [];
@@ -343,9 +409,122 @@ final class BinaryHandler
         return $results;
     }
 
-    private function binaryLookupKey(string $hash, int $collectionId): string
+    /**
+     * @param  list<array<string, mixed>>  $rows
+     * @return list<object>
+     */
+    private function selectBinaryRowsByFileNumber(array $rows): array
     {
-        return strtolower($hash).':'.$collectionId;
+        if ($rows === []) {
+            return [];
+        }
+
+        $rowsByCollection = [];
+        foreach ($rows as $row) {
+            $rowsByCollection[(int) $row['collections_id']][] = (int) $row['filenumber'];
+        }
+
+        $results = [];
+        foreach ($rowsByCollection as $collectionId => $fileNumbers) {
+            $fileNumbers = array_values(array_unique($fileNumbers));
+            foreach (array_chunk($fileNumbers, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
+                $placeholders = implode(',', array_fill(0, \count($chunk), '?'));
+                $bindings = $chunk;
+                $bindings[] = $collectionId;
+
+                $rowsResult = DB::select(
+                    'SELECT id, filenumber, collections_id FROM binaries '
+                    ."WHERE filenumber IN ({$placeholders}) AND collections_id = ?",
+                    $bindings
+                );
+
+                foreach ($rowsResult as $r) {
+                    $results[] = $r;
+                }
+            }
+        }
+
+        return $results;
+    }
+
+    /**
+     * @param  array<string, array<string, mixed>>  $rowsByArticleKey
+     * @param  array<string, int>  $idsByKey
+     * @param  array<string, list<array{number: int, partsize: int}>>  $extraPartsByArticleKey
+     * @return array<string, true>
+     */
+    private function existingPartKeysForResolvedRows(array $rowsByArticleKey, array $idsByKey, array $extraPartsByArticleKey = []): array
+    {
+        $pairs = [];
+        foreach ($rowsByArticleKey as $articleKey => $row) {
+            $hashLookupKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
+            $fileLookupKey = $this->binaryFileLookupKey((int) $row['collections_id'], (int) $row['filenumber']);
+            $binaryId = $idsByKey[$hashLookupKey] ?? $idsByKey[$fileLookupKey] ?? 0;
+            if ($binaryId > 0) {
+                $pairs[$this->partKey($binaryId, (int) $row['number'])] = [$binaryId, (int) $row['number']];
+                foreach ($extraPartsByArticleKey[$articleKey] ?? [] as $extraPart) {
+                    $pairs[$this->partKey($binaryId, (int) $extraPart['number'])] = [$binaryId, (int) $extraPart['number']];
+                }
+            }
+        }
+
+        if ($pairs === []) {
+            return [];
+        }
+
+        $existing = [];
+        foreach (array_chunk(array_values($pairs), self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
+            $tuples = implode(',', array_fill(0, \count($chunk), '(?,?)'));
+            $bindings = [];
+            foreach ($chunk as [$binaryId, $number]) {
+                $bindings[] = $binaryId;
+                $bindings[] = $number;
+            }
+
+            $rows = DB::select("SELECT binaries_id, number FROM parts WHERE (binaries_id, number) IN ({$tuples})", $bindings);
+            foreach ($rows as $row) {
+                $existing[$this->partKey((int) $row->binaries_id, (int) $row->number)] = true;
+            }
+        }
+
+        return $existing;
+    }
+
+    /**
+     * @param  array<string, true>  $existingPartKeys
+     * @param  array<string, true>  $seenPartKeys
+     */
+    private function addBinaryUpdateForNewPart(
+        int $binaryId,
+        int $number,
+        int $partsize,
+        array $existingPartKeys,
+        array &$seenPartKeys
+    ): void {
+        $partKey = $this->partKey($binaryId, $number);
+        if (isset($existingPartKeys[$partKey]) || isset($seenPartKeys[$partKey])) {
+            return;
+        }
+
+        $seenPartKeys[$partKey] = true;
+
+        $this->binariesUpdate[$binaryId]['Size'] += $partsize;
+        $this->binariesUpdate[$binaryId]['Parts']++;
+    }
+
+    private function binaryHashLookupKey(string $hash, int $collectionId): string
+    {
+        return strtolower($hash).':hash:'.$collectionId;
+    }
+
+    private function binaryFileLookupKey(int $collectionId, int $fileNumber): string
+    {
+        return $collectionId.':file:'.$fileNumber;
+    }
+
+    private function partKey(int $binaryId, int $number): string
+    {
+        return $binaryId.':'.$number;
     }
 
     /**
@@ -394,8 +573,8 @@ final class BinaryHandler
         }
 
         $bin = DB::selectOne(
-            'SELECT id FROM binaries WHERE binaryhash = ? AND collections_id = ? LIMIT 1',
-            [$hash, $collectionId]
+            'SELECT id FROM binaries WHERE collections_id = ? AND filenumber = ? LIMIT 1',
+            [$collectionId, $fileNumber]
         );
 
         return (int) ($bin->id ?? 0);
@@ -415,7 +594,9 @@ final class BinaryHandler
             .'VALUES (UNHEX(?), ?, ?, ?, 1, ?, ?) '
             .'ON DUPLICATE KEY UPDATE currentparts = currentparts + 1, partsize = partsize + VALUES(partsize)';
 
-        DB::statement($sql, [$hash, $name, $collectionId, $totalParts, $fileNumber, $partSize]);
+        $this->runBinaryWriteWithRetry(
+            fn (): bool => DB::statement($sql, [$hash, $name, $collectionId, $totalParts, $fileNumber, $partSize])
+        );
 
         $lastId = (int) DB::connection()->getPdo()->lastInsertId();
         if ($lastId > 0) {
@@ -425,8 +606,8 @@ final class BinaryHandler
         }
 
         $bin = DB::selectOne(
-            'SELECT id FROM binaries WHERE binaryhash = UNHEX(?) AND collections_id = ? LIMIT 1',
-            [$hash, $collectionId]
+            'SELECT id FROM binaries WHERE collections_id = ? AND filenumber = ? LIMIT 1',
+            [$collectionId, $fileNumber]
         );
 
         return (int) ($bin->id ?? 0);
@@ -450,10 +631,17 @@ final class BinaryHandler
             }
 
             return $this->flushUpdatesMysql($updates, $chunkSize); // @phpstan-ignore argument.type
-        } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Binaries aggregate update failed: '.$e->getMessage());
+        } catch (Throwable $e) {
+            if (TransientHeaderStorageFailure::is($e)) {
+                throw $e;
             }
+
+            Log::error('Binaries aggregate update failed', [
+                'driver' => $driver,
+                'updates' => \count($updates),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
 
             return false;
         }
@@ -501,10 +689,28 @@ final class BinaryHandler
                 .'SET b.partsize = b.partsize + u.partsize, '
                 .'b.currentparts = b.currentparts + u.currentparts';
 
-            DB::statement($sql, $bindings);
+            $this->runBinaryWriteWithRetry(fn (): bool => DB::statement($sql, $bindings));
         }
 
         return true;
+    }
+
+    private function runBinaryWriteWithRetry(callable $write): mixed
+    {
+        $attempts = 0;
+
+        while (true) {
+            try {
+                return $write();
+            } catch (Throwable $e) {
+                $attempts++;
+                if ($attempts >= 3 || ! TransientHeaderStorageFailure::canRetryStatement($e)) {
+                    throw $e;
+                }
+
+                usleep(25_000 * $attempts);
+            }
+        }
     }
 
     /**

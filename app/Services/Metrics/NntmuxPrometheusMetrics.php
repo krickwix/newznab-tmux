@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace App\Services\Metrics;
 
 use App\Models\Category;
+use Illuminate\Redis\Connections\PhpRedisConnection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 class NntmuxPrometheusMetrics
@@ -18,6 +20,7 @@ class NntmuxPrometheusMetrics
         'parts',
         'releases',
         'predb',
+        'predb_crcs',
         'usenet_groups',
     ];
 
@@ -30,6 +33,7 @@ class NntmuxPrometheusMetrics
         'post_timer',
         'post_timer_non',
         'post_timer_amazon',
+        'metadata_refresh_timer',
         'seq_timer',
     ];
 
@@ -45,7 +49,9 @@ class NntmuxPrometheusMetrics
                 $lines,
                 $this->tableEstimateMetrics(),
                 $this->groupMetrics(),
+                $this->collectionFormationMetrics(),
                 $this->releaseMetrics(),
+                $this->externalMetadataMetrics(),
                 $this->imdbLookupMetrics(),
                 $this->timerMetrics(),
                 $this->lockMetrics(),
@@ -72,14 +78,15 @@ class NntmuxPrometheusMetrics
         ];
 
         try {
-            foreach (Redis::keys('*metrics:imdb_lookup*') as $key) {
+            $connectionName = (string) config('cache.stores.redis.connection', 'cache');
+            foreach ($this->scanRedisKeys($connectionName, $this->redisPhysicalPattern('metrics:imdb_lookup*')) as $key) {
                 $key = (string) $key;
                 $labels = $this->parseImdbMetricLabels($key);
                 if ($labels === null) {
                     continue;
                 }
 
-                $lines[] = $this->metric('nntmux_imdb_lookup_total', $this->redisValue($key), $labels);
+                $lines[] = $this->metric('nntmux_imdb_lookup_total', $this->redisValue($key, $connectionName), $labels);
             }
         } catch (Throwable) {
             $lines[] = $this->metric('nntmux_imdb_lookup_total', 0, [
@@ -191,18 +198,80 @@ class NntmuxPrometheusMetrics
     /**
      * @return list<string>
      */
+    private function collectionFormationMetrics(): array
+    {
+        $lines = [
+            '# HELP nntmux_collections_filecheck_total Current collection count by group and filecheck state.',
+            '# TYPE nntmux_collections_filecheck_total gauge',
+            '# HELP nntmux_collections_pending_multifile_total Pending multi-file collections by group and collection regex.',
+            '# TYPE nntmux_collections_pending_multifile_total gauge',
+        ];
+
+        if (! Schema::hasTable('collections') || ! Schema::hasTable('usenet_groups')) {
+            return $lines;
+        }
+
+        $filecheckRows = DB::table('collections as c')
+            ->join('usenet_groups as g', 'g.id', '=', 'c.groups_id')
+            ->where(static function ($query): void {
+                $query->where('g.active', 1)->orWhere('g.backfill', 1);
+            })
+            ->groupBy(['g.name', 'c.filecheck'])
+            ->orderBy('g.name')
+            ->orderBy('c.filecheck')
+            ->selectRaw('g.name AS group_name, c.filecheck, COUNT(*) AS collections_count')
+            ->get();
+
+        foreach ($filecheckRows as $row) {
+            $lines[] = $this->metric('nntmux_collections_filecheck_total', (int) $row->collections_count, [
+                'group' => (string) $row->group_name,
+                'filecheck' => (string) $row->filecheck,
+            ]);
+        }
+
+        $pendingMultifileRows = DB::table('collections as c')
+            ->join('usenet_groups as g', 'g.id', '=', 'c.groups_id')
+            ->where(static function ($query): void {
+                $query->where('g.active', 1)->orWhere('g.backfill', 1);
+            })
+            ->where('c.filecheck', 0)
+            ->where('c.totalfiles', '>', 1)
+            ->groupBy(['g.name', 'c.collection_regexes_id'])
+            ->orderBy('group_name')
+            ->orderBy('collection_regexes_id')
+            ->selectRaw('g.name AS group_name, c.collection_regexes_id, COUNT(*) AS pending_multifile_count')
+            ->get();
+
+        foreach ($pendingMultifileRows as $row) {
+            $lines[] = $this->metric('nntmux_collections_pending_multifile_total', (int) $row->pending_multifile_count, [
+                'group' => (string) $row->group_name,
+                'collection_regexes_id' => (string) $row->collection_regexes_id,
+            ]);
+        }
+
+        return $lines;
+    }
+
+    /**
+     * @return list<string>
+     */
     private function releaseMetrics(): array
     {
         $hour = (int) DB::table('releases')->where('adddate', '>=', now()->subHour())->count();
         $day = (int) DB::table('releases')->where('adddate', '>=', now()->subDay())->count();
-        $hashed = (int) DB::table('releases')->where('ishashed', 1)->count();
+        $hasLegacyHashedColumn = Schema::hasColumn('releases', 'ishashed');
+        $hashed = $hasLegacyHashedColumn ? (int) DB::table('releases')->where('ishashed', 1)->count() : 0;
         $hashedCategory = (int) DB::table('releases')->where('categories_id', Category::OTHER_HASHED)->count();
-        $hashedEffective = (int) DB::table('releases')
-            ->where(static function ($query): void {
+        $hashedEffectiveQuery = DB::table('releases');
+        if ($hasLegacyHashedColumn) {
+            $hashedEffectiveQuery->where(static function ($query): void {
                 $query->where('ishashed', 1)
                     ->orWhere('categories_id', Category::OTHER_HASHED);
-            })
-            ->count();
+            });
+        } else {
+            $hashedEffectiveQuery->where('categories_id', Category::OTHER_HASHED);
+        }
+        $hashedEffective = (int) $hashedEffectiveQuery->count();
         $renamed = (int) DB::table('releases')->where('isrenamed', 1)->count();
 
         return [
@@ -257,6 +326,42 @@ class NntmuxPrometheusMetrics
     /**
      * @return list<string>
      */
+    private function externalMetadataMetrics(): array
+    {
+        $lines = [
+            '# HELP nntmux_external_metadata_total External metadata evidence rows and backlog counts.',
+            '# TYPE nntmux_external_metadata_total gauge',
+        ];
+
+        if (Schema::hasTable('predb_crcs')) {
+            $lines[] = $this->metric('nntmux_external_metadata_total', (int) DB::table('predb_crcs')->count(), [
+                'source' => 'srrdb',
+                'state' => 'crc_rows',
+            ]);
+        }
+
+        if (Schema::hasTable('predb') && Schema::hasTable('predb_crcs')) {
+            $withoutCrc = (int) DB::table('predb')
+                ->where('source', 'srrdb')
+                ->whereNotExists(function ($query): void {
+                    $query->selectRaw('1')
+                        ->from('predb_crcs')
+                        ->whereColumn('predb_crcs.predb_id', 'predb.id');
+                })
+                ->count();
+
+            $lines[] = $this->metric('nntmux_external_metadata_total', $withoutCrc, [
+                'source' => 'srrdb',
+                'state' => 'predb_without_crc',
+            ]);
+        }
+
+        return $lines;
+    }
+
+    /**
+     * @return list<string>
+     */
     private function timerMetrics(): array
     {
         $settings = DB::table('settings')
@@ -293,20 +398,22 @@ class NntmuxPrometheusMetrics
 
         try {
             $prefix = (string) config('cache.prefix');
-            $keys = Redis::keys('*distributed-worker*');
-            foreach ($keys as $key) {
+            $connectionName = (string) (config('cache.stores.redis.lock_connection')
+                ?: config('cache.stores.redis.connection', 'default')
+                ?: 'default');
+            foreach ($this->scanRedisKeys($connectionName, $this->redisPhysicalPattern('nntmux:distributed-worker:*')) as $key) {
                 $key = (string) $key;
                 $job = preg_replace('/^.*distributed-worker:/', '', $key) ?: $key;
-                $ttl = $this->redisTtl($key, $prefix);
+                $ttl = $this->redisTtl($key, $prefix, $connectionName);
 
                 $lines[] = $this->metric('nntmux_worker_lock_ttl_seconds', $ttl, [
-                    'job' => $job,
+                    'worker' => $job,
                     'prefix' => $prefix,
                 ]);
             }
         } catch (Throwable) {
             $lines[] = $this->metric('nntmux_worker_lock_ttl_seconds', -1, [
-                'job' => 'redis_unavailable',
+                'worker' => 'redis_unavailable',
                 'prefix' => '',
             ]);
         }
@@ -314,10 +421,10 @@ class NntmuxPrometheusMetrics
         return $lines;
     }
 
-    private function redisTtl(string $key, string $prefix): int
+    private function redisTtl(string $key, string $prefix, string $connectionName): int
     {
         foreach ($this->redisKeyCandidates($key, $prefix) as $candidate) {
-            $ttl = (int) Redis::ttl($candidate);
+            $ttl = (int) Redis::connection($connectionName)->ttl($candidate);
             if ($ttl !== -2) {
                 return $ttl;
             }
@@ -326,16 +433,71 @@ class NntmuxPrometheusMetrics
         return -2;
     }
 
-    private function redisValue(string $key): int
+    private function redisValue(string $key, string $connectionName): int
     {
         foreach ($this->redisKeyCandidates($key, (string) config('cache.prefix')) as $candidate) {
-            $value = Redis::get($candidate);
+            $value = Redis::connection($connectionName)->get($candidate);
             if ($value !== null) {
                 return (int) $value;
             }
         }
 
         return 0;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function scanRedisKeys(string $connectionName, string $pattern, int $count = 1000): array
+    {
+        $connection = Redis::connection($connectionName);
+        $defaultCursor = $this->defaultRedisScanCursor($connection);
+        $cursor = $defaultCursor;
+        $keys = [];
+        $iterations = 0;
+
+        do {
+            // Laravel's Redis connection exposes SCAN dynamically with the same options shape used by RedisStore.
+            /** @phpstan-ignore-next-line */
+            $scanResult = $connection->scan($cursor, ['match' => $pattern, 'count' => $count]);
+            if (! is_array($scanResult)) {
+                break;
+            }
+
+            [$cursor, $chunk] = $scanResult;
+            if (! is_array($chunk)) {
+                break;
+            }
+
+            foreach ($chunk as $key) {
+                $keys[] = (string) $key;
+            }
+
+            $iterations++;
+        } while (! $this->redisScanComplete($cursor, $defaultCursor) && $iterations < 1000);
+
+        return array_values(array_unique($keys));
+    }
+
+    private function redisPhysicalPattern(string $logicalPattern): string
+    {
+        return (string) config('database.redis.options.prefix').(string) config('cache.prefix').$logicalPattern;
+    }
+
+    private function defaultRedisScanCursor(mixed $connection): mixed
+    {
+        return $connection instanceof PhpRedisConnection && version_compare((string) phpversion('redis'), '6.1.0', '>=')
+            ? null
+            : '0';
+    }
+
+    private function redisScanComplete(mixed $cursor, mixed $defaultCursor): bool
+    {
+        if ($defaultCursor === null) {
+            return $cursor === null || $cursor === 0 || $cursor === '0';
+        }
+
+        return (string) $cursor === (string) $defaultCursor;
     }
 
     /**
@@ -382,6 +544,6 @@ class NntmuxPrometheusMetrics
 
     private function escapeLabel(string $value): string
     {
-        return str_replace(["\\", "\n", '"'], ["\\\\", "\\n", '\\"'], $value);
+        return str_replace(['\\', "\n", '"'], ['\\\\', '\\n', '\\"'], $value);
     }
 }

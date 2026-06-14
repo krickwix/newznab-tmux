@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Services\Binaries\BinariesConfig;
+use App\Services\Binaries\BinariesService;
 use Illuminate\Support\Facades\DB;
 use Tests\Support\TestBinariesHarness;
 use Tests\TestCase;
@@ -110,6 +112,32 @@ class BinariesStoreHeadersTest extends TestCase
                 3 => $totalParts,
             ],
         ];
+    }
+
+    public function test_filtered_returned_headers_do_not_mask_missing_articles_in_repair_tracking(): void
+    {
+        $service = new BinariesService(new BinariesConfig(echoCli: false));
+
+        $setProperty = static function (string $name, mixed $value) use ($service): void {
+            $property = new \ReflectionProperty(BinariesService::class, $name);
+            $property->setAccessible(true);
+            $property->setValue($service, $value);
+        };
+
+        $setProperty('groupMySQL', ['id' => 9, 'name' => 'alt.mixed']);
+        $setProperty('first', 100);
+        $setProperty('last', 109);
+        $setProperty('headersReceived', [100, 101, 102, 103, 105, 106, 108, 109]);
+        $setProperty('notYEnc', 3);
+        $setProperty('headersBlackListed', 0);
+
+        $method = new \ReflectionMethod(BinariesService::class, 'handlePartRepairTracking');
+        $method->setAccessible(true);
+        $method->invoke($service, [], []);
+
+        $missed = DB::table('missed_parts')->where('groups_id', 9)->orderBy('numberid')->pluck('numberid')->all();
+
+        $this->assertSame([104, 107], $missed);
     }
 
     public function test_duplicate_collection_and_binary_reuse(): void

@@ -205,7 +205,8 @@ CREATE TABLE `collections` (
   KEY `groups_id` (`groups_id`),
   KEY `ix_collection_dateadded` (`dateadded`),
   KEY `ix_collection_filecheck` (`filecheck`),
-  KEY `ix_collection_releaseid` (`releases_id`)
+  KEY `ix_collection_releaseid` (`releases_id`),
+  KEY `ix_collections_release_stage6` (`groups_id`,`filecheck`,`dateadded`,`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
 
 DROP TABLE IF EXISTS `consoleinfo`;
@@ -950,6 +951,7 @@ CREATE TABLE `releases_groups` (
   `releases_id` int(10) unsigned NOT NULL DEFAULT 0 COMMENT 'FK to releases.id',
   `groups_id` int(10) unsigned NOT NULL DEFAULT 0 COMMENT 'FK to groups.id',
   PRIMARY KEY (`releases_id`,`groups_id`),
+  KEY `ix_releases_groups_group_release` (`groups_id`,`releases_id`),
   CONSTRAINT `FK_rg_releases` FOREIGN KEY (`releases_id`) REFERENCES `releases` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
 DROP TABLE IF EXISTS `role_expiration_emails`;

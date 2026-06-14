@@ -57,6 +57,11 @@ class ArchiveExtractionService
 
         // Try ArchiveInfo for RAR/ZIP
         if (! $this->archiveInfo->setData($compressedData, true)) {
+            $sevenZipResult = $this->processSevenZipData($compressedData, $tmpPath);
+            if ($sevenZipResult['success']) {
+                return $sevenZipResult;
+            }
+
             // Handle standalone video detection
             $videoType = $this->detectStandaloneVideo($compressedData);
             if ($videoType !== null) {
@@ -250,6 +255,129 @@ class ArchiveExtractionService
         }
 
         return '';
+    }
+
+    /**
+     * Use the 7-Zip CLI as a read-only file-list fallback for 7z split
+     * volumes. ArchiveInfo does not handle these, but listing the first volume
+     * often exposes the inner video/NFO filenames needed for guarded renames.
+     *
+     * @return array<string, mixed>
+     */
+    private function processSevenZipData(string $compressedData, string $tmpPath): array
+    {
+        $result = [
+            'success' => false,
+            'files' => [],
+            'hasPassword' => false,
+            'passwordStatus' => ReleaseBrowseService::PASSWD_NONE,
+        ];
+
+        if (! $this->config->sevenZipPath || ! $this->looksLikeSevenZipData($compressedData)) {
+            return $result;
+        }
+
+        try {
+            if (! File::isDirectory($tmpPath)) {
+                File::makeDirectory($tmpPath, 0777, true, true);
+            }
+
+            $archiveFile = $tmpPath.'archive_'.uniqid('', true).'.7z.001';
+            File::put($archiveFile, $compressedData);
+
+            $output = runCmd(
+                escapeshellarg($this->config->sevenZipPath).
+                ' l -slt -p- -- '.
+                escapeshellarg($archiveFile)
+            );
+
+            File::delete($archiveFile);
+        } catch (\Throwable $e) {
+            if ($this->config->debugMode) {
+                Log::debug('7z listing failed: '.$e->getMessage());
+            }
+
+            return $result;
+        }
+
+        $files = $this->parseSevenZipFileList($output);
+        if ($files === []) {
+            return $result;
+        }
+
+        return [
+            'success' => true,
+            'files' => $files,
+            'hasPassword' => false,
+            'passwordStatus' => ReleaseBrowseService::PASSWD_NONE,
+            'archiveMarker' => '7',
+            'dataSummary' => [
+                'main_type' => '7z',
+                'file_list' => $files,
+            ],
+        ];
+    }
+
+    private function looksLikeSevenZipData(string $data): bool
+    {
+        return strncmp($data, "7z\xBC\xAF\x27\x1C", 6) === 0;
+    }
+
+    /**
+     * @return list<array{name: string, size: int, pass: bool, crc32: string}>
+     */
+    private function parseSevenZipFileList(string $output): array
+    {
+        $files = [];
+        $record = [];
+        $flush = function () use (&$record, &$files): void {
+            $path = trim((string) ($record['Path'] ?? ''));
+            if ($path === '' || isset($record['Type']) || ! isset($record['Size']) || ! isset($record['Attributes'])) {
+                $record = [];
+
+                return;
+            }
+
+            if (str_contains((string) $record['Attributes'], 'D')) {
+                $record = [];
+
+                return;
+            }
+
+            $size = (int) $record['Size'];
+            if ($size < 0) {
+                $record = [];
+
+                return;
+            }
+
+            $files[] = [
+                'name' => $path,
+                'size' => $size,
+                'pass' => ($record['Encrypted'] ?? '-') === '+',
+                'crc32' => (string) ($record['CRC'] ?? ''),
+            ];
+            $record = [];
+        };
+
+        foreach (preg_split('/\R/', $output) ?: [] as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                $flush();
+
+                continue;
+            }
+
+            if (! str_contains($line, ' = ')) {
+                continue;
+            }
+
+            [$key, $value] = explode(' = ', $line, 2);
+            $record[$key] = $value;
+        }
+        $flush();
+
+        return $files;
     }
 
     /**

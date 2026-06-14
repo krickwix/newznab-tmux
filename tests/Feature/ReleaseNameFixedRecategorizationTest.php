@@ -15,6 +15,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use PDO;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ReleaseNameFixedRecategorizationTest extends TestCase
@@ -70,6 +71,21 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
 
         DB::purge();
         DB::reconnect();
+        DB::connection()->getPdo()->sqliteCreateFunction(
+            'REGEXP',
+            static function (?string $pattern, ?string $subject): int {
+                if ($pattern === null || $subject === null || $pattern === '') {
+                    return 0;
+                }
+
+                set_error_handler(static fn (): true => true);
+                $matched = @preg_match('~'.$pattern.'~i', $subject);
+                restore_error_handler();
+
+                return $matched === 1 ? 1 : 0;
+            },
+            2
+        );
 
         $this->createSchema();
     }
@@ -300,6 +316,96 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(1, (int) $release->isrenamed);
     }
 
+    public function test_classic_movie_filename_stem_prefers_readable_subject_title_for_recategorization(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.dvd.classics',
+            'active' => 1,
+            'backfill' => 1,
+        ]);
+
+        $subject = 'A Letter to Three Wives (1949) 1:1 - [18/50] - "ALETTERTOTHREEWIVES.part16.rar" yEnc';
+        $release = Release::factory()->create([
+            'name' => $subject,
+            'searchname' => $subject,
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('f', 40),
+            'leftguid' => 'f',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $service = app(ReleaseUpdateService::class);
+        $service->updateRelease(
+            $release->fresh(),
+            'ALETTERTOTHREEWIVES',
+            'RarInfo FileName Match',
+            true,
+            'Filenames, ',
+            true,
+            false,
+        );
+
+        $release->refresh();
+
+        $this->assertSame('A Letter to Three Wives 1949', $release->searchname);
+        $this->assertSame(Category::MOVIE_OTHER, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(1, (int) $release->isrenamed);
+    }
+
+    public function test_one_word_classic_movie_filename_stem_prefers_subject_title_with_year(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.dvd.classics',
+            'active' => 1,
+            'backfill' => 1,
+        ]);
+
+        $subject = 'Humoresque (1946) 1:1 - [03/42] - "HUMORESQUE.par2" yEnc';
+        $release = Release::factory()->create([
+            'name' => $subject,
+            'searchname' => $subject,
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('0', 40),
+            'leftguid' => '0',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $service = app(ReleaseUpdateService::class);
+        $service->updateRelease(
+            $release->fresh(),
+            'HUMORESQUE',
+            'RarInfo FileName Match',
+            true,
+            'Filenames, ',
+            true,
+            false,
+        );
+
+        $release->refresh();
+
+        $this->assertSame('Humoresque 1946', $release->searchname);
+        $this->assertSame(Category::MOVIE_OTHER, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(1, (int) $release->isrenamed);
+    }
+
     public function test_par2_archive_part_name_prefers_subject_title_and_year(): void
     {
         Search::shouldReceive('updateRelease')->twice();
@@ -388,6 +494,685 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(0, (int) $release->isrenamed);
     }
 
+    public function test_explicit_tv_episode_overrides_weak_movie_group_hint(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movie.classics',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => '[2/10] "Ma Sorciere Bien-Aimee S01E11-Transfert de pouvoir.rar" yEnc',
+            'searchname' => '[2/10] "Ma Sorciere Bien-Aimee S01E11-Transfert de pouvoir.rar" yEnc',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::MOVIE_OTHER,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('b', 40),
+            'leftguid' => 'b',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $service = app(ReleaseUpdateService::class);
+        $service->updateRelease(
+            $release->fresh(),
+            'Ma Sorciere Bien-Aimee S01E11-Transfert de pouvoir',
+            'fileCheck: Subject',
+            true,
+            'PAR2, ',
+            true,
+            false,
+        );
+
+        $release->refresh();
+
+        $this->assertSame('Ma Sorciere Bien-Aimee S01E11-Transfert De Pouvoir', $release->searchname);
+        $this->assertSame(Category::TV_OTHER, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(1, (int) $release->isrenamed);
+    }
+
+    public function test_recategorize_releases_test_mode_with_category_selector_does_not_update(): void
+    {
+        Search::shouldReceive('updateRelease')->once();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('c', 40),
+            'leftguid' => 'c',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+            '--test' => true,
+        ])->expectsOutputToContain('Would have changed')
+            ->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::OTHER_HASHED, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_recategorize_hashed_lossless_release_uses_explicit_flac_file_evidence(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.sounds.lossless.flac',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'searchname' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('1', 40),
+            'leftguid' => '1',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id,
+            'name' => 'Cradle of Filth - Midian - 02 Cthulhu Dawn.flac',
+            'size' => 123,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--ids' => (string) $release->id,
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::MUSIC_LOSSLESS, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(0, (int) $release->isrenamed);
+    }
+
+    public function test_recategorize_hashed_movie_release_uses_explicit_video_file_evidence(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'f1e2d3c4b5a697887766554433221100',
+            'searchname' => 'f1e2d3c4b5a697887766554433221100',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('2', 40),
+            'leftguid' => '2',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id,
+            'name' => 'I Confess (1953) 1080p BluRay.mkv',
+            'size' => 123,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--ids' => (string) $release->id,
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::MOVIE_OTHER, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(0, (int) $release->isrenamed);
+    }
+
+    public function test_recategorize_hashed_opaque_movie_group_release_without_explicit_file_evidence_stays_hashed(): void
+    {
+        Search::shouldReceive('updateRelease')->once();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.blu-ray',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => '9c1185a5c5e9fc54612808977ee8f548',
+            'searchname' => '9c1185a5c5e9fc54612808977ee8f548',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('3', 40),
+            'leftguid' => '3',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id,
+            'name' => '9c1185a5c5e9fc54612808977ee8f548.part001.rar',
+            'size' => 123,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--ids' => (string) $release->id,
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::OTHER_HASHED, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(0, (int) $release->isrenamed);
+    }
+
+    public function test_recategorize_releases_combines_category_and_group_selectors(): void
+    {
+        Search::shouldReceive('updateRelease')->times(3);
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $selected = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('6', 40),
+            'leftguid' => '6',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $alreadyMovie = Release::factory()->create([
+            'name' => 'Already Movie 1973',
+            'searchname' => 'Already Movie 1973',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::MOVIE_OTHER,
+            'iscategorized' => 1,
+            'guid' => str_repeat('7', 40),
+            'leftguid' => '7',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+            '--groups' => (string) $group->id,
+        ])->assertSuccessful();
+
+        $selected->refresh();
+        $alreadyMovie->refresh();
+
+        $this->assertSame(Category::MOVIE_OTHER, $selected->categories_id);
+        $this->assertSame(1, (int) $selected->iscategorized);
+        $this->assertSame(Category::MOVIE_OTHER, $alreadyMovie->categories_id);
+    }
+
+    public function test_recategorize_releases_limit_bounds_selected_updates(): void
+    {
+        Search::shouldReceive('updateRelease')->times(3);
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $first = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('a', 40),
+            'leftguid' => 'a',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $second = Release::factory()->create([
+            'name' => 'The Proud Rebel - [02/10] - "The Proud Rebel 1958.part001.rar" yEnc',
+            'searchname' => 'The Proud Rebel - [02/10] - "The Proud Rebel 1958.part001.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('b', 40),
+            'leftguid' => 'b',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+            '--groups' => (string) $group->id,
+            '--limit' => '1',
+        ])->assertSuccessful();
+
+        $first->refresh();
+        $second->refresh();
+
+        $this->assertSame(Category::MOVIE_OTHER, $first->categories_id);
+        $this->assertSame(Category::OTHER_HASHED, $second->categories_id);
+    }
+
+    public function test_recategorize_releases_ids_selects_specific_releases(): void
+    {
+        Search::shouldReceive('updateRelease')->times(3);
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $selected = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('d', 40),
+            'leftguid' => 'd',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $unselected = Release::factory()->create([
+            'name' => 'The Proud Rebel - [02/10] - "The Proud Rebel 1958.part001.rar" yEnc',
+            'searchname' => 'The Proud Rebel - [02/10] - "The Proud Rebel 1958.part001.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('e', 40),
+            'leftguid' => 'e',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+            '--ids' => (string) $selected->id,
+        ])->assertSuccessful();
+
+        $selected->refresh();
+        $unselected->refresh();
+
+        $this->assertSame(Category::MOVIE_OTHER, $selected->categories_id);
+        $this->assertSame(Category::OTHER_HASHED, $unselected->categories_id);
+    }
+
+    public function test_recategorize_releases_rejects_all_with_limit_without_resetting_unselected_rows(): void
+    {
+        Search::shouldReceive('updateRelease')->once();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('f', 40),
+            'leftguid' => 'f',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--all' => true,
+            '--limit' => '1',
+        ])->expectsOutputToContain('Cannot combine --all')
+            ->assertFailed();
+
+        $release->refresh();
+
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(Category::OTHER_HASHED, $release->categories_id);
+    }
+
+    #[DataProvider('invalidRecategorizeLimitProvider')]
+    public function test_recategorize_releases_rejects_invalid_limit(string $limit): void
+    {
+        Search::shouldReceive('updateRelease')->once();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar" yEnc',
+            'searchname' => 'The Man Called Noon - [41/97] - "The Man Called Noon 1973.part040.rar"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('1', 40),
+            'leftguid' => '1',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+            '--limit' => $limit,
+        ])->expectsOutputToContain('--limit must be a positive integer')
+            ->assertFailed();
+
+        $release->refresh();
+
+        $this->assertSame(Category::OTHER_HASHED, $release->categories_id);
+    }
+
+    /**
+     * @return array<string, array{0: string}>
+     */
+    public static function invalidRecategorizeLimitProvider(): array
+    {
+        return [
+            'zero' => ['0'],
+            'negative' => ['-5'],
+            'nonnumeric' => ['abc'],
+        ];
+    }
+
+    public function test_recategorize_releases_uses_original_subject_when_searchname_lost_category_evidence(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.dvd.classics',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'DVDFab v12.4.2.5 (x64) + Fix - [02/15] - "DVDFab v12.4.2.5 (x64) + Fix.par2" yEnc',
+            'searchname' => 'DVDFabActivator20221206.Cmd',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('9', 40),
+            'leftguid' => '9',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::PC_0DAY, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_hashed_subject_fix_revisits_readable_software_subject_after_file_pass_miss(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.sounds.lossless',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => '(PotPlayerSetup64 Pro Installer) [2/7] - "PotPlayerSetup64.rar.par2" yEnc',
+            'searchname' => '(PotPlayerSetup64 Pro Installer) [2/7] - "PotPlayerSetup64.rar.par2"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'proc_files' => 1,
+            'proc_par2' => 1,
+            'guid' => str_repeat('6', 40),
+            'leftguid' => '6',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('releases:fix-names', [
+            'method' => 21,
+            '--category' => 'hashed',
+            '--update' => true,
+            '--set-status' => true,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame('PotPlayerSetup64 Pro Installer', $release->searchname);
+        $this->assertSame(Category::PC_0DAY, $release->categories_id);
+        $this->assertSame(1, (int) $release->isrenamed);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_hashed_subject_fix_uses_original_software_subject_when_searchname_lost_evidence(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.sounds.lossless',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => '(Microsoft Office Professional Plus (2024) - x64 - Multilingual [Latest Package] v24.05 64) [19/34] - "Microsoft Office (2024) - Professional x64 - German Latest Package English Plus.part18.rar" yEnc',
+            'searchname' => 'Configurationx64.Xml',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 1,
+            'proc_files' => 1,
+            'proc_par2' => 1,
+            'guid' => str_repeat('5', 40),
+            'leftguid' => '5',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('releases:fix-names', [
+            'method' => 21,
+            '--category' => 'hashed',
+            '--update' => true,
+            '--set-status' => true,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertStringContainsString('Microsoft Office Professional Plus', $release->searchname);
+        $this->assertSame(Category::PC_0DAY, $release->categories_id);
+        $this->assertSame(1, (int) $release->isrenamed);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_hashed_subject_fix_recategorizes_when_searchname_was_already_repaired(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.sounds.lossless',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => '(PotPlayerSetup64 Pro Installer) [2/7] - "PotPlayerSetup64.rar.par2" yEnc',
+            'searchname' => 'PotPlayerSetup64 Pro Installer',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 1,
+            'proc_files' => 1,
+            'proc_par2' => 1,
+            'guid' => str_repeat('4', 40),
+            'leftguid' => '4',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('releases:fix-names', [
+            'method' => 21,
+            '--category' => 'hashed',
+            '--update' => true,
+            '--set-status' => true,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame('PotPlayerSetup64 Pro Installer', $release->searchname);
+        $this->assertSame(Category::PC_0DAY, $release->categories_id);
+        $this->assertSame(1, (int) $release->isrenamed);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_recategorize_releases_moves_readable_vintage_subject_out_of_hashed(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.multimedia.vintage-film.post-1960',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'Hellfighters [0769/1127] "hellfighters.1080.vol085+2.PAR2.bad" yEnc',
+            'searchname' => 'hellfighters.1080',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('8', 40),
+            'leftguid' => '8',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::MOVIE_OTHER, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
+    public function test_recategorize_releases_handles_vintage_video_image_sidecar_subject(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.multimedia.vintage-film.post-1960',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'THE WRONG BOX.1966.Xvid-KG.[02/87] - "WrongBox.avi.2.jpg" yEnc',
+            'searchname' => 'THE WRONG BOX.1966.Xvid-KG.[02/87] - "WrongBox.avi.2.jpg"',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'guid' => str_repeat('7', 40),
+            'leftguid' => '7',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::MOVIE_SD, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+    }
+
     private function setEnvironmentValue(string $key, ?string $value): void
     {
         if ($value === null) {
@@ -408,6 +1193,51 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
             Schema::create('settings', function (Blueprint $table): void {
                 $table->string('name')->primary();
                 $table->text('value')->nullable();
+            });
+        }
+
+        if (! Schema::hasTable('root_categories')) {
+            Schema::create('root_categories', function (Blueprint $table): void {
+                $table->increments('id');
+                $table->string('title');
+                $table->integer('status')->default(1);
+                $table->boolean('disablepreview')->default(false);
+            });
+
+            DB::table('root_categories')->insert([
+                ['id' => Category::OTHER_ROOT, 'title' => 'Other', 'status' => 1, 'disablepreview' => 0],
+                ['id' => Category::MOVIE_ROOT, 'title' => 'Movies', 'status' => 1, 'disablepreview' => 0],
+                ['id' => Category::MUSIC_ROOT, 'title' => 'Music', 'status' => 1, 'disablepreview' => 0],
+            ]);
+        }
+
+        if (! Schema::hasTable('categories')) {
+            Schema::create('categories', function (Blueprint $table): void {
+                $table->integer('id')->primary();
+                $table->string('title');
+                $table->integer('root_categories_id')->nullable();
+                $table->integer('status')->default(1);
+                $table->boolean('disablepreview')->default(false);
+                $table->integer('minsizetoformrelease')->default(0);
+                $table->integer('maxsizetoformrelease')->default(0);
+            });
+
+            DB::table('categories')->insert([
+                ['id' => Category::OTHER_MISC, 'title' => 'Misc', 'root_categories_id' => Category::OTHER_ROOT],
+                ['id' => Category::OTHER_HASHED, 'title' => 'Hashed', 'root_categories_id' => Category::OTHER_ROOT],
+                ['id' => Category::MOVIE_OTHER, 'title' => 'Other', 'root_categories_id' => Category::MOVIE_ROOT],
+                ['id' => Category::MOVIE_SD, 'title' => 'SD', 'root_categories_id' => Category::MOVIE_ROOT],
+                ['id' => Category::MUSIC_LOSSLESS, 'title' => 'Lossless', 'root_categories_id' => Category::MUSIC_ROOT],
+                ['id' => Category::PC_0DAY, 'title' => '0day', 'root_categories_id' => Category::PC_ROOT],
+            ]);
+        }
+
+        if (! Schema::hasTable('predb')) {
+            Schema::create('predb', function (Blueprint $table): void {
+                $table->increments('id');
+                $table->string('title')->default('');
+                $table->dateTime('predate')->nullable();
+                $table->tinyInteger('searched')->default(0);
             });
         }
 
@@ -447,6 +1277,7 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
                 $table->string('imdbid')->nullable();
                 $table->integer('musicinfo_id')->nullable();
                 $table->integer('consoleinfo_id')->nullable();
+                $table->integer('gamesinfo_id')->default(0);
                 $table->integer('bookinfo_id')->nullable();
                 $table->integer('anidbid')->nullable();
                 $table->unsignedInteger('predb_id')->default(0);
@@ -461,6 +1292,16 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
                 $table->tinyInteger('proc_crc32')->default(0);
                 $table->tinyInteger('passwordstatus')->default(0);
                 $table->tinyInteger('nzbstatus')->default(0);
+            });
+        }
+
+        if (! Schema::hasTable('release_files')) {
+            Schema::create('release_files', function (Blueprint $table): void {
+                $table->unsignedInteger('releases_id');
+                $table->string('name');
+                $table->unsignedBigInteger('size')->default(0);
+                $table->string('crc32')->default('');
+                $table->timestamps();
             });
         }
     }

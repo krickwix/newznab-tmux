@@ -44,6 +44,24 @@ class DistributedJobCatalogTest extends TestCase
         }
     }
 
+    public function test_backfill_is_disabled_when_no_group_level_safe_backfill_work_exists(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('backfill', $this->runVar(
+            [
+                'backfill' => 4,
+                'backfill_days' => 1,
+            ],
+            [
+                'backfill_groups_days' => 0,
+            ],
+        ));
+
+        $this->assertFalse($plan['enabled']);
+        $this->assertSame('no backfill groups to process', $plan['disabled_reason']);
+        $this->assertSame([], $plan['commands']);
+    }
+
     public function test_it_matches_tmux_sequential_mode_one(): void
     {
         $catalog = new DistributedJobCatalog;
@@ -180,6 +198,127 @@ class DistributedJobCatalogTest extends TestCase
         }
     }
 
+    public function test_metadata_refresh_runs_external_source_refresh_before_strong_fixname_passes(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('metadata-refresh', $this->runVar(
+            [
+                'metadata_refresh' => 1,
+                'metadata_refresh_limit' => 25,
+                'metadata_refresh_sleep_ms' => 250,
+                'metadata_refresh_timer' => 900,
+            ],
+            ['other_hashed' => 150],
+        ));
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame(900, $plan['sleep']);
+        $this->assertSame('predb:refresh-external-metadata', $plan['commands'][0]['command']);
+        $this->assertSame(25, $plan['commands'][0]['arguments']['--limit']);
+        $this->assertSame(250, $plan['commands'][0]['arguments']['--sleep-ms']);
+        $this->assertSame(['all'], $plan['commands'][0]['arguments']['--source']);
+        $this->assertSame(['20', '16'], array_map(
+            static fn (array $command): string => (string) $command['arguments']['method'],
+            array_slice($plan['commands'], 1, 2),
+        ));
+        $this->assertSame('hashed', $plan['commands'][1]['arguments']['--category']);
+        $this->assertSame('hashed', $plan['commands'][2]['arguments']['--category']);
+    }
+
+    public function test_post_additional_runs_external_metadata_refresh_after_postprocess_when_hashed_backlog_exists(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('post-additional', $this->runVar(
+            [
+                'post' => 3,
+                'metadata_refresh' => 1,
+                'metadata_refresh_postprocess' => 1,
+                'metadata_refresh_postprocess_limit' => 7,
+                'metadata_refresh_sleep_ms' => 125,
+            ],
+            [
+                'work' => 5,
+                'processnfo' => 4,
+                'other_hashed' => 150,
+            ],
+        ));
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame([
+            'multiprocessing:postprocess',
+            'multiprocessing:postprocess',
+            'predb:refresh-external-metadata',
+            'releases:fix-names',
+            'releases:fix-names',
+        ], array_column($plan['commands'], 'command'));
+        $this->assertSame('add', $plan['commands'][0]['arguments']['type']);
+        $this->assertSame('nfo', $plan['commands'][1]['arguments']['type']);
+        $this->assertSame(['all'], $plan['commands'][2]['arguments']['--source']);
+        $this->assertSame(7, $plan['commands'][2]['arguments']['--limit']);
+        $this->assertSame(125, $plan['commands'][2]['arguments']['--sleep-ms']);
+        $this->assertSame(['20', '16'], array_map(
+            static fn (array $command): string => (string) $command['arguments']['method'],
+            array_slice($plan['commands'], 3, 2),
+        ));
+    }
+
+    public function test_post_additional_skips_external_metadata_refresh_when_postprocess_refresh_is_disabled(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('post-additional', $this->runVar(
+            [
+                'post' => 3,
+                'metadata_refresh_postprocess' => 0,
+            ],
+            [
+                'work' => 5,
+                'processnfo' => 4,
+                'other_hashed' => 150,
+            ],
+        ));
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame([
+            'multiprocessing:postprocess',
+            'multiprocessing:postprocess',
+        ], array_column($plan['commands'], 'command'));
+    }
+
+    public function test_post_additional_skips_external_metadata_refresh_when_hashed_backlog_is_below_threshold(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('post-additional', $this->runVar(
+            [
+                'post' => 3,
+                'metadata_refresh_postprocess' => 1,
+            ],
+            [
+                'work' => 5,
+                'processnfo' => 4,
+                'other_hashed' => 100,
+            ],
+        ));
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame([
+            'multiprocessing:postprocess',
+            'multiprocessing:postprocess',
+        ], array_column($plan['commands'], 'command'));
+    }
+
+    public function test_metadata_refresh_is_disabled_when_not_enabled(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $plan = $catalog->resolve('metadata-refresh', $this->runVar(
+            ['metadata_refresh' => 0],
+            ['other_hashed' => 150],
+        ));
+
+        $this->assertFalse($plan['enabled']);
+        $this->assertSame([], $plan['commands']);
+        $this->assertSame('disabled in settings', $plan['disabled_reason']);
+    }
+
     public function test_it_uses_sleep_metadata_without_shell_sleep_commands(): void
     {
         $catalog = new DistributedJobCatalog;
@@ -200,6 +339,7 @@ class DistributedJobCatalogTest extends TestCase
     /**
      * @param  array<string, mixed>  $settings
      * @param  array<string, mixed>  $counts
+     * @param  array<string, mixed>  $constants
      * @return array<string, mixed>
      */
     private function runVar(array $settings = [], array $counts = [], array $constants = []): array

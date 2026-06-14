@@ -167,6 +167,13 @@ class XxxCategorizationTest extends TestCase
         $this->assertContains($passable->bestResult->categoryId, Category::MOVIES_GROUP);
     }
 
+    public function test_undated_adult_release_in_classic_movie_group_can_still_be_xxx(): void
+    {
+        $passable = $this->runPipeline('Raw Gangbang Avi Xvid', 'alt.binaries.multimedia.vintage-film.pre-1960');
+
+        $this->assertSame(Category::XXX_XVID, $passable->bestResult->categoryId);
+    }
+
     /**
      * @return array<string, array{0: string}>
      */
@@ -176,6 +183,7 @@ class XxxCategorizationTest extends TestCase
             'private eyes movie title' => ['Bowery Boys - 32 Private Eyes (1953) DVDRip XviD NoGroup'],
             'score in parenthetical music credit' => ['Dr Jekyll and Mr Hyde (1920) (score by Devil Music Ensemble) DVDRip XviD NoGroup'],
             'classic xvid archive part' => ['Bowery Boys - 33 Paris Playboys (1954) DVDRip XviD NoGroup'],
+            'gang in classic movie title' => ['East Side Kids - That Gang of Mine - Avi Xvid'],
         ];
     }
 }

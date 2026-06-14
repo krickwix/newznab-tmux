@@ -35,6 +35,20 @@ final readonly class BinariesConfig
         // operations regardless of caller-provided chunk size, so a
         // misconfiguration cannot blow up server memory.
         public int $bulkSqlChunkSize = 500,
+        /**
+         * Groups whose XOVER subjects are known to be opaque while the yEnc
+         * body preamble still carries file name and part metadata.
+         *
+         * This path intentionally stays opt-in because each resolved header
+         * requires a BODY command and connection reset to avoid downloading
+         * the entire article body.
+         *
+         * @var array<int, string>
+         */
+        public array $bodyPreambleDeobfuscateGroups = [],
+        public int $bodyPreambleDeobfuscateLimit = 0,
+        public int $bodyPreambleLineLimit = 8,
+        public float $bodyPreambleDeobfuscateMaxSeconds = 0.0,
     ) {}
 
     /**
@@ -56,6 +70,10 @@ final readonly class BinariesConfig
             echoCli: (bool) config('nntmux.echocli'),
             headerChunkSize: max(50, min(2000, (int) config('nntmux.header_chunk_size', 500))),
             bulkSqlChunkSize: max(50, min(1000, (int) config('nntmux.bulk_sql_chunk_size', 500))),
+            bodyPreambleDeobfuscateGroups: self::getCsvConfig('nntmux.body_preamble_deobfuscate_groups'),
+            bodyPreambleDeobfuscateLimit: max(0, min(1000, (int) config('nntmux.body_preamble_deobfuscate_limit', 0))),
+            bodyPreambleLineLimit: max(2, min(20, (int) config('nntmux.body_preamble_line_limit', 8))),
+            bodyPreambleDeobfuscateMaxSeconds: max(0.0, (float) config('nntmux.body_preamble_deobfuscate_max_seconds', 0)),
         );
     }
 
@@ -64,5 +82,18 @@ final readonly class BinariesConfig
         $value = Settings::settingValue($key);
 
         return $value !== '' ? (int) $value : $default;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private static function getCsvConfig(string $key, string $default = ''): array
+    {
+        $value = config($key, $default);
+        if (\is_array($value)) {
+            return array_values(array_filter(array_map(static fn ($item): string => trim((string) $item), $value)));
+        }
+
+        return array_values(array_filter(array_map('trim', explode(',', (string) $value))));
     }
 }

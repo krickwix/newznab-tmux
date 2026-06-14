@@ -264,6 +264,43 @@ if (! function_exists('imdb_id_needs_lookup')) {
     }
 }
 
+if (! function_exists('movieinfo_needs_repair')) {
+    /**
+     * Determine whether a release should be retried to repair its movieinfo link.
+     *
+     * This covers the partially-linked state where imdbid is already known but
+     * movieinfo_id is still missing because metadata refresh or upsert failed.
+     */
+    function movieinfo_needs_repair(int|string|null $imdbId, int|string|null $movieInfoId): bool
+    {
+        if (! imdb_id_is_valid($imdbId)) {
+            return false;
+        }
+
+        return $movieInfoId === null || $movieInfoId === 0 || $movieInfoId === '0';
+    }
+}
+
+if (! function_exists('movieinfo_needs_repair_sql')) {
+    /**
+     * Build a reusable SQL predicate for releases whose movieinfo link needs repair.
+     */
+    function movieinfo_needs_repair_sql(string $imdbColumn = 'imdbid', string $movieInfoColumn = 'movieinfo_id'): string
+    {
+        $pendingValues = implode(', ', array_map(static fn (string $value): string => escapeString($value), imdb_id_pending_values()));
+
+        return sprintf(
+            '(%s IS NOT NULL AND %s <> \'\' AND %s NOT IN (%s) AND (%s IS NULL OR %s = 0))',
+            $imdbColumn,
+            $imdbColumn,
+            $imdbColumn,
+            $pendingValues,
+            $movieInfoColumn,
+            $movieInfoColumn
+        );
+    }
+}
+
 if (! function_exists('imdb_id_needs_lookup_sql')) {
     /**
      * Build a reusable SQL predicate for releases that still need IMDb lookup.

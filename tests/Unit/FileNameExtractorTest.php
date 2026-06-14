@@ -225,6 +225,22 @@ class FileNameExtractorTest extends TestCase
         $this->assertNull($result);
     }
 
+    public function test_rejects_bare_hashed_archive_stem_as_folder_name(): void
+    {
+        $extractor = new FileNameExtractor;
+
+        $this->assertNull($extractor->extractFromFile('U4BvWIMw96AfmzfxMjHxi.part03.rar'));
+        $this->assertNull($extractor->extractFromFile('R9lelFHQEMt9U8UtM9aVj2amEk7TnPx2OZUxcbBgnue8qyp3vD.7z.052'));
+        $this->assertNull($extractor->extractFromFile('Hxu6fwEJUsaD2sFb - ISO Premium - BluHD by pornexe.7z.003'));
+    }
+
+    public function test_rejects_encoded_archive_stem_with_embedded_timestamp(): void
+    {
+        $extractor = new FileNameExtractor;
+
+        $this->assertNull($extractor->extractFromFile('ASIB1709209393HNR4N240229SHELTER.part1.rar'));
+    }
+
     public function test_strips_segment_counter_from_bare_movie_archive_candidate(): void
     {
         $extractor = new FileNameExtractor;
@@ -278,6 +294,17 @@ class FileNameExtractorTest extends TestCase
         $this->assertNotNull($result);
         $this->assertSame('Kiss the Girls and Make Them Die 1966 DVDRip XviD NoGroup', $result->newName);
         $this->assertSame('Bare movie subject title', $result->method);
+    }
+
+    public function test_extracts_lossless_music_title_from_yenc_subject_prefix(): void
+    {
+        $extractor = new FileNameExtractor;
+
+        $result = $extractor->extractFromFile('New Dimensions in Banjo and Bluegrass 1963 LP (mono) flac [8 of 31] "newdimensions.vol000+01.par2" yEnc');
+
+        $this->assertNotNull($result);
+        $this->assertSame('New Dimensions in Banjo and Bluegrass 1963 LP (mono) flac', $result->newName);
+        $this->assertSame('yEnc subject title', $result->method);
     }
 
     public function test_strips_terminal_video_extension_from_bare_movie_candidate(): void

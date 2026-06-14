@@ -6,6 +6,8 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\BasePageController;
 use App\Models\Settings;
+use App\Models\UsenetGroup;
+use App\Services\Tmux\TmuxSettingsInputNormalizer;
 use Illuminate\Http\Request;
 
 class AdminTmuxController extends BasePageController
@@ -22,7 +24,8 @@ class AdminTmuxController extends BasePageController
 
         switch ($action) {
             case 'submit':
-                $data = $request->all();
+                $normalizedInput = app(TmuxSettingsInputNormalizer::class)->normalize($request->all());
+                $data = $normalizedInput->settings;
 
                 // Handle fix_crap checkbox array - convert to comma-separated string
                 if (isset($data['fix_crap']) && is_array($data['fix_crap'])) {
@@ -33,6 +36,13 @@ class AdminTmuxController extends BasePageController
                 }
 
                 Settings::settingsUpdate($data);
+                if ($normalizedInput->backfillTargetForEnabledGroups !== null) {
+                    UsenetGroup::query()
+                        ->where(static function ($query): void {
+                            $query->where('active', 1)->orWhere('backfill', 1);
+                        })
+                        ->update(['backfill_target' => $normalizedInput->backfillTargetForEnabledGroups]);
+                }
 
                 return redirect()->to('admin/tmux-edit')->with('success', 'Tmux settings updated successfully');
 

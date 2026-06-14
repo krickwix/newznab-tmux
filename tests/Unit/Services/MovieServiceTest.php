@@ -4,13 +4,16 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Services;
 
+use App\Models\MovieInfo;
 use App\Models\Release;
 use App\Services\MovieService;
+use App\Services\TmdbClient;
 use App\Services\TraktService;
 use App\Services\TvProcessing\Providers\TraktProvider;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Schema;
+use PHPUnit\Framework\Assert;
 use PHPUnit\Framework\Attributes\Test;
 use Tests\Unit\ImdbScraperTestCase;
 
@@ -150,6 +153,15 @@ class MovieServiceTest extends ImdbScraperTestCase
     }
 
     #[Test]
+    public function it_repairs_releases_with_an_imdb_id_but_missing_movieinfo_link(): void
+    {
+        $this->assertTrue(movieinfo_needs_repair('0137523', null));
+        $this->assertTrue(movieinfo_needs_repair('0137523', 0));
+        $this->assertFalse(movieinfo_needs_repair(null, null));
+        $this->assertFalse(movieinfo_needs_repair('0137523', 42));
+    }
+
+    #[Test]
     public function it_keeps_a_found_imdb_id_when_metadata_refresh_fails(): void
     {
         Cache::flush();
@@ -176,6 +188,98 @@ class MovieServiceTest extends ImdbScraperTestCase
         $this->assertSame('0137523', $result);
         $this->assertSame('0137523', Release::query()->whereKey(2)->value('imdbid'));
         $this->assertNull(Release::query()->whereKey(2)->value('movieinfo_id'));
+    }
+
+    #[Test]
+    public function it_retries_existing_imdb_ids_that_are_missing_movieinfo_links(): void
+    {
+        Cache::flush();
+
+        $service = new class extends MovieService
+        {
+            public function updateMovieInfo(string $imdbId): bool
+            {
+                MovieInfo::query()->create([
+                    'imdbid' => $imdbId,
+                    'title' => 'Example Movie',
+                    'year' => '2024',
+                ]);
+
+                return true;
+            }
+        };
+        $service->echooutput = false;
+        $service->movieqty = 100;
+
+        Release::query()->insert([
+            'id' => 3,
+            'searchname' => 'Example.Movie.2024',
+            'categories_id' => 2000,
+            'imdbid' => '0137523',
+            'movieinfo_id' => null,
+        ]);
+
+        $service->processMovieReleases();
+
+        $movieInfoId = MovieInfo::query()->where('imdbid', '0137523')->value('id');
+
+        $this->assertNotNull($movieInfoId);
+        $this->assertSame((int) $movieInfoId, (int) Release::query()->whereKey(3)->value('movieinfo_id'));
+    }
+
+    #[Test]
+    public function it_repairs_existing_imdb_ids_without_stale_title_constraints_or_negative_provider_cache(): void
+    {
+        Cache::flush();
+        foreach (['tmdb_movie_', 'imdb_movie_', 'trakt_movie_', 'omdb_movie_'] as $prefix) {
+            Cache::put($prefix.md5('0137523'), false, now()->addHours(6));
+            Cache::put($prefix.md5('tt0137523'), false, now()->addHours(6));
+        }
+
+        $service = new class extends MovieService
+        {
+            public function updateMovieInfo(string $imdbId): bool
+            {
+                foreach (['tmdb_movie_', 'imdb_movie_', 'trakt_movie_', 'omdb_movie_'] as $prefix) {
+                    Assert::assertFalse(Cache::has($prefix.md5($imdbId)));
+                    Assert::assertFalse(Cache::has($prefix.md5('tt'.$imdbId)));
+                }
+                Assert::assertSame('', $this->currentTitle);
+                Assert::assertSame('', $this->currentYear);
+
+                MovieInfo::query()->create([
+                    'imdbid' => $imdbId,
+                    'title' => 'Example Movie',
+                    'year' => '2024',
+                ]);
+
+                return true;
+            }
+
+            public function poisonCurrentLookupContext(): void
+            {
+                $this->currentTitle = 'Wrong Noisy Title';
+                $this->currentYear = '1977';
+            }
+        };
+        $service->echooutput = false;
+        $service->movieqty = 100;
+        $service->poisonCurrentLookupContext();
+
+        Release::query()->insert([
+            'id' => 4,
+            'searchname' => 'Example.Movie.2024',
+            'categories_id' => 2000,
+            'imdbid' => '0137523',
+            'movieinfo_id' => null,
+        ]);
+
+        $service->processMovieReleases();
+
+        $movieInfoId = MovieInfo::query()->where('imdbid', '0137523')->value('id');
+
+        $this->assertNotNull($movieInfoId);
+        $this->assertSame((int) $movieInfoId, (int) Release::query()->whereKey(4)->value('movieinfo_id'));
     }
 
     #[Test]
@@ -240,6 +344,51 @@ class MovieServiceTest extends ImdbScraperTestCase
     }
 
     #[Test]
+    public function it_extracts_alternate_movie_titles_from_noisy_release_subjects(): void
+    {
+        $service = new class extends MovieService
+        {
+            /**
+             * @return list<array{title: string, year: string}>
+             */
+            public function candidates(string $value): array
+            {
+                return $this->releaseNameTitleCandidates($value);
+            }
+        };
+        $service->echooutput = false;
+
+        $candidates = $service->candidates('Mann ihrer Traeume butchers wife German1991 MP4 Demi Moore Jeff Daniels [19/37] - "traum.part14.rar"');
+
+        $this->assertContains(['title' => 'butchers wife', 'year' => '1991'], $candidates);
+
+        $candidates = $service->candidates('"Xuder Won Espylacopa-2-Pittis AVCHD1080p.Ger.Eng.part112.rar"');
+
+        $this->assertContains(['title' => 'Apocalypse Now Redux', 'year' => ''], $candidates);
+
+        $candidates = $service->candidates('THE MIRACLE OF MARCELLINO (1991) 480p DVDrip Xvid MP3 AOS');
+
+        $this->assertContains(['title' => 'Miracle of Marcellino', 'year' => '1991'], $candidates);
+        $this->assertContains(['title' => 'Marcellino', 'year' => '1991'], $candidates);
+
+        $candidates = $service->candidates('(yrraH ytriD - 1971 - BDRip > x.264 > MP4) [25/37] - "DRTYHRRY');
+
+        $this->assertContains(['title' => 'Dirty Harry', 'year' => '1971'], $candidates);
+
+        $candidates = $service->candidates('(esaerG - 1978 - BDRip > x.264 > MP4) [22/39] - "GRSE');
+
+        $this->assertContains(['title' => 'Grease', 'year' => '1978'], $candidates);
+
+        $candidates = $service->candidates('("The Immigrant" - Charlie Chaplin - 1917 - H.264 MP4) [07/15] - "The Immigrant - Charlie Chaplin - 1917.part6.rar"');
+
+        $this->assertContains(['title' => 'The Immigrant', 'year' => '1917'], $candidates);
+
+        $candidates = $service->candidates('The Vagabond - Charlie Chaplin - 1916');
+
+        $this->assertContains(['title' => 'The Vagabond', 'year' => '1916'], $candidates);
+    }
+
+    #[Test]
     public function it_parses_generic_media_release_search_names(): void
     {
         Cache::flush();
@@ -295,6 +444,143 @@ class MovieServiceTest extends ImdbScraperTestCase
             ['title' => 'Texas Lady', 'year' => '1955'],
             $service->parsed('NTEXAS LADYNO (1955) DVDRip XviD NoGroup')
         );
+        $this->assertSame(
+            ['title' => 'Rikki-Tikki-Tavi', 'year' => ''],
+            $service->parsed('Rikki-Tikki-Tavi')
+        );
+        $this->assertSame(
+            ['title' => 'Ma And Pa Kettle At The Fair', 'year' => '1951'],
+            $service->parsed('Marjorie Main-Ma And Pa Kettle At The Fair (1951) 480p DVDrip Divx MP3 AOS')
+        );
+        $this->assertSame(
+            ['title' => 'Saludos Amigos', 'year' => ''],
+            $service->parsed('Saludos Amigos - [01/12] - "Saludos Amigos.par2"')
+        );
+        $this->assertSame(
+            ['title' => 'GIRL WITH GREEN EYES', 'year' => ''],
+            $service->parsed('NZBcave/gwgeyezzz [71/74] - "GIRL WITH GREEN EYES.part70.rar"')
+        );
+        $this->assertSame(
+            ['title' => 'ALIAS NICK AND NORA', 'year' => ''],
+            $service->parsed('[55/86] - ALIAS_NICK_AND_NORA.part54.rar"Alias Nick and Nora Bonus Read"')
+        );
+        $this->assertSame(
+            ['title' => 'Shadow of the Thin Man', 'year' => ''],
+            $service->parsed('[114/117] - SHADOW_OF_THE_THIN_MAN.vol033+27.PAR2"Shadow of the Thin Man"')
+        );
+        $this->assertSame(
+            ['title' => 'Mr Motos Gamble', 'year' => ''],
+            $service->parsed('[101/102] - Mr Motos Gamble.vol068+27.PAR2"Mr Motos Gamble"')
+        );
+        $this->assertSame(
+            ['title' => 'Mann ihrer Traeume butchers wife', 'year' => '1991'],
+            $service->parsed('Mann ihrer Traeume butchers wife German1991 MP4 Demi Moore Jeff Daniels [19/37] - "traum.part14.rar"')
+        );
+    }
+
+    #[Test]
+    public function it_rejects_same_franchise_imdb_search_hits_that_only_match_loosely(): void
+    {
+        $service = new class extends MovieService
+        {
+            public function acceptsFor(
+                string $currentTitle,
+                string $currentYear,
+                string $candidateTitle,
+                string $candidateYear,
+                int $rank = 0,
+            ): bool {
+                $this->currentTitle = $currentTitle;
+                $this->currentYear = $currentYear;
+
+                return $this->isImdbSearchMatchAcceptable($candidateTitle, $candidateYear, $rank);
+            }
+        };
+        $service->echooutput = false;
+
+        $this->assertFalse($service->acceptsFor('Ma And Pa Kettle At The Fair', '1951', 'Ma and Pa Kettle Back on the Farm', '1951'));
+        $this->assertTrue($service->acceptsFor('Ma And Pa Kettle At The Fair', '1951', 'Ma and Pa Kettle at the Fair', '1951'));
+        $this->assertTrue($service->acceptsFor('Ma And Pa Kettle At The Fair', '1951', 'Ma and Pa Kettle at the Fair', '1952'));
+        $this->assertTrue($service->acceptsFor('Marcelino', '1955', 'The Miracle of Marcelino', '1955'));
+        $this->assertTrue($service->acceptsFor('Fruehlingssinfonie', '1983', 'Spring Symphony', '1983', 0));
+        $this->assertFalse($service->acceptsFor('Fruehlingssinfonie', '1983', 'Spring Symphony', '1983', 1));
+        $this->assertTrue($service->acceptsFor('Jim Croce - Live In Concert', '2003', 'Have You Heard: Jim Croce - Live', '2003'));
+        $this->assertTrue($service->acceptsFor('Apocalypse Now Redux', '', 'Apocalypse Now', '1979'));
+    }
+
+    #[Test]
+    public function it_does_not_reject_tmdb_results_by_year_when_the_release_has_no_year(): void
+    {
+        Cache::flush();
+
+        $tmdbClient = new class extends TmdbClient
+        {
+            public ?string $searchedYear = 'not-called';
+
+            public function isConfigured(): bool
+            {
+                return true;
+            }
+
+            public function searchMovies(string $query, int $page = 1, ?string $year = null): ?array
+            {
+                $this->searchedYear = $year;
+
+                return [
+                    'total_results' => 1,
+                    'results' => [
+                        [
+                            'id' => 123,
+                            'title' => 'Alias Nick and Nora',
+                            'release_date' => '2005-06-15',
+                        ],
+                    ],
+                ];
+            }
+        };
+
+        app()->instance(TmdbClient::class, $tmdbClient);
+
+        $service = new class extends MovieService
+        {
+            public function fetchTMDBProperties(string $imdbId, bool $text = false): array|false
+            {
+                return [
+                    'imdbid' => '1234567',
+                    'title' => 'Alias Nick and Nora',
+                    'tmdbid' => (int) $imdbId,
+                ];
+            }
+
+            public function updateMovieInfo(string $imdbId): bool
+            {
+                MovieInfo::query()->create([
+                    'imdbid' => $imdbId,
+                    'title' => 'Alias Nick and Nora',
+                    'year' => '2005',
+                ]);
+
+                return true;
+            }
+        };
+        $service->echooutput = false;
+        $this->setMovieServiceProperty($service, 'currentTitle', 'Alias Nick and Nora');
+        $this->setMovieServiceProperty($service, 'currentYear', '');
+
+        Release::query()->insert([
+            'id' => 5,
+            'searchname' => 'Alias Nick and Nora',
+            'categories_id' => 2999,
+            'imdbid' => null,
+            'movieinfo_id' => null,
+        ]);
+
+        $searchTMDB = new \ReflectionMethod($service, 'searchTMDB');
+
+        $this->assertTrue($searchTMDB->invoke($service, 5));
+        $this->assertNull($tmdbClient->searchedYear);
+        $this->assertSame('1234567', Release::query()->whereKey(5)->value('imdbid'));
+        $this->assertNotNull(Release::query()->whereKey(5)->value('movieinfo_id'));
     }
 
     /**

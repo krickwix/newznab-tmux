@@ -6,6 +6,8 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
+    private const MAX_INLINE_CBP_FK_RESTORE_ROWS = 1_000_000;
+
     public function up(): void
     {
         if (DB::getDriverName() === 'sqlite') {
@@ -14,6 +16,23 @@ return new class extends Migration
 
         if (! Schema::hasTable('collections') || ! Schema::hasTable('binaries') || ! Schema::hasTable('parts')) {
             return;
+        }
+
+        if ($this->foreignKeysAlreadyRestored(
+            $this->foreignKeyExists('binaries', 'FK_Collections'),
+            $this->foreignKeyExists('parts', 'FK_binaries')
+        )) {
+            return;
+        }
+
+        $estimatedPartsRows = $this->estimatedTableRows('parts');
+        $explicitOptIn = (bool) config('nntmux.allow_large_cbp_fk_restore', false);
+        if ($this->shouldAbortInlineForeignKeyRestore($estimatedPartsRows, $explicitOptIn)) {
+            throw new RuntimeException(sprintf(
+                'Refusing to restore CBP foreign keys inline because parts has an estimated %s rows. '
+                .'Run bounded orphan cleanup first, then rerun with NNTMUX_ALLOW_LARGE_CBP_FK_RESTORE=true if FK restoration is still required.',
+                number_format($estimatedPartsRows)
+            ));
         }
 
         // Remove orphans so FK creation cannot fail on existing bad rows.
@@ -62,7 +81,14 @@ return new class extends Migration
 
     private function dropForeignKeyIfExists(string $table, string $constraintName): void
     {
-        $exists = DB::select(
+        if ($this->foreignKeyExists($table, $constraintName)) {
+            DB::statement("ALTER TABLE `{$table}` DROP FOREIGN KEY `{$constraintName}`");
+        }
+    }
+
+    private function foreignKeyExists(string $table, string $constraintName): bool
+    {
+        return DB::select(
             'SELECT CONSTRAINT_NAME
              FROM information_schema.TABLE_CONSTRAINTS
              WHERE CONSTRAINT_TYPE = "FOREIGN KEY"
@@ -70,10 +96,29 @@ return new class extends Migration
                AND TABLE_NAME = ?
                AND CONSTRAINT_NAME = ?',
             [$table, $constraintName]
+        ) !== [];
+    }
+
+    public function foreignKeysAlreadyRestored(bool $collectionsFkExists, bool $binariesFkExists): bool
+    {
+        return $collectionsFkExists && $binariesFkExists;
+    }
+
+    public function shouldAbortInlineForeignKeyRestore(int $estimatedPartsRows, bool $explicitOptIn): bool
+    {
+        return ! $explicitOptIn && $estimatedPartsRows > self::MAX_INLINE_CBP_FK_RESTORE_ROWS;
+    }
+
+    private function estimatedTableRows(string $tableName): int
+    {
+        $rows = DB::selectOne(
+            'SELECT TABLE_ROWS AS estimated_rows
+             FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = ?',
+            [$tableName]
         );
 
-        if ($exists !== []) {
-            DB::statement("ALTER TABLE `{$table}` DROP FOREIGN KEY `{$constraintName}`");
-        }
+        return (int) ($rows->estimated_rows ?? 0);
     }
 };

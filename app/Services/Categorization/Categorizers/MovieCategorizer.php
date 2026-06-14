@@ -103,7 +103,7 @@ class MovieCategorizer extends AbstractCategorizer
             return $result;
         }
 
-        if ($result = $this->checkOther($name)) {
+        if ($result = $this->checkOther($name, $context)) {
             return $result;
         }
 
@@ -117,6 +117,7 @@ class MovieCategorizer extends AbstractCategorizer
     {
         return (bool) preg_match('/[._ -]AVC|[BH][DR]RIP|(Bluray|Blu-Ray)|BD[._ -]?(25|50)?|\bBR\b|Camrip|[._ -]\d{4}[._ -].+(720p|1080p|Cam|HDTS|2160p)|DIVX|[._ -]DVD[._ -]|DVD-?(5|9|R|Rip)|Untouched|VHSRip|XVID|[._ -](DTS|TVrip|webrip|WEBDL|WEB-DL)[._ -]|\b(2160)p\b.*\b(Netflix|Amazon|NF|AMZN|Disney)\b/i', $name)
             || $this->looksLikeClassicMovieTitle($name, $context)
+            || $this->looksLikeReadableVintageFilmArchiveSubject($name, $context)
             || $this->looksLikeVintageFilmPost($name, $context)
             || $this->looksLikeVideoPar2Sidecar($name)
             || $this->looksLikeCleanedVideoSidecar($name)
@@ -134,7 +135,7 @@ class MovieCategorizer extends AbstractCategorizer
             return true;
         }
 
-        return $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?)/i');
+        return $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?)/i');
     }
 
     protected function extractTrailingYear(string $name): ?int
@@ -148,11 +149,12 @@ class MovieCategorizer extends AbstractCategorizer
 
     protected function looksLikeVintageFilmPost(string $name, ReleaseContext $context): bool
     {
-        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
             return false;
         }
 
         $hasVideoEvidence = (bool) preg_match('/(?:\.|\b)(?:nfo|rar|par2|avi|mkv|mp4|mpg|mpeg|vob|iso|nzb)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $name)
+            || $this->looksLikeNumberedImageVideoSidecar($name)
             || preg_match('/\b(?:480p|576p|720p|1080p|x264|x265|h\.?264|h\.?265|xvid|divx|avi|mkv|mp4|mpg|mpeg|vcd|svcd|dvdrip|vhsrip|dvd|disc|film|films|shorts?)\b/i', $name)
             || preg_match('/\b(?:19|20)\d{2}-\d{1,3}(?:-\d{1,3})?mn\b/i', $name);
 
@@ -160,9 +162,7 @@ class MovieCategorizer extends AbstractCategorizer
             return false;
         }
 
-        return (bool) preg_match('/(?:^|[._ \(-])(?:19|20)\d{2}(?:$|[._ -]|\)|\])/i', $name)
-            || preg_match('/\b(?:film|films|shorts?)\b/i', $name)
-            || $hasVideoEvidence;
+        return true;
     }
 
     protected function checkForeign(string $name): ?CategorizationResult
@@ -293,14 +293,19 @@ class MovieCategorizer extends AbstractCategorizer
 
     protected function checkVintageFilmSD(string $name, ReleaseContext $context): ?CategorizationResult
     {
-        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?)/i')) {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?)/i')) {
             return null;
         }
 
         if (preg_match('/(?:^|[._ \(-])(?:19|20)\d{2}(?:$|[._ -]|\)|\])/i', $name) &&
             (preg_match('/(?:\.|\b)(?:avi|mkv|mp4|mpg|mpeg|vob)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $name)
+                || $this->looksLikeNumberedImageVideoSidecar($name)
                 || preg_match('/\b(?:VCD|SVCD)[._ -]?(?:Collection|Disc|Movie|Film)\b/i', $name)
                 || preg_match('/\b(?:19|20)\d{2}-\d{1,3}(?:-\d{1,3})?mn\b/i', $name))) {
+            return $this->matched(Category::MOVIE_SD, 0.82, 'vintage_film_sd');
+        }
+
+        if ($this->looksLikeNumberedImageVideoSidecar($name)) {
             return $this->matched(Category::MOVIE_SD, 0.82, 'vintage_film_sd');
         }
 
@@ -329,9 +334,14 @@ class MovieCategorizer extends AbstractCategorizer
         return (bool) preg_match('/(?:19|20)\d{2}|\bmovie\b|\bfilm\b/i', $name);
     }
 
+    protected function looksLikeNumberedImageVideoSidecar(string $name): bool
+    {
+        return preg_match('/\b(?:avi|mkv|mp4|mpg|mpeg|vob)[._ -]\d{1,4}[._ -](?:jpe?g|png)\b/i', $name) === 1;
+    }
+
     protected function looksLikeDocumentaryVideoPost(string $name, ReleaseContext $context): bool
     {
-        if (! $context->groupMatchesPattern('/alt\.binaries\.documentaries(?:\.|$)/i')) {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\.documentaries(?:\.|$)/i')) {
             return false;
         }
 
@@ -348,8 +358,12 @@ class MovieCategorizer extends AbstractCategorizer
         return null;
     }
 
-    protected function checkOther(string $name): ?CategorizationResult
+    protected function checkOther(string $name, ReleaseContext $context): ?CategorizationResult
     {
+        if ($this->looksLikeReadableVintageFilmArchiveSubject($name, $context)) {
+            return $this->matched(Category::MOVIE_OTHER, 0.82, 'vintage_film_file');
+        }
+
         if ($this->looksLikeVideoPar2Sidecar($name)) {
             return $this->matched(Category::MOVIE_OTHER, 0.82, 'video_par2_sidecar');
         }
@@ -368,5 +382,89 @@ class MovieCategorizer extends AbstractCategorizer
         }
 
         return null;
+    }
+
+    private function looksLikeReadableVintageFilmArchiveSubject(string $name, ReleaseContext $context): bool
+    {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
+            return false;
+        }
+
+        if (! preg_match('/"[^"]+\.(?:part\d+\.rar|vol\d{1,4}\+\d{1,4}\.par2|par2|rar|zip|7z(?:\.\d{1,4})?)"/i', $name)) {
+            return $this->isReadableVintageFilmNormalizedArchiveStem($name);
+        }
+
+        $outsideQuotedFilename = trim((string) preg_replace('/"[^"]+"/', ' ', $name));
+        if (
+            $this->countAlphabeticWordTokens($outsideQuotedFilename) >= 2
+            && (
+                preg_match('/\b(?:19|20)\d{2}\b/', $outsideQuotedFilename) === 1
+                || preg_match('/\b(?:avi|xvid|divx|mkv|mp4|mpg|mpeg|vob|dvd|dvdrip|vhsrip|tvrip|bluray|blu[.-]?ray|480p|576p|720p|1080p|2160p)\b/i', $outsideQuotedFilename) === 1
+            )
+        ) {
+            return true;
+        }
+
+        return $this->hasReadableQuotedArchiveStem($name);
+    }
+
+    private function isReadableVintageFilmNormalizedArchiveStem(string $name): bool
+    {
+        $trimmed = trim($name);
+
+        if (
+            preg_match('/^[A-Z][a-z]{3,}\d{1,4}$/', $trimmed) === 1
+            && preg_match('/[aeiouy]/i', $trimmed) === 1
+        ) {
+            return true;
+        }
+
+        return $this->countAlphabeticWordTokens($trimmed) >= 2
+            && preg_match('/\b(?:D?\d+of\d+|part\d+)\b/i', $trimmed) === 1;
+    }
+
+    private function hasReadableQuotedArchiveStem(string $name): bool
+    {
+        if (! preg_match('/"(?P<filename>[^"]+)"/', $name, $matches)) {
+            return false;
+        }
+
+        $stem = (string) preg_replace(
+            '/\.(?:part\d+\.rar|vol\d{1,4}\+\d{1,4}\.par2|par2|rar|zip|7z(?:\.\d{1,4})?)$/i',
+            '',
+            $matches['filename'],
+        );
+
+        $stem = str_replace(['_', '.', '-'], ' ', $stem);
+
+        if ($this->countReadableStemWordTokens($stem) >= 2) {
+            return true;
+        }
+
+        $compactStem = preg_replace('/\s+/', '', $stem) ?? $stem;
+
+        return preg_match('/^[A-Z][a-z]{3,}(?:\d{2,4})?$/', $compactStem) === 1
+            && preg_match('/[aeiouy]/i', $compactStem) === 1;
+    }
+
+    private function countReadableStemWordTokens(string $stem): int
+    {
+        $tokens = preg_split('/[.\s_-]+/', $stem) ?: [];
+
+        return count(array_filter(
+            $tokens,
+            static fn (string $token): bool => preg_match('/^[A-Z]?[a-z]{2,}(?:[\'-][A-Z]?[a-z]{2,})?$/', $token) === 1
+                && preg_match('/[aeiouy]/i', $token) === 1
+        ));
+    }
+
+    private function countAlphabeticWordTokens(string $name): int
+    {
+        $tokens = preg_split('/[.\s_-]+/', $name) ?: [];
+
+        return count(array_filter(
+            $tokens,
+            static fn (string $token): bool => preg_match('/[a-z]{3,}/i', $token) === 1
+        ));
     }
 }

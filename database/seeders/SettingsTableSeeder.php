@@ -422,7 +422,7 @@ class SettingsTableSeeder extends Seeder
             ],
             162 => [
                 'name' => 'backfill_order',
-                'value' => '2',
+                'value' => '1',
             ],
             163 => [
                 'name' => 'backfill_qty',

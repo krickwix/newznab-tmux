@@ -21,6 +21,7 @@ class DistributedJobCatalog
             'hashed-fixnames' => 'Run full-history name fixing passes for Other > Hashed backlogs',
             'removecrap' => 'Remove configured unwanted releases',
             'post-additional' => 'Run additional and/or NFO post-processing',
+            'metadata-refresh' => 'Refresh external release-name evidence and run strong fix-name passes',
             'post-tv' => 'Run TV and anime post-processing',
             'post-movies' => 'Run movie post-processing',
             'post-amazon' => 'Run books, music, console, and games post-processing',
@@ -30,6 +31,12 @@ class DistributedJobCatalog
     }
 
     /**
+     * @param  array{
+     *     settings?: array<string, mixed>,
+     *     constants?: array<string, mixed>,
+     *     counts?: array{now?: array<string, mixed>},
+     *     killswitch?: array<string, mixed>
+     * }  $runVar
      * @return array{
      *     name: string,
      *     description: string,
@@ -70,6 +77,7 @@ class DistributedJobCatalog
             'hashed-fixnames' => $this->hashedFixNames($settings, $counts),
             'removecrap' => $this->removeCrap($settings),
             'post-additional' => $this->postAdditional($settings, $counts),
+            'metadata-refresh' => $this->metadataRefresh($settings, $counts),
             'post-tv' => $this->postTv($settings, $counts),
             'post-movies' => $this->postMovies($settings, $counts),
             'post-amazon' => $this->postAmazon($settings, $counts),
@@ -89,6 +97,7 @@ class DistributedJobCatalog
                 [],
                 (int) ($settings['seq_timer'] ?? 300)
             ),
+            default => throw new \InvalidArgumentException("Unknown distributed job [{$job}]."),
         };
     }
 
@@ -110,6 +119,7 @@ class DistributedJobCatalog
             'fixnames', 'hashed-fixnames' => (int) ($settings['fix_timer'] ?? 300),
             'removecrap' => (int) ($settings['crap_timer'] ?? 300),
             'post-additional' => (int) ($settings['post_timer'] ?? 300),
+            'metadata-refresh' => (int) ($settings['metadata_refresh_timer'] ?? config('external_metadata.timer', 900)),
             'post-tv', 'post-movies' => (int) ($settings['post_timer_non'] ?? 300),
             'post-amazon' => (int) ($settings['post_timer_amazon'] ?? 300),
             'per-group' => (int) ($settings['seq_timer'] ?? 300),
@@ -181,7 +191,29 @@ class DistributedJobCatalog
             return $this->disabled('backfill', 'kill limit exceeded', $sleep);
         }
 
+        $groupWork = $this->backfillGroupWorkCount($settings, $counts);
+        if ($groupWork !== null && $groupWork === 0) {
+            return $this->disabled('backfill', 'no backfill groups to process', $sleep);
+        }
+
         return $this->simple('backfill', true, null, 'multiprocessing:safe', ['type' => 'backfill'], $sleep);
+    }
+
+    /**
+     * @param  array<string, mixed>  $settings
+     * @param  array<string, mixed>  $counts
+     */
+    private function backfillGroupWorkCount(array $settings, array $counts): ?int
+    {
+        $countKey = ((int) ($settings['backfill_days'] ?? 1)) === 2
+            ? 'backfill_groups_date'
+            : 'backfill_groups_days';
+
+        if (! array_key_exists($countKey, $counts)) {
+            return null;
+        }
+
+        return (int) $counts[$countKey];
     }
 
     /**
@@ -403,7 +435,100 @@ class DistributedJobCatalog
             return $this->disabled('post-additional', 'no additional work or NFOs to process', $sleep);
         }
 
+        array_push($commands, ...$this->postprocessMetadataRefreshCommands($settings, $counts));
+
         return $this->job('post-additional', true, null, $commands, $sleep);
+    }
+
+    /**
+     * @param  array<string, mixed>  $settings
+     * @param  array<string, mixed>  $counts
+     * @return array<string, mixed>
+     */
+    private function metadataRefresh(array $settings, array $counts): array
+    {
+        $sleep = (int) ($settings['metadata_refresh_timer'] ?? config('external_metadata.timer', 900));
+        $enabled = (int) ($settings['metadata_refresh'] ?? ((bool) config('external_metadata.enabled', false) ? 1 : 0));
+
+        if ($enabled !== 1) {
+            return $this->disabled('metadata-refresh', 'disabled in settings', $sleep);
+        }
+
+        $commands = [$this->metadataRefreshCommand(
+            (int) ($settings['metadata_refresh_limit'] ?? config('external_metadata.limit', 25)),
+            (int) ($settings['metadata_refresh_sleep_ms'] ?? config('external_metadata.sleep_ms', 500)),
+        )];
+
+        array_push($commands, ...$this->strongHashedFixNameCommands($counts));
+
+        return $this->job('metadata-refresh', true, null, $commands, $sleep);
+    }
+
+    /**
+     * @param  array<string, mixed>  $settings
+     * @param  array<string, mixed>  $counts
+     * @return list<array{command: string, arguments: array<string, mixed>}>
+     */
+    private function postprocessMetadataRefreshCommands(array $settings, array $counts): array
+    {
+        $enabled = (int) ($settings['metadata_refresh_postprocess'] ?? (
+            (bool) config('external_metadata.postprocess_enabled', false) ? 1 : 0
+        ));
+
+        if ($enabled !== 1 || (int) ($counts['other_hashed'] ?? 0) <= self::HASHED_FIXNAMES_THRESHOLD) {
+            return [];
+        }
+
+        return [
+            $this->metadataRefreshCommand(
+                (int) ($settings['metadata_refresh_postprocess_limit'] ?? config('external_metadata.postprocess_limit', 10)),
+                (int) ($settings['metadata_refresh_sleep_ms'] ?? config('external_metadata.sleep_ms', 500)),
+            ),
+            ...$this->strongHashedFixNameCommands($counts),
+        ];
+    }
+
+    /**
+     * @return array{command: string, arguments: array<string, mixed>}
+     */
+    private function metadataRefreshCommand(int $limit, int $sleepMs): array
+    {
+        return [
+            'command' => 'predb:refresh-external-metadata',
+            'arguments' => [
+                '--source' => ['all'],
+                '--limit' => max(1, $limit),
+                '--sleep-ms' => max(0, $sleepMs),
+            ],
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $counts
+     * @return list<array{command: string, arguments: array<string, mixed>}>
+     */
+    private function strongHashedFixNameCommands(array $counts): array
+    {
+        if ((int) ($counts['other_hashed'] ?? 0) > self::HASHED_FIXNAMES_THRESHOLD) {
+            $commands = [];
+            foreach ([20, 16] as $method) {
+                $commands[] = [
+                    'command' => 'releases:fix-names',
+                    'arguments' => [
+                        'method' => (string) $method,
+                        '--update' => true,
+                        '--category' => 'hashed',
+                        '--set-status' => true,
+                        '--limit' => 500,
+                        '--show' => true,
+                    ],
+                ];
+            }
+
+            return $commands;
+        }
+
+        return [];
     }
 
     /**
@@ -494,6 +619,7 @@ class DistributedJobCatalog
     }
 
     /**
+     * @param  array<string, mixed>  $arguments
      * @return array<string, mixed>
      */
     private function simple(string $job, bool $enabled, ?string $disabledReason, string $command, array $arguments, int $sleep): array

@@ -81,10 +81,10 @@ class CategorizationPipeline
         ?string $poster = '',
         bool $debug = false
     ): array {
-        $releaseName = $this->nzbSplitUnwrapper->unwrap($releaseName) ?? $releaseName;
-        $releaseName = $this->obfuscatedSubjectExtractor->extract($releaseName) ?? $releaseName;
-
         $groupName = UsenetGroup::whereId($groupId)->value('name') ?? '';
+
+        $releaseName = $this->nzbSplitUnwrapper->unwrap($releaseName) ?? $releaseName;
+        $releaseName = $this->obfuscatedSubjectExtractor->extract($releaseName, $groupName) ?? $releaseName;
 
         $context = new ReleaseContext(
             releaseName: $releaseName,

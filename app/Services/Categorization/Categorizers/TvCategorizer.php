@@ -90,7 +90,7 @@ class TvCategorizer extends AbstractCategorizer
 
     protected function looksLikeClassicMoviePost(string $name, ReleaseContext $context): bool
     {
-        if (! $context->groupMatchesPattern('/alt\.binaries\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
             return false;
         }
 
@@ -161,7 +161,7 @@ class TvCategorizer extends AbstractCategorizer
             return $this->matched(Category::TV_ANIME, 0.98, 'anime_tosho_poster');
         }
         // Usenet group dedicated to anime (e.g. alt.binaries.*anime*)
-        if ($context->groupName !== '' && preg_match('/alt\.binaries\..*anime/i', $context->groupName)) {
+        if ($context->groupName !== '' && preg_match('/(?:alt\.binaries|a\.b)\..*anime/i', $context->groupName)) {
             return $this->matched(Category::TV_ANIME, 0.9, 'anime_group_name');
         }
         // Known anime fansub/release group tag

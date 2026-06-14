@@ -31,6 +31,9 @@ class PcCategorizer extends AbstractCategorizer
         if ($context->hasAdultMarkers()) {
             return true;
         }
+        if ($this->isExplicitVintageFilmVideo($context)) {
+            return true;
+        }
         // Skip TV shows (season patterns)
         if (preg_match('/[._ -]S\d{1,3}[._ -]?(E\d|Complete|Full|1080|720|480|2160|WEB|HDTV|BluRay)/i', $context->releaseName)) {
             return true;
@@ -152,6 +155,10 @@ class PcCategorizer extends AbstractCategorizer
             return $this->matched(Category::PC_0DAY, 0.9, '0day_msix_installer');
         }
 
+        if (preg_match('/\b(?:Microsoft[._ -])?Office[._ -](?:19|20)\d{2}(?:[._ -]\d{3,6}){1,3}[._ -](?:32|64)Bit\b/i', $name)) {
+            return $this->matched(Category::PC_0DAY, 0.88, '0day_office_build');
+        }
+
         // Explicit 0day indicators
         if (preg_match('/[._ -]exe$|[._ -](utorrent|Virtualbox)[._ -]|\b0DAY\b|incl.+crack| DRM$|>DRM</i', $name)) {
             return $this->matched(Category::PC_0DAY, 0.9, '0day_explicit');
@@ -163,10 +170,24 @@ class PcCategorizer extends AbstractCategorizer
         }
 
         // Software vendors and patterns
-        if (preg_match('/\b(Adobe|auto(cad|desk)|-BEAN|Cracked|Cucusoft|CYGNUS|Divx[._ -]Plus|\.(deb|exe)|DIGERATI|FOSI|-FONT|Key(filemaker|gen|maker)|Lynda\.com|lz0|MULTiLANGUAGE|Microsoft\s*(Office|Windows|Server)|MultiOS|-(iNViSiBLE|SPYRAL|SUNiSO|UNION|TE)|v\d{1,3}.*?Pro|[._ -]v\d{1,3}[._ -]|Xilisoft)\b|\(x(64|86)\)/i', $name)) {
+        if (preg_match('/\b(Adobe|auto(cad|desk)|-BEAN|Cracked|Cucusoft|CYGNUS|Divx[._ -]Plus|\.(deb|exe)|DIGERATI|FOSI|-FONT|Key(filemaker|gen|maker)|Lynda\.com|lz0|MULTiLANGUAGE|Microsoft\s*(Office|Windows|Server)|MultiOS|Native[._ -]Instruments|Traktor[._ -]Pro|-(iNViSiBLE|SPYRAL|SUNiSO|UNION|TE)|v\d{1,3}.*?Pro|[._ -]v\d{1,3}[._ -]|Xilisoft)\b|\(x(64|86)\)/i', $name)) {
             return $this->matched(Category::PC_0DAY, 0.85, '0day_software');
         }
 
+        if (preg_match('/\b(?:AcroRdr|CorelDRAW|CyberLink|DVDFab|Navicat|PotPlayer|PowerDVD|SQLiteExpert|Topaz|[A-Za-z][A-Za-z0-9]+Setup(?:64|32)?)[\w.\' -]*(?:Installer|Setup|KeyGen|Crack|Activator|Patch|Portable|x64|x86|Pro|Enterprise)\b/i', $name)) {
+            return $this->matched(Category::PC_0DAY, 0.85, '0day_installer');
+        }
+
         return null;
+    }
+
+    private function isExplicitVintageFilmVideo(ReleaseContext $context): bool
+    {
+        if (! $context->groupMatchesPattern('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|old[.-]?movies?|movies?[.-]?classic|dvd[.-]classic)/i')) {
+            return false;
+        }
+
+        return preg_match('/(?:\.|\b)(?:avi|mkv|mp4|mpg|mpeg|vob)(?:\.\d{3})?"?\s*(?:yEnc)?$/i', $context->releaseName) === 1
+            || preg_match('/\b(?:480p|576p|720p|1080p|2160p|x264|x265|h\.?264|h\.?265|xvid|divx|dvdrip|vhsrip|tvrip|bdrip|bluray|dvd)\b/i', $context->releaseName) === 1;
     }
 }

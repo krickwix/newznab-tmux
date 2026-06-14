@@ -1,5 +1,7 @@
 <?php
 
+use App\Console\Commands\CollectionSplitDiagnostics;
+use App\Console\Commands\RequeueBodyPreambleFragments;
 use App\Http\Middleware\BlockAbusiveServices;
 use App\Http\Middleware\ClearanceMiddleware;
 use App\Http\Middleware\ContentSecurityPolicy;
@@ -26,9 +28,11 @@ use Sentry\Laravel\Integration;
 use Spatie\Permission\Middleware\PermissionMiddleware;
 use Spatie\Permission\Middleware\RoleMiddleware;
 use Spatie\Permission\Middleware\RoleOrPermissionMiddleware;
+use Spatie\Permission\PermissionServiceProvider;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withProviders([
+        PermissionServiceProvider::class,
         TinkerServiceProvider::class,
     ])
     ->withRouting(
@@ -43,6 +47,10 @@ return Application::configure(basePath: dirname(__DIR__))
                 ->group(base_path('routes/rss.php'));
         },
     )
+    ->withCommands([
+        CollectionSplitDiagnostics::class,
+        RequeueBodyPreambleFragments::class,
+    ])
     ->withMiddleware(function (Middleware $middleware) {
         $middleware->redirectTo(
             guests: fn () => route('login'),

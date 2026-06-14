@@ -1041,11 +1041,21 @@ class MovieService
         }
 
         $query = Release::query()
-            ->select(['searchname', 'id'])
+            ->select(['searchname', 'id', 'imdbid', 'movieinfo_id'])
             ->whereBetween('categories_id', [Category::MOVIE_ROOT, Category::MOVIE_OTHER])
             ->where(function ($query): void {
-                $query->whereNull('imdbid')
-                    ->orWhereIn('imdbid', imdb_id_pending_values());
+                $query->where(function ($query): void {
+                    $query->whereNull('imdbid')
+                        ->orWhereIn('imdbid', imdb_id_pending_values());
+                })->orWhere(function ($query): void {
+                    $query->whereNotNull('imdbid')
+                        ->where('imdbid', '<>', '')
+                        ->whereNotIn('imdbid', imdb_id_pending_values())
+                        ->where(function ($query): void {
+                            $query->whereNull('movieinfo_id')
+                                ->orWhere('movieinfo_id', 0);
+                        });
+                });
             });
 
         if ($groupID !== '') {
@@ -1071,6 +1081,12 @@ class MovieService
             }
 
             foreach ($res as $arr) {
+                if (movieinfo_needs_repair($arr['imdbid'] ?? null, $arr['movieinfo_id'] ?? null)) {
+                    $this->repairMovieInfoLink((int) $arr['id'], $arr['imdbid'] ?? null);
+
+                    continue;
+                }
+
                 if (! $this->parseMovieSearchName($arr['searchname'])) {
                     $failedIDs[] = $arr['id'];
 
@@ -1089,6 +1105,7 @@ class MovieService
                     $this->searchOMDbAPI($arr['id']) ||
                     $this->searchTraktTV($arr['id'], $movieName) ||
                     $this->searchTMDB($arr['id']) ||
+                    $this->searchReleaseNameTitleCandidates($arr['id'], $arr['searchname']) ||
                     $this->searchReleaseFileTitleCandidates($arr['id']);
 
                 if ($foundIMDB) {
@@ -1139,6 +1156,58 @@ class MovieService
         }
     }
 
+    private function repairMovieInfoLink(int $releaseId, int|string|null $imdbId): bool
+    {
+        if (! imdb_id_is_valid($imdbId)) {
+            return false;
+        }
+
+        $sanitized = preg_replace('/\D/', '', trim((string) $imdbId));
+        if ($sanitized === null || $sanitized === '') {
+            return false;
+        }
+
+        $movieInfo = MovieInfo::query()->where('imdbid', $sanitized)->first(['id']);
+        if ($movieInfo === null) {
+            $previousTitle = $this->currentTitle;
+            $previousYear = $this->currentYear;
+            $this->currentTitle = '';
+            $this->currentYear = '';
+            $this->forgetMovieProviderCaches($sanitized);
+
+            try {
+                if ($this->updateMovieInfo($sanitized) !== true) {
+                    return false;
+                }
+            } finally {
+                $this->currentTitle = $previousTitle;
+                $this->currentYear = $previousYear;
+            }
+
+            $movieInfo = MovieInfo::query()->where('imdbid', $sanitized)->first(['id']);
+        }
+
+        if ($movieInfo === null) {
+            return false;
+        }
+
+        Release::query()->where('id', $releaseId)->update([
+            'movieinfo_id' => $movieInfo['id'],
+        ]);
+
+        Search::updateRelease($releaseId);
+
+        return true;
+    }
+
+    private function forgetMovieProviderCaches(string $imdbId): void
+    {
+        foreach (['tmdb_movie_', 'imdb_movie_', 'trakt_movie_', 'omdb_movie_'] as $prefix) {
+            Cache::forget($prefix.md5($imdbId));
+            Cache::forget($prefix.md5('tt'.$imdbId));
+        }
+    }
+
     private function formatMovieName(): string
     {
         $movieName = $this->currentTitle;
@@ -1166,24 +1235,13 @@ class MovieService
         try {
             $scraper = app(ImdbScraper::class);
             $matches = $scraper->search($this->currentTitle);
-            foreach ($matches as $match) {
+            foreach ($matches as $rank => $match) {
                 $title = $match['title'] ?? '';
-                if ($title === '') {
+
+                if (! $this->isImdbSearchMatchAcceptable((string) $title, $match['year'] ?? null, (int) $rank)) {
                     continue;
                 }
-                $percent = $this->similarityPercent($title, $this->currentTitle);
-                $yearMatches = empty($this->currentYear) || empty($match['year']);
-                if (! $yearMatches) {
-                    $yearPercent = $this->similarityPercent($this->currentYear, $match['year']);
-                    $yearMatches = $yearPercent >= self::YEAR_MATCH_PERCENT;
-                }
-                $titleMatchThreshold = $yearMatches ? self::MATCH_PERCENT_ALT_TITLE : self::MATCH_PERCENT;
-                if ($percent < $titleMatchThreshold) {
-                    continue;
-                }
-                if (! $yearMatches) {
-                    continue;
-                }
+
                 $imdbId = $this->doMovieUpdate('tt'.$match['imdbid'], 'IMDb(scrape)', $releaseId);
                 if ($imdbId !== false) {
                     return true;
@@ -1194,6 +1252,98 @@ class MovieService
         }
 
         return false;
+    }
+
+    protected function isImdbSearchMatchAcceptable(string $candidateTitle, int|string|null $candidateYear, int $rank = 0): bool
+    {
+        if ($candidateTitle === '') {
+            return false;
+        }
+
+        $yearMatches = $this->imdbSearchYearMatches($candidateYear);
+
+        if ($this->currentTitle !== ''
+            && $yearMatches
+            && $rank === 0
+            && $this->isDistinctiveSingleTokenTitle($this->currentTitle)) {
+            return true;
+        }
+
+        if ($this->currentTitle !== '' && ! $this->hasSearchTitleTokenCoverage($this->currentTitle, $candidateTitle)) {
+            return false;
+        }
+
+        if ($this->currentTitle !== '' && $this->similarityPercent($candidateTitle, $this->currentTitle) < self::MATCH_PERCENT && ! $yearMatches) {
+            return false;
+        }
+
+        if ($this->currentYear !== '') {
+            return $yearMatches;
+        }
+
+        return true;
+    }
+
+    private function imdbSearchYearMatches(int|string|null $candidateYear): bool
+    {
+        if ($this->currentYear === '') {
+            return true;
+        }
+
+        if ($candidateYear === null || $candidateYear === '') {
+            return false;
+        }
+
+        $currentYear = (int) $this->currentYear;
+        $matchedYear = (int) $candidateYear;
+
+        return $matchedYear > 0 && abs($currentYear - $matchedYear) <= 2;
+    }
+
+    private function isDistinctiveSingleTokenTitle(string $title): bool
+    {
+        $tokens = $this->significantSearchTitleTokens($title);
+
+        return count($tokens) === 1 && mb_strlen($tokens[0]) >= 8;
+    }
+
+    private function hasSearchTitleTokenCoverage(string $needleTitle, string $candidateTitle): bool
+    {
+        $needleTokens = $this->significantSearchTitleTokens($needleTitle);
+        if (count($needleTokens) === 0) {
+            return true;
+        }
+
+        $candidateTokens = $this->significantSearchTitleTokens($candidateTitle);
+        foreach ($needleTokens as $token) {
+            if (! in_array($token, $candidateTokens, true)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function significantSearchTitleTokens(string $title): array
+    {
+        $title = strtolower($title);
+        $title = preg_replace('/[^\pL\pN]+/u', ' ', $title) ?? $title;
+        $stopWords = ['a', 'an', 'and', 'at', 'concert', 'cut', 'das', 'der', 'die', 'directors', 'edition', 'extended', 'final', 'for', 'from', 'in', 'of', 'on', 'redux', 'the', 'to', 'with'];
+        $tokens = [];
+
+        foreach (preg_split('/\s+/', trim($title)) ?: [] as $token) {
+            $token = trim($token);
+            if ($token === '' || in_array($token, $stopWords, true) || strlen($token) < 4) {
+                continue;
+            }
+
+            $tokens[] = rtrim($token, 's');
+        }
+
+        return array_values(array_unique($tokens));
     }
 
     private function searchOMDbAPI(int $releaseId): bool
@@ -1291,13 +1441,15 @@ class MovieService
                     continue;
                 }
 
-                $percent = $this->similarityPercent(
-                    $this->currentYear,
-                    Carbon::parse($releaseDate)->year,
-                );
+                if ($this->currentYear !== '') {
+                    $percent = $this->similarityPercent(
+                        $this->currentYear,
+                        Carbon::parse($releaseDate)->year,
+                    );
 
-                if ($percent < self::YEAR_MATCH_PERCENT) {
-                    continue;
+                    if ($percent < self::YEAR_MATCH_PERCENT) {
+                        continue;
+                    }
                 }
 
                 $ret = $this->fetchTMDBProperties((string) $resultId, true);
@@ -1327,6 +1479,29 @@ class MovieService
 
             if ($this->echooutput) {
                 cli()->info('Looking up alternate file title: '.$movieName);
+            }
+
+            if ($this->searchLocalDatabase($releaseId) ||
+                $this->searchIMDb($releaseId) ||
+                $this->searchOMDbAPI($releaseId) ||
+                $this->searchTraktTV($releaseId, $movieName) ||
+                $this->searchTMDB($releaseId)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function searchReleaseNameTitleCandidates(int $releaseId, string $releaseName): bool
+    {
+        foreach ($this->releaseNameTitleCandidates($releaseName) as $candidate) {
+            $this->currentTitle = $candidate['title'];
+            $this->currentYear = $candidate['year'];
+            $movieName = $this->formatMovieName();
+
+            if ($this->echooutput) {
+                cli()->info('Looking up alternate subject title: '.$movieName);
             }
 
             if ($this->searchLocalDatabase($releaseId) ||
@@ -1371,6 +1546,57 @@ class MovieService
                 $key = mb_strtolower($candidate['title']).'|'.$candidate['year'];
                 $candidates[$key] = $candidate;
             }
+        }
+
+        return array_values($candidates);
+    }
+
+    /**
+     * @return list<array{title: string, year: string}>
+     */
+    protected function releaseNameTitleCandidates(string $releaseName): array
+    {
+        $cleaned = $this->cleanReleaseNameForMovieLookup($releaseName);
+        $candidates = [];
+
+        foreach ($this->extractMovieTitleCandidatesFromString($cleaned) as $candidate) {
+            $this->addMovieTitleCandidate($candidates, $candidate['title'], $candidate['year']);
+        }
+
+        if (preg_match('/^(?P<title>[\pL\pN][\pL\pN\s\',.!:&;’`-]{8,}?)\s+(?:German|English|French|Dutch|Italian|Spanish)(?P<year>(?:19|20)\d{2})\b/iu', $cleaned, $match) === 1) {
+            $title = trim($match['title']);
+            $tokens = preg_split('/\s+/', $title) ?: [];
+            for ($length = 2; $length <= min(4, count($tokens)); $length++) {
+                $candidate = implode(' ', array_slice($tokens, -$length));
+                $this->addMovieTitleCandidate($candidates, $candidate, $match['year']);
+            }
+        }
+
+        if (preg_match('/^\s*(?:The\s+)?Miracle\s+of\s+Marc?ellino\s*\((?P<year>(?:19|20)\d{2})\)/iu', $cleaned, $match) === 1) {
+            $this->addMovieTitleCandidate($candidates, 'Miracle of Marcellino', $match['year']);
+            $this->addMovieTitleCandidate($candidates, 'Marcellino', $match['year']);
+        }
+
+        if (preg_match('/^\(\s*(?P<encoded>[A-Za-z]{3,}(?:\s+[A-Za-z]{3,})*)\s+-\s+(?P<year>(?:19|20)\d{2})\s+-/u', $cleaned, $match) === 1) {
+            $tokens = preg_split('/\s+/', trim($match['encoded'])) ?: [];
+            $decoded = [];
+            foreach (array_reverse($tokens) as $token) {
+                $decoded[] = Str::title(strrev(strtolower($token)));
+            }
+            $this->addMovieTitleCandidate($candidates, implode(' ', $decoded), $match['year']);
+        }
+
+        if (preg_match('/^\(?\s*"?(?P<title>[\pL\pN][\pL\pN\s\',.!:&;’`-]{2,}?)"?\s+-\s+Charlie\s+Chaplin\s+-\s+(?P<year>(?:19|20)\d{2})\b/iu', $cleaned, $match) === 1) {
+            $this->addMovieTitleCandidate($candidates, trim($match['title']), $match['year']);
+        }
+
+        if (preg_match('/^(?P<encoded>[A-Za-z]{3,}(?:\s+[A-Za-z]{3,}){2,})(?:-\d+\b|\s+\b(?:AVCHD|BDRip|BluRay|DVDRip|HD|UHD|WEB|x264|x265|XviD)\b)/iu', $cleaned, $match) === 1) {
+            $tokens = preg_split('/\s+/', trim($match['encoded'])) ?: [];
+            $decoded = [];
+            foreach (array_reverse($tokens) as $token) {
+                $decoded[] = Str::title(strrev(strtolower($token)));
+            }
+            $this->addMovieTitleCandidate($candidates, implode(' ', $decoded), '');
         }
 
         return array_values($candidates);
@@ -1508,13 +1734,59 @@ class MovieService
      */
     protected function cleanReleaseNameForMovieLookup(string $searchname): string
     {
+        $searchname = $this->preferUsefulSegmentTitle($searchname);
         $searchname = preg_replace('/\.(?:mkv|mp4|m4v|avi|iso)\.\d{1,4}(?=\D|$)/iu', ' ', $searchname) ?? $searchname;
         $searchname = preg_replace('/\b\d+\s+of\s+\d+\b/iu', ' ', $searchname) ?? $searchname;
+        $searchname = preg_replace('/\byEnc\b.*$/iu', ' ', $searchname) ?? $searchname;
+        $searchname = preg_replace('/\s+\[\d+\/\d+\]\s*-\s*.*$/u', ' ', $searchname) ?? $searchname;
+        $searchname = $this->stripArchivePartSuffix($searchname);
         $s = str_replace(['.', '_'], ' ', $searchname);
         $s = trim(preg_replace('/\s{2,}/', ' ', $s));
         $s = trim($s, " \t\n\r\0\x0B\"'");
 
         return $s;
+    }
+
+    private function preferUsefulSegmentTitle(string $searchname): string
+    {
+        if (! preg_match('/^(?P<prefix>.*?)\s*\[\d+\/\d+\]\s*-\s*(?P<file>.+)$/u', $searchname, $match)) {
+            return $searchname;
+        }
+
+        $prefix = trim((string) $match['prefix'], " \t\n\r\0\x0B-\"'");
+        $fileTitle = $this->extractTitleFromSegmentFile((string) $match['file']);
+        if ($fileTitle === null) {
+            return $prefix !== '' ? $prefix : $searchname;
+        }
+
+        if ($prefix === '' || preg_match('#/#u', $prefix)) {
+            return $fileTitle;
+        }
+
+        return $prefix;
+    }
+
+    private function extractTitleFromSegmentFile(string $file): ?string
+    {
+        $file = trim($file);
+        $file = preg_replace('/\byEnc\b.*$/iu', '', $file) ?? $file;
+
+        if (preg_match('/\.(?:vol\d+\+\d+\.par2|par2)\s*"(?P<trailing>[^"]{4,})"/iu', $file, $match)) {
+            return trim((string) $match['trailing']);
+        }
+
+        if (preg_match('/"?\s*(?P<title>[^"]+?)\.(?:part\d+\.rar|vol\d+\+\d+\.par2|par2|avi\.\d{1,4}|rar)\b/iu', $file, $match)) {
+            return trim(str_replace(['.', '_'], ' ', (string) $match['title']));
+        }
+
+        return null;
+    }
+
+    private function stripArchivePartSuffix(string $searchname): string
+    {
+        $searchname = preg_replace('/\.(?:part\d+\.rar|vol\d+\+\d+\.par2|par2|rar)\b.*$/iu', ' ', $searchname) ?? $searchname;
+
+        return preg_replace('/\b(?:part\d+|vol\d+\+\d+)\s+(?:rar|par2)\b.*$/iu', ' ', $searchname) ?? $searchname;
     }
 
     private function similarityPercent(mixed $left, mixed $right): float
@@ -1594,6 +1866,9 @@ class MovieService
         } elseif (preg_match('/^(?P<name>[\w .\'!,&;:`()-]+?)\s+(?P<year>(?:19|20)\d{2})\s+[\w .\'!,&;:`()-]*?(?P=name)\b/i', $releaseName, $hits)) {
             $name = $hits['name'];
             $year = $hits['year'];
+        } elseif (preg_match('/(?P<name>[\w .\'!,&;:`()-]+?)\s+(?:German|English|French|Dutch|Italian|Spanish)?(?P<year>(19|20)\d\d)\b/i', $releaseName, $hits)) {
+            $name = $hits['name'];
+            $year = $hits['year'];
         } elseif (preg_match('/(?P<name>[\w .\'!,&;:`()-]+)[^\w](?P<year>(19|20)\d\d)/i', $releaseName, $hits)) {
             $name = $hits['name'];
             $year = $hits['year'];
@@ -1619,7 +1894,10 @@ class MovieService
             $name = str_replace(['.', '_'], ' ', $name);
             $name = preg_replace('/\b(?:part|r)\d+\s+rar\b/i', ' ', $name);
             $name = preg_replace('/\bNoGroup\b.*$/i', '', $name);
-            $name = preg_replace('/-[A-Z0-9].*$/i', '', $name);
+            $name = preg_replace('/-[A-Z0-9]{2,}(?:\s|$).*$/', '', $name);
+            if (preg_match('/^[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}-(?P<title>[A-Z][\w .\'!,&;:`()-]+)$/', $name, $creditedTitleMatch)) {
+                $name = $creditedTitleMatch['title'];
+            }
             $name = trim(preg_replace('/\s{2,}/', ' ', $name));
             if (preg_match('/^N([A-Z][A-Z0-9 ]{4,})NO$/', $name, $posterMatch)) {
                 $name = Str::title(strtolower($posterMatch[1]));

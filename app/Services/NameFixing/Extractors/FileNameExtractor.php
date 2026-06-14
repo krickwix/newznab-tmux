@@ -71,7 +71,12 @@ class FileNameExtractor
         if (! preg_match('/(?:^|[._ -])(?:sample|proof|subs?|thumbs?)(?:[._ -]|$)/iu', $baseFilename)
             && ! $this->isLikelySoftwareArchivePart($baseFilename)
             && preg_match('/^(.+?(19|20)\d\d.+?)(?:[._ -]part0*\d+|[._ -]r\d{2,3})\.rar$/iu', $baseFilename, $result)) {
-            return NameFixResult::fromMatch($this->normalizeBareMovieCandidate($result[1]).' DVDRip XviD NoGroup', 'Movie (year) archive part', 'File');
+            $candidate = $this->normalizeBareMovieCandidate($result[1]);
+            if ($this->isEncodedArchiveTimestampStem($candidate)) {
+                return null;
+            }
+
+            return NameFixResult::fromMatch($candidate.' DVDRip XviD NoGroup', 'Movie (year) archive part', 'File');
         }
 
         // Scene TV release with group suffix
@@ -169,7 +174,12 @@ class FileNameExtractor
         if (! preg_match('/(?:^|[._ -])(?:sample|proof|subs?|thumbs?)(?:[._ -]|$)/iu', $baseFilename)
             && ! $this->isLikelySoftwareArchivePart($baseFilename)
             && preg_match('/^(.+?(19|20)\d\d.+?)(?:[._ -]part0*\d+|[._ -]r\d{2,3})\.rar$/iu', $baseFilename, $result)) {
-            return NameFixResult::fromMatch($this->normalizeBareMovieCandidate($result[1]).' DVDRip XviD NoGroup', 'Movie (year) archive part', 'File');
+            $candidate = $this->normalizeBareMovieCandidate($result[1]);
+            if ($this->isEncodedArchiveTimestampStem($candidate)) {
+                return null;
+            }
+
+            return NameFixResult::fromMatch($candidate.' DVDRip XviD NoGroup', 'Movie (year) archive part', 'File');
         }
 
         // RAR file contents - look for release name in RAR path
@@ -276,6 +286,7 @@ class FileNameExtractor
 
         // Folder name fallback
         if (! preg_match('/(?:^|\s)yEnc$/i', trim($filename))
+            && ! $this->isHashedArchiveStem($baseFilename)
             && ! $this->isLowInformationName($cleanedFilename)
             && preg_match('/\w+[\-\w.\',;& ]+$/i', $filename, $result)
             && preg_match(self::PREDB_REGEX, $filename)) {
@@ -300,7 +311,7 @@ class FileNameExtractor
         }
 
         $candidate = null;
-        if (preg_match('/^(?:REQ[:\s]*)?(.+?\b(?:19|20)\d{2}\b.*?)(?:[._\s-]*\[\d+\/\d+\]\s*(?:-|\")|\s+-\s+"|\s+yEnc\b)/iu', $subject, $match)) {
+        if (preg_match('/^(?:REQ[:\s]*)?(.+?\b(?:19|20)\d{2}\b.*?)(?:[._\s-]*\[\d+(?:\/|\s+of\s+)\d+\]\s*(?:-|\")|\s+-\s+"|\s+yEnc\b)/iu', $subject, $match)) {
             $candidate = $match[1];
         } elseif (preg_match('/^(?:REQ[:\s]*)?(.+?\b(?:19|20)\d{2}\b.*?)[._\s-]+\[[^\]]+\]/iu', $subject, $match)) {
             $candidate = $match[1];
@@ -327,6 +338,10 @@ class FileNameExtractor
         $candidate = trim((string) preg_replace('/\s+-\s*$/', '', $candidate));
         $candidate = trim($candidate, " \t\n\r\0\x0B.-_[]");
 
+        if ($candidate !== '' && $this->isBracketedBareYearSubjectTitle($candidate, $subject)) {
+            return NameFixResult::fromMatch($candidate, 'yEnc subject title', 'File');
+        }
+
         if ($candidate === '' || ! $this->cleaner->isPlausibleReleaseTitle($candidate)) {
             if ($supportFileResult = $this->extractQuotedClassicMovieSupportFilename($subject)) {
                 return $supportFileResult;
@@ -346,6 +361,14 @@ class FileNameExtractor
         return NameFixResult::fromMatch($candidate, 'yEnc subject title', 'File');
     }
 
+    private function isBracketedBareYearSubjectTitle(string $candidate, string $subject): bool
+    {
+        return preg_match('/\b(19|20)\d{2}\b/u', $candidate) === 1
+            && preg_match_all('/[\pL\pN]{3,}/u', $candidate) >= 2
+            && ! $this->isLowInformationName($candidate)
+            && preg_match('/^\['.preg_quote($candidate, '/').'\]\s+yEnc\s*$/iu', trim($subject)) === 1;
+    }
+
     private function extractBareMovieSubjectTitle(string $candidate, string $subject): ?NameFixResult
     {
         if (! preg_match('/\b(19|20)\d{2}\b/u', $candidate)) {
@@ -359,6 +382,7 @@ class FileNameExtractor
         $candidate = $this->normalizeBareMovieCandidate($candidate);
         if ($candidate === ''
             || $this->isLowInformationName($candidate)
+            || $this->isEncodedArchiveTimestampStem($candidate)
             || $this->cleaner->looksLikeHashedName($candidate)
             || ! preg_match('/[\pL][\pL\pN\s._\',;&!()’`-]{2,}/u', $candidate)) {
             return null;
@@ -499,6 +523,13 @@ class FileNameExtractor
         return trim($candidate);
     }
 
+    private function isEncodedArchiveTimestampStem(string $candidate): bool
+    {
+        $compact = preg_replace('/[^A-Za-z0-9]/', '', $candidate) ?: $candidate;
+
+        return preg_match('/^[A-Za-z]{1,8}\d{10}[A-Za-z0-9]{3,12}\d{6}[A-Za-z0-9]{3,24}$/', $compact) === 1;
+    }
+
     private function stripArchiveSuffixes(string $candidate): string
     {
         $candidate = trim($candidate);
@@ -532,6 +563,23 @@ class FileNameExtractor
         }
 
         return preg_match('/^(?:nfo|sfv|par2?|nzb|srr|srs|txt|md5|sha1)$/i', $name) === 1;
+    }
+
+    private function isHashedArchiveStem(string $baseFilename): bool
+    {
+        if (! preg_match('/\.(?:part\d{1,4}\.rar|r\d{2,4}|rar|par2?|vol\d+[+\-]\d+\.par2?|7z\.\d{2,4}|\d{3}|mkv|mp4|m4v|avi)$/iu', $baseFilename)) {
+            return false;
+        }
+
+        $stem = $this->stripArchiveSuffixes($baseFilename);
+        if (str_contains($stem, ' - ')) {
+            $parts = preg_split('/\s+-\s+/', $stem, 2);
+            $stem = (string) ($parts[0] ?? $stem);
+        }
+
+        $stem = trim($stem, " \t\n\r\0\x0B.-_\"'");
+
+        return $stem !== '' && $this->cleaner->looksLikeHashedName($stem);
     }
 
     private function isSubtitleSupportFilename(string $baseFilename): bool

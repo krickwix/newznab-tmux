@@ -144,8 +144,18 @@ class ReleaseUpdateService
 
             // Determine if the source is trusted enough to bypass plausibility checks
             $trustedSource = $this->isTrustedSource($type, $method, $preId);
+            $preferredSubjectTitle = false;
 
-            if (! $trustedSource && ! $this->fileNameCleaner->isPlausibleReleaseTitle($normalizedName)) {
+            if (! $trustedSource) {
+                $subjectTitle = $this->preferClassicMovieSubjectTitle($release, $newName);
+                if ($subjectTitle !== $newName) {
+                    $newName = $subjectTitle;
+                    $normalizedName = $this->fileNameCleaner->normalizeCandidateTitle($newName);
+                    $preferredSubjectTitle = true;
+                }
+            }
+
+            if (! $trustedSource && ! $preferredSubjectTitle && ! $this->fileNameCleaner->isPlausibleReleaseTitle($normalizedName)) {
                 // Skip low-quality rename candidates for untrusted sources
                 $this->done = true;
 
@@ -165,32 +175,32 @@ class ReleaseUpdateService
                 }
             }
 
-            if (strtolower($newName) !== strtolower($release->searchname)) {
+            if ($type === 'PAR2, ') {
+                $newName = ucwords($newName);
+                if (preg_match('/(.+?)\.[a-z0-9]{2,3}(PAR2)?$/i', $name, $hit)) {
+                    $newName = $hit[1];
+                }
+            }
+
+            // Split on path separator backslash to strip any path
+            $newName = explode('\\', $newName);
+            $newName = preg_replace(['/^[=_.:\s-]+/', '/[=_.:\s-]+$/'], '', $newName[0]);
+
+            $newTitle = substr($newName, 0, 299);
+
+            $allowedCategories = (array) ($release->allowed_categories ?? []);
+            $determinedCategory = $this->category->determineCategory(
+                $release->groups_id,
+                $newTitle,
+                ! empty($release->fromname) ? $release->fromname : ''
+            );
+
+            $categoryChanged = (int) $release->categories_id === Category::OTHER_HASHED
+                && (int) $release->categories_id !== (int) $determinedCategory['categories_id'];
+
+            if (strtolower($newTitle) !== strtolower($release->searchname) || $categoryChanged) {
                 $this->matched = true;
                 $this->relid = (int) $release->releases_id;
-
-                if ($type === 'PAR2, ') {
-                    $newName = ucwords($newName);
-                    if (preg_match('/(.+?)\.[a-z0-9]{2,3}(PAR2)?$/i', $name, $hit)) {
-                        $newName = $hit[1];
-                    }
-                }
-
-                // Split on path separator backslash to strip any path
-                $newName = explode('\\', $newName);
-                $newName = preg_replace(['/^[=_.:\s-]+/', '/[=_.:\s-]+$/'], '', $newName[0]);
-
-                $newTitle = substr($newName, 0, 299);
-
-                $determinedCategory = null;
-                $allowedCategories = (array) ($release->allowed_categories ?? []);
-                if (($this->echoOutput && $show) || $allowedCategories !== []) {
-                    $determinedCategory = $this->category->determineCategory(
-                        $release->groups_id,
-                        $newTitle,
-                        ! empty($release->fromname) ? $release->fromname : ''
-                    );
-                }
 
                 if ($allowedCategories !== [] && ! in_array((int) $determinedCategory['categories_id'], $allowedCategories, true)) {
                     $this->matched = false;
@@ -207,11 +217,72 @@ class ReleaseUpdateService
                 }
 
                 if ($echo === true) {
-                    $this->performDatabaseUpdate($release, $newTitle, $type, $nameStatus, $preId);
+                    $this->performDatabaseUpdate($release, $newTitle, $type, $nameStatus, $preId, (int) $determinedCategory['categories_id']);
                 }
             }
         }
         $this->done = true;
+    }
+
+    protected function preferClassicMovieSubjectTitle(object $release, string $candidate): string
+    {
+        $groupName = UsenetGroup::getNameByID($release->groups_id);
+        if (! $this->isClassicMovieGroup($groupName)) {
+            return $candidate;
+        }
+
+        if (! $this->looksLikeCompactFilenameStem($candidate)) {
+            return $candidate;
+        }
+
+        $subject = (string) ($release->name ?? $release->searchname ?? '');
+        $title = $this->extractReadableSubjectMovieTitle($subject);
+
+        return $title === null ? $candidate : $title;
+    }
+
+    protected function isClassicMovieGroup(string $groupName): bool
+    {
+        return preg_match('/(?:alt\.binaries|a\.b)\..*?(?:vintage[.-]?film|classic[.-]?film|dvd[.-]?classic|movies?[.-]?classic|movie[.-]?classic)/i', $groupName) === 1;
+    }
+
+    protected function looksLikeCompactFilenameStem(string $candidate): bool
+    {
+        $normalized = preg_replace('/[^\pL\pN]+/u', '', $candidate) ?? $candidate;
+
+        return strlen($normalized) >= 8
+            && preg_match('/\s/u', $candidate) !== 1
+            && preg_match('/[a-z]/u', $normalized) !== 1
+            && preg_match('/[A-Z]{4,}/u', $normalized) === 1;
+    }
+
+    protected function extractReadableSubjectMovieTitle(string $subject): ?string
+    {
+        if ($subject === '' || preg_match('/\b(?:19|20)\d{2}\b/', $subject) !== 1) {
+            return null;
+        }
+
+        $withoutQuotedFiles = preg_replace('/["\'][^"\']+["\']/', ' ', $subject) ?? $subject;
+        $withoutQuotedFiles = preg_replace('/\[[0-9]+\/[0-9]+\]/', ' ', $withoutQuotedFiles) ?? $withoutQuotedFiles;
+        $withoutQuotedFiles = preg_replace('/\byEnc\b/i', ' ', $withoutQuotedFiles) ?? $withoutQuotedFiles;
+        $withoutQuotedFiles = preg_replace('/\b1\s*:\s*1\b/i', ' ', $withoutQuotedFiles) ?? $withoutQuotedFiles;
+        $withoutQuotedFiles = preg_replace('/\s+-\s*$/', '', trim($withoutQuotedFiles)) ?? $withoutQuotedFiles;
+        $withoutQuotedFiles = preg_replace('/\s{2,}/', ' ', $withoutQuotedFiles) ?? $withoutQuotedFiles;
+        $title = trim($withoutQuotedFiles, " \t\n\r\0\x0B-_.");
+
+        if (preg_match('/^(.+?\b(?:19|20)\d{2}\b\)?)/u', $title, $hit) === 1) {
+            $title = $hit[1];
+        }
+
+        $title = preg_replace('/\(((?:19|20)\d{2})\)/', ' $1', $title) ?? $title;
+        $title = preg_replace('/\s{2,}/', ' ', $title) ?? $title;
+        $title = trim($title, " \t\n\r\0\x0B-_.");
+
+        if (preg_match_all('/[\pL]{3,}/u', $title) < 1 || preg_match('/\b(?:19|20)\d{2}\b/', $title) !== 1) {
+            return null;
+        }
+
+        return $title;
     }
 
     /**
@@ -269,6 +340,7 @@ class ReleaseUpdateService
             $type === 'CRC32, ' ||
             $type === 'SRR, ' ||
             stripos($method, 'Title Match') !== false ||
+            stripos($method, 'App:') !== false ||
             stripos($method, 'Classic movie support filename') !== false ||
             stripos($method, 'file matched source') !== false ||
             stripos($method, 'PreDb') !== false ||
@@ -329,9 +401,10 @@ class ReleaseUpdateService
         string $newTitle,
         string $type,
         bool $nameStatus,
-        int $preId
+        int $preId,
+        int $categoryId
     ): void {
-        DB::transaction(function () use ($release, $newTitle, $type, $nameStatus, $preId): void {
+        DB::transaction(function () use ($release, $newTitle, $type, $nameStatus, $preId, $categoryId): void {
             if ($nameStatus === true) {
                 $status = $this->getStatusColumnsForType($type);
 
@@ -345,6 +418,7 @@ class ReleaseUpdateService
                     'anidbid' => '',
                     'predb_id' => $preId,
                     'searchname' => $newTitle,
+                    'categories_id' => $categoryId,
                 ];
 
                 if (! empty($status)) {
@@ -369,6 +443,7 @@ class ReleaseUpdateService
                         'anidbid' => null,
                         'predb_id' => $preId,
                         'searchname' => $newTitle,
+                        'categories_id' => $categoryId,
                         'iscategorized' => 1,
                     ]);
             }

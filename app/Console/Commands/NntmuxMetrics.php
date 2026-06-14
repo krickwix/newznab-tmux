@@ -41,14 +41,28 @@ class NntmuxMetrics extends Command
 
         $this->info("Serving NNTmux metrics on {$host}:{$port}");
 
-        while (true) {
+        while (true) { // @phpstan-ignore while.alwaysTrue
             $client = @stream_socket_accept($server, 30);
             if ($client === false) {
                 continue;
             }
 
+            stream_set_timeout($client, 3);
+
             $request = fgets($client) ?: '';
+            if (stream_get_meta_data($client)['timed_out']) {
+                fclose($client);
+
+                continue;
+            }
+
             while (($line = fgets($client)) !== false && trim($line) !== '') {
+                if (stream_get_meta_data($client)['timed_out']) {
+                    fclose($client);
+
+                    continue 2;
+                }
+
                 // Drain headers.
             }
 

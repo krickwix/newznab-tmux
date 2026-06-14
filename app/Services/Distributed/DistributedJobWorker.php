@@ -79,6 +79,9 @@ class DistributedJobWorker
     {
         $lockName = 'nntmux:distributed-worker:'.$plan['name'];
         $lockStore = (string) config('nntmux.distributed_lock_store', 'redis');
+        // Laravel exposes lock() on concrete cache repositories, but the facade
+        // contract does not currently declare it for static analysis.
+        /** @phpstan-ignore-next-line method.notFound */
         $lock = Cache::store($lockStore)->lock($lockName, $lockSeconds);
 
         try {
@@ -175,13 +178,7 @@ class DistributedJobWorker
                 : SIG_DFL;
 
             pcntl_signal($signal, function (int $receivedSignal) use ($lock, $lockName, $job, $output): void {
-                $output->writeln(sprintf(
-                    '[%s] received signal %d while running %s; releasing %s before exit',
-                    now()->toDateTimeString(),
-                    $receivedSignal,
-                    $job,
-                    $lockName,
-                ));
+                $output->writeln($this->formatTerminationSignalMessage($receivedSignal, $job, $lockName));
 
                 try {
                     $lock->release();
@@ -210,6 +207,17 @@ class DistributedJobWorker
         };
     }
 
+    private function formatTerminationSignalMessage(int $signal, string $job, string $lockName): string
+    {
+        return sprintf(
+            '[%s] received signal %d while running %s; releasing %s before exit',
+            now()->toDateTimeString(),
+            $signal,
+            $job,
+            $lockName,
+        );
+    }
+
     /**
      * @param  array<string, mixed>  $arguments
      */
@@ -227,6 +235,16 @@ class DistributedJobWorker
     {
         $parts = [];
         foreach ($arguments as $key => $value) {
+            if (is_array($value)) {
+                foreach ($value as $item) {
+                    $parts[] = is_string($key) && str_starts_with($key, '--')
+                        ? $key.'='.(string) $item
+                        : (string) $item;
+                }
+
+                continue;
+            }
+
             if (is_bool($value)) {
                 if ($value) {
                     $parts[] = (string) $key;

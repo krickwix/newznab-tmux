@@ -6,14 +6,57 @@ namespace Tests\Unit\Services\Metrics;
 
 use App\Models\Category;
 use App\Services\Metrics\NntmuxPrometheusMetrics;
+use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Mockery;
+use Mockery\MockInterface;
+use PDO;
 use ReflectionClass;
 use Tests\TestCase;
 
 class NntmuxPrometheusMetricsTest extends TestCase
 {
+    private string $databasePath;
+
+    /**
+     * @var array<string, string|false>
+     */
+    private array $originalEnvironment = [];
+
+    public function createApplication()
+    {
+        $this->databasePath = sys_get_temp_dir().'/nntmux-prometheus-metrics-test.sqlite';
+
+        $this->originalEnvironment = [
+            'APP_ENV' => getenv('APP_ENV'),
+            'DB_CONNECTION' => getenv('DB_CONNECTION'),
+            'DB_DATABASE' => getenv('DB_DATABASE'),
+        ];
+
+        if (file_exists($this->databasePath)) {
+            unlink($this->databasePath);
+        }
+
+        $pdo = new PDO('sqlite:'.$this->databasePath);
+        $pdo->exec('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        $pdo->exec("INSERT INTO settings (name, value) VALUES
+            ('categorizeforeign', '0'),
+            ('catwebdl', '0'),
+            ('title', 'NNTmux Test'),
+            ('home_link', '/')");
+
+        $this->setEnvironmentValue('APP_ENV', 'testing');
+        $this->setEnvironmentValue('DB_CONNECTION', 'sqlite');
+        $this->setEnvironmentValue('DB_DATABASE', $this->databasePath);
+
+        $app = require __DIR__.'/../../../../bootstrap/app.php';
+
+        $app->make(Kernel::class)->bootstrap();
+
+        return $app;
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -52,6 +95,33 @@ class NntmuxPrometheusMetricsTest extends TestCase
         ]);
     }
 
+    protected function tearDown(): void
+    {
+        parent::tearDown();
+
+        foreach ($this->originalEnvironment as $key => $value) {
+            $this->setEnvironmentValue($key, $value);
+        }
+
+        if (isset($this->databasePath) && file_exists($this->databasePath)) {
+            unlink($this->databasePath);
+        }
+    }
+
+    private function setEnvironmentValue(string $key, string|false $value): void
+    {
+        if ($value === false) {
+            putenv($key);
+            unset($_ENV[$key], $_SERVER[$key]);
+
+            return;
+        }
+
+        putenv($key.'='.$value);
+        $_ENV[$key] = $value;
+        $_SERVER[$key] = $value;
+    }
+
     public function test_release_metrics_expose_category_based_hashed_backlog(): void
     {
         DB::table('releases')->insert([
@@ -72,16 +142,56 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_releases_state_total{state="renamed"} 1', $output);
     }
 
+    public function test_release_metrics_work_after_legacy_ishashed_column_is_removed(): void
+    {
+        DB::statement('ALTER TABLE releases DROP COLUMN ishashed');
+
+        DB::table('releases')->insert([
+            ['id' => 1, 'adddate' => now(), 'isrenamed' => 0, 'categories_id' => Category::OTHER_HASHED],
+            ['id' => 2, 'adddate' => now(), 'isrenamed' => 1, 'categories_id' => Category::MOVIE_HD],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('releaseMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_releases_state_total{state="hashed"} 0', $output);
+        $this->assertStringContainsString('nntmux_releases_state_total{state="hashed_category"} 1', $output);
+        $this->assertStringContainsString('nntmux_releases_state_total{state="hashed_effective"} 1', $output);
+        $this->assertStringContainsString('nntmux_releases_state_total{state="renamed"} 1', $output);
+    }
+
     public function test_imdb_lookup_metrics_expose_reason_and_fallback_counters(): void
     {
-        Redis::shouldReceive('keys')
+        config([
+            'cache.prefix' => 'nntmux-cache-',
+            'cache.stores.redis.connection' => 'cache',
+            'database.redis.options.prefix' => 'nntmux_database_',
+        ]);
+
+        /** @var MockInterface $connection */
+        $connection = Mockery::mock();
+        Redis::shouldReceive('keys')->never();
+        Redis::shouldReceive('connection')
+            ->with('cache')
+            ->andReturn($connection);
+        $connection->shouldReceive('scan')
+            // @phpstan-ignore-next-line Mockery fluent expectations expose once() dynamically.
             ->once()
-            ->with('*metrics:imdb_lookup*')
-            ->andReturn([
+            ->with('0', ['match' => 'nntmux_database_nntmux-cache-metrics:imdb_lookup*', 'count' => 1000])
+            ->andReturn(['12', [
                 'nntmux_database_nntmux-cache-metrics:imdb_lookup:outcome:failed:reason:waf_block:fallback:fallback_min_interval_active:source:none',
+            ]]);
+        $connection->shouldReceive('scan')
+            // @phpstan-ignore-next-line Mockery fluent expectations expose once() dynamically.
+            ->once()
+            ->with('12', ['match' => 'nntmux_database_nntmux-cache-metrics:imdb_lookup*', 'count' => 1000])
+            ->andReturn(['0', [
                 'nntmux_database_nntmux-cache-metrics:imdb_lookup:outcome:success:reason:none:fallback:none:source:imdbapi_dev',
-            ]);
-        Redis::shouldReceive('get')
+            ]]);
+        $connection->shouldReceive('get')
+            // @phpstan-ignore-next-line Mockery fluent expectations expose with() dynamically.
             ->with(Mockery::type('string'))
             ->andReturnUsing(static function (string $key): int {
                 return str_contains($key, 'success') ? 3 : 7;
@@ -94,5 +204,136 @@ class NntmuxPrometheusMetricsTest extends TestCase
 
         $this->assertStringContainsString('nntmux_imdb_lookup_total{outcome="failed",reason="waf_block",fallback_reason="fallback_min_interval_active",source="none"} 7', $output);
         $this->assertStringContainsString('nntmux_imdb_lookup_total{outcome="success",reason="none",fallback_reason="none",source="imdbapi_dev"} 3', $output);
+    }
+
+    public function test_lock_metrics_scan_lock_connection_without_keys(): void
+    {
+        config([
+            'cache.prefix' => 'nntmux-cache-',
+            'cache.stores.redis.lock_connection' => 'default',
+            'database.redis.options.prefix' => 'nntmux_database_',
+        ]);
+
+        /** @var MockInterface $connection */
+        $connection = Mockery::mock();
+        Redis::shouldReceive('keys')->never();
+        Redis::shouldReceive('connection')
+            ->with('default')
+            ->andReturn($connection);
+        $connection->shouldReceive('scan')
+            // @phpstan-ignore-next-line Mockery fluent expectations expose once() dynamically.
+            ->once()
+            ->with('0', ['match' => 'nntmux_database_nntmux-cache-nntmux:distributed-worker:*', 'count' => 1000])
+            ->andReturn(['0', [
+                'nntmux_database_nntmux-cache-nntmux:distributed-worker:releases',
+            ]]);
+        $connection->shouldReceive('ttl')
+            // @phpstan-ignore-next-line Mockery fluent expectations expose with() dynamically.
+            ->with(Mockery::type('string'))
+            ->andReturnUsing(static function (string $key): int {
+                return str_ends_with($key, 'releases') ? 42 : -2;
+            });
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('lockMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_worker_lock_ttl_seconds{worker="releases",prefix="nntmux-cache-"} 42', $output);
+    }
+
+    public function test_external_metadata_metrics_expose_srrdb_crc_rows_and_backlog(): void
+    {
+        DB::statement('CREATE TABLE predb (
+            id INTEGER PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            source VARCHAR(255) NOT NULL
+        )');
+
+        DB::statement('CREATE TABLE predb_crcs (
+            id INTEGER PRIMARY KEY,
+            predb_id INTEGER NOT NULL,
+            crchash VARCHAR(8) NOT NULL,
+            filesize INTEGER NOT NULL
+        )');
+
+        DB::table('predb')->insert([
+            ['id' => 1, 'title' => 'Matched.Release-GRP', 'source' => 'srrdb'],
+            ['id' => 2, 'title' => 'Missing.Crc-GRP', 'source' => 'srrdb'],
+            ['id' => 3, 'title' => 'Other.Source-GRP', 'source' => 'xrel'],
+        ]);
+        DB::table('predb_crcs')->insert([
+            ['id' => 1, 'predb_id' => 1, 'crchash' => 'AABBCCDD', 'filesize' => 15000000],
+            ['id' => 2, 'predb_id' => 1, 'crchash' => 'EEFF0011', 'filesize' => 15000000],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('externalMetadataMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_external_metadata_total{source="srrdb",state="crc_rows"} 2', $output);
+        $this->assertStringContainsString('nntmux_external_metadata_total{source="srrdb",state="predb_without_crc"} 1', $output);
+    }
+
+    public function test_collection_formation_metrics_expose_filecheck_and_pending_multifile_backlogs(): void
+    {
+        DB::statement('CREATE TABLE usenet_groups (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            active INTEGER DEFAULT 0,
+            backfill INTEGER DEFAULT 0
+        )');
+
+        DB::statement('CREATE TABLE collections (
+            id INTEGER PRIMARY KEY,
+            groups_id INTEGER NOT NULL,
+            totalfiles INTEGER NOT NULL,
+            filecheck INTEGER NOT NULL,
+            collection_regexes_id INTEGER NOT NULL
+        )');
+
+        DB::statement('CREATE TABLE binaries (
+            id INTEGER PRIMARY KEY,
+            collections_id INTEGER NOT NULL
+        )');
+
+        DB::table('usenet_groups')->insert([
+            ['id' => 5, 'name' => 'alt.binaries.blu-ray', 'active' => 1, 'backfill' => 1],
+            ['id' => 6, 'name' => 'alt.binaries.lossless', 'active' => 1, 'backfill' => 1],
+            ['id' => 7, 'name' => 'alt.binaries.inactive', 'active' => 0, 'backfill' => 0],
+        ]);
+
+        DB::table('collections')->insert([
+            ['id' => 101, 'groups_id' => 5, 'totalfiles' => 55, 'filecheck' => 0, 'collection_regexes_id' => 88],
+            ['id' => 102, 'groups_id' => 5, 'totalfiles' => 55, 'filecheck' => 0, 'collection_regexes_id' => 88],
+            ['id' => 103, 'groups_id' => 5, 'totalfiles' => 55, 'filecheck' => 4, 'collection_regexes_id' => 88],
+            ['id' => 201, 'groups_id' => 6, 'totalfiles' => 1, 'filecheck' => 0, 'collection_regexes_id' => -10],
+            ['id' => 301, 'groups_id' => 7, 'totalfiles' => 10, 'filecheck' => 0, 'collection_regexes_id' => 88],
+        ]);
+
+        DB::table('binaries')->insert([
+            ['id' => 1, 'collections_id' => 101],
+            ['id' => 2, 'collections_id' => 102],
+            ['id' => 3, 'collections_id' => 103],
+            ['id' => 4, 'collections_id' => 103],
+            ['id' => 5, 'collections_id' => 201],
+            ['id' => 6, 'collections_id' => 301],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $reflection = new ReflectionClass($metrics);
+
+        $this->assertTrue($reflection->hasMethod('collectionFormationMetrics'));
+
+        $method = $reflection->getMethod('collectionFormationMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.binaries.blu-ray",filecheck="0"} 2', $output);
+        $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.binaries.blu-ray",filecheck="4"} 1', $output);
+        $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.binaries.lossless",filecheck="0"} 1', $output);
+        $this->assertStringContainsString('nntmux_collections_pending_multifile_total{group="alt.binaries.blu-ray",collection_regexes_id="88"} 2', $output);
+        $this->assertStringNotContainsString('alt.binaries.inactive', $output);
     }
 }

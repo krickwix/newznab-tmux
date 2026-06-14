@@ -10,6 +10,7 @@ use App\Services\XrefService;
 use App\Support\Utf8;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Handles collection record creation and retrieval during header storage.
@@ -127,10 +128,14 @@ final class CollectionHandler
 
                 return $collectionId;
             }
-        } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Collection insert failed: '.$e->getMessage());
-            }
+        } catch (Throwable $e) {
+            Log::error('Collection insert failed', [
+                'driver' => DB::getDriverName(),
+                'group_id' => $groupId,
+                'subject' => $subject,
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
         }
 
         return null;
@@ -140,6 +145,7 @@ final class CollectionHandler
      * Resolve collections for a chunk of headers with one bulk insert and one id lookup.
      *
      * @param  array<int, array<string, mixed>>  $headers
+     * @param  array<int, int>  $totalFilesByIndex
      * @return array<int, int> Collection ids keyed by header index
      */
     public function getOrCreateCollections(
@@ -153,13 +159,18 @@ final class CollectionHandler
         $pending = [];
         $indexByCollectionKey = [];
         $xrefsToPrefetch = [];
+        $cleanedBySubject = [];
 
         foreach ($headers as $index => $header) {
             $totalFiles = (int) ($totalFilesByIndex[$index] ?? 0);
-            $collMatch = $this->collectionsCleaning->collectionsCleaner(
-                $header['matches'][1],
-                $groupName
-            );
+            $subject = (string) $header['matches'][1];
+            if (! isset($cleanedBySubject[$subject])) {
+                $cleanedBySubject[$subject] = $this->collectionsCleaning->collectionsCleaner(
+                    $subject,
+                    $groupName
+                );
+            }
+            $collMatch = $cleanedBySubject[$subject];
 
             $collectionKey = $collMatch['name'].$totalFiles;
             if (isset($this->collectionIds[$collectionKey])) {
@@ -202,6 +213,7 @@ final class CollectionHandler
         }
 
         $this->prefetchExistingCollections($xrefsToPrefetch);
+
         foreach ($pending as $collectionKey => &$row) {
             $row['xref_append'] = implode(' ', $this->xrefService->diffNewTokens(
                 $this->existingXrefs[$collectionKey],
@@ -224,10 +236,19 @@ final class CollectionHandler
                     $resolved[$index] = $collectionId;
                 }
             }
-        } catch (\Throwable $e) {
-            if (config('app.debug') === true) {
-                Log::error('Bulk collection insert failed: '.$e->getMessage());
+        } catch (Throwable $e) {
+            if (TransientHeaderStorageFailure::is($e)) {
+                throw $e;
             }
+
+            Log::error('Bulk collection insert failed', [
+                'driver' => DB::getDriverName(),
+                'group_id' => $groupId,
+                'pending' => \count($pending),
+                'sample_hashes' => array_slice(array_column($pending, 'collectionhash'), 0, 5),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
         }
 
         return $resolved;
@@ -296,10 +317,15 @@ final class CollectionHandler
             }
         }
 
+        $newRowsByCollectionKey = array_filter(
+            $rowsByCollectionKey,
+            static fn (array $row): bool => ! isset($existingHashes[$row['collectionhash']])
+        );
+
         if (DB::getDriverName() === 'sqlite') {
-            $this->bulkInsertCollectionsSqlite($rowsByCollectionKey);
+            $this->bulkInsertCollectionsSqlite($newRowsByCollectionKey);
         } else {
-            $this->bulkInsertCollectionsMysql($rowsByCollectionKey, $existingHashes);
+            $this->bulkInsertCollectionsMysql($newRowsByCollectionKey, $existingHashes, $rowsByCollectionKey);
         }
 
         // Only resolve ids for the hashes we couldn't satisfy from the
@@ -352,7 +378,7 @@ final class CollectionHandler
      * @param  array<string, array<string, mixed>>  $rowsByCollectionKey
      * @param  array<string, true>  $existingHashes
      */
-    private function bulkInsertCollectionsMysql(array $rowsByCollectionKey, array $existingHashes): void
+    private function bulkInsertCollectionsMysql(array $rowsByCollectionKey, array $existingHashes, ?array $xrefRowsByCollectionKey = null): void
     {
         foreach (array_chunk(array_values($rowsByCollectionKey), self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
             $placeholders = [];
@@ -377,15 +403,15 @@ final class CollectionHandler
             // "insert or do nothing" idiom that avoids re-writing existing
             // rows (and the redo/binlog churn that comes with it) while still
             // letting LAST_INSERT_ID() return the existing row's id.
-            DB::statement(
+            $this->runCollectionWriteWithRetry(fn (): bool => DB::statement(
                 'INSERT INTO collections (subject, fromname, date, xref, groups_id, totalfiles, collectionhash, collection_regexes_id, dateadded, noise) VALUES '
                 .implode(',', $placeholders)
                 .' ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)',
                 $bindings
-            );
+            ));
         }
 
-        $this->batchAppendXrefs($rowsByCollectionKey, $existingHashes);
+        $this->batchAppendXrefs($xrefRowsByCollectionKey ?? $rowsByCollectionKey, $existingHashes);
     }
 
     /**
@@ -427,7 +453,7 @@ final class CollectionHandler
                 .'SET c.xref = CONCAT(c.xref, ?, u.xref_append)';
             $bindings[] = "\n";
 
-            DB::statement($sql, $bindings);
+            $this->runCollectionWriteWithRetry(fn (): bool => DB::statement($sql, $bindings));
         }
     }
 
@@ -578,7 +604,9 @@ final class CollectionHandler
         // append, or 2 when xref was actually appended). LAST_INSERT_ID(id) in
         // the ODKU clause makes lastInsertId() return the existing row id
         // even on a duplicate, so we can't rely on lastInsertId() alone.
-        $affected = (int) DB::affectingStatement($insertSql, $bindings);
+        $affected = (int) $this->runCollectionWriteWithRetry(
+            fn (): int => (int) DB::affectingStatement($insertSql, $bindings)
+        );
         $lastId = (int) DB::connection()->getPdo()->lastInsertId();
 
         if ($lastId > 0) {
@@ -590,6 +618,24 @@ final class CollectionHandler
         }
 
         return (int) (Collection::whereCollectionhash($collectionHash)->value('id') ?? 0);
+    }
+
+    private function runCollectionWriteWithRetry(callable $write): mixed
+    {
+        $attempts = 0;
+
+        while (true) {
+            try {
+                return $write();
+            } catch (Throwable $e) {
+                $attempts++;
+                if ($attempts >= 3 || ! TransientHeaderStorageFailure::canRetryStatement($e)) {
+                    throw $e;
+                }
+
+                usleep(25_000 * $attempts);
+            }
+        }
     }
 
     /**

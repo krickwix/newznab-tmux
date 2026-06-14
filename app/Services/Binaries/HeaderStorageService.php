@@ -12,6 +12,8 @@ namespace App\Services\Binaries;
  */
 final class HeaderStorageService
 {
+    private const MAX_CHUNK_ATTEMPTS = 3;
+
     private CollectionHandler $collectionHandler;
 
     private BinaryHandler $binaryHandler;
@@ -41,10 +43,10 @@ final class HeaderStorageService
     /**
      * Store parsed headers to the database.
      *
-     * @param  array<string, mixed>  $headers  Parsed headers with 'matches' already populated
+     * @param  array<int, array<string, mixed>>  $headers  Parsed headers with 'matches' already populated
      * @param  array<string, mixed>  $groupMySQL  Group info from database
      * @param  bool  $addToPartRepair  Whether to track failed inserts
-     * @return array<string, mixed> Article numbers that failed to insert
+     * @return list<int> Article numbers that failed to insert
      */
     public function store(array $headers, array $groupMySQL, bool $addToPartRepair = true): array
     {
@@ -77,20 +79,62 @@ final class HeaderStorageService
     /**
      * Store one bounded header chunk inside its own transaction.
      *
-     * @param  array<string, mixed>  $headers
+     * @param  array<int, array<string, mixed>>  $headers
      * @param  array<string, mixed>  $groupMySQL
      */
     private function storeChunk(array $headers, array $groupMySQL, bool $addToPartRepair): void
+    {
+        $chunkNumbers = array_values(array_filter(array_map(
+            static fn (array $header): mixed => $header['Number'] ?? null,
+            $headers
+        )));
+
+        $failedBaseCount = \count($this->failedInserts);
+
+        for ($attempt = 1; $attempt <= self::MAX_CHUNK_ATTEMPTS; $attempt++) {
+            try {
+                if ($this->storeChunkOnce($headers, $groupMySQL, $addToPartRepair, $chunkNumbers)) {
+                    return;
+                }
+
+                return;
+            } catch (\Throwable $e) {
+                $this->failedInserts = \array_slice($this->failedInserts, 0, $failedBaseCount);
+
+                if (! TransientHeaderStorageFailure::is($e)) {
+                    throw $e;
+                }
+
+                if ($attempt >= self::MAX_CHUNK_ATTEMPTS) {
+                    if ($addToPartRepair) {
+                        $this->failedInserts = array_merge(
+                            $this->failedInserts,
+                            $chunkNumbers,
+                            $this->partHandler->getFailedNumbers()
+                        );
+                    }
+
+                    return;
+                }
+
+                usleep(50_000 * $attempt);
+            }
+        }
+    }
+
+    /**
+     * Store one bounded header chunk attempt inside its own transaction.
+     *
+     * @param  array<int, array<string, mixed>>  $headers
+     * @param  array<string, mixed>  $groupMySQL
+     * @param  list<int>  $chunkNumbers
+     */
+    private function storeChunkOnce(array $headers, array $groupMySQL, bool $addToPartRepair, array $chunkNumbers): bool
     {
         $this->collectionHandler->reset();
         $this->binaryHandler->reset();
         $this->partHandler->reset();
         $this->partHandler->setAddToPartRepair($addToPartRepair);
-
-        $chunkNumbers = array_values(array_filter(array_map(
-            static fn (array $header): mixed => $header['Number'] ?? null,
-            $headers
-        )));
 
         // Create transaction
         $transaction = new HeaderStorageTransaction(
@@ -99,41 +143,49 @@ final class HeaderStorageService
             $this->partHandler
         );
 
-        $transaction->begin();
+        try {
+            $transaction->begin();
 
-        $this->processHeaderChunk($headers, $groupMySQL, $transaction, $addToPartRepair);
+            $this->processHeaderChunk($headers, $groupMySQL, $transaction, $addToPartRepair);
 
-        // Flush remaining parts
-        if ($this->partHandler->hasPending()) {
-            if (! $this->partHandler->flush()) {
-                $transaction->markError();
-            }
-        }
-
-        // Flush binary aggregate updates
-        if (! $transaction->hasErrors()) {
-            if (! $this->binaryHandler->flushUpdates($this->config->binariesUpdateChunkSize)) {
-                $transaction->markError();
-            }
-        }
-
-        // Finish transaction
-        if (! $transaction->finish()) {
-            if ($addToPartRepair) {
-                $this->failedInserts = array_merge(
-                    $this->failedInserts,
-                    $chunkNumbers,
-                    $this->partHandler->getFailedNumbers()
-                );
+            // Flush remaining parts
+            if ($this->partHandler->hasPending()) {
+                if (! $this->partHandler->flush()) {
+                    $transaction->markError();
+                }
             }
 
-            return;
+            // Flush binary aggregate updates
+            if (! $transaction->hasErrors()) {
+                if (! $this->binaryHandler->flushUpdates($this->config->binariesUpdateChunkSize)) {
+                    $transaction->markError();
+                }
+            }
+
+            // Finish transaction
+            if (! $transaction->finish()) {
+                if ($addToPartRepair) {
+                    $this->failedInserts = array_merge(
+                        $this->failedInserts,
+                        $chunkNumbers,
+                        $this->partHandler->getFailedNumbers()
+                    );
+                }
+
+                return false;
+            }
+        } catch (\Throwable $e) {
+            $transaction->abort();
+
+            throw $e;
         }
 
         $this->failedInserts = array_merge(
             $this->failedInserts,
             $this->partHandler->getFailedNumbers()
         );
+
+        return true;
     }
 
     /**
@@ -196,6 +248,13 @@ final class HeaderStorageService
      */
     private function extractFileNumberAndTotal(array $header): array
     {
+        if (array_key_exists('collection_file_number', $header) && array_key_exists('collection_total_files', $header)) {
+            return [
+                (int) ($header['collection_file_number'] ?? 0),
+                (int) ($header['collection_total_files'] ?? 0),
+            ];
+        }
+
         $fileCount = $this->getFileCount($header['matches'][1]);
         if ($fileCount[1] === 0 && $fileCount[3] === 0) {
             $fileCount = $this->getFileCount($header['matches'][0]);
@@ -214,67 +273,28 @@ final class HeaderStorageService
     }
 
     /**
-     * @param  array<string, mixed>  $groupMySQL
-     * @param  array<string, mixed>  $header
-     */
-    private function processHeader(array $header, array $groupMySQL, HeaderStorageTransaction $transaction): bool
-    {
-        // Get file count from subject
-        $fileCount = $this->getFileCount($header['matches'][1]);
-        if ($fileCount[1] === 0 && $fileCount[3] === 0) {
-            $fileCount = $this->getFileCount($header['matches'][0]);
-        }
-
-        $totalFiles = (int) $fileCount[3];
-        $fileNumber = (int) $fileCount[1];
-
-        // Get or create collection
-        $collectionId = $this->collectionHandler->getOrCreateCollection(
-            $header,
-            $groupMySQL['id'],
-            $groupMySQL['name'],
-            $totalFiles,
-            $transaction->getBatchNoise()
-        );
-
-        if ($collectionId === null) {
-            $transaction->markError();
-
-            return false;
-        }
-
-        // Get or create binary
-        $binaryId = $this->binaryHandler->getOrCreateBinary(
-            $header,
-            $collectionId,
-            $groupMySQL['id'],
-            $fileNumber
-        );
-
-        if ($binaryId === null) {
-            $transaction->markError();
-
-            return false;
-        }
-
-        // Add part
-        if (! $this->partHandler->addPart($binaryId, $header)) {
-            $transaction->markError();
-
-            return false;
-        }
-
-        return true;
-    }
-
-    /**
      * @return array<int, int|string>
      */
     private function getFileCount(string $subject): array
     {
-        if (! preg_match('/[[(\s](\d{1,5})(\/|[\s_]of[\s_]|-)(\d{1,5})[])[\s$:]/i', $subject, $fileCount)) {
-            $fileCount[1] = $fileCount[3] = 0;
+        $patterns = [
+            '/\bFile[\s_]+(\d{1,5})[\s_]+of[\s_]+(\d{1,5})\b/i',
+            '/[\[(]\s*(\d{1,5})\s*\/\s*(\d{1,5})\s*[\])]/',
+            '/[\[(]\s*(\d{1,5})(?:\s+|_)of(?:\s+|_)(\d{1,5})\s*[\])]/i',
+            '/[\[(]\s*(\d{1,5})\s*-\s*(\d{1,5})\s*[\])]/',
+            '/(?:^|[\s:])(\d{1,5})\s*\/\s*(\d{1,5})(?:[\s$:)]|$)/',
+            '/(?:^|[\s:])(\d{1,5})(?:\s+|_)of(?:\s+|_)(\d{1,5})(?:[\s$:)]|$)/i',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $subject, $fileCount) === 1) {
+                $fileCount[3] = $fileCount[2];
+
+                return $fileCount;
+            }
         }
+
+        $fileCount[1] = $fileCount[3] = 0;
 
         return $fileCount;
     }
