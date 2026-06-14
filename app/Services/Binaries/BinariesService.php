@@ -69,7 +69,7 @@ class BinariesService
     private array $headersReceived = [];
 
     /**
-     * @var array<string, int>
+     * @var array<string, int|float>
      */
     private array $bodyPreambleStats = [];
 
@@ -399,9 +399,12 @@ class BinariesService
             'applied' => 0,
             'skipped_unhelpful' => 0,
             'errors' => 0,
+            'elapsed_seconds' => 0.0,
+            'average_ms' => 0.0,
         ];
 
         $probed = 0;
+        $startedAt = microtime(true);
         foreach ($headers as $index => $header) {
             if ($probed >= $this->config->bodyPreambleDeobfuscateLimit) {
                 break;
@@ -441,6 +444,9 @@ class BinariesService
             $headers[$index]['collection_total_files'] = $metadata->collectionTotalFiles();
             $this->bodyPreambleStats['applied']++;
         }
+        $elapsedSeconds = max(0.0, microtime(true) - $startedAt);
+        $this->bodyPreambleStats['elapsed_seconds'] = $elapsedSeconds;
+        $this->bodyPreambleStats['average_ms'] = $probed > 0 ? ($elapsedSeconds * 1000) / $probed : 0.0;
 
         return $headers;
     }
@@ -1131,13 +1137,15 @@ class BinariesService
 
         if ($this->bodyPreambleStats !== []) {
             cli()->primary(sprintf(
-                'Body preamble probes: eligible %d, probed %d, metadata %d, applied %d, skipped_unhelpful %d, errors %d.',
+                'Body preamble probes: eligible %d, probed %d, metadata %d, applied %d, skipped_unhelpful %d, errors %d, elapsed %.2fs, avg %.1fms.',
                 $this->bodyPreambleStats['eligible'],
                 $this->bodyPreambleStats['probed'],
                 $this->bodyPreambleStats['metadata'],
                 $this->bodyPreambleStats['applied'],
                 $this->bodyPreambleStats['skipped_unhelpful'],
-                $this->bodyPreambleStats['errors']
+                $this->bodyPreambleStats['errors'],
+                $this->bodyPreambleStats['elapsed_seconds'],
+                $this->bodyPreambleStats['average_ms']
             ));
         }
     }

@@ -182,6 +182,61 @@ class YencBodyDeobfuscationStorageTest extends TestCase
         $this->assertSame(104, (int) DB::table('parts')->value('partnumber'));
     }
 
+    public function test_scan_reports_body_preamble_probe_timing_in_cli_output(): void
+    {
+        $nntp = Mockery::mock(NNTPService::class);
+        $nntp->shouldReceive('getXOVER')
+            ->once()
+            ->with('785650027-785650027')
+            ->andReturn([[
+                'Number' => '785650027',
+                'Subject' => '757aeb2bb70f4915a13a1fecd8090147',
+                'From' => 'Qyb8IOrhzbQFL@ngPost.com',
+                'Date' => 'Thu, 04 Jun 2026 12:32:44 +0000',
+                'Message-ID' => '<757aeb2bb70f4915a13a1fecd8090147@ngPost>',
+                'Bytes' => '740162',
+                'Xref' => 'news.example a.b.boneless:785650027',
+            ]]);
+        $nntp->shouldReceive('getYencBodyPreambleLines')
+            ->once()
+            ->with('a.b.boneless', '785650027', 8)
+            ->andReturn([
+                '=ybegin part=104 total=634 line=128 size=454033408 name=Y7FouDJBgKrPFCGpz4wp.part070.rar',
+                '=ypart begin=73830401 end=74547200',
+            ]);
+
+        $service = new BinariesService(
+            new BinariesConfig(
+                partsChunkSize: 10,
+                headerChunkSize: 10,
+                echoCli: true,
+                bodyPreambleDeobfuscateGroups: ['a.b.boneless'],
+                bodyPreambleDeobfuscateLimit: 10,
+                bodyPreambleLineLimit: 8
+            ),
+            headerParser: new HeaderParser(new class extends BlacklistService
+            {
+                public function isBlackListed(array $msg, string $groupName): bool
+                {
+                    return false;
+                }
+            }),
+            headerStorage: $this->deterministicHeaderStorage(),
+            nntp: $nntp
+        );
+
+        $service->scan(['id' => 2, 'name' => 'a.b.boneless'], 785650027, 785650027);
+
+        $statsProperty = new \ReflectionProperty(BinariesService::class, 'bodyPreambleStats');
+        $stats = $statsProperty->getValue($service);
+
+        $this->assertIsArray($stats);
+        $this->assertArrayHasKey('elapsed_seconds', $stats);
+        $this->assertArrayHasKey('average_ms', $stats);
+        $this->assertGreaterThanOrEqual(0, $stats['elapsed_seconds']);
+        $this->assertGreaterThanOrEqual(0, $stats['average_ms']);
+    }
+
     public function test_scan_uses_body_preamble_for_quoted_obfuscated_yenc_subjects_in_configured_groups(): void
     {
         $nntp = Mockery::mock(NNTPService::class);
