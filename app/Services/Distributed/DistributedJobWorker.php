@@ -6,7 +6,6 @@ namespace App\Services\Distributed;
 
 use App\Models\Settings;
 use App\Services\Tmux\TmuxMonitorService;
-use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -80,20 +79,10 @@ class DistributedJobWorker
     {
         $lockName = 'nntmux:distributed-worker:'.$plan['name'];
         $lockStore = (string) config('nntmux.distributed_lock_store', 'redis');
-        $cacheStore = Cache::store($lockStore);
-
-        if (! $cacheStore instanceof LockProvider) {
-            $output->writeln(sprintf(
-                '[%s] skipped %s: %s cache store does not support distributed locks',
-                now()->toDateTimeString(),
-                $plan['name'],
-                $lockStore,
-            ));
-
-            return 1;
-        }
-
-        $lock = $cacheStore->lock($lockName, $lockSeconds);
+        // Laravel exposes lock() on concrete cache repositories, but the facade
+        // contract does not currently declare it for static analysis.
+        /** @phpstan-ignore-next-line method.notFound */
+        $lock = Cache::store($lockStore)->lock($lockName, $lockSeconds);
 
         try {
             $acquired = $lock->get();
