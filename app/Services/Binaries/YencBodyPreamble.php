@@ -65,6 +65,12 @@ final readonly class YencBodyPreamble
         return 0;
     }
 
+    public function isUsefulForCollection(): bool
+    {
+        return $this->collectionFileNumber() > 0
+            || preg_match('/\.(?:7z|avi|iso|m2ts|mkv|mp4|nfo|par2|rar|rev|sfv|zip)$/i', $this->name) === 1;
+    }
+
     /**
      * @return array<string, string>
      */

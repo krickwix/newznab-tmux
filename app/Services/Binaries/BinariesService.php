@@ -68,6 +68,11 @@ class BinariesService
      */
     private array $headersReceived = [];
 
+    /**
+     * @var array<string, int>
+     */
+    private array $bodyPreambleStats = [];
+
     public function __construct(
         ?BinariesConfig $config = null,
         ?HeaderParser $headerParser = null,
@@ -301,6 +306,7 @@ class BinariesService
         $this->first = $first;
         $this->notYEnc = $this->headersBlackListed = 0;
         $this->headersReceived = [];
+        $this->bodyPreambleStats = [];
 
         $returnArray = [];
         $partRepair = ($type === 'partrepair');
@@ -388,6 +394,15 @@ class BinariesService
             return $headers;
         }
 
+        $this->bodyPreambleStats = [
+            'eligible' => 0,
+            'probed' => 0,
+            'metadata' => 0,
+            'applied' => 0,
+            'skipped_unhelpful' => 0,
+            'errors' => 0,
+        ];
+
         $probed = 0;
         foreach ($headers as $index => $header) {
             if ($probed >= $this->config->bodyPreambleDeobfuscateLimit) {
@@ -397,13 +412,17 @@ class BinariesService
                 continue;
             }
 
+            $this->bodyPreambleStats['eligible']++;
             $lines = $this->getNntp()->getYencBodyPreambleLines(
                 $groupName,
                 $header['Number'],
                 $this->config->bodyPreambleLineLimit
             );
             $probed++;
+            $this->bodyPreambleStats['probed']++;
             if (NNTPService::isError($lines) || ! \is_array($lines)) {
+                $this->bodyPreambleStats['errors']++;
+
                 continue;
             }
 
@@ -411,11 +430,18 @@ class BinariesService
             if ($metadata === null) {
                 continue;
             }
+            $this->bodyPreambleStats['metadata']++;
+            if (! $metadata->isUsefulForCollection()) {
+                $this->bodyPreambleStats['skipped_unhelpful']++;
+
+                continue;
+            }
 
             $headers[$index]['Original-Subject'] = $header['Subject'] ?? '';
             $headers[$index]['Subject'] = $metadata->toSyntheticSubject();
             $headers[$index]['collection_file_number'] = $metadata->collectionFileNumber();
             $headers[$index]['collection_total_files'] = 0;
+            $this->bodyPreambleStats['applied']++;
         }
 
         return $headers;
@@ -441,7 +467,23 @@ class BinariesService
             return false;
         }
 
-        return preg_match('/^[a-f0-9]{16,64}$/i', trim((string) $header['Subject'])) === 1;
+        $subject = trim((string) $header['Subject']);
+        if (preg_match('/^[a-f0-9]{16,64}$/i', $subject) === 1) {
+            return true;
+        }
+
+        if (preg_match('/^\[\s*\d{1,5}\s*\/\s*\d{1,5}\s*\]\s*(?:-\s*)?"([^"]{8,255})"(?:\s+-\s*\d+(?:[.,]\d+)?\s*[kmg]b)?\s+yEnc(?:\s+\(\s*\d{1,5}\s*\/\s*\d{1,5}\s*\))?$/i', $subject, $match) !== 1) {
+            return false;
+        }
+
+        return ! $this->looksLikeReadableQuotedFilename($match[1]);
+    }
+
+    private function looksLikeReadableQuotedFilename(string $filename): bool
+    {
+        $normalized = preg_replace('/[._-]+/', ' ', $filename) ?: $filename;
+
+        return preg_match('/\b(?:19|20)\d{2}\b|\b(?:480p|720p|1080p|2160p|blu[ -]?ray|b[dr]rip|dvd(?:rip)?|h\.?26[45]|hdr|remux|uhd|web[ -]?dl|x26[45])\b/i', $normalized) === 1;
     }
 
     /**
@@ -1088,6 +1130,18 @@ class BinariesService
             ' articles of '.number_format($this->last - $this->first + 1).' requested, '.
             $this->headersBlackListed.' blacklisted, '.$this->notYEnc.' not yEnc.'
         );
+
+        if ($this->bodyPreambleStats !== []) {
+            cli()->primary(sprintf(
+                'Body preamble probes: eligible %d, probed %d, metadata %d, applied %d, skipped_unhelpful %d, errors %d.',
+                $this->bodyPreambleStats['eligible'],
+                $this->bodyPreambleStats['probed'],
+                $this->bodyPreambleStats['metadata'],
+                $this->bodyPreambleStats['applied'],
+                $this->bodyPreambleStats['skipped_unhelpful'],
+                $this->bodyPreambleStats['errors']
+            ));
+        }
     }
 
     private function outputHeaderDuration(): void

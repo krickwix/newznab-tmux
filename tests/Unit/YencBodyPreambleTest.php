@@ -20,6 +20,19 @@ class YencBodyPreambleTest extends TestCase
         $this->assertSame(454033408, $metadata->size);
         $this->assertSame('"Y7FouDJBgKrPFCGpz4wp.part070.rar" (104/634) yEnc', $metadata->toSyntheticSubject());
         $this->assertSame(70, $metadata->collectionFileNumber());
+        $this->assertTrue($metadata->isUsefulForCollection());
+    }
+
+    public function test_extensionless_random_yenc_name_is_not_useful_for_collection_grouping(): void
+    {
+        $metadata = YencBodyPreamble::fromLines([
+            '=ybegin part=5 total=56 line=128 size=39854080 name=xASUfbtk4mf45SfeaPdKWQOLhW1d',
+            '=ypart begin=2867201 end=3584000',
+        ]);
+
+        $this->assertSame('xASUfbtk4mf45SfeaPdKWQOLhW1d', $metadata?->name);
+        $this->assertSame(0, $metadata->collectionFileNumber());
+        $this->assertFalse($metadata->isUsefulForCollection());
     }
 
     public function test_rejects_text_without_required_ybegin_name_and_size(): void
