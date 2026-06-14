@@ -121,7 +121,14 @@ final class CollectionSplitDiagnosticsService
             ->selectRaw('COUNT(DISTINCT filenumber) AS distinct_filenumbers')
             ->selectRaw('MIN(filenumber) AS min_filenumber')
             ->selectRaw('MAX(filenumber) AS max_filenumber')
+            ->selectRaw('SUM(CASE WHEN totalparts > 0 AND currentparts >= totalparts THEN 1 ELSE 0 END) AS complete_binaries')
             ->selectRaw('SUM(CASE WHEN totalparts > 0 AND currentparts < totalparts THEN 1 ELSE 0 END) AS incomplete_binaries')
+            ->selectRaw('MIN(currentparts) AS min_currentparts')
+            ->selectRaw('MAX(currentparts) AS max_currentparts')
+            ->selectRaw('ROUND(AVG(currentparts), 2) AS avg_currentparts')
+            ->selectRaw('MIN(totalparts) AS min_totalparts')
+            ->selectRaw('MAX(totalparts) AS max_totalparts')
+            ->selectRaw('ROUND(AVG(totalparts), 2) AS avg_totalparts')
             ->selectRaw('MIN(date) AS min_date')
             ->selectRaw('MAX(date) AS max_date')
             ->selectRaw($this->regexIdsExpression())
@@ -140,7 +147,20 @@ final class CollectionSplitDiagnosticsService
                 'min_filenumber' => (int) $row->min_filenumber,
                 'max_filenumber' => (int) $row->max_filenumber,
                 'filenumber_span' => (int) $row->min_filenumber.','.(int) $row->max_filenumber,
+                'complete_binaries' => (int) $row->complete_binaries,
                 'incomplete_binaries' => (int) $row->incomplete_binaries,
+                'min_currentparts' => (int) $row->min_currentparts,
+                'max_currentparts' => (int) $row->max_currentparts,
+                'avg_currentparts' => (float) $row->avg_currentparts,
+                'min_totalparts' => (int) $row->min_totalparts,
+                'max_totalparts' => (int) $row->max_totalparts,
+                'avg_totalparts' => (float) $row->avg_totalparts,
+                'classification' => $this->classifyCohort(
+                    (int) $row->binaries,
+                    (int) $row->complete_binaries,
+                    (int) $row->incomplete_binaries,
+                    (int) $row->max_currentparts
+                ),
                 'min_date' => (string) $row->min_date,
                 'max_date' => (string) $row->max_date,
                 'regex_ids' => $this->normalizeRegexIds((string) $row->regex_ids),
@@ -148,6 +168,23 @@ final class CollectionSplitDiagnosticsService
         }
 
         return $result;
+    }
+
+    private function classifyCohort(int $binaries, int $completeBinaries, int $incompleteBinaries, int $maxCurrentParts): string
+    {
+        if ($binaries > 0 && $incompleteBinaries === $binaries && $maxCurrentParts <= 2) {
+            return 'incomplete_part_fragments';
+        }
+
+        if ($completeBinaries > 0 && $incompleteBinaries > 0) {
+            return 'mixed_completeness';
+        }
+
+        if ($completeBinaries > 0 && $incompleteBinaries === 0) {
+            return 'complete_split_candidate';
+        }
+
+        return 'incomplete_split_candidate';
     }
 
     private function regexIdsExpression(): string

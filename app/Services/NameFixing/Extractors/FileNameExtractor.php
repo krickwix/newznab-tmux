@@ -276,6 +276,7 @@ class FileNameExtractor
 
         // Folder name fallback
         if (! preg_match('/(?:^|\s)yEnc$/i', trim($filename))
+            && ! $this->isHashedArchiveStem($baseFilename)
             && ! $this->isLowInformationName($cleanedFilename)
             && preg_match('/\w+[\-\w.\',;& ]+$/i', $filename, $result)
             && preg_match(self::PREDB_REGEX, $filename)) {
@@ -544,6 +545,23 @@ class FileNameExtractor
         }
 
         return preg_match('/^(?:nfo|sfv|par2?|nzb|srr|srs|txt|md5|sha1)$/i', $name) === 1;
+    }
+
+    private function isHashedArchiveStem(string $baseFilename): bool
+    {
+        if (! preg_match('/\.(?:part\d{1,4}\.rar|r\d{2,4}|rar|par2?|vol\d+[+\-]\d+\.par2?|7z\.\d{2,4}|\d{3}|mkv|mp4|m4v|avi)$/iu', $baseFilename)) {
+            return false;
+        }
+
+        $stem = $this->stripArchiveSuffixes($baseFilename);
+        if (str_contains($stem, ' - ')) {
+            $parts = preg_split('/\s+-\s+/', $stem, 2);
+            $stem = (string) ($parts[0] ?? $stem);
+        }
+
+        $stem = trim($stem, " \t\n\r\0\x0B.-_\"'");
+
+        return $stem !== '' && $this->cleaner->looksLikeHashedName($stem);
     }
 
     private function isSubtitleSupportFilename(string $baseFilename): bool

@@ -225,6 +225,15 @@ class FileNameExtractorTest extends TestCase
         $this->assertNull($result);
     }
 
+    public function test_rejects_bare_hashed_archive_stem_as_folder_name(): void
+    {
+        $extractor = new FileNameExtractor;
+
+        $this->assertNull($extractor->extractFromFile('U4BvWIMw96AfmzfxMjHxi.part03.rar'));
+        $this->assertNull($extractor->extractFromFile('R9lelFHQEMt9U8UtM9aVj2amEk7TnPx2OZUxcbBgnue8qyp3vD.7z.052'));
+        $this->assertNull($extractor->extractFromFile('Hxu6fwEJUsaD2sFb - ISO Premium - BluHD by pornexe.7z.003'));
+    }
+
     public function test_strips_segment_counter_from_bare_movie_archive_candidate(): void
     {
         $extractor = new FileNameExtractor;

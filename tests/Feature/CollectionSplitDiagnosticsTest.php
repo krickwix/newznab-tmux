@@ -77,6 +77,9 @@ class CollectionSplitDiagnosticsTest extends TestCase
         $this->assertSame(3, $summary['cohorts'][0]['posters']);
         $this->assertSame(2, $summary['cohorts'][0]['distinct_filenumbers']);
         $this->assertSame('1,2', $summary['cohorts'][0]['filenumber_span']);
+        $this->assertSame(0, $summary['cohorts'][0]['complete_binaries']);
+        $this->assertSame(3, $summary['cohorts'][0]['incomplete_binaries']);
+        $this->assertSame('incomplete_part_fragments', $summary['cohorts'][0]['classification']);
         $this->assertSame('-10,88', $summary['cohorts'][0]['regex_ids']);
     }
 
