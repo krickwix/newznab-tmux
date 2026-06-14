@@ -46,6 +46,7 @@ return [
     'body_preamble_deobfuscate_groups' => env('NNTMUX_BODY_PREAMBLE_DEOBFUSCATE_GROUPS', ''),
     'body_preamble_deobfuscate_limit' => (int) env('NNTMUX_BODY_PREAMBLE_DEOBFUSCATE_LIMIT', 0),
     'body_preamble_line_limit' => (int) env('NNTMUX_BODY_PREAMBLE_LINE_LIMIT', 8),
+    'body_preamble_deobfuscate_max_seconds' => (float) env('NNTMUX_BODY_PREAMBLE_DEOBFUSCATE_MAX_SECONDS', 0),
     'categorization' => [
         'log' => (bool) env('NNTMUX_CATEGORIZATION_LOG', false),
     ],

@@ -48,6 +48,7 @@ final readonly class BinariesConfig
         public array $bodyPreambleDeobfuscateGroups = [],
         public int $bodyPreambleDeobfuscateLimit = 0,
         public int $bodyPreambleLineLimit = 8,
+        public float $bodyPreambleDeobfuscateMaxSeconds = 0.0,
     ) {}
 
     /**
@@ -72,6 +73,7 @@ final readonly class BinariesConfig
             bodyPreambleDeobfuscateGroups: self::getCsvConfig('nntmux.body_preamble_deobfuscate_groups'),
             bodyPreambleDeobfuscateLimit: max(0, min(1000, (int) config('nntmux.body_preamble_deobfuscate_limit', 0))),
             bodyPreambleLineLimit: max(2, min(20, (int) config('nntmux.body_preamble_line_limit', 8))),
+            bodyPreambleDeobfuscateMaxSeconds: max(0.0, (float) config('nntmux.body_preamble_deobfuscate_max_seconds', 0)),
         );
     }
 

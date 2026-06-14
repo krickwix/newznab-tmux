@@ -568,6 +568,75 @@ class YencBodyDeobfuscationStorageTest extends TestCase
         $this->assertTrue(DB::table('collections')->where('subject', '[1/2] - "Movie.Title.2024.1080p.BluRay.x264-GRP.mkv" yEnc')->exists());
     }
 
+    public function test_scan_stops_body_preamble_probes_after_elapsed_budget_is_exhausted(): void
+    {
+        $nntp = Mockery::mock(NNTPService::class);
+        $nntp->shouldReceive('getXOVER')
+            ->once()
+            ->with('7305032856-7305032857')
+            ->andReturn([
+                [
+                    'Number' => '7305032856',
+                    'Subject' => '[21/52] - "DDrDC5ShYs629Bmm-NvXbM-8ldS68zeZoVLz20OdcUb41oi6FzorrYizrjv.iWT4a90" yEnc',
+                    'From' => 'poster@example.invalid',
+                    'Date' => 'Sun, 14 Jun 2026 09:13:21 +0000',
+                    'Message-ID' => '<7305032856@example.invalid>',
+                    'Bytes' => '740162',
+                    'Xref' => 'news.example alt.binaries.blu-ray:7305032856',
+                ],
+                [
+                    'Number' => '7305032857',
+                    'Subject' => '[22/52] - "b15a4UDyIhCzBTg3id5tRrsK59gTGArRR8WgxGRzDreTEG2lqom8jAZld18x.iWT4a90" yEnc',
+                    'From' => 'poster@example.invalid',
+                    'Date' => 'Sun, 14 Jun 2026 09:13:22 +0000',
+                    'Message-ID' => '<7305032857@example.invalid>',
+                    'Bytes' => '740162',
+                    'Xref' => 'news.example alt.binaries.blu-ray:7305032857',
+                ],
+            ]);
+        $nntp->shouldReceive('getYencBodyPreambleLines')
+            ->once()
+            ->with('alt.binaries.blu-ray', '7305032856', 10)
+            ->andReturnUsing(static function (): array {
+                usleep(2500);
+
+                return [
+                    '=ybegin part=22 total=76 line=128 size=454033408 name=Movie.Payload.part021.rar',
+                    '=ypart begin=15073281 end=15810560',
+                ];
+            });
+
+        $service = new BinariesService(
+            new BinariesConfig(
+                partsChunkSize: 10,
+                headerChunkSize: 10,
+                bodyPreambleDeobfuscateGroups: ['alt.binaries.blu-ray'],
+                bodyPreambleDeobfuscateLimit: 10,
+                bodyPreambleLineLimit: 10,
+                bodyPreambleDeobfuscateMaxSeconds: 0.001
+            ),
+            headerParser: new HeaderParser(new class extends BlacklistService
+            {
+                public function isBlackListed(array $msg, string $groupName): bool
+                {
+                    return false;
+                }
+            }),
+            headerStorage: $this->deterministicHeaderStorage(),
+            nntp: $nntp
+        );
+
+        $service->scan(['id' => 5, 'name' => 'alt.binaries.blu-ray'], 7305032856, 7305032857);
+
+        $statsProperty = new \ReflectionProperty(BinariesService::class, 'bodyPreambleStats');
+        $stats = $statsProperty->getValue($service);
+
+        $this->assertSame(1, $stats['probed']);
+        $this->assertSame(1, $stats['time_limited']);
+        $this->assertSame(1, DB::table('collections')->count());
+        $this->assertTrue(DB::table('collections')->where('subject', '"Movie.Payload.part021.rar"')->exists());
+    }
+
     private function deterministicHeaderStorage(): HeaderStorageService
     {
         return new HeaderStorageService(

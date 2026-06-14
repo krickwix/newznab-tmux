@@ -399,6 +399,7 @@ class BinariesService
             'applied' => 0,
             'skipped_unhelpful' => 0,
             'errors' => 0,
+            'time_limited' => 0,
             'elapsed_seconds' => 0.0,
             'average_ms' => 0.0,
         ];
@@ -421,19 +422,30 @@ class BinariesService
             );
             $probed++;
             $this->bodyPreambleStats['probed']++;
+            $maxProbeSecondsReached = $this->bodyPreambleMaxSecondsReached($startedAt);
             if (NNTPService::isError($lines) || ! \is_array($lines)) {
                 $this->bodyPreambleStats['errors']++;
+                if ($maxProbeSecondsReached) {
+                    break;
+                }
 
                 continue;
             }
 
             $metadata = YencBodyPreamble::fromLines($lines);
             if ($metadata === null) {
+                if ($maxProbeSecondsReached) {
+                    break;
+                }
+
                 continue;
             }
             $this->bodyPreambleStats['metadata']++;
             if (! $metadata->isUsefulForCollection()) {
                 $this->bodyPreambleStats['skipped_unhelpful']++;
+                if ($maxProbeSecondsReached) {
+                    break;
+                }
 
                 continue;
             }
@@ -443,12 +455,30 @@ class BinariesService
             $headers[$index]['collection_file_number'] = $metadata->collectionFileNumber();
             $headers[$index]['collection_total_files'] = $metadata->collectionTotalFiles();
             $this->bodyPreambleStats['applied']++;
+
+            if ($maxProbeSecondsReached) {
+                break;
+            }
         }
         $elapsedSeconds = max(0.0, microtime(true) - $startedAt);
         $this->bodyPreambleStats['elapsed_seconds'] = $elapsedSeconds;
         $this->bodyPreambleStats['average_ms'] = $probed > 0 ? ($elapsedSeconds * 1000) / $probed : 0.0;
 
         return $headers;
+    }
+
+    private function bodyPreambleMaxSecondsReached(float $startedAt): bool
+    {
+        if (
+            $this->config->bodyPreambleDeobfuscateMaxSeconds <= 0
+            || microtime(true) - $startedAt < $this->config->bodyPreambleDeobfuscateMaxSeconds
+        ) {
+            return false;
+        }
+
+        $this->bodyPreambleStats['time_limited'] = 1;
+
+        return true;
     }
 
     private function shouldDeobfuscateBodyPreambleGroup(string $groupName): bool
@@ -1137,13 +1167,14 @@ class BinariesService
 
         if ($this->bodyPreambleStats !== []) {
             cli()->primary(sprintf(
-                'Body preamble probes: eligible %d, probed %d, metadata %d, applied %d, skipped_unhelpful %d, errors %d, elapsed %.2fs, avg %.1fms.',
+                'Body preamble probes: eligible %d, probed %d, metadata %d, applied %d, skipped_unhelpful %d, errors %d, time_limited %d, elapsed %.2fs, avg %.1fms.',
                 $this->bodyPreambleStats['eligible'],
                 $this->bodyPreambleStats['probed'],
                 $this->bodyPreambleStats['metadata'],
                 $this->bodyPreambleStats['applied'],
                 $this->bodyPreambleStats['skipped_unhelpful'],
                 $this->bodyPreambleStats['errors'],
+                $this->bodyPreambleStats['time_limited'],
                 $this->bodyPreambleStats['elapsed_seconds'],
                 $this->bodyPreambleStats['average_ms']
             ));
