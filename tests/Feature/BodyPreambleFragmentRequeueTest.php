@@ -81,6 +81,14 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
         $this->assertSame(0, $output['inserted']);
         $this->assertSame(1, $output['skipped_existing']);
         $this->assertSame(1, DB::table('missed_parts')->count());
+        $this->assertSame([
+            'collection_id_min' => 1,
+            'collection_id_max' => 6,
+            'next_after_collection_id' => 6,
+        ], $output['batch']);
+        $this->assertSame([7304209420, 7304209421], $output['candidate_numberids']);
+        $this->assertSame([], $output['inserted_numberids']);
+        $this->assertSame([7304209421], $output['skipped_existing_numberids']);
         $this->assertSame([7304209420, 7304209421], array_column($output['sample'], 'article'));
     }
 
@@ -111,6 +119,35 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
             1,
             (int) DB::table('missed_parts')->where(['groups_id' => 5, 'numberid' => 7304209420])->value('attempts')
         );
+    }
+
+    public function test_json_output_includes_full_trace_metadata_for_batch_followup(): void
+    {
+        $this->seedFragments();
+
+        $exitCode = Artisan::call('nntmux:requeue-body-preamble-fragments', [
+            'group' => 'alt.binaries.blu-ray',
+            '--regex' => ['88', '-10'],
+            '--limit' => 10,
+            '--before' => '2026-06-14 12:30:00',
+            '--update' => true,
+            '--json' => true,
+        ]);
+        $output = json_decode(Artisan::output(), true);
+
+        $this->assertSame(0, $exitCode);
+        $this->assertArrayHasKey('batch', $output);
+        $this->assertArrayHasKey('candidate_numberids', $output);
+        $this->assertArrayHasKey('inserted_numberids', $output);
+        $this->assertArrayHasKey('skipped_existing_numberids', $output);
+        $this->assertSame([
+            'collection_id_min' => 1,
+            'collection_id_max' => 6,
+            'next_after_collection_id' => 6,
+        ], $output['batch']);
+        $this->assertSame([7304209420, 7304209421], $output['candidate_numberids']);
+        $this->assertSame([7304209420], $output['inserted_numberids']);
+        $this->assertSame([7304209421], $output['skipped_existing_numberids']);
     }
 
     public function test_update_requires_regex_selector(): void
@@ -175,8 +212,39 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
 
         $this->assertSame(0, $exitCode);
         $this->assertSame(1, $output['candidates']);
+        $this->assertSame([
+            'collection_id_min' => 2,
+            'collection_id_max' => 6,
+            'next_after_collection_id' => 6,
+        ], $output['batch']);
+        $this->assertSame([7304209421], $output['candidate_numberids']);
         $this->assertSame(2, $output['sample'][0]['collection_id']);
         $this->assertSame(7304209421, $output['sample'][0]['article']);
+    }
+
+    public function test_empty_result_reports_stable_trace_metadata(): void
+    {
+        $this->seedFragments();
+
+        $exitCode = Artisan::call('nntmux:requeue-body-preamble-fragments', [
+            'group' => 'alt.binaries.blu-ray',
+            '--regex' => ['88', '-10'],
+            '--limit' => 10,
+            '--after-collection-id' => 99,
+            '--json' => true,
+        ]);
+        $output = json_decode(Artisan::output(), true);
+
+        $this->assertSame(0, $exitCode);
+        $this->assertSame(0, $output['candidates']);
+        $this->assertSame([
+            'collection_id_min' => null,
+            'collection_id_max' => null,
+            'next_after_collection_id' => 99,
+        ], $output['batch']);
+        $this->assertSame([], $output['candidate_numberids']);
+        $this->assertSame([], $output['inserted_numberids']);
+        $this->assertSame([], $output['skipped_existing_numberids']);
     }
 
     public function test_unknown_group_returns_failure(): void

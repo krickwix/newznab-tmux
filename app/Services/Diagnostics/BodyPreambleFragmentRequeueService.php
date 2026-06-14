@@ -20,6 +20,10 @@ final class BodyPreambleFragmentRequeueService
      *     skipped_existing: int,
      *     skipped_without_article: int,
      *     after_collection_id: int,
+     *     batch: array{collection_id_min:int|null,collection_id_max:int|null,next_after_collection_id:int},
+     *     candidate_numberids: list<int>,
+     *     inserted_numberids: list<int>,
+     *     skipped_existing_numberids: list<int>,
      *     sample: list<array<string,mixed>>
      * }
      */
@@ -74,9 +78,19 @@ final class BodyPreambleFragmentRequeueService
         }
 
         $existing = $this->existingMissedPartLookup($groupId, array_column($candidates, 'article'));
+        $candidateNumberIds = array_values(array_map('intval', array_column($candidates, 'article')));
+        $skippedExistingNumberIds = array_values(array_filter(
+            $candidateNumberIds,
+            static fn (int $article): bool => isset($existing[$article])
+        ));
+        $insertedNumberIds = [];
         $inserted = 0;
         if ($update) {
             $inserted = $this->insertMissingParts($groupId, $candidates, $existing);
+            $insertedNumberIds = array_values(array_filter(
+                $candidateNumberIds,
+                static fn (int $article): bool => ! isset($existing[$article])
+            ));
         }
 
         return [
@@ -87,7 +101,29 @@ final class BodyPreambleFragmentRequeueService
             'skipped_existing' => \count($existing),
             'skipped_without_article' => $skippedWithoutArticle,
             'after_collection_id' => $afterCollectionId,
+            'batch' => $this->batchSummary($rows, $afterCollectionId),
+            'candidate_numberids' => $candidateNumberIds,
+            'inserted_numberids' => $insertedNumberIds,
+            'skipped_existing_numberids' => $skippedExistingNumberIds,
             'sample' => array_slice($candidates, 0, 25),
+        ];
+    }
+
+    /**
+     * @param  Collection<int,\stdClass>  $rows
+     * @return array{collection_id_min:int|null,collection_id_max:int|null,next_after_collection_id:int}
+     */
+    private function batchSummary(Collection $rows, int $afterCollectionId): array
+    {
+        $collectionIds = $rows
+            ->pluck('collection_id')
+            ->map(static fn (mixed $id): int => (int) $id);
+        $maxCollectionId = $collectionIds->max();
+
+        return [
+            'collection_id_min' => $collectionIds->isEmpty() ? null : (int) $collectionIds->min(),
+            'collection_id_max' => $collectionIds->isEmpty() ? null : (int) $maxCollectionId,
+            'next_after_collection_id' => $maxCollectionId === null ? $afterCollectionId : (int) $maxCollectionId,
         ];
     }
 
