@@ -130,4 +130,59 @@ final class BinariesCursorRepairTest extends TestCase
             DB::table('usenet_groups')->where('id', 7711)->value('last_updated')
         );
     }
+
+    public function test_tiny_new_group_with_no_scan_range_initializes_cursor(): void
+    {
+        DB::table('usenet_groups')->insert([
+            'id' => 8801,
+            'name' => 'a.b.cd.lossless',
+            'first_record' => 0,
+            'first_record_postdate' => null,
+            'last_record' => 0,
+            'last_record_postdate' => null,
+            'last_updated' => null,
+            'active' => 1,
+            'backfill' => 1,
+        ]);
+
+        $nntp = Mockery::mock(NNTPService::class);
+        $nntp->shouldReceive('selectGroup')
+            ->once()
+            ->with('a.b.cd.lossless')
+            ->andReturn([
+                'group' => 'a.b.cd.lossless',
+                'first' => 2,
+                'last' => 905,
+            ]);
+        $nntp->shouldNotReceive('getOverview');
+        $nntp->shouldNotReceive('getXOVER');
+
+        $service = new BinariesService(
+            new BinariesConfig(
+                messageBuffer: 10000,
+                partRepair: false,
+                newGroupScanByDays: false,
+                newGroupMessagesToScan: 50000,
+                echoCli: false
+            ),
+            nntp: $nntp
+        );
+
+        $service->updateGroup([
+            'id' => 8801,
+            'name' => 'a.b.cd.lossless',
+            'first_record' => 0,
+            'first_record_postdate' => null,
+            'last_record' => 0,
+            'last_record_postdate' => null,
+        ]);
+
+        $group = DB::table('usenet_groups')->where('id', 8801)->first();
+
+        $this->assertSame(2, (int) $group->first_record);
+        $this->assertSame(2, (int) $group->last_record);
+        $this->assertNotNull($group->first_record_postdate);
+        $this->assertNotNull($group->last_record_postdate);
+        $this->assertNotNull($group->last_updated);
+    }
 }

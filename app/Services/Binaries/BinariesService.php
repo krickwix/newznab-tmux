@@ -260,6 +260,7 @@ class BinariesService
         $range = $this->calculateArticleRange($groupMySQL, $groupNNTP, $maxHeaders);
 
         if ($range['total'] <= 0) {
+            $this->initializeNewGroupCursorWithoutScan($groupMySQL, $range);
             UsenetGroup::query()->where('id', $groupMySQL['id'])->update([
                 'last_updated' => now(),
             ]);
@@ -794,6 +795,33 @@ class BinariesService
                     'last_updated' => now(),
                 ]);
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $groupMySQL
+     * @param  array<string, mixed>  $range
+     */
+    private function initializeNewGroupCursorWithoutScan(array &$groupMySQL, array $range): void
+    {
+        if ((bool) ($range['isNew'] ?? false) !== true || (int) $groupMySQL['last_record'] !== 0) {
+            return;
+        }
+
+        $firstRecord = max(1, (int) $range['first']);
+        $lastRecord = max($firstRecord, (int) $range['last']);
+        $timestamp = now();
+
+        $groupMySQL['first_record'] = $firstRecord;
+        $groupMySQL['first_record_postdate'] = $timestamp->timestamp;
+        $groupMySQL['last_record'] = $lastRecord;
+        $groupMySQL['last_record_postdate'] = $timestamp->timestamp;
+
+        UsenetGroup::query()->where('id', $groupMySQL['id'])->update([
+            'first_record' => $firstRecord,
+            'first_record_postdate' => $timestamp,
+            'last_record' => $lastRecord,
+            'last_record_postdate' => $timestamp,
+        ]);
     }
 
     /**
