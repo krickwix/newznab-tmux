@@ -873,20 +873,18 @@ class BinariesService
             );
         }
 
-        // Check for missing headers in range
-        $expectedCount = $this->last - $this->first - $this->notYEnc - $this->headersBlackListed + 1;
-        if ($expectedCount > \count($this->headersReceived)) {
-            $rangeNotReceived = array_diff(range($this->first, $this->last), $this->headersReceived);
-            $notReceivedCount = \count($rangeNotReceived);
+        // Check for missing headers in range. Filtered headers are still returned
+        // by the server, so they must not mask unrelated gaps in the range.
+        $rangeNotReceived = array_diff(range($this->first, $this->last), $this->headersReceived);
+        $notReceivedCount = \count($rangeNotReceived);
 
-            if ($notReceivedCount > 0) {
-                $this->missedPartHandler->addMissingParts(array_values($rangeNotReceived), $this->groupMySQL['id']);
+        if ($notReceivedCount > 0) {
+            $this->missedPartHandler->addMissingParts(array_values($rangeNotReceived), $this->groupMySQL['id']);
 
-                if ($this->config->echoCli) {
-                    cli()->alternate(
-                        'Server did not return '.$notReceivedCount.' articles from '.$this->groupMySQL['name'].'.'
-                    );
-                }
+            if ($this->config->echoCli) {
+                cli()->alternate(
+                    'Server did not return '.$notReceivedCount.' articles from '.$this->groupMySQL['name'].'.'
+                );
             }
         }
     }
