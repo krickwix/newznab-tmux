@@ -150,11 +150,85 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
         );
     }
 
+    public function test_totalfile_zero_dense_collection_promotion_processes_past_batch_size(): void
+    {
+        for ($collectionId = 2000; $collectionId < 2505; $collectionId++) {
+            $this->seedCollection($collectionId, 'dense-zero-'.$collectionId, 0);
+            $this->seedBinary($collectionId * 10, $collectionId, 1, currentParts: 1, totalParts: 1);
+        }
+
+        $this->seedCollection(2600, 'sparse-zero-boundary', 0);
+        $this->seedBinary(26000, 2600, 10, currentParts: 1, totalParts: 1);
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        $service->processIncompleteCollections(null);
+
+        $this->assertSame(
+            505,
+            DB::table('collections')
+                ->whereBetween('id', [2000, 2504])
+                ->where('filecheck', CollectionFileCheckStatus::CompleteParts->value)
+                ->count()
+        );
+        $this->assertSame(
+            CollectionFileCheckStatus::Default->value,
+            (int) DB::table('collections')->where('id', 2600)->value('filecheck')
+        );
+    }
+
+    public function test_later_filecheck_stages_process_candidates_past_batch_size(): void
+    {
+        DB::table('settings')->where('name', 'completionpercent')->update(['value' => '95']);
+
+        for ($collectionId = 3000; $collectionId < 3505; $collectionId++) {
+            $this->seedCollection(
+                $collectionId,
+                'temp-complete-'.$collectionId,
+                1,
+                filecheck: CollectionFileCheckStatus::TempComplete->value
+            );
+            $this->seedBinary($collectionId * 10, $collectionId, 1, currentParts: 95, totalParts: 100);
+        }
+
+        for ($collectionId = 4000; $collectionId < 4505; $collectionId++) {
+            $this->seedCollection(
+                $collectionId,
+                'delayed-stage6-'.$collectionId,
+                2,
+                now()->subHours(13)->format('Y-m-d H:i:s'),
+                10
+            );
+            $this->seedBinary($collectionId * 10, $collectionId, 1, currentParts: 100, totalParts: 100);
+            $this->seedBinary($collectionId * 10 + 1, $collectionId, 2, currentParts: 100, totalParts: 100);
+        }
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        $service->processIncompleteCollections(null);
+
+        $this->assertSame(
+            505,
+            DB::table('binaries')
+                ->whereBetween('collections_id', [3000, 3504])
+                ->where('partcheck', 1)
+                ->count()
+        );
+        $this->assertSame(
+            1010,
+            DB::table('collections')
+                ->whereBetween('id', [3000, 4504])
+                ->where('filecheck', CollectionFileCheckStatus::CompleteParts->value)
+                ->count()
+        );
+    }
+
     private function seedCollection(
         int $id,
         string $subject,
         int $totalFiles,
-        ?string $dateAdded = null
+        ?string $dateAdded = null,
+        int $filecheck = CollectionFileCheckStatus::Default->value
     ): void {
         $dateAdded ??= now()->format('Y-m-d H:i:s');
 
@@ -169,7 +243,7 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
             'groups_id' => 5,
             'totalfiles' => $totalFiles,
             'filesize' => 0,
-            'filecheck' => CollectionFileCheckStatus::Default->value,
+            'filecheck' => $filecheck,
             'collectionhash' => 'collection-'.$id,
             'collection_regexes_id' => 0,
             'releases_id' => null,

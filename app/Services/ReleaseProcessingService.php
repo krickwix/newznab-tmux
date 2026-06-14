@@ -765,24 +765,33 @@ final class ReleaseProcessingService
     {
         $completion = $this->requiredCompletionPercent();
 
-        $collectionIds = Collection::query()
-            ->select(['collections.id'])
-            ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
-            ->where('collections.totalfiles', '=', 0)
-            ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
-            ->where('binaries.filenumber', '>', 0)
-            ->when($groupID !== null, static fn ($q) => $q->where('collections.groups_id', $groupID))
-            ->groupBy(['collections.id'])
-            ->havingRaw(
-                'COUNT(DISTINCT binaries.filenumber) >= GREATEST(1, CEIL(MAX(binaries.filenumber) * ? / 100))',
-                [$completion]
-            )
-            ->pluck('collections.id');
+        $lastCollectionId = 0;
 
-        foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids) {
-            DB::transaction(static function () use ($ids): void {
+        do {
+            $collectionIds = Collection::query()
+                ->select(['collections.id'])
+                ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                ->where('collections.id', '>', $lastCollectionId)
+                ->where('collections.totalfiles', '=', 0)
+                ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
+                ->where('binaries.filenumber', '>', 0)
+                ->when($groupID !== null, static fn ($q) => $q->where('collections.groups_id', $groupID))
+                ->groupBy(['collections.id'])
+                ->havingRaw(
+                    'COUNT(DISTINCT binaries.filenumber) >= GREATEST(1, CEIL(MAX(binaries.filenumber) * ? / 100))',
+                    [$completion]
+                )
+                ->orderBy('collections.id')
+                ->limit(self::BATCH_SIZE)
+                ->pluck('collections.id');
+
+            if ($collectionIds->isEmpty()) {
+                break;
+            }
+
+            DB::transaction(static function () use ($collectionIds): void {
                 Collection::query()
-                    ->whereIn('id', $ids->all())
+                    ->whereIn('id', $collectionIds->all())
                     ->update([
                         'filecheck' => CollectionFileCheckStatus::CompleteCollection->value,
                         'totalfiles' => DB::raw(
@@ -790,7 +799,11 @@ final class ReleaseProcessingService
                         ),
                     ]);
             }, 10);
-        }
+
+            $lastCollectionId = (int) $collectionIds->max();
+
+            usleep(self::BATCH_PAUSE_US);
+        } while ($collectionIds->count() === self::BATCH_SIZE);
     }
 
     /**
@@ -960,26 +973,35 @@ final class ReleaseProcessingService
     {
         $completion = $this->requiredCompletionPercent();
 
-        $collectionIds = DB::table('collections as c')
-            ->select(['c.id'])
-            ->join('binaries as b', 'c.id', '=', 'b.collections_id')
-            ->where('b.partcheck', FileCompletionStatus::Complete->value)
-            ->whereIn('c.filecheck', [
-                CollectionFileCheckStatus::TempComplete->value,
-                CollectionFileCheckStatus::ZeroPart->value,
-            ])
-            ->when($groupID !== null, static fn ($q) => $q->where('c.groups_id', $groupID))
-            ->groupBy(['b.collections_id', 'c.totalfiles', 'c.id'])
-            ->havingRaw(
-                'COUNT(b.id) >= GREATEST(1, CEIL(c.totalfiles * ? / 100))',
-                [$completion]
-            )
-            ->pluck('c.id');
+        $lastCollectionId = 0;
 
-        foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids) {
-            DB::transaction(static function () use ($ids): void {
+        do {
+            $collectionIds = DB::table('collections as c')
+                ->select(['c.id'])
+                ->join('binaries as b', 'c.id', '=', 'b.collections_id')
+                ->where('c.id', '>', $lastCollectionId)
+                ->where('b.partcheck', FileCompletionStatus::Complete->value)
+                ->whereIn('c.filecheck', [
+                    CollectionFileCheckStatus::TempComplete->value,
+                    CollectionFileCheckStatus::ZeroPart->value,
+                ])
+                ->when($groupID !== null, static fn ($q) => $q->where('c.groups_id', $groupID))
+                ->groupBy(['b.collections_id', 'c.totalfiles', 'c.id'])
+                ->havingRaw(
+                    'COUNT(b.id) >= GREATEST(1, CEIL(c.totalfiles * ? / 100))',
+                    [$completion]
+                )
+                ->orderBy('c.id')
+                ->limit(self::BATCH_SIZE)
+                ->pluck('c.id');
+
+            if ($collectionIds->isEmpty()) {
+                break;
+            }
+
+            DB::transaction(static function () use ($collectionIds): void {
                 Collection::query()
-                    ->whereIn('id', $ids->all())
+                    ->whereIn('id', $collectionIds->all())
                     ->update([
                         'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
                         'totalfiles' => DB::raw(
@@ -987,7 +1009,11 @@ final class ReleaseProcessingService
                         ),
                     ]);
             }, 10);
-        }
+
+            $lastCollectionId = (int) $collectionIds->max();
+
+            usleep(self::BATCH_PAUSE_US);
+        } while ($collectionIds->count() === self::BATCH_SIZE);
     }
 
     private function markCompleteBinaries(
@@ -995,24 +1021,37 @@ final class ReleaseProcessingService
         ?int $groupID,
         int $completion
     ): void {
-        $binaryIds = DB::table('binaries as b')
-            ->select(['b.id'])
-            ->join('collections as c', 'c.id', '=', 'b.collections_id')
-            ->where('c.filecheck', $collectionStatus->value)
-            ->where('b.partcheck', FileCompletionStatus::Incomplete->value)
-            ->where('b.totalparts', '>', 0)
-            ->whereRaw('b.currentparts >= CEIL(b.totalparts * ? / 100)', [$completion])
-            ->when($groupID !== null, static fn ($q) => $q->where('c.groups_id', $groupID))
-            ->groupBy(['b.id', 'b.totalparts'])
-            ->pluck('b.id');
+        $lastBinaryId = 0;
 
-        foreach ($binaryIds->chunk(self::BATCH_SIZE) as $ids) {
-            DB::transaction(static function () use ($ids): void {
+        do {
+            $binaryIds = DB::table('binaries as b')
+                ->select(['b.id'])
+                ->join('collections as c', 'c.id', '=', 'b.collections_id')
+                ->where('b.id', '>', $lastBinaryId)
+                ->where('c.filecheck', $collectionStatus->value)
+                ->where('b.partcheck', FileCompletionStatus::Incomplete->value)
+                ->where('b.totalparts', '>', 0)
+                ->whereRaw('b.currentparts >= CEIL(b.totalparts * ? / 100)', [$completion])
+                ->when($groupID !== null, static fn ($q) => $q->where('c.groups_id', $groupID))
+                ->groupBy(['b.id', 'b.totalparts'])
+                ->orderBy('b.id')
+                ->limit(self::BATCH_SIZE)
+                ->pluck('b.id');
+
+            if ($binaryIds->isEmpty()) {
+                break;
+            }
+
+            DB::transaction(static function () use ($binaryIds): void {
                 DB::table('binaries')
-                    ->whereIn('id', $ids->all())
+                    ->whereIn('id', $binaryIds->all())
                     ->update(['partcheck' => FileCompletionStatus::Complete->value]);
             }, 10);
-        }
+
+            $lastBinaryId = (int) $binaryIds->max();
+
+            usleep(self::BATCH_PAUSE_US);
+        } while ($binaryIds->count() === self::BATCH_SIZE);
     }
 
     /**
@@ -1042,31 +1081,41 @@ final class ReleaseProcessingService
     {
         $normalizedGroupId = $this->extractGroupIdFromWhereSql($whereSql);
         $completion = $this->requiredCompletionPercent();
-        $collectionIds = DB::table('collections')
-            ->select('collections.id')
-            ->distinct()
-            ->join('binaries as existing', 'existing.collections_id', '=', 'collections.id')
-            ->leftJoin('binaries as incomplete', static function ($join) use ($completion): void {
-                $join->on('incomplete.collections_id', '=', 'collections.id')
-                    ->whereRaw(
-                        '(incomplete.currentparts < CEIL(incomplete.totalparts * ? / 100) OR incomplete.totalparts <= 0)',
-                        [$completion],
-                    );
-            })
-            ->where('collections.dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
-            ->whereIn('collections.filecheck', [
-                CollectionFileCheckStatus::Default->value,
-                CollectionFileCheckStatus::CompleteCollection->value,
-                10,
-            ])
-            ->whereNull('incomplete.id')
-            ->when($normalizedGroupId !== null, static fn ($q) => $q->where('collections.groups_id', $normalizedGroupId))
-            ->pluck('collections.id');
 
-        foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids) {
-            DB::transaction(static function () use ($ids): void {
+        $lastCollectionId = 0;
+
+        do {
+            $collectionIds = DB::table('collections')
+                ->select('collections.id')
+                ->distinct()
+                ->join('binaries as existing', 'existing.collections_id', '=', 'collections.id')
+                ->leftJoin('binaries as incomplete', static function ($join) use ($completion): void {
+                    $join->on('incomplete.collections_id', '=', 'collections.id')
+                        ->whereRaw(
+                            '(incomplete.currentparts < CEIL(incomplete.totalparts * ? / 100) OR incomplete.totalparts <= 0)',
+                            [$completion],
+                        );
+                })
+                ->where('collections.id', '>', $lastCollectionId)
+                ->where('collections.dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
+                ->whereIn('collections.filecheck', [
+                    CollectionFileCheckStatus::Default->value,
+                    CollectionFileCheckStatus::CompleteCollection->value,
+                    10,
+                ])
+                ->whereNull('incomplete.id')
+                ->when($normalizedGroupId !== null, static fn ($q) => $q->where('collections.groups_id', $normalizedGroupId))
+                ->orderBy('collections.id')
+                ->limit(self::BATCH_SIZE)
+                ->pluck('collections.id');
+
+            if ($collectionIds->isEmpty()) {
+                break;
+            }
+
+            DB::transaction(static function () use ($collectionIds): void {
                 Collection::query()
-                    ->whereIn('id', $ids->all())
+                    ->whereIn('id', $collectionIds->all())
                     ->update([
                         'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
                         'totalfiles' => DB::raw(
@@ -1074,7 +1123,11 @@ final class ReleaseProcessingService
                         ),
                     ]);
             }, 10);
-        }
+
+            $lastCollectionId = (int) $collectionIds->max();
+
+            usleep(self::BATCH_PAUSE_US);
+        } while ($collectionIds->count() === self::BATCH_SIZE);
     }
 
     private function extractGroupIdFromWhereSql(string $whereSql): ?int

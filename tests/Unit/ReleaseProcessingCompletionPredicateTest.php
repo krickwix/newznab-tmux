@@ -112,6 +112,28 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
         self::assertStringNotContainsString('->joinSub($collectionsQuery', $stageSource);
     }
 
+    public function test_release_filecheck_stages_page_candidate_ids_before_updating(): void
+    {
+        $stage0Source = $this->releaseProcessingMethodSource('runCollectionFileCheckStage0');
+        $stage4Source = $this->releaseProcessingMethodSource('runCollectionFileCheckStage4');
+        $stage6Source = $this->releaseProcessingMethodSource('runCollectionFileCheckStage6');
+        $binaryStageSource = $this->releaseProcessingMethodSource('markCompleteBinaries');
+
+        foreach ([
+            'stage0' => [$stage0Source, 'collections.id', '$lastCollectionId'],
+            'stage4' => [$stage4Source, 'c.id', '$lastCollectionId'],
+            'stage6' => [$stage6Source, 'collections.id', '$lastCollectionId'],
+            'binary completion' => [$binaryStageSource, 'b.id', '$lastBinaryId'],
+        ] as $label => [$source, $idColumn, $cursorName]) {
+            self::assertStringContainsString($cursorName.' = 0', $source, $label.' should initialize a cursor.');
+            self::assertStringContainsString("->where('{$idColumn}', '>', {$cursorName})", $source, $label.' should page after the last seen id.');
+            self::assertStringContainsString("->orderBy('{$idColumn}')", $source, $label.' should use stable id ordering.');
+            self::assertStringContainsString('->limit(self::BATCH_SIZE)', $source, $label.' should bound each candidate query.');
+            self::assertStringContainsString($cursorName.' = (int)', $source, $label.' should advance the cursor after each batch.');
+            self::assertStringContainsString('} while ($', $source, $label.' should continue only while a full batch is returned.');
+        }
+    }
+
     private function releaseProcessingMethodSource(string $methodName): string
     {
         $serviceSource = file_get_contents(__DIR__.'/../../app/Services/ReleaseProcessingService.php');
