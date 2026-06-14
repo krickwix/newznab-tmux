@@ -317,10 +317,15 @@ final class CollectionHandler
             }
         }
 
+        $newRowsByCollectionKey = array_filter(
+            $rowsByCollectionKey,
+            static fn (array $row): bool => ! isset($existingHashes[$row['collectionhash']])
+        );
+
         if (DB::getDriverName() === 'sqlite') {
-            $this->bulkInsertCollectionsSqlite($rowsByCollectionKey);
+            $this->bulkInsertCollectionsSqlite($newRowsByCollectionKey);
         } else {
-            $this->bulkInsertCollectionsMysql($rowsByCollectionKey, $existingHashes);
+            $this->bulkInsertCollectionsMysql($newRowsByCollectionKey, $existingHashes, $rowsByCollectionKey);
         }
 
         // Only resolve ids for the hashes we couldn't satisfy from the
@@ -373,7 +378,7 @@ final class CollectionHandler
      * @param  array<string, array<string, mixed>>  $rowsByCollectionKey
      * @param  array<string, true>  $existingHashes
      */
-    private function bulkInsertCollectionsMysql(array $rowsByCollectionKey, array $existingHashes): void
+    private function bulkInsertCollectionsMysql(array $rowsByCollectionKey, array $existingHashes, ?array $xrefRowsByCollectionKey = null): void
     {
         foreach (array_chunk(array_values($rowsByCollectionKey), self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
             $placeholders = [];
@@ -406,7 +411,7 @@ final class CollectionHandler
             ));
         }
 
-        $this->batchAppendXrefs($rowsByCollectionKey, $existingHashes);
+        $this->batchAppendXrefs($xrefRowsByCollectionKey ?? $rowsByCollectionKey, $existingHashes);
     }
 
     /**

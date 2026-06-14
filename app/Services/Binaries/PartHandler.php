@@ -66,7 +66,12 @@ final class PartHandler
      */
     public function addPart(int $binaryId, array $header): bool
     {
-        $this->parts[] = [
+        $key = $this->partKey($binaryId, (int) $header['Number']);
+        if (isset($this->parts[$key])) {
+            return true;
+        }
+
+        $this->parts[$key] = [
             'binaries_id' => $binaryId,
             'number' => $header['Number'],
             'messageid' => $header['Message-ID'],

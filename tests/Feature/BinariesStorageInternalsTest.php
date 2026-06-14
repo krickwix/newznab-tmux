@@ -72,6 +72,29 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(1, DB::table('parts')->count());
     }
 
+    public function test_part_handler_deduplicates_pending_parts_before_flush(): void
+    {
+        DB::statement('CREATE TABLE parts (
+            binaries_id INT,
+            number INT,
+            messageid VARCHAR(255),
+            partnumber INT,
+            size INT,
+            UNIQUE(binaries_id, number)
+        )');
+
+        $handler = new PartHandler(100);
+        $this->assertTrue($handler->addPart(1, $this->parsedHeader(211, 1)));
+        $this->assertTrue($handler->addPart(1, $this->parsedHeader(211, 1)));
+
+        $queries = $this->captureQueries(fn (): bool => $handler->flush());
+
+        $this->assertSame(1, DB::table('parts')->count());
+        $this->assertSame([211], $handler->getInsertedNumbers());
+        $this->assertSame([], $handler->getFailedNumbers());
+        $this->assertSame(1, $this->countValueTuplesForTable($queries, 'parts'));
+    }
+
     public function test_binary_handler_flushes_cached_article_aggregate_updates(): void
     {
         DB::statement('CREATE TABLE binaries (
@@ -753,6 +776,65 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(250, (int) $binary->partsize);
     }
 
+    public function test_collection_handler_skips_insert_when_prefetch_resolves_existing_hash(): void
+    {
+        $this->createHeaderStorageTables();
+
+        $collectionHash = sha1('Existing.Collection2');
+        DB::table('collections')->insert([
+            'id' => 10,
+            'subject' => 'Existing.Collection',
+            'fromname' => 'poster@example.com',
+            'date' => now(),
+            'xref' => 'group:1200',
+            'groups_id' => 1,
+            'totalfiles' => 2,
+            'collectionhash' => $collectionHash,
+            'collection_regexes_id' => 0,
+            'dateadded' => now(),
+            'noise' => '',
+        ]);
+
+        $handler = $this->deterministicCollectionHandler();
+        $queries = $this->captureQueries(fn (): array => $handler->getOrCreateCollections(
+            [$this->parsedHeader(1201, 1, 'Existing.Collection', 100)],
+            1,
+            'alt.test',
+            [0 => 2],
+            'batch-noise'
+        ));
+
+        $this->assertSame(1, DB::table('collections')->count());
+        $this->assertFalse($this->hasInsertIntoTable($queries, 'collections'));
+    }
+
+    public function test_binary_handler_skips_insert_when_file_key_already_resolves_existing_binary(): void
+    {
+        $this->createHeaderStorageTables();
+        DB::table('binaries')->insert([
+            'id' => 20,
+            'binaryhash' => 'different-hash',
+            'name' => 'Existing Binary',
+            'collections_id' => 1,
+            'totalparts' => 2,
+            'currentparts' => 1,
+            'filenumber' => 1,
+            'partsize' => 100,
+        ]);
+
+        $handler = new BinaryHandler;
+        $queries = $this->captureQueries(fn (): array => $handler->getOrCreateBinaries([
+            0 => [
+                'header' => $this->parsedHeader(1301, 1, 'Existing.Binary.Different.Hash', 100),
+                'collection_id' => 1,
+                'file_number' => 1,
+            ],
+        ], 1));
+
+        $this->assertSame(1, DB::table('binaries')->count());
+        $this->assertFalse($this->hasInsertIntoTable($queries, 'binaries'));
+    }
+
     private function rawHeader(int $number, string $subject): array
     {
         return [
@@ -877,5 +959,51 @@ class BinariesStorageInternalsTest extends TestCase
             [],
             new \RuntimeException($message)
         );
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function captureQueries(\Closure $callable): array
+    {
+        $queries = [];
+        DB::listen(static function ($event) use (&$queries): void {
+            $queries[] = $event->sql;
+        });
+
+        $callable();
+
+        return $queries;
+    }
+
+    /**
+     * @param  list<string>  $queries
+     */
+    private function hasInsertIntoTable(array $queries, string $table): bool
+    {
+        foreach ($queries as $sql) {
+            if (preg_match('/\binsert(?:\s+or\s+ignore)?\s+into\s+["`]?'.preg_quote($table, '/').'["`]?\b/i', $sql)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param  list<string>  $queries
+     */
+    private function countValueTuplesForTable(array $queries, string $table): int
+    {
+        $count = 0;
+        foreach ($queries as $sql) {
+            if (! preg_match('/\binsert(?:\s+or\s+ignore)?\s+into\s+["`]?'.preg_quote($table, '/').'["`]?\b/i', $sql)) {
+                continue;
+            }
+
+            $count += substr_count($sql, '(?,?,?,?,?)');
+        }
+
+        return $count;
     }
 }

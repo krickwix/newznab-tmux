@@ -248,7 +248,8 @@ final class BinaryHandler
         $insertRows = [];
         foreach ($lookupRows as $row) {
             $hashKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
-            if (! isset($idsByKey[$hashKey])) {
+            $fileKey = $this->binaryFileLookupKey((int) $row['collections_id'], (int) $row['filenumber']);
+            if (! isset($idsByKey[$hashKey]) && ! isset($idsByKey[$fileKey])) {
                 $insertRows[] = $row;
             }
         }
