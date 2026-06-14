@@ -87,4 +87,31 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
         self::assertStringContainsString('ix_collections_release_stage6', $migrationSource);
         self::assertStringContainsString("['groups_id', 'filecheck', 'dateadded', 'id']", $migrationSource);
     }
+
+    public function test_stage1_collects_candidate_ids_before_updating_filecheck(): void
+    {
+        $stageSource = $this->releaseProcessingMethodSource('runCollectionFileCheckStage1');
+
+        self::assertStringContainsString("->pluck('collections.id')", $stageSource);
+        self::assertStringContainsString('foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids)', $stageSource);
+        self::assertStringContainsString("->where('collections.id', '>', \$lastCollectionId)", $stageSource);
+        self::assertStringContainsString("->orderBy('collections.id')", $stageSource);
+        self::assertStringContainsString('->limit(self::BATCH_SIZE)', $stageSource);
+        self::assertStringNotContainsString('->joinSub($collectionsQuery', $stageSource);
+    }
+
+    private function releaseProcessingMethodSource(string $methodName): string
+    {
+        $serviceSource = file_get_contents(__DIR__.'/../../app/Services/ReleaseProcessingService.php');
+
+        self::assertIsString($serviceSource);
+
+        $start = strpos($serviceSource, 'private function '.$methodName);
+        self::assertIsInt($start);
+
+        $nextMethod = strpos($serviceSource, "\n    /**", $start + 1);
+        self::assertIsInt($nextMethod);
+
+        return substr($serviceSource, $start, $nextMethod - $start);
+    }
 }

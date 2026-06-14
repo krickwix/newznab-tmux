@@ -87,6 +87,32 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
         $this->assertSame(2, (int) $collection->totalfiles);
     }
 
+    public function test_totalfiles_collection_uses_completion_threshold_before_promotion(): void
+    {
+        DB::table('settings')->where('name', 'completionpercent')->update(['value' => '75']);
+
+        $this->seedCollection(5, 'three-of-four-files', 4);
+        $this->seedBinary(5001, 5, 1, currentParts: 1, totalParts: 1);
+        $this->seedBinary(5002, 5, 2, currentParts: 1, totalParts: 1);
+        $this->seedBinary(5003, 5, 3, currentParts: 1, totalParts: 1);
+
+        $this->seedCollection(6, 'two-of-four-files', 4);
+        $this->seedBinary(6001, 6, 1, currentParts: 1, totalParts: 1);
+        $this->seedBinary(6002, 6, 2, currentParts: 1, totalParts: 1);
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        $service->processIncompleteCollections(null);
+
+        $completeEnough = DB::table('collections')->where('id', 5)->first();
+        $tooSparse = DB::table('collections')->where('id', 6)->first();
+
+        $this->assertSame(CollectionFileCheckStatus::CompleteParts->value, (int) $completeEnough->filecheck);
+        $this->assertSame(3, (int) $completeEnough->totalfiles);
+        $this->assertSame(CollectionFileCheckStatus::Default->value, (int) $tooSparse->filecheck);
+        $this->assertSame(4, (int) $tooSparse->totalfiles);
+    }
+
     private function seedCollection(
         int $id,
         string $subject,

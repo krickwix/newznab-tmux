@@ -799,26 +799,42 @@ final class ReleaseProcessingService
     {
         $completion = $this->requiredCompletionPercent();
 
-        DB::transaction(static function () use ($groupID, $completion): void {
-            $collectionsQuery = Collection::query()
+        $lastCollectionId = 0;
+
+        do {
+            $collectionIds = Collection::query()
                 ->select(['collections.id'])
                 ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                ->where('collections.id', '>', $lastCollectionId)
                 ->where('collections.totalfiles', '>', 0)
                 ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
+                ->when($groupID !== 0, static fn ($q) => $q->where('collections.groups_id', $groupID))
                 ->groupBy(['binaries.collections_id', 'collections.totalfiles', 'collections.id'])
                 ->havingRaw(
                     'COUNT(binaries.id) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
                     [$completion]
-                );
+                )
+                ->orderBy('collections.id')
+                ->limit(self::BATCH_SIZE)
+                ->pluck('collections.id');
 
-            if ($groupID !== 0) {
-                $collectionsQuery->where('collections.groups_id', $groupID);
+            if ($collectionIds->isEmpty()) {
+                break;
             }
 
-            Collection::query()
-                ->joinSub($collectionsQuery, 'r', static fn ($join) => $join->on('collections.id', '=', 'r.id'))
-                ->update(['collections.filecheck' => CollectionFileCheckStatus::CompleteCollection->value]);
-        }, 10);
+            foreach ($collectionIds->chunk(self::BATCH_SIZE) as $ids) {
+                DB::transaction(static function () use ($ids): void {
+                    Collection::query()
+                        ->whereIn('id', $ids->all())
+                        ->where('filecheck', CollectionFileCheckStatus::Default->value)
+                        ->update(['filecheck' => CollectionFileCheckStatus::CompleteCollection->value]);
+                }, 10);
+            }
+
+            $lastCollectionId = (int) $collectionIds->max();
+
+            usleep(self::BATCH_PAUSE_US);
+        } while ($collectionIds->count() === self::BATCH_SIZE);
     }
 
     /**
