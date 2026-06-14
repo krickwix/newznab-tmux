@@ -6,15 +6,57 @@ namespace Tests\Unit\Services\Metrics;
 
 use App\Models\Category;
 use App\Services\Metrics\NntmuxPrometheusMetrics;
+use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Mockery;
 use Mockery\MockInterface;
+use PDO;
 use ReflectionClass;
 use Tests\TestCase;
 
 class NntmuxPrometheusMetricsTest extends TestCase
 {
+    private string $databasePath;
+
+    /**
+     * @var array<string, string|false>
+     */
+    private array $originalEnvironment = [];
+
+    public function createApplication()
+    {
+        $this->databasePath = sys_get_temp_dir().'/nntmux-prometheus-metrics-test.sqlite';
+
+        $this->originalEnvironment = [
+            'APP_ENV' => getenv('APP_ENV'),
+            'DB_CONNECTION' => getenv('DB_CONNECTION'),
+            'DB_DATABASE' => getenv('DB_DATABASE'),
+        ];
+
+        if (file_exists($this->databasePath)) {
+            unlink($this->databasePath);
+        }
+
+        $pdo = new PDO('sqlite:'.$this->databasePath);
+        $pdo->exec('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        $pdo->exec("INSERT INTO settings (name, value) VALUES
+            ('categorizeforeign', '0'),
+            ('catwebdl', '0'),
+            ('title', 'NNTmux Test'),
+            ('home_link', '/')");
+
+        $this->setEnvironmentValue('APP_ENV', 'testing');
+        $this->setEnvironmentValue('DB_CONNECTION', 'sqlite');
+        $this->setEnvironmentValue('DB_DATABASE', $this->databasePath);
+
+        $app = require __DIR__.'/../../../../bootstrap/app.php';
+
+        $app->make(Kernel::class)->bootstrap();
+
+        return $app;
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -51,6 +93,33 @@ class NntmuxPrometheusMetricsTest extends TestCase
             ['id' => Category::OTHER_HASHED, 'title' => 'Hashed', 'root_categories_id' => Category::OTHER_ROOT],
             ['id' => Category::MOVIE_HD, 'title' => 'HD', 'root_categories_id' => Category::MOVIE_ROOT],
         ]);
+    }
+
+    protected function tearDown(): void
+    {
+        parent::tearDown();
+
+        foreach ($this->originalEnvironment as $key => $value) {
+            $this->setEnvironmentValue($key, $value);
+        }
+
+        if (isset($this->databasePath) && file_exists($this->databasePath)) {
+            unlink($this->databasePath);
+        }
+    }
+
+    private function setEnvironmentValue(string $key, string|false $value): void
+    {
+        if ($value === false) {
+            putenv($key);
+            unset($_ENV[$key], $_SERVER[$key]);
+
+            return;
+        }
+
+        putenv($key.'='.$value);
+        $_ENV[$key] = $value;
+        $_SERVER[$key] = $value;
     }
 
     public function test_release_metrics_expose_category_based_hashed_backlog(): void
@@ -205,5 +274,66 @@ class NntmuxPrometheusMetricsTest extends TestCase
 
         $this->assertStringContainsString('nntmux_external_metadata_total{source="srrdb",state="crc_rows"} 2', $output);
         $this->assertStringContainsString('nntmux_external_metadata_total{source="srrdb",state="predb_without_crc"} 1', $output);
+    }
+
+    public function test_collection_formation_metrics_expose_filecheck_and_pending_multifile_backlogs(): void
+    {
+        DB::statement('CREATE TABLE usenet_groups (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            active INTEGER DEFAULT 0,
+            backfill INTEGER DEFAULT 0
+        )');
+
+        DB::statement('CREATE TABLE collections (
+            id INTEGER PRIMARY KEY,
+            groups_id INTEGER NOT NULL,
+            totalfiles INTEGER NOT NULL,
+            filecheck INTEGER NOT NULL,
+            collection_regexes_id INTEGER NOT NULL
+        )');
+
+        DB::statement('CREATE TABLE binaries (
+            id INTEGER PRIMARY KEY,
+            collections_id INTEGER NOT NULL
+        )');
+
+        DB::table('usenet_groups')->insert([
+            ['id' => 5, 'name' => 'alt.binaries.blu-ray', 'active' => 1, 'backfill' => 1],
+            ['id' => 6, 'name' => 'alt.binaries.lossless', 'active' => 1, 'backfill' => 1],
+            ['id' => 7, 'name' => 'alt.binaries.inactive', 'active' => 0, 'backfill' => 0],
+        ]);
+
+        DB::table('collections')->insert([
+            ['id' => 101, 'groups_id' => 5, 'totalfiles' => 55, 'filecheck' => 0, 'collection_regexes_id' => 88],
+            ['id' => 102, 'groups_id' => 5, 'totalfiles' => 55, 'filecheck' => 0, 'collection_regexes_id' => 88],
+            ['id' => 103, 'groups_id' => 5, 'totalfiles' => 55, 'filecheck' => 4, 'collection_regexes_id' => 88],
+            ['id' => 201, 'groups_id' => 6, 'totalfiles' => 1, 'filecheck' => 0, 'collection_regexes_id' => -10],
+            ['id' => 301, 'groups_id' => 7, 'totalfiles' => 10, 'filecheck' => 0, 'collection_regexes_id' => 88],
+        ]);
+
+        DB::table('binaries')->insert([
+            ['id' => 1, 'collections_id' => 101],
+            ['id' => 2, 'collections_id' => 102],
+            ['id' => 3, 'collections_id' => 103],
+            ['id' => 4, 'collections_id' => 103],
+            ['id' => 5, 'collections_id' => 201],
+            ['id' => 6, 'collections_id' => 301],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $reflection = new ReflectionClass($metrics);
+
+        $this->assertTrue($reflection->hasMethod('collectionFormationMetrics'));
+
+        $method = $reflection->getMethod('collectionFormationMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.binaries.blu-ray",filecheck="0"} 2', $output);
+        $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.binaries.blu-ray",filecheck="4"} 1', $output);
+        $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.binaries.lossless",filecheck="0"} 1', $output);
+        $this->assertStringContainsString('nntmux_collections_pending_multifile_total{group="alt.binaries.blu-ray",collection_regexes_id="88"} 2', $output);
+        $this->assertStringNotContainsString('alt.binaries.inactive', $output);
     }
 }

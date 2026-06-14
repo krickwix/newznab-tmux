@@ -49,6 +49,7 @@ class NntmuxPrometheusMetrics
                 $lines,
                 $this->tableEstimateMetrics(),
                 $this->groupMetrics(),
+                $this->collectionFormationMetrics(),
                 $this->releaseMetrics(),
                 $this->externalMetadataMetrics(),
                 $this->imdbLookupMetrics(),
@@ -189,6 +190,63 @@ class NntmuxPrometheusMetrics
                 $group->first_record_postdate === null ? 0 : strtotime((string) $group->first_record_postdate),
                 $labels,
             );
+        }
+
+        return $lines;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function collectionFormationMetrics(): array
+    {
+        $lines = [
+            '# HELP nntmux_collections_filecheck_total Current collection count by group and filecheck state.',
+            '# TYPE nntmux_collections_filecheck_total gauge',
+            '# HELP nntmux_collections_pending_multifile_total Pending multi-file collections by group and collection regex.',
+            '# TYPE nntmux_collections_pending_multifile_total gauge',
+        ];
+
+        if (! Schema::hasTable('collections') || ! Schema::hasTable('usenet_groups')) {
+            return $lines;
+        }
+
+        $filecheckRows = DB::table('collections as c')
+            ->join('usenet_groups as g', 'g.id', '=', 'c.groups_id')
+            ->where(static function ($query): void {
+                $query->where('g.active', 1)->orWhere('g.backfill', 1);
+            })
+            ->groupBy(['g.name', 'c.filecheck'])
+            ->orderBy('g.name')
+            ->orderBy('c.filecheck')
+            ->selectRaw('g.name AS group_name, c.filecheck, COUNT(*) AS collections_count')
+            ->get();
+
+        foreach ($filecheckRows as $row) {
+            $lines[] = $this->metric('nntmux_collections_filecheck_total', (int) $row->collections_count, [
+                'group' => (string) $row->group_name,
+                'filecheck' => (string) $row->filecheck,
+            ]);
+        }
+
+        $pendingMultifileRows = DB::table('collections as c')
+            ->join('usenet_groups as g', 'g.id', '=', 'c.groups_id')
+            ->where(static function ($query): void {
+                $query->where('g.active', 1)->orWhere('g.backfill', 1);
+            })
+            ->where('c.filecheck', 0)
+            ->where('c.totalfiles', '>', 1)
+            ->groupBy(['g.name', 'c.collection_regexes_id'])
+            ->orderBy('group_name')
+            ->orderBy('collection_regexes_id')
+            ->selectRaw('g.name AS group_name, c.collection_regexes_id, COUNT(*) AS pending_multifile_count')
+            ->get();
+
+        foreach ($pendingMultifileRows as $row) {
+            $lines[] = $this->metric('nntmux_collections_pending_multifile_total', (int) $row->pending_multifile_count, [
+                'group' => (string) $row->group_name,
+                'collection_regexes_id' => (string) $row->collection_regexes_id,
+            ]);
         }
 
         return $lines;
