@@ -1,6 +1,7 @@
 <?php
 
 use App\Console\Commands\CollectionSplitDiagnostics;
+use App\Console\Commands\RequeueBodyPreambleFragments;
 use App\Http\Middleware\BlockAbusiveServices;
 use App\Http\Middleware\ClearanceMiddleware;
 use App\Http\Middleware\ContentSecurityPolicy;
@@ -48,6 +49,7 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withCommands([
         CollectionSplitDiagnostics::class,
+        RequeueBodyPreambleFragments::class,
     ])
     ->withMiddleware(function (Middleware $middleware) {
         $middleware->redirectTo(
