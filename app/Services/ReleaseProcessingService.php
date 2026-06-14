@@ -609,11 +609,12 @@ final class ReleaseProcessingService
      */
     public function deleteCollections(int|string|null $groupID): void
     {
-        if ($groupID !== null && $groupID !== '') {
+        $normalizedGroupId = $this->normalizeGroupId($groupID);
+        if ($groupID !== null && $groupID !== '' && $normalizedGroupId === null) {
             return;
         }
 
-        $this->collectionCleanupService->deleteFinishedAndOrphans($this->echoCLI);
+        $this->collectionCleanupService->deleteFinishedAndOrphans($this->echoCLI, $normalizedGroupId);
     }
 
     /**

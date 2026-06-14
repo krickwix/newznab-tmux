@@ -11,13 +11,15 @@ use ReflectionClass;
 
 final class ReleaseProcessingCleanupScopeTest extends TestCase
 {
-    public function test_group_scoped_release_cleanup_does_not_run_global_cbp_cleanup(): void
+    public function test_group_scoped_release_cleanup_runs_scoped_cbp_cleanup(): void
     {
         $cleanup = new RecordingCollectionCleanupService;
 
         $this->makeService($cleanup)->deleteCollections(123);
 
-        $this->assertSame(0, $cleanup->calls);
+        $this->assertSame(1, $cleanup->calls);
+        $this->assertFalse($cleanup->lastEchoCli);
+        $this->assertSame(123, $cleanup->lastGroupId);
     }
 
     public function test_site_wide_release_cleanup_runs_global_cbp_cleanup(): void
@@ -28,6 +30,7 @@ final class ReleaseProcessingCleanupScopeTest extends TestCase
 
         $this->assertSame(1, $cleanup->calls);
         $this->assertFalse($cleanup->lastEchoCli);
+        $this->assertNull($cleanup->lastGroupId);
     }
 
     private function makeService(CollectionCleanupService $cleanup): ReleaseProcessingService
@@ -51,10 +54,13 @@ final class RecordingCollectionCleanupService extends CollectionCleanupService
 
     public ?bool $lastEchoCli = null;
 
-    public function deleteFinishedAndOrphans(bool $echoCLI): int
+    public ?int $lastGroupId = null;
+
+    public function deleteFinishedAndOrphans(bool $echoCLI, ?int $groupId = null): int
     {
         $this->calls++;
         $this->lastEchoCli = $echoCLI;
+        $this->lastGroupId = $groupId;
 
         return 0;
     }

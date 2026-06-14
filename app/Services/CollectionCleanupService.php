@@ -40,7 +40,7 @@ class CollectionCleanupService
      *
      * @return int total deleted rows across operations (approximate)
      */
-    public function deleteFinishedAndOrphans(bool $echoCLI): int
+    public function deleteFinishedAndOrphans(bool $echoCLI, ?int $groupId = null): int
     {
         $startTime = now()->toImmutable();
         $deletedCount = 0;
@@ -61,6 +61,7 @@ class CollectionCleanupService
         do {
             $ids = DB::table('collections as c')
                 ->where('c.dateadded', '<', $cutoff)
+                ->when($groupId !== null, static fn ($q) => $q->where('c.groups_id', $groupId))
                 ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
                     ->from('releases as r')
                     ->whereColumn('r.id', 'c.releases_id')
@@ -103,7 +104,7 @@ class CollectionCleanupService
                 cli()->primary('Deleting orphaned collections.', true);
         }
 
-        $orphanDeleted = $this->deleteOrphanCollections($echoCLI);
+        $orphanDeleted = $this->deleteOrphanCollections($echoCLI, $groupId);
         $deletedCount += $orphanDeleted;
 
         if ($echoCLI) {
@@ -123,7 +124,7 @@ class CollectionCleanupService
             cli()->primary('Deleting collections that were missed after NZB creation.', true);
         }
 
-        $missedDeleted = $this->deleteCollectionsMissedAfterNzb($echoCLI);
+        $missedDeleted = $this->deleteCollectionsMissedAfterNzb($echoCLI, $groupId);
         $deletedCount += $missedDeleted;
 
         $totalTime = now()->diffInSeconds($startTime, true);
@@ -148,7 +149,7 @@ class CollectionCleanupService
      * avoids cross-table lock acquisition between `collections` and
      * `binaries`, which can deadlock against concurrent BinaryHandler writes.
      */
-    private function deleteOrphanCollections(bool $echoCLI): int
+    private function deleteOrphanCollections(bool $echoCLI, ?int $groupId): int
     {
         $deleted = 0;
         $maxBatches = 20; // hard cap per cycle; bounded backlog drain
@@ -156,6 +157,7 @@ class CollectionCleanupService
 
         for ($i = 0; $i < $maxBatches; $i++) {
             $ids = DB::table('collections as c')
+                ->when($groupId !== null, static fn ($q) => $q->where('c.groups_id', $groupId))
                 ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
                     ->from('releases as r')
                     ->whereColumn('r.id', 'c.releases_id')
@@ -201,7 +203,7 @@ class CollectionCleanupService
      * multiple `multiprocessing:releases` workers ran in parallel against
      * `NzbService::writeNzbForReleaseId()` on the same DB.
      */
-    private function deleteCollectionsMissedAfterNzb(bool $echoCLI): int
+    private function deleteCollectionsMissedAfterNzb(bool $echoCLI, ?int $groupId): int
     {
         $deleted = 0;
         $maxBatches = 20;
@@ -211,6 +213,7 @@ class CollectionCleanupService
             $ids = DB::table('collections as c')
                 ->join('releases as r', 'r.id', '=', 'c.releases_id')
                 ->where('r.nzbstatus', '=', 1)
+                ->when($groupId !== null, static fn ($q) => $q->where('c.groups_id', $groupId))
                 ->orderBy('c.id')
                 ->limit($batchSize)
                 ->pluck('c.id')

@@ -88,6 +88,15 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
         self::assertStringContainsString("['groups_id', 'filecheck', 'dateadded', 'id']", $migrationSource);
     }
 
+    public function test_stage1_selection_index_is_declared(): void
+    {
+        $migrationSource = file_get_contents(__DIR__.'/../../database/migrations/2026_06_14_010000_add_release_stage1_selection_index.php');
+
+        self::assertIsString($migrationSource);
+        self::assertStringContainsString('ix_collections_release_stage1', $migrationSource);
+        self::assertStringContainsString("['groups_id', 'filecheck', 'id', 'totalfiles']", $migrationSource);
+    }
+
     public function test_stage1_collects_candidate_ids_before_updating_filecheck(): void
     {
         $stageSource = $this->releaseProcessingMethodSource('runCollectionFileCheckStage1');
