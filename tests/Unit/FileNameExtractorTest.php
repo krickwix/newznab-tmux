@@ -234,6 +234,13 @@ class FileNameExtractorTest extends TestCase
         $this->assertNull($extractor->extractFromFile('Hxu6fwEJUsaD2sFb - ISO Premium - BluHD by pornexe.7z.003'));
     }
 
+    public function test_rejects_encoded_archive_stem_with_embedded_timestamp(): void
+    {
+        $extractor = new FileNameExtractor;
+
+        $this->assertNull($extractor->extractFromFile('ASIB1709209393HNR4N240229SHELTER.part1.rar'));
+    }
+
     public function test_strips_segment_counter_from_bare_movie_archive_candidate(): void
     {
         $extractor = new FileNameExtractor;

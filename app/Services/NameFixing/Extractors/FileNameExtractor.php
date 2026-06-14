@@ -71,7 +71,12 @@ class FileNameExtractor
         if (! preg_match('/(?:^|[._ -])(?:sample|proof|subs?|thumbs?)(?:[._ -]|$)/iu', $baseFilename)
             && ! $this->isLikelySoftwareArchivePart($baseFilename)
             && preg_match('/^(.+?(19|20)\d\d.+?)(?:[._ -]part0*\d+|[._ -]r\d{2,3})\.rar$/iu', $baseFilename, $result)) {
-            return NameFixResult::fromMatch($this->normalizeBareMovieCandidate($result[1]).' DVDRip XviD NoGroup', 'Movie (year) archive part', 'File');
+            $candidate = $this->normalizeBareMovieCandidate($result[1]);
+            if ($this->isEncodedArchiveTimestampStem($candidate)) {
+                return null;
+            }
+
+            return NameFixResult::fromMatch($candidate.' DVDRip XviD NoGroup', 'Movie (year) archive part', 'File');
         }
 
         // Scene TV release with group suffix
@@ -169,7 +174,12 @@ class FileNameExtractor
         if (! preg_match('/(?:^|[._ -])(?:sample|proof|subs?|thumbs?)(?:[._ -]|$)/iu', $baseFilename)
             && ! $this->isLikelySoftwareArchivePart($baseFilename)
             && preg_match('/^(.+?(19|20)\d\d.+?)(?:[._ -]part0*\d+|[._ -]r\d{2,3})\.rar$/iu', $baseFilename, $result)) {
-            return NameFixResult::fromMatch($this->normalizeBareMovieCandidate($result[1]).' DVDRip XviD NoGroup', 'Movie (year) archive part', 'File');
+            $candidate = $this->normalizeBareMovieCandidate($result[1]);
+            if ($this->isEncodedArchiveTimestampStem($candidate)) {
+                return null;
+            }
+
+            return NameFixResult::fromMatch($candidate.' DVDRip XviD NoGroup', 'Movie (year) archive part', 'File');
         }
 
         // RAR file contents - look for release name in RAR path
@@ -372,6 +382,7 @@ class FileNameExtractor
         $candidate = $this->normalizeBareMovieCandidate($candidate);
         if ($candidate === ''
             || $this->isLowInformationName($candidate)
+            || $this->isEncodedArchiveTimestampStem($candidate)
             || $this->cleaner->looksLikeHashedName($candidate)
             || ! preg_match('/[\pL][\pL\pN\s._\',;&!()’`-]{2,}/u', $candidate)) {
             return null;
@@ -510,6 +521,13 @@ class FileNameExtractor
         }
 
         return trim($candidate);
+    }
+
+    private function isEncodedArchiveTimestampStem(string $candidate): bool
+    {
+        $compact = preg_replace('/[^A-Za-z0-9]/', '', $candidate) ?: $candidate;
+
+        return preg_match('/^[A-Za-z]{1,8}\d{10}[A-Za-z0-9]{3,12}\d{6}[A-Za-z0-9]{3,24}$/', $compact) === 1;
     }
 
     private function stripArchiveSuffixes(string $candidate): string
