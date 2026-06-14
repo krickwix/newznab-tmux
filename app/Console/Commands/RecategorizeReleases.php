@@ -9,6 +9,7 @@ use App\Models\Category;
 use App\Models\Release;
 use App\Services\Categorization\CategorizationService;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 
 class RecategorizeReleases extends Command
 {
@@ -188,6 +189,19 @@ class RecategorizeReleases extends Command
             return $searchResult;
         }
 
+        if ((int) $release->categories_id === Category::OTHER_HASHED) {
+            if ($this->isWeakGroupFallback($searchResult)) {
+                $searchResult = $this->hashedResult();
+            }
+
+            if ((int) ($searchResult['categories_id'] ?? Category::OTHER_MISC) === Category::OTHER_HASHED) {
+                $fileEvidenceResult = $this->determineCategoryFromExplicitFileEvidence((int) $release->id);
+                if ($fileEvidenceResult !== null) {
+                    return $fileEvidenceResult;
+                }
+            }
+        }
+
         $subject = trim((string) ($release->name ?? ''));
         if ($subject === '' || strcasecmp($subject, (string) $release->searchname) === 0) {
             return $searchResult;
@@ -197,7 +211,8 @@ class RecategorizeReleases extends Command
         if (! $this->isContentCategory($subjectResult)) {
             if ((int) $release->categories_id === Category::OTHER_HASHED
                 && (int) ($searchResult['categories_id'] ?? Category::OTHER_MISC) === Category::OTHER_HASHED
-                && $this->isWeakGroupFallback($subjectResult)) {
+                && $this->isWeakGroupFallback($subjectResult)
+                && $this->hasReadableSubjectEvidence($subject)) {
                 return $subjectResult;
             }
 
@@ -228,6 +243,83 @@ class RecategorizeReleases extends Command
 
         return str_starts_with($matchedBy, 'group_name_')
             || $matchedBy === 'classic_movie_title';
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function determineCategoryFromExplicitFileEvidence(int $releaseId): ?array
+    {
+        $evidence = DB::table('release_files')
+            ->join('releases', 'releases.id', '=', 'release_files.releases_id')
+            ->join('usenet_groups', 'usenet_groups.id', '=', 'releases.groups_id')
+            ->where('release_files.releases_id', $releaseId)
+            ->select(['release_files.name as file_name', 'usenet_groups.name as group_name'])
+            ->orderBy('release_files.name')
+            ->limit(50)
+            ->get();
+
+        foreach ($evidence as $row) {
+            $fileName = (string) $row->file_name;
+            $groupName = (string) $row->group_name;
+
+            if ($this->isTrustedLosslessGroup($groupName) && $this->hasExplicitLosslessFileEvidence($fileName)) {
+                return $this->categoryResult(Category::MUSIC_LOSSLESS, 'release_file_lossless_evidence');
+            }
+
+            if ($this->isTrustedMovieGroup($groupName) && $this->hasExplicitMovieFileEvidence($fileName)) {
+                return $this->categoryResult(Category::MOVIE_OTHER, 'release_file_movie_evidence');
+            }
+        }
+
+        return null;
+    }
+
+    private function isTrustedLosslessGroup(string $groupName): bool
+    {
+        return preg_match('/(?:alt\.binaries|a\.b)\..*lossless/i', $groupName) === 1;
+    }
+
+    private function isTrustedMovieGroup(string $groupName): bool
+    {
+        return preg_match('/(?:alt\.binaries|a\.b)\..*?(movies?|movie[.-]?classic|dvd[.-]classic|dvd[.-]movies?|bluray|blu[.-]?ray|uhd|vintage[.-]?film)/i', $groupName) === 1;
+    }
+
+    private function hasExplicitLosslessFileEvidence(string $fileName): bool
+    {
+        return preg_match('/\.(?:flac|ape|wav|aiff|dsf|dff|m4a|tak)(?:$|["\s])/i', $fileName) === 1;
+    }
+
+    private function hasExplicitMovieFileEvidence(string $fileName): bool
+    {
+        return preg_match('/(?:^|[\/\\\\])VIDEO_TS(?:[\/\\\\]|$)/i', $fileName) === 1
+            || preg_match('/\.(?:mkv|mp4|avi|mpg|mpeg|vob|iso)(?:$|["\s])/i', $fileName) === 1;
+    }
+
+    private function hasReadableSubjectEvidence(string $subject): bool
+    {
+        return preg_match('/[A-Za-z][a-z]{3,}/', $subject) === 1;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function hashedResult(): array
+    {
+        return $this->categoryResult(Category::OTHER_HASHED, 'hashed_locked');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function categoryResult(int $categoryId, string $matchedBy): array
+    {
+        return [
+            'categories_id' => $categoryId,
+            'debug' => [
+                'matched_by' => $matchedBy,
+            ],
+        ];
     }
 
     /**

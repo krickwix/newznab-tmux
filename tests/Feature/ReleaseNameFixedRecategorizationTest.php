@@ -574,6 +574,141 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame(1, (int) $release->iscategorized);
     }
 
+    public function test_recategorize_hashed_lossless_release_uses_explicit_flac_file_evidence(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.sounds.lossless.flac',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'searchname' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('1', 40),
+            'leftguid' => '1',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id,
+            'name' => 'Cradle of Filth - Midian - 02 Cthulhu Dawn.flac',
+            'size' => 123,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--ids' => (string) $release->id,
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::MUSIC_LOSSLESS, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(0, (int) $release->isrenamed);
+    }
+
+    public function test_recategorize_hashed_movie_release_uses_explicit_video_file_evidence(): void
+    {
+        Search::shouldReceive('updateRelease')->twice();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.classic',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => 'f1e2d3c4b5a697887766554433221100',
+            'searchname' => 'f1e2d3c4b5a697887766554433221100',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('2', 40),
+            'leftguid' => '2',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id,
+            'name' => 'I Confess (1953) 1080p BluRay.mkv',
+            'size' => 123,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--ids' => (string) $release->id,
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::MOVIE_OTHER, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(0, (int) $release->isrenamed);
+    }
+
+    public function test_recategorize_hashed_opaque_movie_group_release_without_explicit_file_evidence_stays_hashed(): void
+    {
+        Search::shouldReceive('updateRelease')->once();
+
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.blu-ray',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+
+        $release = Release::factory()->create([
+            'name' => '9c1185a5c5e9fc54612808977ee8f548',
+            'searchname' => '9c1185a5c5e9fc54612808977ee8f548',
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'guid' => str_repeat('3', 40),
+            'leftguid' => '3',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ]);
+
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id,
+            'name' => '9c1185a5c5e9fc54612808977ee8f548.part001.rar',
+            'size' => 123,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->artisan('nntmux:recategorize-releases', [
+            '--ids' => (string) $release->id,
+            '--category' => (string) Category::OTHER_HASHED,
+        ])->assertSuccessful();
+
+        $release->refresh();
+
+        $this->assertSame(Category::OTHER_HASHED, $release->categories_id);
+        $this->assertSame(1, (int) $release->iscategorized);
+        $this->assertSame(0, (int) $release->isrenamed);
+    }
+
     public function test_recategorize_releases_combines_category_and_group_selectors(): void
     {
         Search::shouldReceive('updateRelease')->times(3);
@@ -1072,6 +1207,7 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
             DB::table('root_categories')->insert([
                 ['id' => Category::OTHER_ROOT, 'title' => 'Other', 'status' => 1, 'disablepreview' => 0],
                 ['id' => Category::MOVIE_ROOT, 'title' => 'Movies', 'status' => 1, 'disablepreview' => 0],
+                ['id' => Category::MUSIC_ROOT, 'title' => 'Music', 'status' => 1, 'disablepreview' => 0],
             ]);
         }
 
@@ -1091,6 +1227,7 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
                 ['id' => Category::OTHER_HASHED, 'title' => 'Hashed', 'root_categories_id' => Category::OTHER_ROOT],
                 ['id' => Category::MOVIE_OTHER, 'title' => 'Other', 'root_categories_id' => Category::MOVIE_ROOT],
                 ['id' => Category::MOVIE_SD, 'title' => 'SD', 'root_categories_id' => Category::MOVIE_ROOT],
+                ['id' => Category::MUSIC_LOSSLESS, 'title' => 'Lossless', 'root_categories_id' => Category::MUSIC_ROOT],
                 ['id' => Category::PC_0DAY, 'title' => '0day', 'root_categories_id' => Category::PC_ROOT],
             ]);
         }
@@ -1155,6 +1292,16 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
                 $table->tinyInteger('proc_crc32')->default(0);
                 $table->tinyInteger('passwordstatus')->default(0);
                 $table->tinyInteger('nzbstatus')->default(0);
+            });
+        }
+
+        if (! Schema::hasTable('release_files')) {
+            Schema::create('release_files', function (Blueprint $table): void {
+                $table->unsignedInteger('releases_id');
+                $table->string('name');
+                $table->unsignedBigInteger('size')->default(0);
+                $table->string('crc32')->default('');
+                $table->timestamps();
             });
         }
     }
