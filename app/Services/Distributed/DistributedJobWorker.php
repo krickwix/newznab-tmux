@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Distributed;
 
 use App\Models\Settings;
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Tmux\TmuxMonitorService;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
@@ -16,6 +17,7 @@ class DistributedJobWorker
     public function __construct(
         private readonly DistributedJobCatalog $catalog,
         private readonly TmuxMonitorService $monitorService,
+        private readonly DistributedWorkerTelemetry $workerTelemetry,
     ) {}
 
     public function run(
@@ -34,6 +36,7 @@ class DistributedJobWorker
             $sleep = $sleepOverride ?? (int) $plan['sleep'];
 
             if (! $plan['enabled']) {
+                $this->workerTelemetry->recordRunOutcome($job, 'disabled');
                 $output->writeln(sprintf(
                     '[%s] disabled: %s',
                     now()->toDateTimeString(),
@@ -87,6 +90,7 @@ class DistributedJobWorker
         try {
             $acquired = $lock->get();
         } catch (Throwable $e) {
+            $this->workerTelemetry->recordRunOutcome($plan['name'], 'lock_error');
             $output->writeln(sprintf(
                 '[%s] skipped %s: failed to acquire %s lock [%s]: %s',
                 now()->toDateTimeString(),
@@ -100,12 +104,21 @@ class DistributedJobWorker
         }
 
         if (! $acquired) {
+            $this->workerTelemetry->recordRunOutcome($plan['name'], 'lock_contended');
             $output->writeln(sprintf('[%s] skipped %s: another worker holds %s', now()->toDateTimeString(), $plan['name'], $lockName));
 
             return 0;
         }
 
-        $restoreSignalHandlers = $this->registerLockTerminationHandlers($lock, $lockName, $plan['name'], $output);
+        $startedAt = $this->workerTelemetry->startRun($plan['name']);
+        $runOutcome = 'failure';
+        $restoreSignalHandlers = $this->registerLockTerminationHandlers(
+            $lock,
+            $lockName,
+            $plan['name'],
+            $startedAt,
+            $output,
+        );
 
         try {
             $output->writeln(sprintf(
@@ -131,9 +144,11 @@ class DistributedJobWorker
             }
 
             $output->writeln(sprintf('[%s] completed %s', now()->toDateTimeString(), $plan['name']));
+            $runOutcome = 'success';
 
             return 0;
         } finally {
+            $this->workerTelemetry->finishRun($plan['name'], $runOutcome, $startedAt);
             $restoreSignalHandlers();
             $lock->release();
         }
@@ -149,6 +164,7 @@ class DistributedJobWorker
         mixed $lock,
         string $lockName,
         string $job,
+        float $startedAt,
         OutputInterface $output,
     ): callable {
         if (! function_exists('pcntl_signal')) {
@@ -177,8 +193,9 @@ class DistributedJobWorker
                 ? pcntl_signal_get_handler($signal)
                 : SIG_DFL;
 
-            pcntl_signal($signal, function (int $receivedSignal) use ($lock, $lockName, $job, $output): void {
+            pcntl_signal($signal, function (int $receivedSignal) use ($lock, $lockName, $job, $startedAt, $output): void {
                 $output->writeln($this->formatTerminationSignalMessage($receivedSignal, $job, $lockName));
+                $this->workerTelemetry->finishRun($job, 'terminated', $startedAt);
 
                 try {
                     $lock->release();

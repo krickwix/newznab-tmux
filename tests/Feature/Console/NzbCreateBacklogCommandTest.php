@@ -5,13 +5,17 @@ declare(strict_types=1);
 namespace Tests\Feature\Console;
 
 use App\Models\Release;
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Nzb\NzbBacklogCreationService;
 use App\Services\Nzb\NzbService;
 use App\Services\ReleaseProcessingService;
+use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
 use Mockery\MockInterface;
+use PDO;
 use ReflectionMethod;
 use Tests\TestCase;
 
@@ -19,20 +23,75 @@ final class NzbCreateBacklogCommandTest extends TestCase
 {
     use MockeryPHPUnitIntegration;
 
+    private string $databasePath;
+
+    /**
+     * @var array<string, string|false>
+     */
+    private array $originalEnvironment = [];
+
+    public function createApplication()
+    {
+        $this->databasePath = tempnam(sys_get_temp_dir(), 'nntmux-nzb-backlog-test-');
+        $this->originalEnvironment = [
+            'APP_ENV' => getenv('APP_ENV'),
+            'DB_CONNECTION' => getenv('DB_CONNECTION'),
+            'DB_DATABASE' => getenv('DB_DATABASE'),
+        ];
+
+        $pdo = new PDO('sqlite:'.$this->databasePath);
+        $pdo->exec('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        $pdo->exec("INSERT INTO settings (name, value) VALUES
+            ('categorizeforeign', '0'),
+            ('catwebdl', '0'),
+            ('innerfileblacklist', ''),
+            ('showpasswordedrelease', '0')");
+
+        $this->setEnvironmentValue('APP_ENV', 'testing');
+        $this->setEnvironmentValue('DB_CONNECTION', 'sqlite');
+        $this->setEnvironmentValue('DB_DATABASE', $this->databasePath);
+
+        $app = require __DIR__.'/../../../bootstrap/app.php';
+        $app->make(Kernel::class)->bootstrap();
+
+        return $app;
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
 
         config([
             'database.default' => 'sqlite',
-            'database.connections.sqlite.database' => ':memory:',
+            'database.connections.sqlite.database' => $this->databasePath,
             'nntmux.echocli' => false,
         ]);
+        DB::disconnect();
         DB::purge();
+        if (file_exists($this->databasePath)) {
+            unlink($this->databasePath);
+        }
+        touch($this->databasePath);
         DB::reconnect();
 
         $this->createTables();
         $this->seedSettings();
+    }
+
+    protected function tearDown(): void
+    {
+        DB::disconnect();
+        DB::purge();
+
+        if (isset($this->databasePath) && file_exists($this->databasePath)) {
+            unlink($this->databasePath);
+        }
+
+        parent::tearDown();
+
+        foreach ($this->originalEnvironment as $key => $value) {
+            $this->setEnvironmentValue($key, $value === false ? null : $value);
+        }
     }
 
     public function test_command_processes_only_matching_group_partition_with_payload_and_limit(): void
@@ -58,7 +117,9 @@ final class NzbCreateBacklogCommandTest extends TestCase
             '--leftguid' => 'a',
             '--limit' => 2,
             '--sleep' => 0,
-        ])->assertSuccessful();
+        ])
+            ->expectsOutputToContain('selected=2 scanned=2 scan_exhausted=no')
+            ->assertSuccessful();
 
         $this->assertSame([1, 2], $writtenIds);
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 3)->value('nzbstatus'));
@@ -88,6 +149,32 @@ final class NzbCreateBacklogCommandTest extends TestCase
 
         $this->assertSame([1, 2, 3], $writtenIds);
         $this->assertSame(0, DB::table('releases')->where('nzbstatus', NzbService::NZB_NONE)->count());
+    }
+
+    public function test_command_records_bounded_selector_and_nzb_item_telemetry(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'array']);
+        Cache::store('array')->flush();
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+        $this->bindNzbWriter(static function (Release $release): bool {
+            DB::table('releases')->where('id', $release->id)->update(['nzbstatus' => NzbService::NZB_ADDED]);
+
+            return true;
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', ['--limit' => 1])->assertSuccessful();
+
+        $snapshot = app(DistributedWorkerTelemetry::class)->snapshot(['nzb-backlog']);
+        $items = $snapshot['workers']['nzb-backlog']['items']['nzb'];
+
+        $this->assertSame(1, $items['scanned']);
+        $this->assertSame(1, $items['selected']);
+        $this->assertSame(1, $items['attempted']);
+        $this->assertSame(1, $items['created']);
+        $this->assertSame(0, $items['failed']);
+        $this->assertSame(0, $items['marked_failed']);
+        $this->assertSame(0, $items['scan_exhausted']);
+        $this->assertGreaterThanOrEqual(0.0, $snapshot['nzb_selector_last_duration_seconds']);
     }
 
     public function test_command_marks_failed_releases_when_requested(): void
@@ -243,29 +330,218 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
     }
 
-    public function test_global_pending_query_is_id_ordered_and_keeps_bad_binary_checks_correlated(): void
+    public function test_pending_id_scan_does_not_join_or_subquery_payload_tables(): void
     {
         /** @var NzbService&MockInterface $nzb */
         $nzb = Mockery::mock(NzbService::class);
         $service = new NzbBacklogCreationService($nzb);
-        $method = new ReflectionMethod($service, 'basePendingQuery');
+        $method = new ReflectionMethod($service, 'pendingIdQuery');
         $method->setAccessible(true);
 
-        $query = $method->invoke($service, 94);
-        $sql = $query->toSql();
+        $query = $method->invoke($service);
+        $sql = strtolower($query->toSql());
 
-        $this->assertStringContainsString(
-            'indexed by ix_releases_nzbstatus_id',
-            $sql
+        $this->assertStringContainsString('indexed by ix_releases_nzbstatus_id', $sql);
+        $this->assertStringContainsString('where "nzbstatus" = ?', $sql);
+        $this->assertStringNotContainsString('collections', $sql);
+        $this->assertStringNotContainsString('binaries', $sql);
+        $this->assertStringNotContainsString('parts', $sql);
+        $this->assertStringNotContainsString('select count', $sql);
+        $this->assertStringNotContainsString('exists (', $sql);
+    }
+
+    public function test_eligibility_query_is_bounded_to_one_exact_release_id(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+
+        /** @var NzbService&MockInterface $nzb */
+        $nzb = Mockery::mock(NzbService::class);
+        $service = new NzbBacklogCreationService($nzb);
+        $method = new ReflectionMethod($service, 'eligibleReleaseById');
+        $method->setAccessible(true);
+
+        $queries = [];
+        DB::listen(static function ($query) use (&$queries): void {
+            $queries[] = strtolower($query->sql);
+        });
+
+        $release = $method->invoke($service, 1, 100);
+
+        $this->assertInstanceOf(Release::class, $release);
+        $eligibilitySql = collect($queries)->first(
+            static fn (string $sql): bool => str_contains($sql, 'from "releases"')
+                && str_contains($sql, 'collections')
         );
-        $this->assertStringContainsString(
-            '(select COUNT(*) from "collections" inner join "binaries"',
-            $sql
+        $this->assertIsString($eligibilitySql);
+        $this->assertStringContainsString('"releases"."id" = ?', $eligibilitySql);
+        $this->assertStringNotContainsString('"releases"."id" in (', $eligibilitySql);
+    }
+
+    public function test_candidate_scan_cap_limits_the_number_of_pending_ids_considered(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+        $this->seedRelease(2, groupId: 1, leftGuid: 'a');
+        $this->seedRelease(3, groupId: 1, leftGuid: 'a');
+
+        $writtenIds = [];
+        $nzb = $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+
+            return true;
+        });
+
+        $service = new NzbBacklogCreationService($nzb);
+        $result = $service->create(limit: 3, scanCap: 2);
+
+        $this->assertSame([1, 2], $writtenIds);
+        $this->assertSame(2, $result['selected']);
+        $this->assertSame(2, $result['attempted']);
+        $this->assertSame(2, $result['scanned']);
+        $this->assertTrue($result['scan_exhausted']);
+        $this->assertIsFloat($result['selection_duration_seconds']);
+        $this->assertGreaterThanOrEqual(0.0, $result['selection_duration_seconds']);
+    }
+
+    public function test_scan_is_not_exhausted_when_pending_rows_exactly_equal_cap(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+        $this->seedRelease(2, groupId: 1, leftGuid: 'a');
+
+        $writtenIds = [];
+        $nzb = $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+
+            return true;
+        });
+
+        $service = new NzbBacklogCreationService($nzb);
+        $result = $service->create(limit: 3, scanCap: 2);
+
+        $this->assertSame([1, 2], $writtenIds);
+        $this->assertSame(2, $result['scanned']);
+        $this->assertFalse($result['scan_exhausted']);
+    }
+
+    public function test_configured_scan_cap_reduces_default_window_and_reports_exhaustion(): void
+    {
+        config(['nntmux.distributed_nzb_scan_cap' => 2]);
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+        $this->seedRelease(2, groupId: 1, leftGuid: 'a');
+        $this->seedRelease(3, groupId: 1, leftGuid: 'a');
+
+        $writtenIds = [];
+        $nzb = $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+
+            return true;
+        });
+
+        $service = new NzbBacklogCreationService($nzb);
+        $result = $service->create(limit: 3);
+
+        $this->assertSame([1, 2], $writtenIds);
+        $this->assertSame(2, $result['scanned']);
+        $this->assertTrue($result['scan_exhausted']);
+    }
+
+    public function test_default_scan_uses_full_configured_cap_to_reach_later_eligible_release(): void
+    {
+        config(['nntmux.distributed_nzb_scan_cap' => 5000]);
+        foreach (range(1, 100) as $id) {
+            $this->seedRelease($id, groupId: 1, leftGuid: 'a', withPayload: false);
+        }
+        $this->seedRelease(101, groupId: 1, leftGuid: 'a');
+
+        $writtenIds = [];
+        $nzb = $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+
+            return true;
+        });
+
+        $service = new NzbBacklogCreationService($nzb);
+        $result = $service->create(limit: 1);
+
+        $this->assertSame([101], $writtenIds);
+        $this->assertSame(101, $result['scanned']);
+        $this->assertFalse($result['scan_exhausted']);
+    }
+
+    public function test_ineligible_pending_id_does_not_starve_later_eligible_id_within_scan_cap(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a', currentParts: 0, totalParts: 1);
+        $this->seedRelease(2, groupId: 1, leftGuid: 'a');
+        $this->seedRelease(3, groupId: 1, leftGuid: 'a');
+
+        $writtenIds = [];
+        $nzb = $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+
+            return true;
+        });
+
+        $queries = [];
+        DB::listen(static function ($query) use (&$queries): void {
+            $queries[] = strtolower($query->sql);
+        });
+
+        $service = new NzbBacklogCreationService($nzb);
+        $result = $service->create(limit: 1, scanCap: 2);
+
+        $this->assertSame([2], $writtenIds);
+        $this->assertSame(1, $result['selected']);
+        $this->assertSame(2, $result['scanned']);
+        $this->assertFalse($result['scan_exhausted']);
+
+        $firstReleaseQuery = collect($queries)->first(
+            static fn (string $sql): bool => str_contains($sql, 'from "releases"')
         );
-        $this->assertStringNotContainsString(
-            'not exists (select 1 from "collections" inner join "binaries"',
-            $sql
+        $this->assertIsString($firstReleaseQuery);
+        $this->assertStringNotContainsString('collections', $firstReleaseQuery);
+        $this->assertStringNotContainsString('binaries', $firstReleaseQuery);
+        $this->assertStringNotContainsString('parts', $firstReleaseQuery);
+    }
+
+    public function test_candidate_count_is_exact_within_the_bounded_scan_window(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+        $this->seedRelease(2, groupId: 1, leftGuid: 'a', currentParts: 0, totalParts: 1);
+        $this->seedRelease(3, groupId: 1, leftGuid: 'a');
+
+        $writtenIds = [];
+        $nzb = $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+
+            return true;
+        });
+
+        $service = new NzbBacklogCreationService($nzb);
+        $result = $service->create(
+            limit: 1,
+            order: 'desc',
+            countCandidates: true,
+            scanCap: 3
         );
+
+        $this->assertSame([3], $writtenIds);
+        $this->assertSame(2, $result['candidate_total']);
+        $this->assertSame(1, $result['selected']);
+        $this->assertSame(1, $result['attempted']);
+    }
+
+    public function test_selected_release_keeps_category_tree_eager_loaded(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+
+        $nzb = $this->bindNzbWriter(static function (Release $release): bool {
+            self::assertTrue($release->relationLoaded('category'));
+            self::assertTrue($release->category->relationLoaded('parent'));
+
+            return true;
+        });
+
+        $service = new NzbBacklogCreationService($nzb);
+        $service->create(limit: 1, scanCap: 1);
     }
 
     public function test_group_partition_switches_to_the_partition_covering_index(): void
@@ -273,12 +549,12 @@ final class NzbCreateBacklogCommandTest extends TestCase
         /** @var NzbService&MockInterface $nzb */
         $nzb = Mockery::mock(NzbService::class);
         $service = new NzbBacklogCreationService($nzb);
-        $baseMethod = new ReflectionMethod($service, 'basePendingQuery');
+        $baseMethod = new ReflectionMethod($service, 'pendingIdQuery');
         $baseMethod->setAccessible(true);
         $groupMethod = new ReflectionMethod($service, 'applyGroupFilter');
         $groupMethod->setAccessible(true);
 
-        $query = $baseMethod->invoke($service, 94);
+        $query = $baseMethod->invoke($service);
         $groupMethod->invoke($service, $query, [1]);
 
         $this->assertStringContainsString(
@@ -504,6 +780,20 @@ final class NzbCreateBacklogCommandTest extends TestCase
         ] as $name => $value) {
             DB::table('settings')->insert(['name' => $name, 'value' => $value]);
         }
+    }
+
+    private function setEnvironmentValue(string $key, ?string $value): void
+    {
+        if ($value === null) {
+            putenv($key);
+            unset($_ENV[$key], $_SERVER[$key]);
+
+            return;
+        }
+
+        putenv($key.'='.$value);
+        $_ENV[$key] = $value;
+        $_SERVER[$key] = $value;
     }
 
     private function createTables(): void

@@ -11,13 +11,18 @@ use Illuminate\Support\Facades\DB;
 
 final class NzbBacklogCreationService
 {
+    private const int MAX_CANDIDATE_SCAN = 5000;
+
     public function __construct(private readonly NzbService $nzb) {}
 
     /**
      * @param  array<int, int|string>  $groups
      * @param  array<int, string>  $leftGuids
      * @param  callable(int, int): void|null  $onCreated
-     * @return array{candidate_total: int, selected: int, attempted: int, created: int, failed: int, marked_failed: int}
+     *
+     * When candidate counting is requested, candidate_total is exact within
+     * the bounded pending-ID scan rather than an unbounded global backlog count.
+     * @return array{candidate_total: int, selected: int, scanned: int, scan_exhausted: bool, selection_duration_seconds: float, attempted: int, created: int, failed: int, marked_failed: int}
      */
     public function create(
         array $groups = [],
@@ -26,29 +31,61 @@ final class NzbBacklogCreationService
         bool $markFailed = false,
         string $order = 'asc',
         bool $countCandidates = false,
-        ?callable $onCreated = null
+        ?callable $onCreated = null,
+        ?int $scanCap = null
     ): array {
         $limit = max(1, min(5000, $limit));
+        $configuredScanCap = max(
+            1,
+            min(self::MAX_CANDIDATE_SCAN, (int) config('nntmux.distributed_nzb_scan_cap', self::MAX_CANDIDATE_SCAN))
+        );
+        $scanCap = $scanCap === null
+            ? $configuredScanCap
+            : max(1, min($configuredScanCap, $scanCap));
         $order = strtolower($order) === 'desc' ? 'desc' : 'asc';
 
         $completion = $this->requiredCompletionPercent();
+        $selectionStartedAt = hrtime(true);
 
-        $query = $this->basePendingQuery($completion);
+        $query = $this->pendingIdQuery();
         $this->applyGroupFilter($query, $groups);
         $this->applyLeftGuidFilter($query, $leftGuids);
 
-        $candidateTotal = $countCandidates ? (clone $query)->count() : 0;
-        $releases = $query
+        $pendingIds = $query
             ->orderBy('id', $order)
-            ->limit($limit)
-            ->get();
-        if (! $countCandidates) {
-            $candidateTotal = $releases->count();
+            ->limit($scanCap + 1)
+            ->pluck('id');
+        $hasMorePending = $pendingIds->count() > $scanCap;
+
+        $releases = [];
+        $eligibleCount = 0;
+        $scanned = 0;
+        foreach ($pendingIds->take($scanCap) as $pendingId) {
+            $scanned++;
+            $release = $this->eligibleReleaseById((int) $pendingId, $completion);
+            if ($release === null) {
+                continue;
+            }
+
+            $eligibleCount++;
+            if (count($releases) < $limit) {
+                $releases[] = $release;
+            }
+
+            if (! $countCandidates && count($releases) >= $limit) {
+                break;
+            }
         }
+        $candidateTotal = $countCandidates ? $eligibleCount : count($releases);
+        $scanExhausted = $hasMorePending && $scanned >= $scanCap && count($releases) < $limit;
+        $selectionDurationSeconds = max(0.0, (hrtime(true) - $selectionStartedAt) / 1_000_000_000);
 
         $result = [
             'candidate_total' => $candidateTotal,
-            'selected' => $releases->count(),
+            'selected' => count($releases),
+            'scanned' => $scanned,
+            'scan_exhausted' => $scanExhausted,
+            'selection_duration_seconds' => $selectionDurationSeconds,
             'attempted' => 0,
             'created' => 0,
             'failed' => 0,
@@ -78,18 +115,26 @@ final class NzbBacklogCreationService
     /**
      * @return Builder<Release>
      */
-    private function basePendingQuery(int $completion): Builder
+    private function pendingIdQuery(): Builder
     {
         $query = Release::query();
-
-        // MariaDB otherwise materializes the incomplete-binary NOT EXISTS
-        // branch across the full collections/binaries/parts backlog. Keep the
-        // outer scan release-driven; group-scoped passes switch below to the
-        // partition index before adding their group filter.
         $query->getQuery()->forceIndex('ix_releases_nzbstatus_id');
 
         return $query
+            ->where('nzbstatus', '=', NzbService::NZB_NONE)
+            ->select('id');
+    }
+
+    private function eligibleReleaseById(int $releaseId, int $completion): ?Release
+    {
+        $query = Release::query();
+        if (DB::getDriverName() !== 'sqlite') {
+            $query->getQuery()->forceIndex('PRIMARY');
+        }
+
+        return $query
             ->with('category.parent')
+            ->whereKey($releaseId)
             ->where('nzbstatus', '=', NzbService::NZB_NONE)
             ->whereExists(function ($query): void {
                 $query->selectRaw('1')
@@ -99,9 +144,6 @@ final class NzbBacklogCreationService
                     ->whereColumn('collections.releases_id', 'releases.id')
                     ->limit(1);
             })
-            // COUNT(*) remains correlated to the outer release on MariaDB.
-            // NOT EXISTS was decorrelated into a global materialized scan,
-            // which repeated for every release-worker group and took minutes.
             ->where(function ($query) use ($completion): void {
                 $query->selectRaw('COUNT(*)')
                     ->from('collections')
@@ -118,7 +160,8 @@ final class NzbBacklogCreationService
                             });
                     });
             }, '=', 0)
-            ->select(['id', 'guid', 'name', 'categories_id', 'groups_id', 'leftguid', 'nzbstatus']);
+            ->select(['id', 'guid', 'name', 'categories_id', 'groups_id', 'leftguid', 'nzbstatus'])
+            ->first();
     }
 
     private function requiredCompletionPercent(): int

@@ -5,8 +5,11 @@ declare(strict_types=1);
 namespace Tests\Unit\Services\Metrics;
 
 use App\Models\Category;
+use App\Services\Distributed\DistributedJobCatalog;
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Metrics\NntmuxPrometheusMetrics;
 use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Mockery;
@@ -70,7 +73,8 @@ class NntmuxPrometheusMetricsTest extends TestCase
             adddate DATETIME NOT NULL,
             ishashed INTEGER DEFAULT 0,
             isrenamed INTEGER DEFAULT 0,
-            categories_id INTEGER NOT NULL
+            categories_id INTEGER NOT NULL,
+            nzbstatus INTEGER NOT NULL DEFAULT 0
         )');
 
         DB::statement('CREATE TABLE categories (
@@ -335,5 +339,141 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.binaries.lossless",filecheck="0"} 1', $output);
         $this->assertStringContainsString('nntmux_collections_pending_multifile_total{group="alt.binaries.blu-ray",collection_regexes_id="88"} 2', $output);
         $this->assertStringNotContainsString('alt.binaries.inactive', $output);
+    }
+
+    public function test_collection_lifecycle_metrics_are_aggregate_and_zero_safe(): void
+    {
+        DB::statement('CREATE TABLE collections (
+            id INTEGER PRIMARY KEY,
+            groups_id INTEGER NOT NULL,
+            totalfiles INTEGER NOT NULL,
+            filecheck INTEGER NOT NULL,
+            collection_regexes_id INTEGER NOT NULL
+        )');
+
+        DB::table('collections')->insert([
+            ['id' => 1, 'groups_id' => 1, 'totalfiles' => 1, 'filecheck' => 0, 'collection_regexes_id' => 1],
+            ['id' => 2, 'groups_id' => 1, 'totalfiles' => 1, 'filecheck' => 0, 'collection_regexes_id' => 1],
+            ['id' => 3, 'groups_id' => 1, 'totalfiles' => 1, 'filecheck' => 4, 'collection_regexes_id' => 1],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('pipelineLifecycleMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_collections_filecheck_lifecycle_count{filecheck="0",state="new",lifecycle="backlog"} 2', $output);
+        $this->assertStringContainsString('nntmux_collections_filecheck_lifecycle_count{filecheck="3",state="ready_for_release",lifecycle="ready"} 0', $output);
+        $this->assertStringContainsString('nntmux_collections_filecheck_lifecycle_count{filecheck="4",state="inserted",lifecycle="nzb_pending"} 1', $output);
+    }
+
+    public function test_nzb_metrics_use_direct_status_and_inserted_proxy_counts(): void
+    {
+        DB::statement('CREATE TABLE collections (
+            id INTEGER PRIMARY KEY,
+            groups_id INTEGER NOT NULL,
+            totalfiles INTEGER NOT NULL,
+            filecheck INTEGER NOT NULL,
+            collection_regexes_id INTEGER NOT NULL
+        )');
+
+        DB::table('releases')->insert([
+            ['id' => 1, 'adddate' => now(), 'categories_id' => Category::MOVIE_HD, 'nzbstatus' => 0],
+            ['id' => 2, 'adddate' => now(), 'categories_id' => Category::MOVIE_HD, 'nzbstatus' => 0],
+            ['id' => 3, 'adddate' => now(), 'categories_id' => Category::MOVIE_HD, 'nzbstatus' => -1],
+            ['id' => 4, 'adddate' => now(), 'categories_id' => Category::MOVIE_HD, 'nzbstatus' => 1],
+        ]);
+        DB::table('collections')->insert([
+            ['id' => 1, 'groups_id' => 1, 'totalfiles' => 1, 'filecheck' => 4, 'collection_regexes_id' => 1],
+            ['id' => 2, 'groups_id' => 1, 'totalfiles' => 1, 'filecheck' => 3, 'collection_regexes_id' => 1],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('nzbBacklogMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_nzb_releases_count{state="pending"} 2', $output);
+        $this->assertStringContainsString('nntmux_nzb_releases_count{state="failed"} 1', $output);
+        $this->assertStringContainsString('nntmux_nzb_releases_count{state="added"} 1', $output);
+        $this->assertStringContainsString('nntmux_nzb_inserted_collections_count 1', $output);
+    }
+
+    public function test_worker_metrics_are_zero_safe_and_expose_selector_age_and_config(): void
+    {
+        config([
+            'nntmux.distributed_lock_store' => 'array',
+            'nntmux.inline_nzb_creation' => false,
+            'nntmux.distributed_nzb_limit' => 1,
+            'nntmux.distributed_nzb_sleep' => 60,
+            'nntmux.build_version' => '20260710-v8',
+            'app.env' => 'testing',
+        ]);
+        Cache::store('array')->flush();
+
+        $telemetry = new DistributedWorkerTelemetry;
+        $telemetry->startRun('nzb-backlog', 1_000.0);
+        $telemetry->recordItem('nzb-backlog', 'nzb', 'created', 3);
+        $telemetry->recordSelectorDuration(0.125);
+
+        $metrics = new NntmuxPrometheusMetrics($telemetry, new DistributedJobCatalog);
+        $method = (new ReflectionClass($metrics))->getMethod('workerTelemetryMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics, 1_025.0));
+
+        $this->assertStringContainsString('nntmux_worker_telemetry_available 1', $output);
+        $this->assertStringContainsString('nntmux_worker_runs_total{worker="releases",outcome="success"} 0', $output);
+        $this->assertStringContainsString('nntmux_worker_items_total{worker="nzb-backlog",item="nzb",result="created"} 3', $output);
+        $this->assertStringNotContainsString('nntmux_worker_items_total{worker="releases",item="nzb"', $output);
+        $this->assertStringContainsString('nntmux_worker_in_progress{worker="nzb-backlog"} 1', $output);
+        $this->assertStringContainsString('nntmux_worker_in_progress_age_seconds{worker="nzb-backlog"} 25', $output);
+        $this->assertStringContainsString('nntmux_worker_last_started_timestamp_seconds{worker="nzb-backlog"} 1000', $output);
+        $this->assertStringContainsString('nntmux_worker_last_completed_timestamp_seconds{worker="nzb-backlog"} 0', $output);
+        $this->assertStringContainsString('nntmux_nzb_selector_in_progress_age_seconds 25', $output);
+        $this->assertStringContainsString('nntmux_nzb_selector_last_duration_seconds 0.125', $output);
+    }
+
+    public function test_worker_metrics_omit_redis_derived_samples_when_telemetry_is_unavailable(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'missing-worker-telemetry-store']);
+
+        $metrics = new NntmuxPrometheusMetrics(
+            new DistributedWorkerTelemetry,
+            new DistributedJobCatalog,
+        );
+        $method = (new ReflectionClass($metrics))->getMethod('workerTelemetryMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics, 1_025.0));
+
+        $this->assertStringContainsString('nntmux_worker_telemetry_available 0', $output);
+        $this->assertStringNotContainsString('nntmux_worker_runs_total{', $output);
+        $this->assertStringNotContainsString('nntmux_worker_items_total{', $output);
+        $this->assertStringNotContainsString('nntmux_worker_last_success_timestamp_seconds{', $output);
+        $this->assertDoesNotMatchRegularExpression('/^nntmux_nzb_selector_last_duration_seconds /m', $output);
+    }
+
+    public function test_build_and_nzb_worker_config_are_exported_without_dynamic_labels(): void
+    {
+        config([
+            'app.env' => 'production',
+            'nntmux.build_version' => '20260710-v8',
+            'nntmux.inline_nzb_creation' => false,
+            'nntmux.distributed_nzb_limit' => 2,
+            'nntmux.distributed_nzb_sleep' => 45,
+            'nntmux.distributed_nzb_scan_cap' => 5000,
+            'nntmux.distributed_nzb_lock_seconds' => 7200,
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('buildConfigMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_build_info{version="20260710-v8",environment="production"} 1', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_config_info{inline_creation="disabled"} 1', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_batch_limit 2', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_sleep_seconds 45', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_scan_cap 5000', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_lock_seconds 7200', $output);
     }
 }

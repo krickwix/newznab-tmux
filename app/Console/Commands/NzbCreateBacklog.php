@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Nzb\NzbBacklogCreationService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -21,8 +22,10 @@ final class NzbCreateBacklog extends Command
 
     protected $description = 'Create missing NZB files from the release backlog using optional group and leftguid partitions';
 
-    public function __construct(private readonly NzbBacklogCreationService $backlogCreation)
-    {
+    public function __construct(
+        private readonly NzbBacklogCreationService $backlogCreation,
+        private readonly DistributedWorkerTelemetry $workerTelemetry,
+    ) {
         parent::__construct();
     }
 
@@ -50,12 +53,16 @@ final class NzbCreateBacklog extends Command
                 countCandidates: false,
                 onCreated: fn (int $created, int $total): null => $this->outputProgress($created, $total)
             );
+            $this->recordTelemetry($result);
 
             $this->newLine();
             $this->info(sprintf(
-                'NZB backlog pass: candidates=%d selected=%d attempted=%d created=%d failed=%d marked_failed=%d',
+                'NZB backlog pass: candidates=%d selected=%d scanned=%d scan_exhausted=%s selection_seconds=%.6f attempted=%d created=%d failed=%d marked_failed=%d',
                 $result['candidate_total'],
                 $result['selected'],
+                $result['scanned'],
+                $result['scan_exhausted'] ? 'yes' : 'no',
+                $result['selection_duration_seconds'],
                 $result['attempted'],
                 $result['created'],
                 $result['failed'],
@@ -72,6 +79,24 @@ final class NzbCreateBacklog extends Command
         } while (true);
 
         return self::SUCCESS;
+    }
+
+    /**
+     * @param  array{selected: int, scanned: int, scan_exhausted: bool, selection_duration_seconds: float, attempted: int, created: int, failed: int, marked_failed: int}  $result
+     */
+    private function recordTelemetry(array $result): void
+    {
+        $this->workerTelemetry->recordSelectorDuration($result['selection_duration_seconds']);
+
+        foreach (['scanned', 'selected', 'attempted', 'created', 'failed', 'marked_failed'] as $metric) {
+            if ($result[$metric] > 0) {
+                $this->workerTelemetry->recordItem('nzb-backlog', 'nzb', $metric, $result[$metric]);
+            }
+        }
+
+        if ($result['scan_exhausted']) {
+            $this->workerTelemetry->recordItem('nzb-backlog', 'nzb', 'scan_exhausted');
+        }
     }
 
     /**

@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace App\Services\Metrics;
 
+use App\Enums\CollectionFileCheckStatus;
 use App\Models\Category;
+use App\Services\Distributed\DistributedJobCatalog;
+use App\Services\Nzb\NzbService;
 use Illuminate\Redis\Connections\PhpRedisConnection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
@@ -37,6 +40,11 @@ class NntmuxPrometheusMetrics
         'seq_timer',
     ];
 
+    public function __construct(
+        private readonly DistributedWorkerTelemetry $workerTelemetry = new DistributedWorkerTelemetry,
+        private readonly DistributedJobCatalog $jobCatalog = new DistributedJobCatalog,
+    ) {}
+
     public function render(): string
     {
         $lines = [
@@ -47,13 +55,17 @@ class NntmuxPrometheusMetrics
         try {
             $lines = array_merge(
                 $lines,
+                $this->buildConfigMetrics(),
                 $this->tableEstimateMetrics(),
                 $this->groupMetrics(),
                 $this->collectionFormationMetrics(),
+                $this->pipelineLifecycleMetrics(),
+                $this->nzbBacklogMetrics(),
                 $this->releaseMetrics(),
                 $this->externalMetadataMetrics(),
                 $this->imdbLookupMetrics(),
                 $this->timerMetrics(),
+                $this->workerTelemetryMetrics(),
                 $this->lockMetrics(),
             );
             $lines[] = 'nntmux_metric_scrape_success 1';
@@ -98,6 +110,38 @@ class NntmuxPrometheusMetrics
         }
 
         return $lines;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function buildConfigMetrics(): array
+    {
+        return [
+            '# HELP nntmux_build_info Static NNTmux build and runtime environment information.',
+            '# TYPE nntmux_build_info gauge',
+            $this->metric('nntmux_build_info', 1, [
+                'version' => (string) config('nntmux.build_version', 'unknown'),
+                'environment' => (string) config('app.env', 'unknown'),
+            ]),
+            '# HELP nntmux_nzb_worker_config_info Static dedicated NZB worker mode information.',
+            '# TYPE nntmux_nzb_worker_config_info gauge',
+            $this->metric('nntmux_nzb_worker_config_info', 1, [
+                'inline_creation' => config('nntmux.inline_nzb_creation', true) ? 'enabled' : 'disabled',
+            ]),
+            '# HELP nntmux_nzb_worker_batch_limit Configured maximum releases attempted per dedicated NZB worker cycle.',
+            '# TYPE nntmux_nzb_worker_batch_limit gauge',
+            $this->metric('nntmux_nzb_worker_batch_limit', max(1, (int) config('nntmux.distributed_nzb_limit', 1))),
+            '# HELP nntmux_nzb_worker_sleep_seconds Configured sleep between dedicated NZB worker cycles.',
+            '# TYPE nntmux_nzb_worker_sleep_seconds gauge',
+            $this->metric('nntmux_nzb_worker_sleep_seconds', max(1, (int) config('nntmux.distributed_nzb_sleep', 60))),
+            '# HELP nntmux_nzb_worker_scan_cap Maximum releases examined by one bounded NZB selector cycle.',
+            '# TYPE nntmux_nzb_worker_scan_cap gauge',
+            $this->metric('nntmux_nzb_worker_scan_cap', max(1, (int) config('nntmux.distributed_nzb_scan_cap', 5000))),
+            '# HELP nntmux_nzb_worker_lock_seconds Dedicated NZB worker lock TTL.',
+            '# TYPE nntmux_nzb_worker_lock_seconds gauge',
+            $this->metric('nntmux_nzb_worker_lock_seconds', max(1, (int) config('nntmux.distributed_nzb_lock_seconds', 7200))),
+        ];
     }
 
     /**
@@ -255,6 +299,95 @@ class NntmuxPrometheusMetrics
     /**
      * @return list<string>
      */
+    private function pipelineLifecycleMetrics(): array
+    {
+        $lines = [
+            '# HELP nntmux_collections_filecheck_lifecycle_count Current aggregate collection count for every filecheck lifecycle state.',
+            '# TYPE nntmux_collections_filecheck_lifecycle_count gauge',
+        ];
+
+        if (! Schema::hasTable('collections')) {
+            return $lines;
+        }
+
+        $counts = DB::table('collections')
+            ->selectRaw('filecheck, COUNT(*) AS collections_count')
+            ->groupBy('filecheck')
+            ->pluck('collections_count', 'filecheck');
+
+        $states = [
+            CollectionFileCheckStatus::Default->value => ['new', 'backlog'],
+            CollectionFileCheckStatus::CompleteCollection->value => ['collection_complete', 'backlog'],
+            CollectionFileCheckStatus::CompleteParts->value => ['parts_complete', 'backlog'],
+            CollectionFileCheckStatus::Sized->value => ['ready_for_release', 'ready'],
+            CollectionFileCheckStatus::Inserted->value => ['inserted', 'nzb_pending'],
+            CollectionFileCheckStatus::Delete->value => ['delete', 'terminal'],
+            CollectionFileCheckStatus::TempComplete->value => ['temporary_complete', 'backlog'],
+            CollectionFileCheckStatus::ZeroPart->value => ['zero_part', 'backlog'],
+        ];
+
+        foreach ($states as $filecheck => [$state, $lifecycle]) {
+            $lines[] = $this->metric(
+                'nntmux_collections_filecheck_lifecycle_count',
+                (int) ($counts[$filecheck] ?? 0),
+                [
+                    'filecheck' => (string) $filecheck,
+                    'state' => $state,
+                    'lifecycle' => $lifecycle,
+                ],
+            );
+        }
+
+        return $lines;
+    }
+
+    /**
+     * Direct status counts intentionally avoid the expensive NZB eligibility
+     * predicate. The worker outcome counters describe selector results.
+     *
+     * @return list<string>
+     */
+    private function nzbBacklogMetrics(): array
+    {
+        $lines = [
+            '# HELP nntmux_nzb_releases_count Current release count by persisted NZB status.',
+            '# TYPE nntmux_nzb_releases_count gauge',
+            '# HELP nntmux_nzb_inserted_collections_count Inserted collections; a cheap upper-bound proxy for releases entering the NZB lane.',
+            '# TYPE nntmux_nzb_inserted_collections_count gauge',
+        ];
+
+        if (! Schema::hasTable('releases') || ! Schema::hasColumn('releases', 'nzbstatus')) {
+            return $lines;
+        }
+
+        $statuses = [
+            NzbService::NZB_NONE => 'pending',
+            NzbService::NZB_ADDED => 'added',
+            NzbService::NZB_FAILED => 'failed',
+        ];
+        $counts = DB::table('releases')
+            ->whereIn('nzbstatus', array_keys($statuses))
+            ->selectRaw('nzbstatus, COUNT(*) AS releases_count')
+            ->groupBy('nzbstatus')
+            ->pluck('releases_count', 'nzbstatus');
+
+        foreach ($statuses as $status => $state) {
+            $lines[] = $this->metric('nntmux_nzb_releases_count', (int) ($counts[$status] ?? 0), [
+                'state' => $state,
+            ]);
+        }
+
+        $insertedCollections = Schema::hasTable('collections')
+            ? (int) DB::table('collections')->where('filecheck', CollectionFileCheckStatus::Inserted->value)->count()
+            : 0;
+        $lines[] = $this->metric('nntmux_nzb_inserted_collections_count', $insertedCollections);
+
+        return $lines;
+    }
+
+    /**
+     * @return list<string>
+     */
     private function releaseMetrics(): array
     {
         $hour = (int) DB::table('releases')->where('adddate', '>=', now()->subHour())->count();
@@ -382,6 +515,109 @@ class NntmuxPrometheusMetrics
                 'setting' => $setting,
             ]);
         }
+
+        return $lines;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function workerTelemetryMetrics(?float $now = null): array
+    {
+        $workers = array_keys($this->jobCatalog->jobs());
+        $snapshot = $this->workerTelemetry->snapshot($workers, $now);
+        $lines = [
+            '# HELP nntmux_worker_telemetry_available Whether the resettable Redis-backed worker telemetry store was readable; counter history resets when its cache storage is replaced.',
+            '# TYPE nntmux_worker_telemetry_available gauge',
+            $this->metric('nntmux_worker_telemetry_available', $snapshot['available'] ? 1 : 0),
+            '# HELP nntmux_worker_runs_total Distributed worker cycles by worker and bounded outcome since the Redis telemetry cache was created.',
+            '# TYPE nntmux_worker_runs_total counter',
+            '# HELP nntmux_worker_items_total Worker item observations by worker, bounded item, and bounded result since the Redis telemetry cache was created.',
+            '# TYPE nntmux_worker_items_total counter',
+            '# HELP nntmux_worker_last_run_duration_seconds Duration of the most recently completed worker cycle.',
+            '# TYPE nntmux_worker_last_run_duration_seconds gauge',
+            '# HELP nntmux_worker_last_started_timestamp_seconds Unix timestamp when the most recent worker cycle started.',
+            '# TYPE nntmux_worker_last_started_timestamp_seconds gauge',
+            '# HELP nntmux_worker_last_completed_timestamp_seconds Unix timestamp when the most recent worker cycle completed with any outcome.',
+            '# TYPE nntmux_worker_last_completed_timestamp_seconds gauge',
+            '# HELP nntmux_worker_last_success_timestamp_seconds Unix timestamp of the most recent successful worker cycle.',
+            '# TYPE nntmux_worker_last_success_timestamp_seconds gauge',
+            '# HELP nntmux_worker_in_progress Best-effort Redis state indicating whether a worker cycle is currently executing; it can remain stale after abrupt process loss.',
+            '# TYPE nntmux_worker_in_progress gauge',
+            '# HELP nntmux_worker_in_progress_age_seconds Age of the currently executing worker cycle.',
+            '# TYPE nntmux_worker_in_progress_age_seconds gauge',
+        ];
+
+        // Do not turn a Redis outage into apparent counter resets. Prometheus
+        // should retain the last real samples while availability reports the
+        // telemetry failure independently.
+        if (! $snapshot['available']) {
+            return $lines;
+        }
+
+        $emptyWorker = [
+            'runs' => array_fill_keys(DistributedWorkerTelemetry::RUN_OUTCOMES, 0),
+            'items' => array_fill_keys(
+                DistributedWorkerTelemetry::ITEMS_BY_WORKER['nzb-backlog'],
+                array_fill_keys(DistributedWorkerTelemetry::ITEM_RESULTS, 0),
+            ),
+            'last_duration_seconds' => 0.0,
+            'last_started_timestamp_seconds' => 0.0,
+            'last_completed_timestamp_seconds' => 0.0,
+            'last_success_timestamp_seconds' => 0.0,
+            'in_progress' => false,
+            'in_progress_age_seconds' => 0.0,
+        ];
+
+        foreach ($workers as $worker) {
+            $workerSnapshot = $snapshot['workers'][$worker] ?? $emptyWorker;
+            foreach (DistributedWorkerTelemetry::RUN_OUTCOMES as $outcome) {
+                $lines[] = $this->metric('nntmux_worker_runs_total', $workerSnapshot['runs'][$outcome], [
+                    'worker' => $worker,
+                    'outcome' => $outcome,
+                ]);
+            }
+            foreach (DistributedWorkerTelemetry::ITEMS_BY_WORKER[$worker] ?? [] as $item) {
+                foreach (DistributedWorkerTelemetry::ITEM_RESULTS as $result) {
+                    $lines[] = $this->metric('nntmux_worker_items_total', $workerSnapshot['items'][$item][$result], [
+                        'worker' => $worker,
+                        'item' => $item,
+                        'result' => $result,
+                    ]);
+                }
+            }
+            $lines[] = $this->metric('nntmux_worker_last_run_duration_seconds', $workerSnapshot['last_duration_seconds'], [
+                'worker' => $worker,
+            ]);
+            $lines[] = $this->metric('nntmux_worker_last_started_timestamp_seconds', $workerSnapshot['last_started_timestamp_seconds'], [
+                'worker' => $worker,
+            ]);
+            $lines[] = $this->metric('nntmux_worker_last_completed_timestamp_seconds', $workerSnapshot['last_completed_timestamp_seconds'], [
+                'worker' => $worker,
+            ]);
+            $lines[] = $this->metric('nntmux_worker_last_success_timestamp_seconds', $workerSnapshot['last_success_timestamp_seconds'], [
+                'worker' => $worker,
+            ]);
+            $lines[] = $this->metric('nntmux_worker_in_progress', $workerSnapshot['in_progress'] ? 1 : 0, [
+                'worker' => $worker,
+            ]);
+            $lines[] = $this->metric('nntmux_worker_in_progress_age_seconds', $workerSnapshot['in_progress_age_seconds'], [
+                'worker' => $worker,
+            ]);
+        }
+
+        $lines[] = '# HELP nntmux_nzb_selector_in_progress_age_seconds Age of the active dedicated NZB selector cycle.';
+        $lines[] = '# TYPE nntmux_nzb_selector_in_progress_age_seconds gauge';
+        $lines[] = $this->metric(
+            'nntmux_nzb_selector_in_progress_age_seconds',
+            $snapshot['workers']['nzb-backlog']['in_progress_age_seconds'] ?? 0,
+        );
+        $lines[] = '# HELP nntmux_nzb_selector_last_duration_seconds Duration of the most recent dedicated NZB candidate selection, excluding NZB writes.';
+        $lines[] = '# TYPE nntmux_nzb_selector_last_duration_seconds gauge';
+        $lines[] = $this->metric(
+            'nntmux_nzb_selector_last_duration_seconds',
+            $snapshot['nzb_selector_last_duration_seconds'],
+        );
 
         return $lines;
     }
