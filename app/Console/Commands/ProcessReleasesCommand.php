@@ -67,7 +67,7 @@ class ProcessReleasesCommand extends Command
 
         do {
             $result = $this->releaseProcessingService->createReleases($groupID);
-            $nzbFilesAdded = $this->releaseProcessingService->createNZBs($groupID);
+            $nzbFilesAdded = $this->releaseProcessingService->createNZBsIfEnabled($groupID);
 
             $shouldContinue = $result->total() >= $limit || $nzbFilesAdded >= $limit;
         } while ($shouldContinue);

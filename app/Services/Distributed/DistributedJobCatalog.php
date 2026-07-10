@@ -17,6 +17,7 @@ class DistributedJobCatalog
             'binaries' => 'Download new headers for active groups',
             'backfill' => 'Backfill enabled groups',
             'releases' => 'Create and categorize releases',
+            'nzb-backlog' => 'Create missing NZB files in a bounded independent lane',
             'fixnames' => 'Run release name fixing passes',
             'hashed-fixnames' => 'Run full-history name fixing passes for Other > Hashed backlogs',
             'removecrap' => 'Remove configured unwanted releases',
@@ -73,6 +74,17 @@ class DistributedJobCatalog
                 [],
                 (int) ($settings['rel_timer'] ?? 60)
             ),
+            'nzb-backlog' => $this->simple(
+                $job,
+                true,
+                null,
+                'nntmux:nzb-create-backlog',
+                [
+                    '--limit' => max(1, (int) config('nntmux.distributed_nzb_limit', 1)),
+                    '--order' => 'desc',
+                ],
+                max(1, (int) config('nntmux.distributed_nzb_sleep', 60))
+            ),
             'fixnames' => $this->fixNames($settings, $counts),
             'hashed-fixnames' => $this->hashedFixNames($settings, $counts),
             'removecrap' => $this->removeCrap($settings),
@@ -116,6 +128,7 @@ class DistributedJobCatalog
             'binaries' => (int) ($settings['bins_timer'] ?? 60),
             'backfill' => $this->backfillSleep($settings, []),
             'releases' => (int) ($settings['rel_timer'] ?? 60),
+            'nzb-backlog' => max(1, (int) config('nntmux.distributed_nzb_sleep', 60)),
             'fixnames', 'hashed-fixnames' => (int) ($settings['fix_timer'] ?? 300),
             'removecrap' => (int) ($settings['crap_timer'] ?? 300),
             'post-additional' => (int) ($settings['post_timer'] ?? 300),
@@ -126,7 +139,7 @@ class DistributedJobCatalog
             default => 300,
         };
 
-        if ($job === 'irc') {
+        if (in_array($job, ['irc', 'nzb-backlog'], true)) {
             return null;
         }
 

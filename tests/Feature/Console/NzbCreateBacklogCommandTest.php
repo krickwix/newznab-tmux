@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature\Console;
 
 use App\Models\Release;
+use App\Services\Nzb\NzbBacklogCreationService;
 use App\Services\Nzb\NzbService;
 use App\Services\ReleaseProcessingService;
 use Illuminate\Support\Facades\DB;
@@ -242,6 +243,71 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
     }
 
+    public function test_global_pending_query_is_id_ordered_and_keeps_bad_binary_checks_correlated(): void
+    {
+        /** @var NzbService&MockInterface $nzb */
+        $nzb = Mockery::mock(NzbService::class);
+        $service = new NzbBacklogCreationService($nzb);
+        $method = new ReflectionMethod($service, 'basePendingQuery');
+        $method->setAccessible(true);
+
+        $query = $method->invoke($service, 94);
+        $sql = $query->toSql();
+
+        $this->assertStringContainsString(
+            'indexed by ix_releases_nzbstatus_id',
+            $sql
+        );
+        $this->assertStringContainsString(
+            '(select COUNT(*) from "collections" inner join "binaries"',
+            $sql
+        );
+        $this->assertStringNotContainsString(
+            'not exists (select 1 from "collections" inner join "binaries"',
+            $sql
+        );
+    }
+
+    public function test_group_partition_switches_to_the_partition_covering_index(): void
+    {
+        /** @var NzbService&MockInterface $nzb */
+        $nzb = Mockery::mock(NzbService::class);
+        $service = new NzbBacklogCreationService($nzb);
+        $baseMethod = new ReflectionMethod($service, 'basePendingQuery');
+        $baseMethod->setAccessible(true);
+        $groupMethod = new ReflectionMethod($service, 'applyGroupFilter');
+        $groupMethod->setAccessible(true);
+
+        $query = $baseMethod->invoke($service, 94);
+        $groupMethod->invoke($service, $query, [1]);
+
+        $this->assertStringContainsString(
+            'indexed by ix_releases_nzb_backlog_partition',
+            $query->toSql()
+        );
+    }
+
+    public function test_command_does_not_count_the_full_eligible_backlog_before_a_bounded_pass(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+        $this->bindNzbWriter(static function (Release $release): bool {
+            DB::table('releases')->where('id', $release->id)->update(['nzbstatus' => NzbService::NZB_ADDED]);
+
+            return true;
+        });
+
+        $queries = [];
+        DB::listen(static function ($query) use (&$queries): void {
+            $queries[] = strtolower($query->sql);
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', ['--limit' => 1])->assertSuccessful();
+
+        $this->assertFalse(collect($queries)->contains(
+            static fn (string $sql): bool => str_contains($sql, 'count(*) as "aggregate"')
+        ));
+    }
+
     public function test_command_rejects_invalid_leftguid_partition(): void
     {
         $this->bindNzbWriter(static function (): bool {
@@ -275,6 +341,38 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertSame(2, $service->createNZBs(1));
         $this->assertSame([1, 2], $writtenIds);
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 3)->value('nzbstatus'));
+    }
+
+    public function test_release_processing_service_can_skip_inline_nzb_backlog_work(): void
+    {
+        config(['nntmux.inline_nzb_creation' => false]);
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+
+        $nzb = $this->bindNzbWriter(static function (): bool {
+            self::fail('Inline NZB creation must stay off the release-formation lane.');
+        });
+
+        $service = new ReleaseProcessingService(nzb: $nzb);
+        $service->setEchoCLI(false);
+
+        $this->assertSame(0, $service->createNZBsIfEnabled(1));
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
+    public function test_main_release_creation_loop_honors_inline_nzb_disable_flag(): void
+    {
+        $method = new ReflectionMethod(ReleaseProcessingService::class, 'runReleaseCreationLoop');
+        $sourceLines = file($method->getFileName());
+
+        $this->assertIsArray($sourceLines);
+        $source = implode('', array_slice(
+            $sourceLines,
+            $method->getStartLine() - 1,
+            $method->getEndLine() - $method->getStartLine() + 1
+        ));
+
+        $this->assertStringContainsString('$this->createNZBsIfEnabled(', $source);
+        $this->assertStringNotContainsString('$this->createNZBs($normalizedGroupId)', $source);
     }
 
     public function test_stuck_collection_cleanup_preserves_payload_for_release_waiting_on_nzb(): void
@@ -435,6 +533,8 @@ final class NzbCreateBacklogCommandTest extends TestCase
             predb_id INTEGER,
             source VARCHAR(255) NULL
         )');
+        DB::statement('CREATE INDEX ix_releases_nzb_backlog_partition ON releases (nzbstatus, groups_id, leftguid, id)');
+        DB::statement('CREATE INDEX ix_releases_nzbstatus_id ON releases (nzbstatus, id)');
         DB::statement('CREATE TABLE collections (
             id INTEGER PRIMARY KEY,
             subject VARCHAR(255),

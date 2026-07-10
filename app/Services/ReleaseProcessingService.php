@@ -267,7 +267,7 @@ final class ReleaseProcessingService
             $totals['releases'] += $result->added;
             $totals['dupes'] += $result->dupes;
 
-            $nzbFilesAdded = $this->createNZBs($normalizedGroupId);
+            $nzbFilesAdded = $this->createNZBsIfEnabled($normalizedGroupId);
             $totals['nzbs'] += $nzbFilesAdded;
 
             $this->categorizeReleases($categorize, $normalizedGroupId);
@@ -566,6 +566,19 @@ final class ReleaseProcessingService
         $this->outputElapsedTime($startTime);
 
         return $result['created'];
+    }
+
+    /**
+     * Keep historical NZB backlog work optional on release-formation lanes.
+     * Distributed deployments run it in a separately bounded worker.
+     */
+    public function createNZBsIfEnabled(int|string|null $groupID): int
+    {
+        if (! (bool) config('nntmux.inline_nzb_creation', true)) {
+            return 0;
+        }
+
+        return $this->createNZBs($groupID);
     }
 
     /**

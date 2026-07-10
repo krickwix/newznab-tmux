@@ -47,7 +47,7 @@ final class NzbCreateBacklog extends Command
                 limit: $limit,
                 markFailed: $markFailed,
                 order: $order,
-                countCandidates: true,
+                countCandidates: false,
                 onCreated: fn (int $created, int $total): null => $this->outputProgress($created, $total)
             );
 

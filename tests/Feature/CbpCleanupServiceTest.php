@@ -436,6 +436,85 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertSame(1, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
     }
 
+    public function test_nzb_creation_streams_large_part_sets_with_bounded_memory(): void
+    {
+        $guid = str_repeat('b', 36);
+        DB::table('releases')->insert([
+            'id' => 2,
+            'name' => 'Large.Nzb.Release',
+            'searchname' => 'Large.Nzb.Release',
+            'totalpart' => 50000,
+            'groups_id' => 1,
+            'adddate' => now()->format('Y-m-d H:i:s'),
+            'guid' => $guid,
+            'leftguid' => 'b',
+            'postdate' => now()->format('Y-m-d H:i:s'),
+            'fromname' => 'poster@example.com',
+            'size' => 500000,
+            'passwordstatus' => 0,
+            'haspreview' => -1,
+            'categories_id' => 1,
+            'nfostatus' => -1,
+            'nzbstatus' => NzbService::NZB_NONE,
+            'isrenamed' => 1,
+            'iscategorized' => 1,
+            'predb_id' => 0,
+            'source' => null,
+        ]);
+        DB::table('collections')->insert([
+            'id' => 210,
+            'subject' => 'Large.Nzb.Release',
+            'fromname' => 'poster@example.com',
+            'date' => now()->subHour()->format('Y-m-d H:i:s'),
+            'dateadded' => now()->subHour()->format('Y-m-d H:i:s'),
+            'added' => now()->subHour()->format('Y-m-d H:i:s'),
+            'xref' => 'alt.test:210',
+            'groups_id' => 1,
+            'totalfiles' => 1,
+            'filesize' => 500000,
+            'filecheck' => CollectionFileCheckStatus::Inserted->value,
+            'collectionhash' => 'large-nzb-hash',
+            'collection_regexes_id' => 0,
+            'releases_id' => 2,
+            'noise' => '',
+        ]);
+        DB::table('binaries')->insert([
+            'id' => 2100,
+            'name' => 'Large.Nzb.Release yEnc',
+            'collections_id' => 210,
+            'totalparts' => 50000,
+        ]);
+
+        for ($offset = 0; $offset < 50000; $offset += 1000) {
+            $rows = [];
+            for ($number = $offset + 1; $number <= $offset + 1000; $number++) {
+                $rows[] = [
+                    'binaries_id' => 2100,
+                    'number' => $number,
+                    'messageid' => '<large-'.$number.'@example.com>',
+                    'partnumber' => $number,
+                    'size' => 10,
+                ];
+            }
+            DB::table('parts')->insert($rows);
+        }
+
+        $release = Release::query()->findOrFail(2);
+        $baselineBytes = memory_get_usage(true);
+        memory_reset_peak_usage();
+
+        $written = app(NzbService::class)->writeNzbForReleaseId($release);
+        $peakGrowthBytes = memory_get_peak_usage(true) - $baselineBytes;
+
+        $this->assertTrue($written);
+        $this->assertLessThan(32 * 1024 * 1024, $peakGrowthBytes);
+        $nzbPath = app(NzbService::class)->nzbPath($guid);
+        $this->assertIsString($nzbPath);
+        $xml = gzdecode((string) file_get_contents($nzbPath));
+        $this->assertIsString($xml);
+        $this->assertStringContainsString('<segment bytes="10" number="50000">large-50000@example.com</segment>', $xml);
+    }
+
     public function test_nzb_creation_uses_collection_group_when_xref_is_empty(): void
     {
         $guid = str_repeat('f', 36);

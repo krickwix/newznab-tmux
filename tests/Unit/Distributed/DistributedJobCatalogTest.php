@@ -110,6 +110,27 @@ class DistributedJobCatalogTest extends TestCase
         $this->assertTrue($catalog->resolve('per-group', $runVar)['enabled']);
     }
 
+    public function test_nzb_backlog_lane_stays_bounded_and_independent_of_sequential_mode(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 1,
+            'nntmux.distributed_nzb_sleep' => 60,
+        ]);
+
+        $plan = (new DistributedJobCatalog)->resolve(
+            'nzb-backlog',
+            $this->runVar(constants: ['sequential' => 2]),
+        );
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame(60, $plan['sleep']);
+        $this->assertSame('nntmux:nzb-create-backlog', $plan['commands'][0]['command']);
+        $this->assertSame([
+            '--limit' => 1,
+            '--order' => 'desc',
+        ], $plan['commands'][0]['arguments']);
+    }
+
     public function test_it_filters_postprocess_jobs_by_enabled_flags_and_work_counts(): void
     {
         $catalog = new DistributedJobCatalog;

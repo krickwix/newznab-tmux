@@ -80,7 +80,15 @@ final class NzbBacklogCreationService
      */
     private function basePendingQuery(int $completion): Builder
     {
-        return Release::query()
+        $query = Release::query();
+
+        // MariaDB otherwise materializes the incomplete-binary NOT EXISTS
+        // branch across the full collections/binaries/parts backlog. Keep the
+        // outer scan release-driven; group-scoped passes switch below to the
+        // partition index before adding their group filter.
+        $query->getQuery()->forceIndex('ix_releases_nzbstatus_id');
+
+        return $query
             ->with('category.parent')
             ->where('nzbstatus', '=', NzbService::NZB_NONE)
             ->whereExists(function ($query): void {
@@ -91,8 +99,11 @@ final class NzbBacklogCreationService
                     ->whereColumn('collections.releases_id', 'releases.id')
                     ->limit(1);
             })
-            ->whereNotExists(function ($query) use ($completion): void {
-                $query->selectRaw('1')
+            // COUNT(*) remains correlated to the outer release on MariaDB.
+            // NOT EXISTS was decorrelated into a global materialized scan,
+            // which repeated for every release-worker group and took minutes.
+            ->where(function ($query) use ($completion): void {
+                $query->selectRaw('COUNT(*)')
                     ->from('collections')
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
                     ->whereColumn('collections.releases_id', 'releases.id')
@@ -105,9 +116,8 @@ final class NzbBacklogCreationService
                                     ->whereColumn('parts.binaries_id', 'binaries.id')
                                     ->limit(1);
                             });
-                    })
-                    ->limit(1);
-            })
+                    });
+            }, '=', 0)
             ->select(['id', 'guid', 'name', 'categories_id', 'groups_id', 'leftguid', 'nzbstatus']);
     }
 
@@ -156,6 +166,7 @@ final class NzbBacklogCreationService
             );
         }
 
+        $query->getQuery()->forceIndex('ix_releases_nzb_backlog_partition');
         $query->whereIn('groups_id', array_values(array_unique($groupIds)));
     }
 
