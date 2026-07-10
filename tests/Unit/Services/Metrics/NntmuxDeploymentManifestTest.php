@@ -49,4 +49,65 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($backfill);
         self::assertSame(0, $backfill['spec']['replicas'] ?? null);
     }
+
+    public function test_nzb_backlog_and_metrics_share_the_durable_throughput_contract(): void
+    {
+        $manifestRoot = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux';
+        $workersPath = $manifestRoot.'/distributed-workers.yaml';
+        $monitoringPath = $manifestRoot.'/monitoring.yaml';
+        if (! is_file($workersPath) || ! is_file($monitoringPath)) {
+            self::markTestSkipped('mediahome sibling checkout is required for the workspace manifest regression.');
+        }
+
+        $parser = new Parser(maxAliasesForCollections: 1000);
+        $workersManifest = $parser->parse((string) file_get_contents($workersPath));
+        self::assertIsArray($workersManifest);
+        self::assertIsArray($workersManifest['items'] ?? null);
+
+        $deployments = [];
+        foreach ($workersManifest['items'] as $deployment) {
+            if (is_array($deployment) && ($deployment['kind'] ?? null) === 'Deployment') {
+                $deployments[(string) ($deployment['metadata']['name'] ?? '')] = $deployment;
+            }
+        }
+
+        $monitoringDocuments = preg_split('/^---\s*$/m', (string) file_get_contents($monitoringPath));
+        self::assertIsArray($monitoringDocuments);
+        $metrics = $parser->parse($monitoringDocuments[0]);
+        self::assertIsArray($metrics);
+        self::assertSame('nntmux-metrics', $metrics['metadata']['name'] ?? null);
+
+        $expected = [
+            'NNTMUX_INLINE_NZB_CREATION' => 'false',
+            'NNTMUX_DISTRIBUTED_NZB_LIMIT' => '5',
+            'NNTMUX_DISTRIBUTED_NZB_SLEEP' => '60',
+            'NNTMUX_DISTRIBUTED_NZB_SCAN_CAP' => '5000',
+            'NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS' => '7200',
+        ];
+        $environment = static fn (array $deployment): array => array_column(
+            $deployment['spec']['template']['spec']['containers'][0]['env'] ?? [],
+            'value',
+            'name',
+        );
+
+        $backlogEnvironment = $environment($deployments['nntmux-worker-nzb-backlog'] ?? []);
+        $metricsEnvironment = $environment($metrics);
+
+        self::assertSame($expected, array_intersect_key($backlogEnvironment, $expected));
+        self::assertSame($expected, array_intersect_key($metricsEnvironment, $expected));
+        self::assertSame(0, $deployments['nntmux-worker-backfill']['spec']['replicas'] ?? null);
+
+        foreach ($deployments as $name => $deployment) {
+            $container = $deployment['spec']['template']['spec']['containers'][0] ?? [];
+            if ($name === 'nntmux-worker-nzb-backlog' || ! in_array('nntmux:worker', $container['args'] ?? [], true)) {
+                continue;
+            }
+
+            self::assertSame(
+                '1',
+                $environment($deployment)['NNTMUX_DISTRIBUTED_NZB_LIMIT'] ?? null,
+                sprintf('%s must retain the shared one-item limit.', $name),
+            );
+        }
+    }
 }
