@@ -42,6 +42,8 @@ final readonly class PipelineSnapshot
         public array $backlogRatesPerMinute = [],
         /** @var array<string, float> */
         public array $backlogEwmaPerMinute = [],
+        public string $backfillGroup = '',
+        public int $backfillCursor = 0,
     ) {}
 
     public function withPermitOutcome(bool $completed, bool $effective): self
@@ -80,6 +82,8 @@ final readonly class PipelineSnapshot
             oldestNzbAgeSeconds: $this->oldestNzbAgeSeconds,
             backlogRatesPerMinute: $this->backlogRatesPerMinute,
             backlogEwmaPerMinute: $this->backlogEwmaPerMinute,
+            backfillGroup: $this->backfillGroup,
+            backfillCursor: $this->backfillCursor,
         );
     }
 

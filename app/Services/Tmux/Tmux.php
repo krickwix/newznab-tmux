@@ -209,6 +209,7 @@ class Tmux
             'orchestrator_nzb_limit' => 'orchestrator_nzb_limit',
             'orchestrator_backfill_paused' => 'orchestrator_backfill_paused',
             'orchestrator_backfill_permit' => 'orchestrator_backfill_permit',
+            'orchestrator_backfill_group' => 'orchestrator_backfill_group',
             'maxsizetopostprocess' => 'maxsize_pp',
             'minsizetopostprocess' => 'minsize_pp',
         ];

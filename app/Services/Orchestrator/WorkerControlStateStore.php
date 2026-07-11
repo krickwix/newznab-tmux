@@ -20,7 +20,7 @@ class WorkerControlStateStore
     public function leaderLock(): Lock
     {
         return Cache::store((string) config('nntmux.orchestrator.lock_store', 'redis'))
-            ->lock('nntmux:worker-orchestrator:leader', 90);
+            ->lock('nntmux:worker-orchestrator:leader', 600);
     }
 
     public function loadState(): ControlState
@@ -79,12 +79,12 @@ class WorkerControlStateStore
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forever(self::SNAPSHOT_KEY, $value);
     }
 
-    /** @return array<string, int>|null */
+    /** @return array<string, int|string>|null */
     public function permitObservation(): ?array
     {
         $value = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->get(self::PERMIT_OBSERVATION_KEY);
 
-        return is_array($value) ? array_map('intval', $value) : null;
+        return is_array($value) ? $value : null;
     }
 
     public function beginPermitObservation(PipelineSnapshot $snapshot, int $generation, int $now): void
@@ -96,6 +96,8 @@ class WorkerControlStateStore
             'binaries' => $snapshot->binariesBacklog,
             'ready_collections' => $snapshot->readyCollections,
             'release_total' => $snapshot->releaseTotal,
+            'backfill_group' => $snapshot->backfillGroup,
+            'backfill_cursor' => $snapshot->backfillCursor,
         ]);
     }
 

@@ -9,9 +9,9 @@ use Illuminate\Support\Facades\DB;
 
 class WorkerProfileApplier
 {
-    public function apply(ControlDecision $decision, int $now, bool $grantPermit): int
+    public function apply(ControlDecision $decision, int $now, bool $grantPermit, ?string $backfillGroup = null): int
     {
-        return DB::transaction(function () use ($decision, $now, $grantPermit): int {
+        return DB::transaction(function () use ($decision, $now, $grantPermit, $backfillGroup): int {
             $generation = (int) Settings::query()
                 ->where('name', 'orchestrator_generation')
                 ->lockForUpdate()
@@ -37,6 +37,7 @@ class WorkerProfileApplier
                 'orchestrator_nzb_limit' => (string) $profile->nzbBatchSize,
                 'orchestrator_backfill_paused' => $decision->backfillPermitted ? '0' : '1',
                 'orchestrator_backfill_permit' => (string) $permit,
+                'orchestrator_backfill_group' => $decision->backfillPermitted ? (string) $backfillGroup : '',
                 'backfill_groups' => (string) max(1, $profile->backfillGroups),
                 'backfillthreads' => (string) max(1, $profile->backfillThreads),
                 'backfill_qty' => (string) max(10000, $profile->backfillQuantity),
@@ -60,6 +61,7 @@ class WorkerProfileApplier
                 'orchestrator_lease_until' => '0',
                 'orchestrator_backfill_paused' => '1',
                 'orchestrator_backfill_permit' => '0',
+                'orchestrator_backfill_group' => '',
             ] as $name => $value) {
                 Settings::query()->updateOrCreate(['name' => $name], ['value' => $value]);
             }

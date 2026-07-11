@@ -701,6 +701,10 @@ class SettingsTableSeeder extends Seeder
                 'name' => 'orchestrator_profile',
                 'value' => 'drain',
             ],
+            252 => [
+                'name' => 'orchestrator_backfill_group',
+                'value' => '',
+            ],
         ]);
     }
 }

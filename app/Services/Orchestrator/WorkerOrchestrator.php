@@ -20,12 +20,14 @@ class WorkerOrchestrator
     /** @return array<string, mixed> */
     public function runOnce(bool $shadow, bool $grantPermit = false): array
     {
-        $lock = $this->store->leaderLock();
-        if (! $lock->get()) {
-            return ['leader' => false, 'applied' => false, 'reason' => 'leader_lock_contended'];
-        }
-
+        $lock = null;
+        $acquired = false;
         try {
+            $lock = $this->store->leaderLock();
+            if (! $lock->get()) {
+                return ['leader' => false, 'applied' => false, 'reason' => 'leader_lock_contended'];
+            }
+            $acquired = true;
             $previous = $this->store->previousSnapshot();
             $snapshot = $this->snapshots->capture($previous);
             $permitObservation = $this->store->permitObservation();
@@ -38,11 +40,12 @@ class WorkerOrchestrator
             }
             if ($permitObservation !== null && time() - $permitObservation['issued_at'] >= 900) {
                 $permitConsumed = (int) Settings::settingValue('orchestrator_backfill_permit') === 0;
-                $ingested = $snapshot->partsBacklog > $permitObservation['parts']
-                    || $snapshot->binariesBacklog > $permitObservation['binaries'];
+                $cursorMoved = $snapshot->backfillGroup === (string) ($permitObservation['backfill_group'] ?? '')
+                    && $snapshot->backfillCursor > 0
+                    && $snapshot->backfillCursor < (int) ($permitObservation['backfill_cursor'] ?? 0);
                 $produced = $snapshot->readyCollections > $permitObservation['ready_collections']
                     || $snapshot->releaseTotal > $permitObservation['release_total'];
-                $snapshot = $snapshot->withPermitOutcome(true, $permitConsumed && $ingested && $produced);
+                $snapshot = $snapshot->withPermitOutcome(true, $permitConsumed && $cursorMoved && $produced);
                 $this->store->clearPermitObservation();
             }
             $state = $this->store->loadState();
@@ -55,7 +58,7 @@ class WorkerOrchestrator
                 && (int) Settings::settingValue('orchestrator_backfill_permit') === 0;
             $issuePermit = $grantPermit || $autoGrant;
             if (! $shadow) {
-                $generation = $this->applier->apply($decision, time(), $issuePermit);
+                $generation = $this->applier->apply($decision, time(), $issuePermit, $snapshot->backfillGroup);
                 if ($issuePermit && $decision->backfillPermitted) {
                     $this->store->beginPermitObservation($snapshot, $generation, time());
                 }
@@ -109,7 +112,9 @@ class WorkerOrchestrator
             }
             throw $error;
         } finally {
-            $lock->release();
+            if ($acquired && $lock !== null) {
+                $lock->release();
+            }
         }
     }
 }

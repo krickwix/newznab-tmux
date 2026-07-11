@@ -43,6 +43,7 @@ final class WorkerProfileApplierTest extends TestCase
             $this->decision(ControlProfile::Balanced, true),
             1_000,
             true,
+            'alt.test',
         );
 
         self::assertSame(5, $generation);
@@ -57,6 +58,7 @@ final class WorkerProfileApplierTest extends TestCase
             'orchestrator_nzb_timer' => 55,
             'orchestrator_nzb_limit' => 20,
             'orchestrator_backfill_paused' => 0,
+            'orchestrator_backfill_group' => 'alt.test',
             'backfill_groups' => 1,
             'backfillthreads' => 1,
             'backfill_qty' => 10_000,
@@ -74,6 +76,7 @@ final class WorkerProfileApplierTest extends TestCase
             'backfill_groups',
             'backfillthreads',
             'backfill_qty',
+            'orchestrator_backfill_group',
         ])->toArray());
     }
 

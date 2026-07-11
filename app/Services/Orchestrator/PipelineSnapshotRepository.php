@@ -23,23 +23,34 @@ class PipelineSnapshotRepository
             FROM information_schema.TABLES
             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('parts', 'binaries')");
         $pipeline = DB::selectOne('SELECT
-            (SELECT COUNT(*) FROM collections WHERE filecheck IN (0, 1, 2, 6, 7)) AS collections_backlog,
+            (SELECT COUNT(*) FROM collections WHERE filecheck IN (0, 1, 2, 15, 16)) AS collections_backlog,
             (SELECT COUNT(*) FROM binaries WHERE partcheck = 0) AS binaries_backlog,
             (SELECT COUNT(*) FROM collections WHERE filecheck = 3) AS ready_collections,
             (SELECT COUNT(*) FROM collections WHERE filecheck = 3) AS releases_backlog,
             (SELECT COUNT(*) FROM releases) AS release_total,
             (SELECT COUNT(*) FROM releases WHERE nzbstatus = 0) AS nzbs_backlog,
-            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM binaries b INNER JOIN collections c ON c.id = b.collections_id WHERE b.partcheck = 0 AND c.dateadded >= NOW() - INTERVAL 24 HOUR) AS oldest_binary_age,
-            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(dateadded), NOW()), 0) FROM collections WHERE filecheck IN (0, 1, 2, 6, 7) AND dateadded >= NOW() - INTERVAL 24 HOUR) AS oldest_collection_age,
-            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(dateadded), NOW()), 0) FROM collections WHERE filecheck = 3 AND dateadded >= NOW() - INTERVAL 24 HOUR) AS oldest_release_age,
+            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM binaries b INNER JOIN collections c ON c.id = b.collections_id WHERE b.partcheck = 0) AS oldest_binary_age,
+            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(dateadded), NOW()), 0) FROM collections WHERE filecheck IN (0, 1, 2, 15, 16)) AS oldest_collection_age,
+            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(dateadded), NOW()), 0) FROM collections WHERE filecheck = 3) AS oldest_release_age,
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(adddate), NOW()), 0) FROM releases WHERE nzbstatus = 0) AS oldest_nzb_age,
             NOT EXISTS(SELECT 1 FROM usenet_groups g LEFT JOIN short_groups s ON s.name = g.name
                 WHERE g.active = 1 AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > 10000)) AS current_groups,
-            EXISTS(SELECT 1 FROM short_groups s WHERE s.updated >= NOW() - INTERVAL 10 MINUTE
+            EXISTS(SELECT 1 FROM usenet_groups g INNER JOIN short_groups s ON s.name = g.name
+                WHERE g.backfill = 1 AND s.updated >= NOW() - INTERVAL 10 MINUTE
                 AND CAST(s.first_record AS SIGNED) > 0 AND CAST(s.last_record AS SIGNED) >= CAST(s.first_record AS SIGNED) LIMIT 1) AS provider_available,
             EXISTS(SELECT 1 FROM usenet_groups g INNER JOIN short_groups s ON s.name = g.name
                 WHERE g.backfill = 1 AND g.first_record IS NOT NULL AND g.first_record_postdate IS NOT NULL
-                AND CAST(g.first_record AS SIGNED) > CAST(s.first_record AS SIGNED) + 10000 LIMIT 1) AS backfill_cursor');
+                AND CAST(g.first_record AS SIGNED) > CAST(s.first_record AS SIGNED) + 10000 LIMIT 1) AS backfill_cursor_available,
+            (SELECT g.name FROM usenet_groups g INNER JOIN short_groups s ON s.name = g.name
+                WHERE g.backfill = 1 AND g.first_record IS NOT NULL AND g.first_record_postdate IS NOT NULL
+                AND s.updated >= NOW() - INTERVAL 10 MINUTE
+                AND CAST(g.first_record AS SIGNED) > CAST(s.first_record AS SIGNED) + 10000
+                ORDER BY g.first_record_postdate DESC, g.name ASC LIMIT 1) AS backfill_group,
+            (SELECT CAST(g.first_record AS SIGNED) FROM usenet_groups g INNER JOIN short_groups s ON s.name = g.name
+                WHERE g.backfill = 1 AND g.first_record IS NOT NULL AND g.first_record_postdate IS NOT NULL
+                AND s.updated >= NOW() - INTERVAL 10 MINUTE
+                AND CAST(g.first_record AS SIGNED) > CAST(s.first_record AS SIGNED) + 10000
+                ORDER BY g.first_record_postdate DESC, g.name ASC LIMIT 1) AS backfill_group_cursor');
         $statusRows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Innodb_deadlocks', 'Innodb_row_lock_current_waits')");
         $status = [];
         foreach ($statusRows as $row) {
@@ -66,7 +77,7 @@ class PipelineSnapshotRepository
         }
         [$rates, $ewma] = $this->rates($backlogs, $previous);
         $high = $this->isHigh($backlogs, $ages, $ewma);
-        $low = $this->isLow($backlogs, $ages, $ewma);
+        $low = $this->isLow($backlogs, $ewma);
         $deadlocks = $status['Innodb_deadlocks'] ?? 0;
         $waits = $status['Innodb_row_lock_current_waits'] ?? 0;
         $deadlockDelta = $previous !== null && isset($previous['database_deadlocks']) && $deadlocks > $previous['database_deadlocks'];
@@ -86,9 +97,9 @@ class PipelineSnapshotRepository
             highPressure: $high,
             lowPressure: $low,
             providerAvailable: (bool) ($pipeline->provider_available ?? false),
-            cursorAvailable: (bool) ($pipeline->backfill_cursor ?? false),
+            cursorAvailable: (bool) ($pipeline->backfill_cursor_available ?? false),
             currentGroupsAvailable: (bool) ($pipeline->current_groups ?? false),
-            eligibleBackfillSupply: $backlogs['nzbs'] > 0 && $eligibleNzbs === 0 && (bool) ($pipeline->backfill_cursor ?? false),
+            eligibleBackfillSupply: $eligibleNzbs === 0 && (bool) ($pipeline->backfill_cursor_available ?? false),
             databaseDeadlocks: $deadlocks,
             databaseCurrentWaits: $waits,
             storageAvailableBytes: $signals['storage_available_bytes'],
@@ -102,6 +113,8 @@ class PipelineSnapshotRepository
             oldestNzbAgeSeconds: $ages['nzbs'],
             backlogRatesPerMinute: $rates,
             backlogEwmaPerMinute: $ewma,
+            backfillGroup: (string) ($pipeline->backfill_group ?? ''),
+            backfillCursor: (int) ($pipeline->backfill_group_cursor ?? 0),
         );
     }
 
@@ -117,7 +130,8 @@ class PipelineSnapshotRepository
         }
 
         foreach ($ages as $stage => $age) {
-            if ($age >= (int) config('nntmux.orchestrator.age_slo_seconds.'.$stage, PHP_INT_MAX)) {
+            $low = (int) floor((int) config('nntmux.orchestrator.high_watermarks.'.$stage, 0) * 0.6);
+            if (($now[$stage] ?? 0) > $low && $age >= (int) config('nntmux.orchestrator.age_slo_seconds.'.$stage, PHP_INT_MAX)) {
                 return true;
             }
         }
@@ -125,8 +139,8 @@ class PipelineSnapshotRepository
         return false;
     }
 
-    /** @param array<string, int> $now @param array<string, int> $ages @param array<string, float> $ewma */
-    private function isLow(array $now, array $ages, array $ewma): bool
+    /** @param array<string, int> $now @param array<string, float> $ewma */
+    private function isLow(array $now, array $ewma): bool
     {
         // Parts and binaries are capacity signals: they must remain below their
         // hard watermarks and must not grow, but they need not drain to 60%.
@@ -142,12 +156,6 @@ class PipelineSnapshotRepository
             $value = $now[$stage];
             $low = (int) floor((int) config('nntmux.orchestrator.high_watermarks.'.$stage, 0) * 0.6);
             if ($value > $low || ($ewma[$stage] ?? 0.0) > max(1.0, $low * 0.0005)) {
-                return false;
-            }
-        }
-        foreach ($ages as $stage => $age) {
-            $slo = (int) config('nntmux.orchestrator.age_slo_seconds.'.$stage, PHP_INT_MAX);
-            if ($age > (int) floor($slo * 0.6)) {
                 return false;
             }
         }

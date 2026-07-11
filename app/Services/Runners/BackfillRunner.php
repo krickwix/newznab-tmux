@@ -71,6 +71,10 @@ class BackfillRunner extends BaseRunner
         $maxMessages = (int) Settings::settingValue('maxmssgs');
         $threads = (int) Settings::settingValue('backfillthreads');
         $minimumSafeRange = $this->minimumSafeBackfillRange();
+        $orchestratorGroup = trim((string) Settings::settingValue('orchestrator_backfill_group'));
+        $orchestratorGroupFilter = $orchestratorGroup === ''
+            ? ''
+            : ' AND g.name = '.DB::getPdo()->quote($orchestratorGroup);
 
         $backfilldays = '0';
         if ($backfill_days === 1) {
@@ -90,6 +94,7 @@ class BackfillRunner extends BaseRunner
             AND CAST(g.first_record AS SIGNED) > 0
             AND g.first_record_postdate IS NOT NULL
             AND g.backfill = 1
+            '.$orchestratorGroupFilter.'
             AND (NOW() - INTERVAL '.$backfilldays.' DAY ) < g.first_record_postdate
             AND CAST(a.first_record AS SIGNED) > 0
             AND CAST(a.last_record AS SIGNED) >= CAST(a.first_record AS SIGNED)

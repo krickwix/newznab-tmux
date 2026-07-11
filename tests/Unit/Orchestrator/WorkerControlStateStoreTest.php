@@ -77,6 +77,8 @@ final class WorkerControlStateStoreTest extends TestCase
             nzbsBacklog: 55,
             readyCollections: 66,
             releaseTotal: 77,
+            backfillGroup: 'alt.test',
+            backfillCursor: 12345,
         ), generation: 8, now: 9);
 
         self::assertSame([
@@ -86,6 +88,8 @@ final class WorkerControlStateStoreTest extends TestCase
             'binaries' => 22,
             'ready_collections' => 66,
             'release_total' => 77,
+            'backfill_group' => 'alt.test',
+            'backfill_cursor' => 12345,
         ], $store->permitObservation());
 
         $store->clearPermitObservation();
