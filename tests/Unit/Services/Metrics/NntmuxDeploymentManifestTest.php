@@ -161,6 +161,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $orchestrator = $deployments['nntmux-worker-orchestrator'] ?? null;
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
+        self::assertStringEndsWith(
+            ':microservices-pods-20260711-worker-orchestrator-v23',
+            (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
+        );
+        self::assertSame(
+            'microservices-pods-20260711-worker-orchestrator-v23',
+            $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
+        );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
         self::assertSame(
             'false',
