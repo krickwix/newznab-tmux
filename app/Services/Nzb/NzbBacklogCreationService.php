@@ -165,8 +165,8 @@ final class NzbBacklogCreationService
                     ->whereColumn('collections.releases_id', 'releases.id')
                     ->limit(1);
             })
-            ->where(function ($query) use ($completion): void {
-                $query->selectRaw('COUNT(*)')
+            ->whereNotExists(function ($query) use ($completion): void {
+                $query->selectRaw('1')
                     ->from('collections')
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
                     ->whereColumn('collections.releases_id', 'releases.id')
@@ -180,7 +180,7 @@ final class NzbBacklogCreationService
                                     ->limit(1);
                             });
                     });
-            }, '=', 0)
+            })
             ->select(['id', 'guid', 'name', 'categories_id', 'groups_id', 'leftguid', 'nzbstatus'])
             ->get();
     }

@@ -281,6 +281,64 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 2)->value('nzbstatus'));
     }
 
+    public function test_eligibility_anti_join_preserves_completion_and_multi_binary_semantics(): void
+    {
+        DB::table('settings')->where('name', 'completionpercent')->update(['value' => '94']);
+
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a', currentParts: 94, totalParts: 100);
+        $this->seedRelease(2, groupId: 1, leftGuid: 'a', currentParts: 93, totalParts: 100);
+        $this->seedRelease(3, groupId: 1, leftGuid: 'a', currentParts: 1, totalParts: 0);
+        $this->seedRelease(4, groupId: 1, leftGuid: 'a', currentParts: 94, totalParts: 100);
+        $this->seedRelease(5, groupId: 1, leftGuid: 'a', currentParts: 100, totalParts: 100);
+        $this->seedRelease(6, groupId: 1, leftGuid: 'a', withPayload: false);
+
+        foreach ([
+            ['id' => 401, 'collections_id' => 40, 'currentparts' => 95, 'totalparts' => 100],
+            ['id' => 501, 'collections_id' => 50, 'currentparts' => 93, 'totalparts' => 100],
+        ] as $binary) {
+            DB::table('binaries')->insert($binary + ['name' => 'Sibling yEnc']);
+            DB::table('parts')->insert([
+                'binaries_id' => $binary['id'],
+                'number' => 1,
+                'messageid' => '<'.$binary['id'].'@example.com>',
+                'partnumber' => 1,
+                'size' => 100,
+            ]);
+        }
+        DB::table('collections')->insert([
+            'id' => 60,
+            'subject' => 'Release 6',
+            'fromname' => 'poster@example.com',
+            'date' => now()->format('Y-m-d H:i:s'),
+            'dateadded' => now()->format('Y-m-d H:i:s'),
+            'added' => now()->format('Y-m-d H:i:s'),
+            'xref' => 'alt.test:6',
+            'groups_id' => 1,
+            'totalfiles' => 0,
+            'filesize' => 0,
+            'filecheck' => 1,
+            'collectionhash' => 'collection-6',
+            'collection_regexes_id' => 0,
+            'releases_id' => 6,
+            'noise' => '',
+        ]);
+
+        $writtenIds = [];
+        $nzb = $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+
+            return true;
+        });
+
+        $result = (new NzbBacklogCreationService($nzb))->create(limit: 10, scanCap: 6);
+
+        $this->assertSame([1, 4], $writtenIds);
+        $this->assertSame(6, $result['scanned']);
+        $this->assertSame(2, $result['selected']);
+        $this->assertSame(2, $result['attempted']);
+        $this->assertSame(2, $result['created']);
+    }
+
     public function test_command_selection_requires_parts_table_payload(): void
     {
         $this->seedRelease(1, groupId: 1, leftGuid: 'a', withParts: false);
@@ -375,6 +433,8 @@ final class NzbCreateBacklogCommandTest extends TestCase
         );
         $this->assertIsString($eligibilitySql);
         $this->assertStringContainsString('"releases"."id" in (?)', $eligibilitySql);
+        $this->assertStringContainsString('not exists (select 1 from "collections"', $eligibilitySql);
+        $this->assertStringNotContainsString('(select count(*) from "collections"', $eligibilitySql);
     }
 
     public function test_sparse_eligibility_scan_uses_bounded_chunks_instead_of_one_query_per_id(): void
