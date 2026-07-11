@@ -37,9 +37,12 @@ class BackfillPermitGate
                 return false;
             }
 
-            Settings::query()
-                ->where('name', 'orchestrator_bf_permit')
-                ->update(['value' => '0']);
+            $generation = (int) $rows->get('orchestrator_bf_permit');
+            Settings::query()->updateOrCreate(
+                ['name' => 'orchestrator_bf_claimed'],
+                ['value' => (string) $generation],
+            );
+            Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
             Settings::forgetCachedSettings();
 
             return true;

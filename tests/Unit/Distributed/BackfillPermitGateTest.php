@@ -35,6 +35,7 @@ class BackfillPermitGateTest extends TestCase
 
         self::assertTrue((new BackfillPermitGate)->claim());
         self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_claimed'));
         self::assertFalse((new BackfillPermitGate)->claim());
     }
 
@@ -74,6 +75,7 @@ class BackfillPermitGateTest extends TestCase
             ['name' => 'orchestrator_lease_until', 'value' => (string) $lease],
             ['name' => 'orchestrator_bf_paused', 'value' => (string) $paused],
             ['name' => 'orchestrator_bf_permit', 'value' => (string) $permit],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '0'],
             ['name' => 'orchestrator_bf_group', 'value' => 'alt.test'],
         ]);
     }

@@ -705,6 +705,10 @@ class SettingsTableSeeder extends Seeder
                 'name' => 'orchestrator_bf_group',
                 'value' => '',
             ],
+            253 => [
+                'name' => 'orchestrator_bf_claimed',
+                'value' => '0',
+            ],
         ]);
     }
 }

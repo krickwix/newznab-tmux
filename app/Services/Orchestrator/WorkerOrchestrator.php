@@ -40,7 +40,8 @@ class WorkerOrchestrator
             }
             $observationSeconds = (int) config('nntmux.orchestrator.permit_observation_seconds', 1200);
             if ($permitObservation !== null && time() - $permitObservation['issued_at'] >= $observationSeconds) {
-                $permitConsumed = (int) Settings::settingValue('orchestrator_bf_permit') === 0;
+                $permitClaimed = (int) Settings::settingValue('orchestrator_bf_claimed')
+                    === (int) $permitObservation['generation'];
                 if (! $shadow) {
                     $this->applier->revokePermit();
                 }
@@ -52,7 +53,7 @@ class WorkerOrchestrator
                     && $outcome['cursor'] < (int) ($permitObservation['backfill_cursor'] ?? 0);
                 $produced = $outcome['ready_collections'] > (int) ($permitObservation['ready_collections'] ?? 0)
                     || $outcome['releases'] > (int) ($permitObservation['release_total'] ?? 0);
-                $snapshot = $snapshot->withPermitOutcome(true, $permitConsumed && $cursorMoved && $produced);
+                $snapshot = $snapshot->withPermitOutcome(true, $permitClaimed && $cursorMoved && $produced);
                 $this->store->clearPermitObservation();
             }
             $state = $this->store->loadState();
@@ -64,8 +65,19 @@ class WorkerOrchestrator
                 && $permitObservation === null
                 && (int) Settings::settingValue('orchestrator_bf_permit') === 0;
             $issuePermit = $grantPermit || $autoGrant;
+            $preserveUnclaimedPermit = ! $shadow
+                && $permitObservation !== null
+                && time() - (int) $permitObservation['issued_at'] < (int) config('nntmux.orchestrator.permit_claim_grace_seconds', 120)
+                && (int) Settings::settingValue('orchestrator_bf_permit') === (int) $permitObservation['generation']
+                && in_array('backfill_no_eligible_supply', $decision->reasons, true);
             if (! $shadow) {
-                $generation = $this->applier->apply($decision, time(), $issuePermit, $snapshot->backfillGroup);
+                $generation = $this->applier->apply(
+                    $decision,
+                    time(),
+                    $issuePermit,
+                    $snapshot->backfillGroup,
+                    $preserveUnclaimedPermit,
+                );
                 if ($issuePermit && $decision->backfillPermitted) {
                     $this->store->beginPermitObservation(
                         $snapshot,
@@ -86,7 +98,9 @@ class WorkerOrchestrator
                 'profile' => $decision->profile->profile->value,
                 'backfill_permitted' => $decision->backfillPermitted,
                 'permit_granted' => ! $shadow && $issuePermit && $decision->backfillPermitted,
-                'reasons' => $decision->reasons,
+                'reasons' => $preserveUnclaimedPermit
+                    ? [...$decision->reasons, 'backfill_permit_claim_grace']
+                    : $decision->reasons,
                 'backlogs' => [
                     'parts' => $snapshot->partsBacklog,
                     'binaries' => $snapshot->binariesBacklog,

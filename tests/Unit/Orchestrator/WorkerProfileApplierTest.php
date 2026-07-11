@@ -34,6 +34,7 @@ final class WorkerProfileApplierTest extends TestCase
         Settings::query()->insert([
             ['name' => 'orchestrator_generation', 'value' => '4'],
             ['name' => 'orchestrator_bf_permit', 'value' => '3'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '0'],
         ]);
     }
 
@@ -50,6 +51,7 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame([
             'orchestrator_generation' => 5,
             'orchestrator_bf_permit' => 5,
+            'orchestrator_bf_claimed' => 0,
             'orchestrator_mode' => 'active',
             'orchestrator_lease_until' => 1_600,
             'orchestrator_bins_timer' => 40,
@@ -65,6 +67,7 @@ final class WorkerProfileApplierTest extends TestCase
         ], Settings::query()->pluck('value', 'name')->only([
             'orchestrator_generation',
             'orchestrator_bf_permit',
+            'orchestrator_bf_claimed',
             'orchestrator_mode',
             'orchestrator_lease_until',
             'orchestrator_bins_timer',
@@ -95,6 +98,26 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
         self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
         self::assertSame(5, Settings::settingValue('orchestrator_generation'));
+    }
+
+    public function test_it_preserves_an_unclaimed_permit_during_the_claim_grace_period(): void
+    {
+        Settings::query()->insert([
+            ['name' => 'orchestrator_bf_paused', 'value' => '0'],
+            ['name' => 'orchestrator_bf_group', 'value' => 'alt.test'],
+        ]);
+
+        (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::Fill, false),
+            1_000,
+            false,
+            null,
+            true,
+        );
+
+        self::assertSame(3, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_paused'));
+        self::assertSame('alt.test', Settings::settingValue('orchestrator_bf_group'));
     }
 
     public function test_all_managed_setting_names_fit_the_live_varchar_25_schema(): void
