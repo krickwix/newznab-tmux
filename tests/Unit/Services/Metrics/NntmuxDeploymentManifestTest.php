@@ -9,7 +9,7 @@ use Symfony\Component\Yaml\Parser;
 
 final class NntmuxDeploymentManifestTest extends TestCase
 {
-    public function test_only_nzb_backlog_uses_v9_and_backfill_remains_disabled(): void
+    public function test_cleanup_capable_workers_use_v9_and_backfill_remains_disabled(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/distributed-workers.yaml';
         if (! is_file($path)) {
@@ -30,7 +30,6 @@ final class NntmuxDeploymentManifestTest extends TestCase
             if (($deployment['metadata']['name'] ?? null) === 'nntmux-worker-backfill') {
                 $backfill = $deployment;
             }
-
             $container = $deployment['spec']['template']['spec']['containers'][0] ?? null;
             if (! is_array($container) || ! in_array('nntmux:worker', $container['args'] ?? [], true)) {
                 continue;
@@ -38,7 +37,12 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
-            $expectedImage = $name === 'nntmux-worker-nzb-backlog'
+            $expectedImage = in_array($name, [
+                'nntmux-worker-releases',
+                'nntmux-worker-nzb-backlog',
+                'nntmux-worker-removecrap',
+                'nntmux-worker-per-group',
+            ], true)
                 ? ':microservices-pods-20260711-nzb-cleanup-lock-v9'
                 : ':microservices-pods-20260710-nzb-query-v8';
             self::assertStringEndsWith(
@@ -46,11 +50,51 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 (string) ($container['image'] ?? ''),
                 sprintf('%s must retain its intended isolated image.', $name),
             );
+            $environment = array_column($container['env'] ?? [], 'value', 'name');
+            self::assertSame(
+                str_contains($expectedImage, 'nzb-cleanup-lock-v9')
+                    ? 'microservices-pods-20260711-nzb-cleanup-lock-v9'
+                    : 'microservices-pods-20260710-nzb-query-v8',
+                $environment['NNTMUX_BUILD_VERSION'] ?? null,
+                sprintf('%s build telemetry must match its image.', $name),
+            );
         }
 
         self::assertNotEmpty($workers);
         self::assertIsArray($backfill);
         self::assertSame(0, $backfill['spec']['replicas'] ?? null);
+    }
+
+    public function test_web_uses_lock_safe_overlay_without_changing_scheduler_or_legacy_worker(): void
+    {
+        $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/app.yaml';
+        if (! is_file($path)) {
+            self::markTestSkipped('mediahome sibling checkout is required for the workspace manifest regression.');
+        }
+
+        $parser = new Parser(maxAliasesForCollections: 1000);
+        $documents = preg_split('/^---\s*$/m', (string) file_get_contents($path));
+        self::assertIsArray($documents);
+
+        $images = [];
+        foreach ($documents as $document) {
+            $resource = $parser->parse($document);
+            if (is_array($resource) && ($resource['kind'] ?? null) === 'Deployment') {
+                $images[(string) ($resource['metadata']['name'] ?? '')] =
+                    (string) ($resource['spec']['template']['spec']['containers'][0]['image'] ?? '');
+            }
+        }
+
+        self::assertStringEndsWith(
+            ':microservices-pods-20260711-nzb-cleanup-web-amd64-v9',
+            $images['nntmux-web'] ?? '',
+        );
+        foreach (['nntmux-worker', 'nntmux-scheduler'] as $deployment) {
+            self::assertStringEndsWith(
+                ':microservices-pods-20260615-group-delete-v1',
+                $images[$deployment] ?? '',
+            );
+        }
     }
 
     public function test_nzb_backlog_and_metrics_share_the_durable_throughput_contract(): void
@@ -87,7 +131,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $expected = [
             'NNTMUX_BUILD_VERSION' => 'microservices-pods-20260711-nzb-cleanup-lock-v9',
             'NNTMUX_INLINE_NZB_CREATION' => 'false',
-            'NNTMUX_DISTRIBUTED_NZB_LIMIT' => '10',
+            'NNTMUX_DISTRIBUTED_NZB_LIMIT' => '5',
             'NNTMUX_DISTRIBUTED_NZB_SLEEP' => '60',
             'NNTMUX_DISTRIBUTED_NZB_SCAN_CAP' => '5000',
             'NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS' => '7200',
