@@ -9,7 +9,7 @@ use Symfony\Component\Yaml\Parser;
 
 final class NntmuxDeploymentManifestTest extends TestCase
 {
-    public function test_cleanup_capable_workers_use_v9_and_backfill_remains_disabled(): void
+    public function test_orchestrated_workers_use_v21_and_backfill_remains_disabled(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/distributed-workers.yaml';
         if (! is_file($path)) {
@@ -37,10 +37,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
-            $expectedImage = $name === 'nntmux-worker-nzb-backlog'
-                ? ':microservices-pods-20260711-nzb-selector-wide-v15'
+            $expectedImage = in_array($name, [
+                'nntmux-worker-binaries',
+                'nntmux-worker-backfill',
+                'nntmux-worker-releases',
+                'nntmux-worker-nzb-backlog',
+            ], true)
+                ? ':microservices-pods-20260711-worker-orchestrator-v21'
                 : (in_array($name, [
-                    'nntmux-worker-releases',
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
                 ], true)
@@ -96,7 +100,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         }
     }
 
-    public function test_shadow_orchestrator_preserves_nzb_throughput_contract_and_backfill_zero(): void
+    public function test_active_orchestrator_preserves_nzb_throughput_contract_and_backfill_zero(): void
     {
         $manifestRoot = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux';
         $workersPath = $manifestRoot.'/distributed-workers.yaml';
@@ -142,7 +146,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
         $backlogEnvironment = $environment($deployments['nntmux-worker-nzb-backlog'] ?? []);
         $metricsEnvironment = $environment($metrics);
-        self::assertSame('microservices-pods-20260711-nzb-selector-wide-v15', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260711-worker-orchestrator-v21', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         self::assertSame('microservices-pods-20260711-worker-orchestrator-v21', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
@@ -157,7 +161,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $orchestrator = $deployments['nntmux-worker-orchestrator'] ?? null;
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
-        self::assertContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
+        self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
+        self::assertSame(
+            'false',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
+        );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);
 
         foreach ($deployments as $name => $deployment) {

@@ -535,8 +535,8 @@ class NntmuxPrometheusMetrics
             'orchestrator_lease_until',
             'orchestrator_generation',
             'orchestrator_nzb_limit',
-            'orchestrator_backfill_paused',
-            'orchestrator_backfill_permit',
+            'orchestrator_bf_paused',
+            'orchestrator_bf_permit',
         ])->pluck('value', 'name');
         $mode = (string) ($settings['orchestrator_mode'] ?? 'legacy');
         $profile = (string) ($settings['orchestrator_profile'] ?? 'unknown');
@@ -568,10 +568,10 @@ class NntmuxPrometheusMetrics
             $this->metric('nntmux_orchestrator_lease_remaining_seconds', max(0, $leaseUntil - time())),
             '# HELP nntmux_orchestrator_backfill_permit Current one-shot backfill permit generation; zero means denied.',
             '# TYPE nntmux_orchestrator_backfill_permit gauge',
-            $this->metric('nntmux_orchestrator_backfill_permit', (int) ($settings['orchestrator_backfill_permit'] ?? 0)),
+            $this->metric('nntmux_orchestrator_backfill_permit', (int) ($settings['orchestrator_bf_permit'] ?? 0)),
             '# HELP nntmux_orchestrator_backfill_paused Whether adaptive backfill is paused.',
             '# TYPE nntmux_orchestrator_backfill_paused gauge',
-            $this->metric('nntmux_orchestrator_backfill_paused', (int) ($settings['orchestrator_backfill_paused'] ?? 1)),
+            $this->metric('nntmux_orchestrator_backfill_paused', (int) ($settings['orchestrator_bf_paused'] ?? 1)),
             '# HELP nntmux_orchestrator_nzb_batch_size Desired bounded NZB batch size.',
             '# TYPE nntmux_orchestrator_nzb_batch_size gauge',
             $this->metric('nntmux_orchestrator_nzb_batch_size', (int) ($settings['orchestrator_nzb_limit'] ?? 0)),

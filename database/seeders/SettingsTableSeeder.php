@@ -690,11 +690,11 @@ class SettingsTableSeeder extends Seeder
                 'value' => '5',
             ],
             249 => [
-                'name' => 'orchestrator_backfill_paused',
+                'name' => 'orchestrator_bf_paused',
                 'value' => '1',
             ],
             250 => [
-                'name' => 'orchestrator_backfill_permit',
+                'name' => 'orchestrator_bf_permit',
                 'value' => '0',
             ],
             251 => [
@@ -702,7 +702,7 @@ class SettingsTableSeeder extends Seeder
                 'value' => 'drain',
             ],
             252 => [
-                'name' => 'orchestrator_backfill_group',
+                'name' => 'orchestrator_bf_group',
                 'value' => '',
             ],
         ]);

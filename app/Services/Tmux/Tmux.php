@@ -207,9 +207,9 @@ class Tmux
             'orchestrator_rel_timer' => 'orchestrator_rel_timer',
             'orchestrator_nzb_timer' => 'orchestrator_nzb_timer',
             'orchestrator_nzb_limit' => 'orchestrator_nzb_limit',
-            'orchestrator_backfill_paused' => 'orchestrator_backfill_paused',
-            'orchestrator_backfill_permit' => 'orchestrator_backfill_permit',
-            'orchestrator_backfill_group' => 'orchestrator_backfill_group',
+            'orchestrator_bf_paused' => 'orchestrator_bf_paused',
+            'orchestrator_bf_permit' => 'orchestrator_bf_permit',
+            'orchestrator_bf_group' => 'orchestrator_bf_group',
             'maxsizetopostprocess' => 'maxsize_pp',
             'minsizetopostprocess' => 'minsize_pp',
         ];

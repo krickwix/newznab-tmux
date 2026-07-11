@@ -19,7 +19,7 @@ class WorkerProfileApplier
 
             $profile = $decision->profile;
             $existingPermit = (int) Settings::query()
-                ->where('name', 'orchestrator_backfill_permit')
+                ->where('name', 'orchestrator_bf_permit')
                 ->lockForUpdate()
                 ->value('value');
             $permit = $decision->backfillPermitted
@@ -35,9 +35,9 @@ class WorkerProfileApplier
                 'orchestrator_rel_timer' => (string) $profile->releasesSleepSeconds,
                 'orchestrator_nzb_timer' => (string) $profile->nzbSleepSeconds,
                 'orchestrator_nzb_limit' => (string) $profile->nzbBatchSize,
-                'orchestrator_backfill_paused' => $decision->backfillPermitted ? '0' : '1',
-                'orchestrator_backfill_permit' => (string) $permit,
-                'orchestrator_backfill_group' => $decision->backfillPermitted ? (string) $backfillGroup : '',
+                'orchestrator_bf_paused' => $decision->backfillPermitted ? '0' : '1',
+                'orchestrator_bf_permit' => (string) $permit,
+                'orchestrator_bf_group' => $decision->backfillPermitted ? (string) $backfillGroup : '',
                 'backfill_groups' => (string) max(1, $profile->backfillGroups),
                 'backfillthreads' => (string) max(1, $profile->backfillThreads),
                 'backfill_qty' => (string) max(10000, $profile->backfillQuantity),
@@ -59,9 +59,9 @@ class WorkerProfileApplier
                 'orchestrator_mode' => 'failsafe',
                 'orchestrator_profile' => 'fail_safe',
                 'orchestrator_lease_until' => '0',
-                'orchestrator_backfill_paused' => '1',
-                'orchestrator_backfill_permit' => '0',
-                'orchestrator_backfill_group' => '',
+                'orchestrator_bf_paused' => '1',
+                'orchestrator_bf_permit' => '0',
+                'orchestrator_bf_group' => '',
             ] as $name => $value) {
                 Settings::query()->updateOrCreate(['name' => $name], ['value' => $value]);
             }
@@ -71,7 +71,7 @@ class WorkerProfileApplier
 
     public function revokePermit(): void
     {
-        Settings::query()->updateOrCreate(['name' => 'orchestrator_backfill_permit'], ['value' => '0']);
+        Settings::query()->updateOrCreate(['name' => 'orchestrator_bf_permit'], ['value' => '0']);
         Settings::forgetCachedSettings();
     }
 }

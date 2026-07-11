@@ -33,7 +33,7 @@ final class WorkerProfileApplierTest extends TestCase
         });
         Settings::query()->insert([
             ['name' => 'orchestrator_generation', 'value' => '4'],
-            ['name' => 'orchestrator_backfill_permit', 'value' => '3'],
+            ['name' => 'orchestrator_bf_permit', 'value' => '3'],
         ]);
     }
 
@@ -49,7 +49,7 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame(5, $generation);
         self::assertSame([
             'orchestrator_generation' => 5,
-            'orchestrator_backfill_permit' => 5,
+            'orchestrator_bf_permit' => 5,
             'orchestrator_mode' => 'active',
             'orchestrator_lease_until' => 1_600,
             'orchestrator_bins_timer' => 40,
@@ -57,14 +57,14 @@ final class WorkerProfileApplierTest extends TestCase
             'orchestrator_rel_timer' => 60,
             'orchestrator_nzb_timer' => 55,
             'orchestrator_nzb_limit' => 20,
-            'orchestrator_backfill_paused' => 0,
-            'orchestrator_backfill_group' => 'alt.test',
+            'orchestrator_bf_paused' => 0,
+            'orchestrator_bf_group' => 'alt.test',
             'backfill_groups' => 1,
             'backfillthreads' => 1,
             'backfill_qty' => 10_000,
         ], Settings::query()->pluck('value', 'name')->only([
             'orchestrator_generation',
-            'orchestrator_backfill_permit',
+            'orchestrator_bf_permit',
             'orchestrator_mode',
             'orchestrator_lease_until',
             'orchestrator_bins_timer',
@@ -72,11 +72,11 @@ final class WorkerProfileApplierTest extends TestCase
             'orchestrator_rel_timer',
             'orchestrator_nzb_timer',
             'orchestrator_nzb_limit',
-            'orchestrator_backfill_paused',
+            'orchestrator_bf_paused',
             'backfill_groups',
             'backfillthreads',
             'backfill_qty',
-            'orchestrator_backfill_group',
+            'orchestrator_bf_group',
         ])->toArray());
     }
 
@@ -84,7 +84,7 @@ final class WorkerProfileApplierTest extends TestCase
     {
         (new WorkerProfileApplier)->apply($this->decision(ControlProfile::Fill, true), 1_000, false);
 
-        self::assertSame(3, Settings::settingValue('orchestrator_backfill_permit'));
+        self::assertSame(3, Settings::settingValue('orchestrator_bf_permit'));
         self::assertSame(5, Settings::settingValue('orchestrator_generation'));
     }
 
@@ -92,9 +92,21 @@ final class WorkerProfileApplierTest extends TestCase
     {
         (new WorkerProfileApplier)->apply($this->decision(ControlProfile::Drain, false), 1_000, true);
 
-        self::assertSame(0, Settings::settingValue('orchestrator_backfill_permit'));
-        self::assertSame(1, Settings::settingValue('orchestrator_backfill_paused'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
         self::assertSame(5, Settings::settingValue('orchestrator_generation'));
+    }
+
+    public function test_all_managed_setting_names_fit_the_live_varchar_25_schema(): void
+    {
+        (new WorkerProfileApplier)->apply($this->decision(ControlProfile::Balanced, true), 1_000, true, 'alt.test');
+
+        $names = Settings::query()->pluck('name')->all();
+
+        self::assertNotEmpty($names);
+        foreach ($names as $name) {
+            self::assertLessThanOrEqual(25, strlen((string) $name), (string) $name);
+        }
     }
 
     private function decision(ControlProfile $profile, bool $backfillPermitted): ControlDecision

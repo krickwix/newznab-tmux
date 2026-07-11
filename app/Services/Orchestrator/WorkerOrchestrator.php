@@ -39,7 +39,7 @@ class WorkerOrchestrator
                 ];
             }
             if ($permitObservation !== null && time() - $permitObservation['issued_at'] >= 900) {
-                $permitConsumed = (int) Settings::settingValue('orchestrator_backfill_permit') === 0;
+                $permitConsumed = (int) Settings::settingValue('orchestrator_bf_permit') === 0;
                 if (! $shadow) {
                     $this->applier->revokePermit();
                 }
@@ -61,7 +61,7 @@ class WorkerOrchestrator
                 && (bool) config('nntmux.orchestrator.auto_backfill', false)
                 && $decision->backfillPermitted
                 && $permitObservation === null
-                && (int) Settings::settingValue('orchestrator_backfill_permit') === 0;
+                && (int) Settings::settingValue('orchestrator_bf_permit') === 0;
             $issuePermit = $grantPermit || $autoGrant;
             if (! $shadow) {
                 $generation = $this->applier->apply($decision, time(), $issuePermit, $snapshot->backfillGroup);

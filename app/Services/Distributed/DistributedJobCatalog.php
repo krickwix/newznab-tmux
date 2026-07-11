@@ -287,8 +287,8 @@ class DistributedJobCatalog
     private function hasFreshActiveBackfillPermit(array $settings): bool
     {
         return $this->hasFreshActiveLease($settings)
-            && (int) ($settings['orchestrator_backfill_paused'] ?? 1) === 0
-            && (int) ($settings['orchestrator_backfill_permit'] ?? 0) > 0;
+            && (int) ($settings['orchestrator_bf_paused'] ?? 1) === 0
+            && (int) ($settings['orchestrator_bf_permit'] ?? 0) > 0;
     }
 
     /** @param array<string, mixed> $settings */

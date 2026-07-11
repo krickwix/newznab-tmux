@@ -34,17 +34,17 @@ class BackfillPermitGateTest extends TestCase
         $this->settings('active', time() + 60, 0, 17);
 
         self::assertTrue((new BackfillPermitGate)->claim());
-        self::assertSame(0, Settings::settingValue('orchestrator_backfill_permit'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
         self::assertFalse((new BackfillPermitGate)->claim());
     }
 
     public function test_it_denies_a_permit_without_a_pinned_target_group(): void
     {
         $this->settings('active', time() + 60, 0, 17);
-        Settings::query()->where('name', 'orchestrator_backfill_group')->update(['value' => '']);
+        Settings::query()->where('name', 'orchestrator_bf_group')->update(['value' => '']);
 
         self::assertFalse((new BackfillPermitGate)->claim());
-        self::assertSame(17, Settings::settingValue('orchestrator_backfill_permit'));
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_permit'));
     }
 
     #[DataProvider('deniedStates')]
@@ -53,7 +53,7 @@ class BackfillPermitGateTest extends TestCase
         $this->settings($mode, time() + $leaseOffset, $paused, $permit);
 
         self::assertFalse((new BackfillPermitGate)->claim());
-        self::assertSame($permit, Settings::settingValue('orchestrator_backfill_permit'));
+        self::assertSame($permit, Settings::settingValue('orchestrator_bf_permit'));
     }
 
     /** @return array<string, array{string, int, int, int}> */
@@ -72,9 +72,9 @@ class BackfillPermitGateTest extends TestCase
         Settings::query()->insert([
             ['name' => 'orchestrator_mode', 'value' => $mode],
             ['name' => 'orchestrator_lease_until', 'value' => (string) $lease],
-            ['name' => 'orchestrator_backfill_paused', 'value' => (string) $paused],
-            ['name' => 'orchestrator_backfill_permit', 'value' => (string) $permit],
-            ['name' => 'orchestrator_backfill_group', 'value' => 'alt.test'],
+            ['name' => 'orchestrator_bf_paused', 'value' => (string) $paused],
+            ['name' => 'orchestrator_bf_permit', 'value' => (string) $permit],
+            ['name' => 'orchestrator_bf_group', 'value' => 'alt.test'],
         ]);
     }
 }

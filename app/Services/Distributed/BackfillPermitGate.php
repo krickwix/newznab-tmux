@@ -19,9 +19,9 @@ class BackfillPermitGate
                 ->whereIn('name', [
                     'orchestrator_mode',
                     'orchestrator_lease_until',
-                    'orchestrator_backfill_paused',
-                    'orchestrator_backfill_permit',
-                    'orchestrator_backfill_group',
+                    'orchestrator_bf_paused',
+                    'orchestrator_bf_permit',
+                    'orchestrator_bf_group',
                 ])
                 ->lockForUpdate()
                 ->get()
@@ -31,14 +31,14 @@ class BackfillPermitGate
 
             if ((string) $rows->get('orchestrator_mode', '') !== 'active'
                 || (int) $rows->get('orchestrator_lease_until', 0) < time()
-                || (int) $rows->get('orchestrator_backfill_paused', 1) !== 0
-                || (int) $rows->get('orchestrator_backfill_permit', 0) <= 0
-                || trim((string) $rows->get('orchestrator_backfill_group', '')) === '') {
+                || (int) $rows->get('orchestrator_bf_paused', 1) !== 0
+                || (int) $rows->get('orchestrator_bf_permit', 0) <= 0
+                || trim((string) $rows->get('orchestrator_bf_group', '')) === '') {
                 return false;
             }
 
             Settings::query()
-                ->where('name', 'orchestrator_backfill_permit')
+                ->where('name', 'orchestrator_bf_permit')
                 ->update(['value' => '0']);
             Settings::forgetCachedSettings();
 

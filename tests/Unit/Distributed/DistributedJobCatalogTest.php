@@ -389,7 +389,7 @@ class DistributedJobCatalogTest extends TestCase
             'backfill' => 4,
             'orchestrator_mode' => 'active',
             'orchestrator_lease_until' => time() + 300,
-            'orchestrator_backfill_paused' => 0,
+            'orchestrator_bf_paused' => 0,
         ];
 
         $denied = $catalog->resolve('backfill', $this->runVar($base, ['backfill_groups_days' => 1]));
@@ -397,7 +397,7 @@ class DistributedJobCatalogTest extends TestCase
         self::assertStringContainsString('permit', (string) $denied['disabled_reason']);
 
         $allowed = $catalog->resolve('backfill', $this->runVar(
-            $base + ['orchestrator_backfill_permit' => 9],
+            $base + ['orchestrator_bf_permit' => 9],
             ['backfill_groups_days' => 1],
         ));
         self::assertTrue($allowed['enabled']);
@@ -415,8 +415,8 @@ class DistributedJobCatalogTest extends TestCase
             'backfill' => 4,
             'orchestrator_mode' => 'active',
             'orchestrator_lease_until' => time() - 1,
-            'orchestrator_backfill_paused' => 0,
-            'orchestrator_backfill_permit' => 1,
+            'orchestrator_bf_paused' => 0,
+            'orchestrator_bf_permit' => 1,
         ];
         $catalog = new DistributedJobCatalog;
 
@@ -440,7 +440,7 @@ class DistributedJobCatalogTest extends TestCase
             'rel_timer' => 120,
             'orchestrator_mode' => 'shadow',
             'orchestrator_lease_until' => 0,
-            'orchestrator_backfill_paused' => 1,
+            'orchestrator_bf_paused' => 1,
         ];
         $catalog = new DistributedJobCatalog;
 

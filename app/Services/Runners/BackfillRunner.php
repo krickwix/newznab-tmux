@@ -71,7 +71,7 @@ class BackfillRunner extends BaseRunner
         $maxMessages = (int) Settings::settingValue('maxmssgs');
         $threads = (int) Settings::settingValue('backfillthreads');
         $minimumSafeRange = $this->minimumSafeBackfillRange();
-        $orchestratorGroup = trim((string) Settings::settingValue('orchestrator_backfill_group'));
+        $orchestratorGroup = trim((string) Settings::settingValue('orchestrator_bf_group'));
         $orchestratorGroupFilter = $orchestratorGroup === ''
             ? ''
             : ' AND g.name = '.DB::getPdo()->quote($orchestratorGroup);

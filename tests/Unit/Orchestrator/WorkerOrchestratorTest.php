@@ -88,7 +88,7 @@ final class WorkerOrchestratorTest extends TestCase
             $table->string('name')->primary();
             $table->string('value');
         });
-        DB::table('settings')->insert(['name' => 'orchestrator_backfill_permit', 'value' => '7']);
+        DB::table('settings')->insert(['name' => 'orchestrator_bf_permit', 'value' => '7']);
         $snapshot = new PipelineSnapshot(
             1,
             2,
