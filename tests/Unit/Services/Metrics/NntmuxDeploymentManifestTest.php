@@ -37,14 +37,15 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
-            $expectedImage = in_array($name, [
-                'nntmux-worker-releases',
-                'nntmux-worker-nzb-backlog',
-                'nntmux-worker-removecrap',
-                'nntmux-worker-per-group',
-            ], true)
+            $expectedImage = $name === 'nntmux-worker-nzb-backlog'
+                ? ':microservices-pods-20260711-nzb-selector-chunk-v11'
+                : (in_array($name, [
+                    'nntmux-worker-releases',
+                    'nntmux-worker-removecrap',
+                    'nntmux-worker-per-group',
+                ], true)
                 ? ':microservices-pods-20260711-nzb-cleanup-lock-v9'
-                : ':microservices-pods-20260710-nzb-query-v8';
+                : ':microservices-pods-20260710-nzb-query-v8');
             self::assertStringEndsWith(
                 $expectedImage,
                 (string) ($container['image'] ?? ''),
@@ -52,9 +53,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             );
             $environment = array_column($container['env'] ?? [], 'value', 'name');
             self::assertSame(
-                str_contains($expectedImage, 'nzb-cleanup-lock-v9')
-                    ? 'microservices-pods-20260711-nzb-cleanup-lock-v9'
-                    : 'microservices-pods-20260710-nzb-query-v8',
+                ltrim($expectedImage, ':'),
                 $environment['NNTMUX_BUILD_VERSION'] ?? null,
                 sprintf('%s build telemetry must match its image.', $name),
             );
@@ -124,12 +123,12 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($metrics);
         self::assertSame('nntmux-metrics', $metrics['metadata']['name'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260711-nzb-cleanup-lock-v9',
+            ':microservices-pods-20260711-nzb-selector-chunk-v11',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
         $expected = [
-            'NNTMUX_BUILD_VERSION' => 'microservices-pods-20260711-nzb-cleanup-lock-v9',
+            'NNTMUX_BUILD_VERSION' => 'microservices-pods-20260711-nzb-selector-chunk-v11',
             'NNTMUX_INLINE_NZB_CREATION' => 'false',
             'NNTMUX_DISTRIBUTED_NZB_LIMIT' => '20',
             'NNTMUX_DISTRIBUTED_NZB_SLEEP' => '60',
