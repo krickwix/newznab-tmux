@@ -507,4 +507,28 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_stage_oldest_age_seconds{stage="nzbs"} 14', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_policy_permitted 1', $output);
     }
+
+    public function test_persisted_fail_safe_overrides_a_stale_redis_decision(): void
+    {
+        config(['nntmux.orchestrator.state_store' => 'array']);
+        DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_mode', 'value' => 'failsafe'],
+            ['name' => 'orchestrator_profile', 'value' => 'fail_safe'],
+        ]);
+        Cache::store('array')->flush();
+        Cache::store('array')->forever(WorkerControlStateStore::DECISION_KEY, [
+            'mode' => 'active',
+            'profile' => 'balanced',
+            'observed_at' => time() - 20,
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_orchestrator_mode_info{mode="failsafe"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_profile_info{profile="fail_safe"} 1', $output);
+    }
 }

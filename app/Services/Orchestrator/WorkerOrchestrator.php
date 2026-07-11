@@ -94,6 +94,10 @@ class WorkerOrchestrator
                     'releases' => $snapshot->oldestReleaseAgeSeconds,
                     'nzbs' => $snapshot->oldestNzbAgeSeconds,
                 ],
+                'backfill_target' => [
+                    'group' => $snapshot->backfillGroup,
+                    'cursor' => $snapshot->backfillCursor,
+                ],
             ];
             $this->store->storeDecision($result);
             Log::info('NNTmux worker orchestrator decision', $result);
@@ -113,7 +117,16 @@ class WorkerOrchestrator
             throw $error;
         } finally {
             if ($acquired && $lock !== null) {
-                $lock->release();
+                try {
+                    $lock->release();
+                } catch (Throwable $releaseError) {
+                    Log::critical('NNTmux worker orchestrator leader lock release failed', [
+                        'error' => $releaseError->getMessage(),
+                    ]);
+                    if (! $shadow) {
+                        $this->applier->failClosed();
+                    }
+                }
             }
         }
     }

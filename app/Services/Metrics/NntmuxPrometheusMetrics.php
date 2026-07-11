@@ -548,7 +548,7 @@ class NntmuxPrometheusMetrics
         } catch (Throwable) {
             $decision = null;
         }
-        if (is_array($decision)) {
+        if (is_array($decision) && $mode !== 'failsafe') {
             $mode = (string) ($decision['mode'] ?? $mode);
             $profile = (string) ($decision['profile'] ?? $profile);
         }
