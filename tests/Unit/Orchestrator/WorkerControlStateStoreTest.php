@@ -98,4 +98,13 @@ final class WorkerControlStateStoreTest extends TestCase
         self::assertEquals(ControlState::initial(), (new WorkerControlStateStore)->loadState());
         self::assertNull((new WorkerControlStateStore)->previousSnapshot());
     }
+
+    public function test_it_publishes_the_last_decision_for_metrics(): void
+    {
+        $decision = ['mode' => 'shadow', 'profile' => 'drain', 'observed_at' => 123];
+
+        (new WorkerControlStateStore)->storeDecision($decision);
+
+        self::assertSame($decision, Cache::store('array')->get(WorkerControlStateStore::DECISION_KEY));
+    }
 }

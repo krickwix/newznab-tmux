@@ -8,6 +8,7 @@ use App\Models\Category;
 use App\Services\Distributed\DistributedJobCatalog;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Metrics\NntmuxPrometheusMetrics;
+use App\Services\Orchestrator\WorkerControlStateStore;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -475,5 +476,35 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_nzb_worker_sleep_seconds 45', $output);
         $this->assertStringContainsString('nntmux_nzb_worker_scan_cap 5000', $output);
         $this->assertStringContainsString('nntmux_nzb_worker_lock_seconds 7200', $output);
+    }
+
+    public function test_orchestrator_metrics_export_the_zero_write_shadow_snapshot(): void
+    {
+        config(['nntmux.orchestrator.state_store' => 'array']);
+        DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        Cache::store('array')->flush();
+        Cache::store('array')->forever(WorkerControlStateStore::DECISION_KEY, [
+            'mode' => 'shadow',
+            'profile' => 'balanced',
+            'observed_at' => time() - 10,
+            'backfill_permitted' => true,
+            'eligible_nzbs' => 0,
+            'backlogs' => ['parts' => 100, 'binaries' => 20, 'collections' => 30, 'releases' => 4, 'nzbs' => 50],
+            'rates_per_minute' => ['parts' => 1.5],
+            'ewma_per_minute' => ['parts' => 0.5],
+            'oldest_age_seconds' => ['binaries' => 11, 'collections' => 12, 'releases' => 13, 'nzbs' => 14],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_orchestrator_mode_info{mode="shadow"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_profile_info{profile="balanced"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_backlog{stage="parts"} 100', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_rate_per_minute{stage="parts",estimator="ewma"} 0.5', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_oldest_age_seconds{stage="nzbs"} 14', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_policy_permitted 1', $output);
     }
 }

@@ -8,7 +8,9 @@ use App\Enums\CollectionFileCheckStatus;
 use App\Models\Category;
 use App\Services\Distributed\DistributedJobCatalog;
 use App\Services\Nzb\NzbService;
+use App\Services\Orchestrator\WorkerControlStateStore;
 use Illuminate\Redis\Connections\PhpRedisConnection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Schema;
@@ -540,7 +542,18 @@ class NntmuxPrometheusMetrics
         $profile = (string) ($settings['orchestrator_profile'] ?? 'unknown');
         $leaseUntil = (int) ($settings['orchestrator_lease_until'] ?? 0);
 
-        return [
+        try {
+            $decision = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+                ->get(WorkerControlStateStore::DECISION_KEY);
+        } catch (Throwable) {
+            $decision = null;
+        }
+        if (is_array($decision)) {
+            $mode = (string) ($decision['mode'] ?? $mode);
+            $profile = (string) ($decision['profile'] ?? $profile);
+        }
+
+        $lines = [
             '# HELP nntmux_orchestrator_mode_info Current deterministic worker orchestrator mode.',
             '# TYPE nntmux_orchestrator_mode_info gauge',
             $this->metric('nntmux_orchestrator_mode_info', 1, ['mode' => $mode]),
@@ -563,6 +576,40 @@ class NntmuxPrometheusMetrics
             '# TYPE nntmux_orchestrator_nzb_batch_size gauge',
             $this->metric('nntmux_orchestrator_nzb_batch_size', (int) ($settings['orchestrator_nzb_limit'] ?? 0)),
         ];
+
+        if (! is_array($decision)) {
+            return $lines;
+        }
+
+        $lines[] = '# HELP nntmux_orchestrator_snapshot_age_seconds Age of the last controller observation.';
+        $lines[] = '# TYPE nntmux_orchestrator_snapshot_age_seconds gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_snapshot_age_seconds', max(0, time() - (int) ($decision['observed_at'] ?? 0)));
+        $lines[] = '# HELP nntmux_orchestrator_backfill_policy_permitted Whether all deterministic backfill gates are green.';
+        $lines[] = '# TYPE nntmux_orchestrator_backfill_policy_permitted gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_backfill_policy_permitted', ($decision['backfill_permitted'] ?? false) ? 1 : 0);
+        $lines[] = '# HELP nntmux_orchestrator_eligible_nzbs Exact actionable NZBs in the bounded selector frontier.';
+        $lines[] = '# TYPE nntmux_orchestrator_eligible_nzbs gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_eligible_nzbs', (int) ($decision['eligible_nzbs'] ?? 0));
+        $lines[] = '# HELP nntmux_orchestrator_stage_backlog Current bounded pipeline stage backlog or capacity level.';
+        $lines[] = '# TYPE nntmux_orchestrator_stage_backlog gauge';
+        $lines[] = '# HELP nntmux_orchestrator_stage_rate_per_minute Pipeline stage change rate by estimator.';
+        $lines[] = '# TYPE nntmux_orchestrator_stage_rate_per_minute gauge';
+        $lines[] = '# HELP nntmux_orchestrator_stage_oldest_age_seconds Oldest actionable item age by stage.';
+        $lines[] = '# TYPE nntmux_orchestrator_stage_oldest_age_seconds gauge';
+        foreach (['parts', 'binaries', 'collections', 'releases', 'nzbs'] as $stage) {
+            $lines[] = $this->metric('nntmux_orchestrator_stage_backlog', (float) ($decision['backlogs'][$stage] ?? 0), ['stage' => $stage]);
+            foreach (['rates_per_minute' => 'instant', 'ewma_per_minute' => 'ewma'] as $key => $estimator) {
+                $lines[] = $this->metric('nntmux_orchestrator_stage_rate_per_minute', (float) ($decision[$key][$stage] ?? 0), [
+                    'stage' => $stage,
+                    'estimator' => $estimator,
+                ]);
+            }
+            if ($stage !== 'parts') {
+                $lines[] = $this->metric('nntmux_orchestrator_stage_oldest_age_seconds', (float) ($decision['oldest_age_seconds'][$stage] ?? 0), ['stage' => $stage]);
+            }
+        }
+
+        return $lines;
     }
 
     /**

@@ -15,6 +15,8 @@ class WorkerControlStateStore
 
     private const string PERMIT_OBSERVATION_KEY = 'nntmux:orchestrator:permit-observation';
 
+    public const string DECISION_KEY = 'nntmux:orchestrator:last-decision';
+
     public function leaderLock(): Lock
     {
         /** @phpstan-ignore-next-line method.notFound */
@@ -101,5 +103,11 @@ class WorkerControlStateStore
     public function clearPermitObservation(): void
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forget(self::PERMIT_OBSERVATION_KEY);
+    }
+
+    /** @param array<string, mixed> $decision */
+    public function storeDecision(array $decision): void
+    {
+        Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forever(self::DECISION_KEY, $decision);
     }
 }

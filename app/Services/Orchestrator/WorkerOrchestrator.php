@@ -79,7 +79,19 @@ class WorkerOrchestrator
                     'nzbs' => $snapshot->nzbsBacklog,
                 ],
                 'storage_available_bytes' => $snapshot->storageAvailableBytes,
+                'observed_at' => $snapshot->observedAt,
+                'eligible_nzbs' => $snapshot->eligibleNzbs,
+                'pressure' => $snapshot->highPressure ? 'high' : ($snapshot->lowPressure ? 'low' : 'neutral'),
+                'rates_per_minute' => $snapshot->backlogRatesPerMinute,
+                'ewma_per_minute' => $snapshot->backlogEwmaPerMinute,
+                'oldest_age_seconds' => [
+                    'binaries' => $snapshot->oldestBinaryAgeSeconds,
+                    'collections' => $snapshot->oldestCollectionAgeSeconds,
+                    'releases' => $snapshot->oldestReleaseAgeSeconds,
+                    'nzbs' => $snapshot->oldestNzbAgeSeconds,
+                ],
             ];
+            $this->store->storeDecision($result);
             Log::info('NNTmux worker orchestrator decision', $result);
 
             return $result;
