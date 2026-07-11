@@ -9,10 +9,21 @@ use Illuminate\Support\Facades\DB;
 
 class PipelineSnapshotRepository
 {
+    private const int BACKFILL_CANDIDATE_LIMIT = 16;
+
+    private readonly BackfillTargetSelector $targets;
+
+    private readonly WorkerControlStateStore $state;
+
     public function __construct(
         private readonly PrometheusSafetySignalProvider $safety,
         private readonly NzbBacklogCreationService $nzbBacklog,
-    ) {}
+        ?BackfillTargetSelector $targets = null,
+        ?WorkerControlStateStore $state = null,
+    ) {
+        $this->targets = $targets ?? new BackfillTargetSelector;
+        $this->state = $state ?? new WorkerControlStateStore;
+    }
 
     /** @param array<string, int|float>|null $previous */
     public function capture(?array $previous = null): PipelineSnapshot
@@ -34,23 +45,7 @@ class PipelineSnapshotRepository
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(dateadded), NOW()), 0) FROM collections WHERE filecheck = 3) AS oldest_release_age,
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(adddate), NOW()), 0) FROM releases WHERE nzbstatus = 0) AS oldest_nzb_age,
             NOT EXISTS(SELECT 1 FROM usenet_groups g LEFT JOIN short_groups s ON s.name = g.name
-                WHERE g.active = 1 AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > 10000)) AS current_groups,
-            EXISTS(SELECT 1 FROM usenet_groups g INNER JOIN short_groups s ON s.name = g.name
-                WHERE g.backfill = 1 AND s.updated >= NOW() - INTERVAL 10 MINUTE
-                AND CAST(s.first_record AS SIGNED) > 0 AND CAST(s.last_record AS SIGNED) >= CAST(s.first_record AS SIGNED) LIMIT 1) AS provider_available,
-            EXISTS(SELECT 1 FROM usenet_groups g INNER JOIN short_groups s ON s.name = g.name
-                WHERE g.backfill = 1 AND g.first_record IS NOT NULL AND g.first_record_postdate IS NOT NULL
-                AND CAST(g.first_record AS SIGNED) > CAST(s.first_record AS SIGNED) + 10000 LIMIT 1) AS backfill_cursor_available,
-            (SELECT g.name FROM usenet_groups g INNER JOIN short_groups s ON s.name = g.name
-                WHERE g.backfill = 1 AND g.first_record IS NOT NULL AND g.first_record_postdate IS NOT NULL
-                AND s.updated >= NOW() - INTERVAL 10 MINUTE
-                AND CAST(g.first_record AS SIGNED) > CAST(s.first_record AS SIGNED) + 10000
-                ORDER BY g.first_record_postdate DESC, g.name ASC LIMIT 1) AS backfill_group,
-            (SELECT CAST(g.first_record AS SIGNED) FROM usenet_groups g INNER JOIN short_groups s ON s.name = g.name
-                WHERE g.backfill = 1 AND g.first_record IS NOT NULL AND g.first_record_postdate IS NOT NULL
-                AND s.updated >= NOW() - INTERVAL 10 MINUTE
-                AND CAST(g.first_record AS SIGNED) > CAST(s.first_record AS SIGNED) + 10000
-                ORDER BY g.first_record_postdate DESC, g.name ASC LIMIT 1) AS backfill_group_cursor');
+                WHERE g.active = 1 AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > 10000)) AS current_groups');
         $statusRows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Innodb_deadlocks', 'Innodb_row_lock_current_waits')");
         $status = [];
         foreach ($statusRows as $row) {
@@ -58,7 +53,12 @@ class PipelineSnapshotRepository
         }
         $signals = $this->safety->signals();
         $eligibleNzbs = $this->nzbBacklog->eligibleCandidateCount((int) config('nntmux.distributed_nzb_scan_cap', 10000));
-        $backfillGroup = (string) ($pipeline->backfill_group ?? '');
+        $backfillTarget = $this->targets->select(
+            $this->backfillCandidates(),
+            $this->state->backfillYieldHistory(),
+            time(),
+        );
+        $backfillGroup = (string) ($backfillTarget['name'] ?? '');
 
         $backlogs = [
             'parts' => (int) ($tables->parts_count ?? 0),
@@ -98,7 +98,7 @@ class PipelineSnapshotRepository
             highPressure: $high,
             lowPressure: $low,
             providerAvailable: $backfillGroup !== '',
-            cursorAvailable: $backfillGroup !== '' && (bool) ($pipeline->backfill_cursor_available ?? false),
+            cursorAvailable: $backfillGroup !== '',
             currentGroupsAvailable: (bool) ($pipeline->current_groups ?? false),
             eligibleBackfillSupply: $eligibleNzbs === 0 && $backfillGroup !== '',
             databaseDeadlocks: $deadlocks,
@@ -115,24 +115,58 @@ class PipelineSnapshotRepository
             backlogRatesPerMinute: $rates,
             backlogEwmaPerMinute: $ewma,
             backfillGroup: $backfillGroup,
-            backfillCursor: (int) ($pipeline->backfill_group_cursor ?? 0),
+            backfillCursor: (int) ($backfillTarget['cursor'] ?? 0),
         );
     }
 
-    /** @return array{cursor: int, ready_collections: int, releases: int} */
+    /** @return array{cursor: int, ready_collections: int, releases: int, nzb_created: int} */
     public function backfillOutcomeForGroup(string $group): array
     {
         $row = DB::selectOne('SELECT
             CAST(g.first_record AS SIGNED) AS backfill_cursor,
             (SELECT COUNT(*) FROM collections c WHERE c.groups_id = g.id AND c.filecheck = 3) AS ready_collections,
-            (SELECT COUNT(*) FROM releases r WHERE r.groups_id = g.id) AS releases
+            (SELECT COUNT(*) FROM releases r WHERE r.groups_id = g.id) AS releases,
+            (SELECT COUNT(*) FROM releases r WHERE r.groups_id = g.id AND r.nzbstatus = 1) AS nzb_created
             FROM usenet_groups g WHERE g.name = ? LIMIT 1', [$group]);
 
         return [
             'cursor' => (int) ($row->backfill_cursor ?? 0),
             'ready_collections' => (int) ($row->ready_collections ?? 0),
             'releases' => (int) ($row->releases ?? 0),
+            'nzb_created' => (int) ($row->nzb_created ?? 0),
         ];
+    }
+
+    /**
+     * @return list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>
+     */
+    public function backfillCandidates(): array
+    {
+        $rows = DB::select('SELECT
+            g.name,
+            CAST(g.first_record AS SIGNED) AS backfill_cursor,
+            CAST(g.first_record_postdate AS CHAR) AS cursor_postdate,
+            CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) AS remaining_articles
+            FROM usenet_groups g
+            INNER JOIN short_groups s ON s.name = g.name
+            WHERE g.active = 1
+            AND g.backfill = 1
+            AND g.first_record IS NOT NULL
+            AND g.first_record_postdate >= \'2000-01-01\'
+            AND s.updated >= NOW() - INTERVAL 10 MINUTE
+            AND CAST(s.first_record AS SIGNED) > 0
+            AND CAST(s.last_record AS SIGNED) >= CAST(s.first_record AS SIGNED)
+            AND CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000
+            AND CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= 20000
+            ORDER BY g.first_record_postdate DESC, g.name ASC
+            LIMIT '.self::BACKFILL_CANDIDATE_LIMIT, []);
+
+        return array_map(static fn (object $row): array => [
+            'name' => (string) $row->name,
+            'cursor' => (int) $row->backfill_cursor,
+            'cursor_postdate' => (string) $row->cursor_postdate,
+            'remaining_articles' => (int) $row->remaining_articles,
+        ], $rows);
     }
 
     /** @param array<string, int> $now @param array<string, int> $ages @param array<string, float> $ewma */

@@ -15,6 +15,8 @@ class WorkerControlStateStore
 
     private const string PERMIT_OBSERVATION_KEY = 'nntmux:orchestrator:permit-observation';
 
+    private const string BACKFILL_YIELD_KEY = 'nntmux:orchestrator:backfill-yield';
+
     public const string DECISION_KEY = 'nntmux:orchestrator:last-decision';
 
     public function leaderLock(): Lock
@@ -87,7 +89,7 @@ class WorkerControlStateStore
         return is_array($value) ? $value : null;
     }
 
-    /** @param array{cursor: int, ready_collections: int, releases: int} $outcome */
+    /** @param array{cursor: int, ready_collections: int, releases: int, nzb_created: int} $outcome */
     public function beginPermitObservation(PipelineSnapshot $snapshot, int $generation, int $now, array $outcome): void
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forever(self::PERMIT_OBSERVATION_KEY, [
@@ -97,6 +99,7 @@ class WorkerControlStateStore
             'binaries' => $snapshot->binariesBacklog,
             'ready_collections' => $outcome['ready_collections'],
             'release_total' => $outcome['releases'],
+            'nzb_created' => $outcome['nzb_created'],
             'backfill_group' => $snapshot->backfillGroup,
             'backfill_cursor' => $outcome['cursor'],
         ]);
@@ -105,6 +108,60 @@ class WorkerControlStateStore
     public function clearPermitObservation(): void
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forget(self::PERMIT_OBSERVATION_KEY);
+    }
+
+    /** @return array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int}> */
+    public function backfillYieldHistory(): array
+    {
+        $value = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->get(self::BACKFILL_YIELD_KEY);
+        if (! is_array($value)) {
+            return [];
+        }
+
+        $history = [];
+        foreach ($value as $group => $entry) {
+            if (! is_string($group) || ! is_array($entry)) {
+                continue;
+            }
+            $history[$group] = [
+                'attempts' => max(0, (int) ($entry['attempts'] ?? 0)),
+                'ewma_nzbs_per_10k' => max(0.0, (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0)),
+                'last_attempt_at' => max(0, (int) ($entry['last_attempt_at'] ?? 0)),
+                'last_effective_at' => max(0, (int) ($entry['last_effective_at'] ?? 0)),
+            ];
+        }
+
+        return $history;
+    }
+
+    public function recordBackfillYield(string $group, int $cursorDelta, int $nzbCreatedDelta, int $now): void
+    {
+        $history = $this->backfillYieldHistory();
+        $existing = $history[$group] ?? [
+            'attempts' => 0,
+            'ewma_nzbs_per_10k' => 0.0,
+            'last_attempt_at' => 0,
+            'last_effective_at' => 0,
+        ];
+        $yield = $cursorDelta > 0
+            ? max(0, $nzbCreatedDelta) * 10_000 / $cursorDelta
+            : 0.0;
+        $score = $existing['attempts'] === 0
+            ? $yield
+            : ($existing['ewma_nzbs_per_10k'] + $yield) / 2;
+        $history[$group] = [
+            'attempts' => $existing['attempts'] + 1,
+            'ewma_nzbs_per_10k' => round($score, 6),
+            'last_attempt_at' => max(0, $now),
+            'last_effective_at' => $cursorDelta > 0 && $nzbCreatedDelta > 0
+                ? max(0, $now)
+                : $existing['last_effective_at'],
+        ];
+        uasort($history, static fn (array $left, array $right): int => $right['last_attempt_at'] <=> $left['last_attempt_at']);
+        $history = array_slice($history, 0, 16, preserve_keys: true);
+
+        Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+            ->forever(self::BACKFILL_YIELD_KEY, $history);
     }
 
     /** @param array<string, mixed> $decision */

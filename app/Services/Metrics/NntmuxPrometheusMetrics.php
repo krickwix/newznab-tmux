@@ -545,8 +545,10 @@ class NntmuxPrometheusMetrics
         try {
             $decision = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
                 ->get(WorkerControlStateStore::DECISION_KEY);
+            $backfillYieldHistory = (new WorkerControlStateStore)->backfillYieldHistory();
         } catch (Throwable) {
             $decision = null;
+            $backfillYieldHistory = [];
         }
         if (is_array($decision) && $mode !== 'failsafe') {
             $mode = (string) ($decision['mode'] ?? $mode);
@@ -590,6 +592,23 @@ class NntmuxPrometheusMetrics
         $lines[] = '# HELP nntmux_orchestrator_eligible_nzbs Exact actionable NZBs in the bounded selector frontier.';
         $lines[] = '# TYPE nntmux_orchestrator_eligible_nzbs gauge';
         $lines[] = $this->metric('nntmux_orchestrator_eligible_nzbs', (int) ($decision['eligible_nzbs'] ?? 0));
+        $targetGroup = (string) ($decision['backfill_target']['group'] ?? '');
+        if ($targetGroup !== '') {
+            $lines[] = '# HELP nntmux_orchestrator_backfill_target_info Selected adaptive backfill target group.';
+            $lines[] = '# TYPE nntmux_orchestrator_backfill_target_info gauge';
+            $lines[] = $this->metric('nntmux_orchestrator_backfill_target_info', 1, ['group' => $targetGroup]);
+            $lines[] = '# HELP nntmux_orchestrator_backfill_target_cursor Selected adaptive backfill target cursor.';
+            $lines[] = '# TYPE nntmux_orchestrator_backfill_target_cursor gauge';
+            $lines[] = $this->metric('nntmux_orchestrator_backfill_target_cursor', (int) ($decision['backfill_target']['cursor'] ?? 0), ['group' => $targetGroup]);
+        }
+        $lines[] = '# HELP nntmux_orchestrator_backfill_yield_nzbs_per_10k Recent target NZB yield EWMA per 10,000 cursor articles.';
+        $lines[] = '# TYPE nntmux_orchestrator_backfill_yield_nzbs_per_10k gauge';
+        $lines[] = '# HELP nntmux_orchestrator_backfill_yield_attempts Recent attributed permits by target group.';
+        $lines[] = '# TYPE nntmux_orchestrator_backfill_yield_attempts gauge';
+        foreach ($backfillYieldHistory as $group => $entry) {
+            $lines[] = $this->metric('nntmux_orchestrator_backfill_yield_nzbs_per_10k', $entry['ewma_nzbs_per_10k'], ['group' => $group]);
+            $lines[] = $this->metric('nntmux_orchestrator_backfill_yield_attempts', $entry['attempts'], ['group' => $group]);
+        }
         $lines[] = '# HELP nntmux_orchestrator_stage_backlog Current bounded pipeline stage backlog or capacity level.';
         $lines[] = '# TYPE nntmux_orchestrator_stage_backlog gauge';
         $lines[] = '# HELP nntmux_orchestrator_stage_rate_per_minute Pipeline stage change rate by estimator.';

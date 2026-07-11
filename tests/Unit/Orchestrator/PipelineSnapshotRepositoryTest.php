@@ -12,6 +12,42 @@ use Tests\TestCase;
 
 final class PipelineSnapshotRepositoryTest extends TestCase
 {
+    public function test_backfill_candidates_are_bounded_to_fresh_current_valid_ranges(): void
+    {
+        DB::shouldReceive('select')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('g.active = 1', $sql);
+                self::assertStringContainsString('g.backfill = 1', $sql);
+                self::assertStringContainsString('s.updated >= NOW() - INTERVAL 10 MINUTE', $sql);
+                self::assertStringContainsString('CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000', $sql);
+                self::assertStringContainsString('CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= 20000', $sql);
+                self::assertStringContainsString("g.first_record_postdate >= '2000-01-01'", $sql);
+                self::assertStringContainsString('LIMIT 16', $sql);
+                self::assertSame([], $bindings);
+
+                return true;
+            })
+            ->andReturn([(object) [
+                'name' => 'alt.test',
+                'backfill_cursor' => 100_000,
+                'cursor_postdate' => '2020-01-01 00:00:00',
+                'remaining_articles' => 90_000,
+            ]]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([[
+            'name' => 'alt.test',
+            'cursor' => 100_000,
+            'cursor_postdate' => '2020-01-01 00:00:00',
+            'remaining_articles' => 90_000,
+        ]], $repository->backfillCandidates());
+    }
+
     public function test_group_outcome_uses_a_mariadb_safe_cursor_alias(): void
     {
         DB::shouldReceive('selectOne')
@@ -27,6 +63,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 'backfill_cursor' => 12345,
                 'ready_collections' => 6,
                 'releases' => 7,
+                'nzb_created' => 8,
             ]);
 
         $repository = new PipelineSnapshotRepository(
@@ -38,6 +75,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             'cursor' => 12345,
             'ready_collections' => 6,
             'releases' => 7,
+            'nzb_created' => 8,
         ], $repository->backfillOutcomeForGroup('alt.test'));
     }
 }

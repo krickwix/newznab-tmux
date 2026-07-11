@@ -53,6 +53,14 @@ class WorkerOrchestrator
                     && $outcome['cursor'] < (int) ($permitObservation['backfill_cursor'] ?? 0);
                 $produced = $outcome['ready_collections'] > (int) ($permitObservation['ready_collections'] ?? 0)
                     || $outcome['releases'] > (int) ($permitObservation['release_total'] ?? 0);
+                if ($permitClaimed && array_key_exists('nzb_created', $permitObservation)) {
+                    $this->store->recordBackfillYield(
+                        $observedGroup,
+                        cursorDelta: max(0, (int) $permitObservation['backfill_cursor'] - $outcome['cursor']),
+                        nzbCreatedDelta: max(0, $outcome['nzb_created'] - (int) $permitObservation['nzb_created']),
+                        now: time(),
+                    );
+                }
                 $snapshot = $snapshot->withPermitOutcome(true, $permitClaimed && $cursorMoved && $produced);
                 $this->store->clearPermitObservation();
             }

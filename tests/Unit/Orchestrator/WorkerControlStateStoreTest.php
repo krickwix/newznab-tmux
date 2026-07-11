@@ -83,6 +83,7 @@ final class WorkerControlStateStoreTest extends TestCase
             'cursor' => 12345,
             'ready_collections' => 66,
             'releases' => 77,
+            'nzb_created' => 88,
         ]);
 
         self::assertSame([
@@ -92,6 +93,7 @@ final class WorkerControlStateStoreTest extends TestCase
             'binaries' => 22,
             'ready_collections' => 66,
             'release_total' => 77,
+            'nzb_created' => 88,
             'backfill_group' => 'alt.test',
             'backfill_cursor' => 12345,
         ], $store->permitObservation());
@@ -114,5 +116,46 @@ final class WorkerControlStateStoreTest extends TestCase
         (new WorkerControlStateStore)->storeDecision($decision);
 
         self::assertSame($decision, Cache::store('array')->get(WorkerControlStateStore::DECISION_KEY));
+    }
+
+    public function test_it_records_cursor_normalized_target_nzb_yield(): void
+    {
+        $store = new WorkerControlStateStore;
+
+        $store->recordBackfillYield('alt.test', cursorDelta: 10_000, nzbCreatedDelta: 5, now: 1_000);
+        $store->recordBackfillYield('alt.test', cursorDelta: 10_000, nzbCreatedDelta: 0, now: 2_000);
+
+        self::assertSame([
+            'alt.test' => [
+                'attempts' => 2,
+                'ewma_nzbs_per_10k' => 2.5,
+                'last_attempt_at' => 2_000,
+                'last_effective_at' => 1_000,
+            ],
+        ], $store->backfillYieldHistory());
+    }
+
+    public function test_zero_cursor_movement_never_scores_output(): void
+    {
+        $store = new WorkerControlStateStore;
+
+        $store->recordBackfillYield('alt.test', cursorDelta: 0, nzbCreatedDelta: 5, now: 1_000);
+
+        self::assertSame(0.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
+        self::assertSame(0, $store->backfillYieldHistory()['alt.test']['last_effective_at']);
+    }
+
+    public function test_yield_history_is_bounded_to_the_sixteen_most_recent_groups(): void
+    {
+        $store = new WorkerControlStateStore;
+
+        for ($group = 1; $group <= 17; $group++) {
+            $store->recordBackfillYield('alt.test.'.$group, 10_000, 1, $group);
+        }
+
+        $history = $store->backfillYieldHistory();
+        self::assertCount(16, $history);
+        self::assertArrayNotHasKey('alt.test.1', $history);
+        self::assertArrayHasKey('alt.test.17', $history);
     }
 }

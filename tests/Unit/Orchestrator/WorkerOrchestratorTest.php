@@ -15,6 +15,7 @@ use App\Services\Orchestrator\WorkerOrchestrator;
 use App\Services\Orchestrator\WorkerProfileApplier;
 use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Mockery;
@@ -265,6 +266,54 @@ final class WorkerOrchestratorTest extends TestCase
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
 
         self::assertContains('backfill_permit_ineffective', $result['reasons']);
+    }
+
+    public function test_a_claimed_permit_records_target_nzb_yield_after_attribution(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.permit_observation_seconds' => 1200,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+        ]);
+        $store = new WorkerControlStateStore;
+        $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, generation: 7, now: time() - 1201, outcome: [
+            'cursor' => 20_000,
+            'ready_collections' => 0,
+            'releases' => 0,
+            'nzb_created' => 0,
+        ]);
+        $current = new PipelineSnapshot(1, 2, 3, 4, 5, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillCursor: 10_000);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($current);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
+            'cursor' => 10_000,
+            'ready_collections' => 1,
+            'releases' => 1,
+            'nzb_created' => 3,
+        ]);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertContains('backfill_permit_effective', $result['reasons']);
+        self::assertSame(3.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
+        self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts']);
     }
 
     public function test_a_soft_supply_gate_preserves_an_unclaimed_permit_during_claim_grace(): void
