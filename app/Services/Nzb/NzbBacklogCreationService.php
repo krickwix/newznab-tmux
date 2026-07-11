@@ -12,7 +12,7 @@ use Illuminate\Support\Facades\DB;
 
 final class NzbBacklogCreationService
 {
-    private const int MAX_CANDIDATE_SCAN = 5000;
+    private const int MAX_CANDIDATE_SCAN = 10000;
 
     private const int ELIGIBILITY_CHUNK_SIZE = 100;
 
