@@ -131,7 +131,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $expected = [
             'NNTMUX_BUILD_VERSION' => 'microservices-pods-20260711-nzb-cleanup-lock-v9',
             'NNTMUX_INLINE_NZB_CREATION' => 'false',
-            'NNTMUX_DISTRIBUTED_NZB_LIMIT' => '10',
+            'NNTMUX_DISTRIBUTED_NZB_LIMIT' => '20',
             'NNTMUX_DISTRIBUTED_NZB_SLEEP' => '60',
             'NNTMUX_DISTRIBUTED_NZB_SCAN_CAP' => '5000',
             'NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS' => '7200',
