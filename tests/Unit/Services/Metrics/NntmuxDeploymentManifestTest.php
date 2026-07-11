@@ -9,7 +9,7 @@ use Symfony\Component\Yaml\Parser;
 
 final class NntmuxDeploymentManifestTest extends TestCase
 {
-    public function test_distributed_workers_use_v8_and_backfill_remains_disabled(): void
+    public function test_only_nzb_backlog_uses_v9_and_backfill_remains_disabled(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/distributed-workers.yaml';
         if (! is_file($path)) {
@@ -38,10 +38,13 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
+            $expectedImage = $name === 'nntmux-worker-nzb-backlog'
+                ? ':microservices-pods-20260711-nzb-cleanup-lock-v9'
+                : ':microservices-pods-20260710-nzb-query-v8';
             self::assertStringEndsWith(
-                ':microservices-pods-20260710-nzb-query-v8',
+                $expectedImage,
                 (string) ($container['image'] ?? ''),
-                sprintf('%s must run the telemetry-capable v8 image.', $name),
+                sprintf('%s must retain its intended isolated image.', $name),
             );
         }
 
@@ -76,8 +79,13 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $metrics = $parser->parse($monitoringDocuments[0]);
         self::assertIsArray($metrics);
         self::assertSame('nntmux-metrics', $metrics['metadata']['name'] ?? null);
+        self::assertStringEndsWith(
+            ':microservices-pods-20260711-nzb-cleanup-lock-v9',
+            (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
+        );
 
         $expected = [
+            'NNTMUX_BUILD_VERSION' => 'microservices-pods-20260711-nzb-cleanup-lock-v9',
             'NNTMUX_INLINE_NZB_CREATION' => 'false',
             'NNTMUX_DISTRIBUTED_NZB_LIMIT' => '5',
             'NNTMUX_DISTRIBUTED_NZB_SLEEP' => '60',
@@ -92,9 +100,15 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
         $backlogEnvironment = $environment($deployments['nntmux-worker-nzb-backlog'] ?? []);
         $metricsEnvironment = $environment($metrics);
+        $backlogContract = array_intersect_key($backlogEnvironment, $expected);
+        $metricsContract = array_intersect_key($metricsEnvironment, $expected);
+        ksort($expected);
+        ksort($backlogContract);
+        ksort($metricsContract);
 
-        self::assertSame($expected, array_intersect_key($backlogEnvironment, $expected));
-        self::assertSame($expected, array_intersect_key($metricsEnvironment, $expected));
+        self::assertSame($expected, $backlogContract);
+        self::assertSame($expected, $metricsContract);
+        self::assertSame(1, $deployments['nntmux-worker-nzb-backlog']['spec']['replicas'] ?? null);
         self::assertSame(0, $deployments['nntmux-worker-backfill']['spec']['replicas'] ?? null);
 
         foreach ($deployments as $name => $deployment) {
@@ -107,6 +121,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 '1',
                 $environment($deployment)['NNTMUX_DISTRIBUTED_NZB_LIMIT'] ?? null,
                 sprintf('%s must retain the shared one-item limit.', $name),
+            );
+            self::assertSame(
+                '60',
+                $environment($deployment)['NNTMUX_DISTRIBUTED_NZB_SLEEP'] ?? null,
+                sprintf('%s must retain the shared 60-second sleep.', $name),
             );
         }
     }

@@ -8,6 +8,7 @@ use App\Models\Settings;
 use App\Services\Nzb\NzbService;
 use App\Support\TransientDatabaseError;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class CollectionCleanupService
@@ -223,8 +224,12 @@ class CollectionCleanupService
     }
 
     /**
-     * Explicitly delete parts, binaries, then collections for the given IDs.
-     * This path does not rely on DB-level cascade constraints.
+     * Lock collections and binaries in ingest order, then delete descendants.
+     *
+     * Header ingest acquires collection, binary, then part locks. Following the
+     * same stable order prevents both collection/binary inversion and the
+     * binary/part cycle caused by the old DELETE subquery. This path does not
+     * rely on DB-level cascade constraints.
      *
      * @param  list<int>  $collectionIds
      */
@@ -237,26 +242,40 @@ class CollectionCleanupService
             return 0;
         }
 
+        $collectionIds = array_values(array_unique(array_map('intval', $collectionIds)));
+        sort($collectionIds, SORT_NUMERIC);
         $deletedCollections = 0;
 
         foreach (array_chunk($collectionIds, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
-            $placeholders = implode(',', array_fill(0, count($chunk), '?'));
             $deletedCollections += $this->retryOnLockError(
                 fn (): int => DB::transaction(
-                    function () use ($chunk, $placeholders): int {
-                        DB::statement(
-                            "DELETE FROM parts WHERE binaries_id IN (SELECT id FROM binaries WHERE collections_id IN ({$placeholders}))",
-                            $chunk
-                        );
-                        DB::statement(
-                            "DELETE FROM binaries WHERE collections_id IN ({$placeholders})",
-                            $chunk
-                        );
+                    function () use ($chunk): int {
+                        $lockedCollectionIds = DB::table('collections')
+                            ->whereIn('id', $chunk)
+                            ->orderBy('id')
+                            ->lockForUpdate()
+                            ->pluck('id')
+                            ->map(static fn ($id): int => (int) $id)
+                            ->all();
 
-                        return (int) DB::affectingStatement(
-                            "DELETE FROM collections WHERE id IN ({$placeholders})",
-                            $chunk
-                        );
+                        if ($lockedCollectionIds === []) {
+                            return 0;
+                        }
+
+                        $binaryIds = DB::table('binaries')
+                            ->whereIn('collections_id', $lockedCollectionIds)
+                            ->orderBy('id')
+                            ->lockForUpdate()
+                            ->pluck('id')
+                            ->map(static fn ($id): int => (int) $id)
+                            ->all();
+
+                        foreach (array_chunk($binaryIds, self::MAX_SQL_ROWS_PER_STATEMENT) as $binaryChunk) {
+                            DB::table('parts')->whereIn('binaries_id', $binaryChunk)->delete();
+                            DB::table('binaries')->whereIn('id', $binaryChunk)->delete();
+                        }
+
+                        return DB::table('collections')->whereIn('id', $lockedCollectionIds)->delete();
                     }
                 ),
                 $label,
@@ -268,10 +287,10 @@ class CollectionCleanupService
     }
 
     /**
-     * Run a DB write inside a bounded retry loop that only swallows transient
-     * InnoDB lock errors (deadlock 1213, lock wait timeout 1205). Any other
-     * exception is re-thrown so real failures (constraint violations, schema
-     * issues, connection drops, etc.) are not silently retried.
+     * Run a DB write inside a bounded retry loop for transient InnoDB lock
+     * errors (deadlock 1213, lock wait timeout 1205). Every retry is logged,
+     * and exhaustion is logged and re-thrown so incomplete cleanup cannot be
+     * mistaken for success. Any other exception is re-thrown immediately.
      *
      * Backoff is `min(500ms, 20ms * attempt) + 0..25ms jitter` so concurrent
      * cleanup workers stop colliding on the exact same retry cadence.
@@ -279,7 +298,7 @@ class CollectionCleanupService
      * @param  callable():int  $op  Returns the number of rows affected by the write.
      * @param  string  $label  Human-readable label used in the CLI error message.
      * @param  bool  $echoCLI  Whether to echo a final error after exhausting retries.
-     * @return int Rows affected on success, or 0 if all retries exhausted.
+     * @return int Rows affected on success.
      */
     private function retryOnLockError(callable $op, string $label, bool $echoCLI): int
     {
@@ -294,13 +313,23 @@ class CollectionCleanupService
                 }
 
                 $attempt++;
+                $context = [
+                    'label' => $label,
+                    'attempt' => $attempt,
+                    'max_attempts' => self::LOCK_RETRY_MAX,
+                    'exception' => $e::class,
+                    'code' => $e->getCode(),
+                ];
                 if ($attempt >= self::LOCK_RETRY_MAX) {
+                    Log::error('Collection cleanup exhausted transient lock retries.', $context);
                     if ($echoCLI) {
                         cli()->error($label.' delete failed after retries: '.$e->getMessage());
                     }
 
-                    return 0;
+                    throw $e;
                 }
+
+                Log::warning('Transient collection cleanup lock error; retrying.', $context);
 
                 $sleepMs = min(500, 20 * $attempt) + random_int(0, 25);
                 usleep($sleepMs * 1000);
