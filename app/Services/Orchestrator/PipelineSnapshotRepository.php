@@ -123,13 +123,13 @@ class PipelineSnapshotRepository
     public function backfillOutcomeForGroup(string $group): array
     {
         $row = DB::selectOne('SELECT
-            CAST(g.first_record AS SIGNED) AS cursor,
+            CAST(g.first_record AS SIGNED) AS backfill_cursor,
             (SELECT COUNT(*) FROM collections c WHERE c.groups_id = g.id AND c.filecheck = 3) AS ready_collections,
             (SELECT COUNT(*) FROM releases r WHERE r.groups_id = g.id) AS releases
             FROM usenet_groups g WHERE g.name = ? LIMIT 1', [$group]);
 
         return [
-            'cursor' => (int) ($row->cursor ?? 0),
+            'cursor' => (int) ($row->backfill_cursor ?? 0),
             'ready_collections' => (int) ($row->ready_collections ?? 0),
             'releases' => (int) ($row->releases ?? 0),
         ];
