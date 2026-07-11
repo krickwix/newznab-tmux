@@ -433,7 +433,11 @@ final class NzbCreateBacklogCommandTest extends TestCase
         );
         $this->assertIsString($eligibilitySql);
         $this->assertStringContainsString('"releases"."id" in (?)', $eligibilitySql);
-        $this->assertStringContainsString('not exists (select 1 from "collections"', $eligibilitySql);
+        $this->assertStringContainsString('(select 1 from "collections"', $eligibilitySql);
+        $this->assertStringContainsString('limit 1) is not null', $eligibilitySql);
+        $this->assertStringContainsString('limit 1) is null', $eligibilitySql);
+        $this->assertStringNotContainsString('inner join "parts"', $eligibilitySql);
+        $this->assertStringNotContainsString('not exists (select 1 from "collections"', $eligibilitySql);
         $this->assertStringNotContainsString('(select count(*) from "collections"', $eligibilitySql);
     }
 

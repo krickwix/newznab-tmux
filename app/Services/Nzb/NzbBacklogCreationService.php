@@ -157,15 +157,14 @@ final class NzbBacklogCreationService
             ->with('category.parent')
             ->whereIn('releases.id', $releaseIds)
             ->where('nzbstatus', '=', NzbService::NZB_NONE)
-            ->whereExists(function ($query): void {
+            ->where(function ($query): void {
                 $query->selectRaw('1')
                     ->from('collections')
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
-                    ->join('parts', 'parts.binaries_id', '=', 'binaries.id')
                     ->whereColumn('collections.releases_id', 'releases.id')
                     ->limit(1);
-            })
-            ->whereNotExists(function ($query) use ($completion): void {
+            }, '!=', null)
+            ->where(function ($query) use ($completion): void {
                 $query->selectRaw('1')
                     ->from('collections')
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
@@ -179,8 +178,9 @@ final class NzbBacklogCreationService
                                     ->whereColumn('parts.binaries_id', 'binaries.id')
                                     ->limit(1);
                             });
-                    });
-            })
+                    })
+                    ->limit(1);
+            }, '=', null)
             ->select(['id', 'guid', 'name', 'categories_id', 'groups_id', 'leftguid', 'nzbstatus'])
             ->get();
     }
