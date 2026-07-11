@@ -28,7 +28,7 @@ return [
         'lock_store' => env('NNTMUX_ORCHESTRATOR_LOCK_STORE', 'redis'),
         'state_store' => env('NNTMUX_ORCHESTRATOR_STATE_STORE', 'redis'),
         'auto_backfill' => filter_var(env('NNTMUX_ORCHESTRATOR_AUTO_BACKFILL', false), FILTER_VALIDATE_BOOL),
-        'permit_observation_seconds' => max(900, (int) env('NNTMUX_ORCHESTRATOR_PERMIT_OBSERVATION_SECONDS', 1200)),
+        'permit_observation_seconds' => max(1200, (int) env('NNTMUX_ORCHESTRATOR_PERMIT_OBSERVATION_SECONDS', 1200)),
         'prometheus_url' => env('NNTMUX_ORCHESTRATOR_PROMETHEUS_URL', 'http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090'),
         'database_memory_limit_bytes' => (int) env('NNTMUX_ORCHESTRATOR_DB_MEMORY_LIMIT_BYTES', 4456448000),
         'database_cpu_limit_cores' => (float) env('NNTMUX_ORCHESTRATOR_DB_CPU_LIMIT_CORES', 3),
