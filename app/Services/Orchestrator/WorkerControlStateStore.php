@@ -19,7 +19,6 @@ class WorkerControlStateStore
 
     public function leaderLock(): Lock
     {
-        /** @phpstan-ignore-next-line method.notFound */
         return Cache::store((string) config('nntmux.orchestrator.lock_store', 'redis'))
             ->lock('nntmux:worker-orchestrator:leader', 90);
     }

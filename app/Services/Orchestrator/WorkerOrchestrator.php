@@ -49,6 +49,7 @@ class WorkerOrchestrator
             $decision = $this->policy->decide($snapshot, $state, time());
             $generation = null;
             $autoGrant = ! $shadow
+                && (bool) config('nntmux.orchestrator.auto_backfill', false)
                 && $decision->backfillPermitted
                 && $permitObservation === null
                 && (int) Settings::settingValue('orchestrator_backfill_permit') === 0;

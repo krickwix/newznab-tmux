@@ -787,7 +787,6 @@ class NntmuxPrometheusMetrics
 
         do {
             // Laravel's Redis connection exposes SCAN dynamically with the same options shape used by RedisStore.
-            /** @phpstan-ignore-next-line */
             $scanResult = $connection->scan($cursor, ['match' => $pattern, 'count' => $count]);
             if (! is_array($scanResult)) {
                 break;

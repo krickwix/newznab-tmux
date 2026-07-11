@@ -83,9 +83,6 @@ class DistributedJobWorker
     {
         $lockName = 'nntmux:distributed-worker:'.$plan['name'];
         $lockStore = (string) config('nntmux.distributed_lock_store', 'redis');
-        // Laravel exposes lock() on concrete cache repositories, but the facade
-        // contract does not currently declare it for static analysis.
-        /** @phpstan-ignore-next-line method.notFound */
         $lock = Cache::store($lockStore)->lock($lockName, $lockSeconds);
 
         try {
