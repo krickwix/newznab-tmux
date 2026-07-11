@@ -21,6 +21,7 @@ class BackfillPermitGate
                     'orchestrator_lease_until',
                     'orchestrator_backfill_paused',
                     'orchestrator_backfill_permit',
+                    'orchestrator_backfill_group',
                 ])
                 ->lockForUpdate()
                 ->get()
@@ -31,7 +32,8 @@ class BackfillPermitGate
             if ((string) $rows->get('orchestrator_mode', '') !== 'active'
                 || (int) $rows->get('orchestrator_lease_until', 0) < time()
                 || (int) $rows->get('orchestrator_backfill_paused', 1) !== 0
-                || (int) $rows->get('orchestrator_backfill_permit', 0) <= 0) {
+                || (int) $rows->get('orchestrator_backfill_permit', 0) <= 0
+                || trim((string) $rows->get('orchestrator_backfill_group', '')) === '') {
                 return false;
             }
 

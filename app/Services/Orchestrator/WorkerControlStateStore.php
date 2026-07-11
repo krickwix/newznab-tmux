@@ -87,17 +87,18 @@ class WorkerControlStateStore
         return is_array($value) ? $value : null;
     }
 
-    public function beginPermitObservation(PipelineSnapshot $snapshot, int $generation, int $now): void
+    /** @param array{cursor: int, ready_collections: int, releases: int} $outcome */
+    public function beginPermitObservation(PipelineSnapshot $snapshot, int $generation, int $now, array $outcome): void
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forever(self::PERMIT_OBSERVATION_KEY, [
             'generation' => $generation,
             'issued_at' => $now,
             'parts' => $snapshot->partsBacklog,
             'binaries' => $snapshot->binariesBacklog,
-            'ready_collections' => $snapshot->readyCollections,
-            'release_total' => $snapshot->releaseTotal,
+            'ready_collections' => $outcome['ready_collections'],
+            'release_total' => $outcome['releases'],
             'backfill_group' => $snapshot->backfillGroup,
-            'backfill_cursor' => $snapshot->backfillCursor,
+            'backfill_cursor' => $outcome['cursor'],
         ]);
     }
 

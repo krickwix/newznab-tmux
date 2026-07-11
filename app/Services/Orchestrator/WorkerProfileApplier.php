@@ -68,4 +68,10 @@ class WorkerProfileApplier
             Settings::forgetCachedSettings();
         }, 3);
     }
+
+    public function revokePermit(): void
+    {
+        Settings::query()->updateOrCreate(['name' => 'orchestrator_backfill_permit'], ['value' => '0']);
+        Settings::forgetCachedSettings();
+    }
 }

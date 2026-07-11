@@ -58,6 +58,7 @@ class PipelineSnapshotRepository
         }
         $signals = $this->safety->signals();
         $eligibleNzbs = $this->nzbBacklog->eligibleCandidateCount((int) config('nntmux.distributed_nzb_scan_cap', 10000));
+        $backfillGroup = (string) ($pipeline->backfill_group ?? '');
 
         $backlogs = [
             'parts' => (int) ($tables->parts_count ?? 0),
@@ -96,10 +97,10 @@ class PipelineSnapshotRepository
             storageSafe: $signals['storage_safe'],
             highPressure: $high,
             lowPressure: $low,
-            providerAvailable: (bool) ($pipeline->provider_available ?? false),
-            cursorAvailable: (bool) ($pipeline->backfill_cursor_available ?? false),
+            providerAvailable: $backfillGroup !== '',
+            cursorAvailable: $backfillGroup !== '' && (bool) ($pipeline->backfill_cursor_available ?? false),
             currentGroupsAvailable: (bool) ($pipeline->current_groups ?? false),
-            eligibleBackfillSupply: $eligibleNzbs === 0 && (bool) ($pipeline->backfill_cursor_available ?? false),
+            eligibleBackfillSupply: $eligibleNzbs === 0 && $backfillGroup !== '',
             databaseDeadlocks: $deadlocks,
             databaseCurrentWaits: $waits,
             storageAvailableBytes: $signals['storage_available_bytes'],
@@ -113,9 +114,25 @@ class PipelineSnapshotRepository
             oldestNzbAgeSeconds: $ages['nzbs'],
             backlogRatesPerMinute: $rates,
             backlogEwmaPerMinute: $ewma,
-            backfillGroup: (string) ($pipeline->backfill_group ?? ''),
+            backfillGroup: $backfillGroup,
             backfillCursor: (int) ($pipeline->backfill_group_cursor ?? 0),
         );
+    }
+
+    /** @return array{cursor: int, ready_collections: int, releases: int} */
+    public function backfillOutcomeForGroup(string $group): array
+    {
+        $row = DB::selectOne('SELECT
+            CAST(g.first_record AS SIGNED) AS cursor,
+            (SELECT COUNT(*) FROM collections c WHERE c.groups_id = g.id AND c.filecheck = 3) AS ready_collections,
+            (SELECT COUNT(*) FROM releases r WHERE r.groups_id = g.id) AS releases
+            FROM usenet_groups g WHERE g.name = ? LIMIT 1', [$group]);
+
+        return [
+            'cursor' => (int) ($row->cursor ?? 0),
+            'ready_collections' => (int) ($row->ready_collections ?? 0),
+            'releases' => (int) ($row->releases ?? 0),
+        ];
     }
 
     /** @param array<string, int> $now @param array<string, int> $ages @param array<string, float> $ewma */

@@ -79,7 +79,11 @@ final class WorkerControlStateStoreTest extends TestCase
             releaseTotal: 77,
             backfillGroup: 'alt.test',
             backfillCursor: 12345,
-        ), generation: 8, now: 9);
+        ), generation: 8, now: 9, outcome: [
+            'cursor' => 12345,
+            'ready_collections' => 66,
+            'releases' => 77,
+        ]);
 
         self::assertSame([
             'generation' => 8,

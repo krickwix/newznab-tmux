@@ -40,11 +40,17 @@ class WorkerOrchestrator
             }
             if ($permitObservation !== null && time() - $permitObservation['issued_at'] >= 900) {
                 $permitConsumed = (int) Settings::settingValue('orchestrator_backfill_permit') === 0;
-                $cursorMoved = $snapshot->backfillGroup === (string) ($permitObservation['backfill_group'] ?? '')
-                    && $snapshot->backfillCursor > 0
-                    && $snapshot->backfillCursor < (int) ($permitObservation['backfill_cursor'] ?? 0);
-                $produced = $snapshot->readyCollections > $permitObservation['ready_collections']
-                    || $snapshot->releaseTotal > $permitObservation['release_total'];
+                if (! $shadow) {
+                    $this->applier->revokePermit();
+                }
+                $observedGroup = (string) ($permitObservation['backfill_group'] ?? '');
+                $outcome = $observedGroup === ''
+                    ? ['cursor' => 0, 'ready_collections' => 0, 'releases' => 0]
+                    : $this->snapshots->backfillOutcomeForGroup($observedGroup);
+                $cursorMoved = $outcome['cursor'] > 0
+                    && $outcome['cursor'] < (int) ($permitObservation['backfill_cursor'] ?? 0);
+                $produced = $outcome['ready_collections'] > (int) ($permitObservation['ready_collections'] ?? 0)
+                    || $outcome['releases'] > (int) ($permitObservation['release_total'] ?? 0);
                 $snapshot = $snapshot->withPermitOutcome(true, $permitConsumed && $cursorMoved && $produced);
                 $this->store->clearPermitObservation();
             }
@@ -60,7 +66,12 @@ class WorkerOrchestrator
             if (! $shadow) {
                 $generation = $this->applier->apply($decision, time(), $issuePermit, $snapshot->backfillGroup);
                 if ($issuePermit && $decision->backfillPermitted) {
-                    $this->store->beginPermitObservation($snapshot, $generation, time());
+                    $this->store->beginPermitObservation(
+                        $snapshot,
+                        $generation,
+                        time(),
+                        $this->snapshots->backfillOutcomeForGroup($snapshot->backfillGroup),
+                    );
                 }
             }
             $this->store->storeState($decision->nextState);

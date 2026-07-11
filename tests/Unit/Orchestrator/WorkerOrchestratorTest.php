@@ -14,6 +14,9 @@ use App\Services\Orchestrator\WorkerControlStateStore;
 use App\Services\Orchestrator\WorkerOrchestrator;
 use App\Services\Orchestrator\WorkerProfileApplier;
 use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Mockery;
 use RuntimeException;
 use Tests\TestCase;
@@ -71,5 +74,67 @@ final class WorkerOrchestratorTest extends TestCase
         $this->expectExceptionMessage('redis unavailable');
 
         $orchestrator->runOnce(false);
+    }
+
+    public function test_an_expired_unconsumed_permit_is_revoked_and_counted_ineffective(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert(['name' => 'orchestrator_backfill_permit', 'value' => '7']);
+        $snapshot = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            4,
+            5,
+            eligibleBackfillSupply: true,
+            backfillGroup: 'alt.test',
+            backfillCursor: 100,
+        );
+        $state = new ControlState(profile: ControlProfile::Balanced);
+        $lock = Mockery::mock(Lock::class);
+        $lock->shouldReceive('get')->once()->andReturnTrue();
+        $lock->shouldReceive('release')->once();
+        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store->shouldReceive('leaderLock')->once()->andReturn($lock);
+        $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
+        $store->shouldReceive('permitObservation')->once()->andReturn([
+            'generation' => 7,
+            'issued_at' => time() - 901,
+            'ready_collections' => 0,
+            'release_total' => 0,
+            'backfill_group' => 'alt.test',
+            'backfill_cursor' => 100,
+        ]);
+        $store->shouldReceive('clearPermitObservation')->once();
+        $store->shouldReceive('loadState')->once()->andReturn($state);
+        $store->shouldReceive('storeState')->once()->with(Mockery::on(
+            static fn (ControlState $next): bool => $next->consecutiveIneffectiveBackfillPermits === 1,
+        ));
+        $store->shouldReceive('storeSnapshot')->once();
+        $store->shouldReceive('storeDecision')->once();
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($snapshot);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
+            'cursor' => 100,
+            'ready_collections' => 0,
+            'releases' => 0,
+        ]);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertContains('backfill_permit_ineffective', $result['reasons']);
+        self::assertFalse($result['permit_granted']);
     }
 }
