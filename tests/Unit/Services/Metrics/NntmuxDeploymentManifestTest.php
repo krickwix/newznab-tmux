@@ -38,7 +38,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-nzb-backlog'
-                ? ':microservices-pods-20260711-nzb-selector-staged-v14'
+                ? ':microservices-pods-20260711-nzb-selector-wide-v15'
                 : (in_array($name, [
                     'nntmux-worker-releases',
                     'nntmux-worker-removecrap',
@@ -123,16 +123,16 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($metrics);
         self::assertSame('nntmux-metrics', $metrics['metadata']['name'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260711-nzb-selector-staged-v14',
+            ':microservices-pods-20260711-nzb-selector-wide-v15',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
         $expected = [
-            'NNTMUX_BUILD_VERSION' => 'microservices-pods-20260711-nzb-selector-staged-v14',
+            'NNTMUX_BUILD_VERSION' => 'microservices-pods-20260711-nzb-selector-wide-v15',
             'NNTMUX_INLINE_NZB_CREATION' => 'false',
             'NNTMUX_DISTRIBUTED_NZB_LIMIT' => '20',
             'NNTMUX_DISTRIBUTED_NZB_SLEEP' => '55',
-            'NNTMUX_DISTRIBUTED_NZB_SCAN_CAP' => '5000',
+            'NNTMUX_DISTRIBUTED_NZB_SCAN_CAP' => '10000',
             'NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS' => '7200',
         ];
         $environment = static fn (array $deployment): array => array_column(
