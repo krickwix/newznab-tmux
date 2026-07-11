@@ -37,19 +37,20 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
-            $expectedImage = in_array($name, [
-                'nntmux-worker-binaries',
-                'nntmux-worker-backfill',
-                'nntmux-worker-releases',
-                'nntmux-worker-nzb-backlog',
-            ], true)
+            $expectedImage = $name === 'nntmux-worker-backfill'
+                ? ':microservices-pods-20260711-worker-orchestrator-v24'
+                : (in_array($name, [
+                    'nntmux-worker-binaries',
+                    'nntmux-worker-releases',
+                    'nntmux-worker-nzb-backlog',
+                ], true)
                 ? ':microservices-pods-20260711-worker-orchestrator-v22'
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
                 ], true)
                 ? ':microservices-pods-20260711-nzb-cleanup-lock-v9'
-                : ':microservices-pods-20260710-nzb-query-v8');
+                : ':microservices-pods-20260710-nzb-query-v8'));
             self::assertStringEndsWith(
                 $expectedImage,
                 (string) ($container['image'] ?? ''),
@@ -65,7 +66,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
         self::assertNotEmpty($workers);
         self::assertIsArray($backfill);
-        self::assertSame(0, $backfill['spec']['replicas'] ?? null);
+        self::assertSame(1, $backfill['spec']['replicas'] ?? null);
     }
 
     public function test_web_uses_lock_safe_overlay_without_changing_scheduler_or_legacy_worker(): void
@@ -157,21 +158,21 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame($expected, $backlogContract);
         self::assertSame($expected, $metricsContract);
         self::assertSame(1, $deployments['nntmux-worker-nzb-backlog']['spec']['replicas'] ?? null);
-        self::assertSame(0, $deployments['nntmux-worker-backfill']['spec']['replicas'] ?? null);
+        self::assertSame(1, $deployments['nntmux-worker-backfill']['spec']['replicas'] ?? null);
         $orchestrator = $deployments['nntmux-worker-orchestrator'] ?? null;
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260711-worker-orchestrator-v23',
+            ':microservices-pods-20260711-worker-orchestrator-v24',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260711-worker-orchestrator-v23',
+            'microservices-pods-20260711-worker-orchestrator-v24',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
         self::assertSame(
-            'false',
+            'true',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);
