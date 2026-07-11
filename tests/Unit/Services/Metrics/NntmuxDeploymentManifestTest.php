@@ -38,7 +38,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-nzb-backlog'
-                ? ':microservices-pods-20260711-nzb-selector-chunk-v11'
+                ? ':microservices-pods-20260711-nzb-selector-correlated-v13'
                 : (in_array($name, [
                     'nntmux-worker-releases',
                     'nntmux-worker-removecrap',
@@ -123,12 +123,12 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($metrics);
         self::assertSame('nntmux-metrics', $metrics['metadata']['name'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260711-nzb-selector-chunk-v11',
+            ':microservices-pods-20260711-nzb-selector-correlated-v13',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
         $expected = [
-            'NNTMUX_BUILD_VERSION' => 'microservices-pods-20260711-nzb-selector-chunk-v11',
+            'NNTMUX_BUILD_VERSION' => 'microservices-pods-20260711-nzb-selector-correlated-v13',
             'NNTMUX_INLINE_NZB_CREATION' => 'false',
             'NNTMUX_DISTRIBUTED_NZB_LIMIT' => '20',
             'NNTMUX_DISTRIBUTED_NZB_SLEEP' => '60',
