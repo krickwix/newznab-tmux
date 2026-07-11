@@ -9,7 +9,7 @@ use Symfony\Component\Yaml\Parser;
 
 final class NntmuxDeploymentManifestTest extends TestCase
 {
-    public function test_orchestrated_workers_use_v21_and_backfill_remains_disabled(): void
+    public function test_orchestrated_workers_keep_isolated_images_and_backfill_ready(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/distributed-workers.yaml';
         if (! is_file($path)) {
@@ -38,7 +38,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-backfill'
-                ? ':microservices-pods-20260711-worker-orchestrator-v24'
+                ? ':microservices-pods-20260712-worker-orchestrator-v27'
                 : (in_array($name, [
                     'nntmux-worker-binaries',
                     'nntmux-worker-releases',
@@ -163,11 +163,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260711-worker-orchestrator-v26',
+            ':microservices-pods-20260712-worker-orchestrator-v27',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260711-worker-orchestrator-v26',
+            'microservices-pods-20260712-worker-orchestrator-v27',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
@@ -178,6 +178,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '1200',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PERMIT_OBSERVATION_SECONDS'] ?? null,
+        );
+        self::assertSame(
+            '120',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PERMIT_CLAIM_GRACE_SECONDS'] ?? null,
+        );
+        self::assertStringEndsWith(
+            ':microservices-pods-20260712-worker-orchestrator-v27',
+            (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);
 
