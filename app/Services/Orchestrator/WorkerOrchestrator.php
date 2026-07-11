@@ -38,7 +38,8 @@ class WorkerOrchestrator
                     'reason' => 'backfill_permit_observation_in_progress',
                 ];
             }
-            if ($permitObservation !== null && time() - $permitObservation['issued_at'] >= 900) {
+            $observationSeconds = (int) config('nntmux.orchestrator.permit_observation_seconds', 1200);
+            if ($permitObservation !== null && time() - $permitObservation['issued_at'] >= $observationSeconds) {
                 $permitConsumed = (int) Settings::settingValue('orchestrator_bf_permit') === 0;
                 if (! $shadow) {
                     $this->applier->revokePermit();
