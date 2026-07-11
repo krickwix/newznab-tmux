@@ -18,6 +18,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Mockery;
+use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -324,5 +325,77 @@ final class WorkerOrchestratorTest extends TestCase
 
         self::assertContains('backfill_permit_claim_grace', $result['reasons']);
         self::assertFalse($result['permit_granted']);
+    }
+
+    #[DataProvider('claimGraceRevocationCases')]
+    public function test_claim_grace_never_overrides_hard_safety_or_the_exact_expiry(
+        int $ageSeconds,
+        bool $databaseMemorySafe,
+    ): void {
+        config([
+            'nntmux.orchestrator.auto_backfill' => true,
+            'nntmux.orchestrator.permit_claim_grace_seconds' => 120,
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert(['name' => 'orchestrator_bf_permit', 'value' => '7']);
+        $snapshot = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            4,
+            5,
+            databaseMemorySafe: $databaseMemorySafe,
+            eligibleBackfillSupply: false,
+            backfillGroup: 'alt.test',
+            backfillCursor: 100,
+        );
+        $lock = Mockery::mock(Lock::class);
+        $lock->shouldReceive('get')->once()->andReturnTrue();
+        $lock->shouldReceive('release')->once();
+        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store->shouldReceive('leaderLock')->once()->andReturn($lock);
+        $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
+        $store->shouldReceive('permitObservation')->once()->andReturn([
+            'generation' => 7,
+            'issued_at' => time() - $ageSeconds,
+            'ready_collections' => 0,
+            'release_total' => 0,
+            'backfill_group' => 'alt.test',
+            'backfill_cursor' => 100,
+        ]);
+        $store->shouldReceive('loadState')->once()->andReturn(new ControlState(profile: ControlProfile::Fill));
+        $store->shouldReceive('storeState')->once();
+        $store->shouldReceive('storeSnapshot')->once();
+        $store->shouldReceive('storeDecision')->once();
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($snapshot);
+        $snapshots->shouldNotReceive('backfillOutcomeForGroup');
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->once()->with(
+            Mockery::type(ControlDecision::class),
+            Mockery::type('int'),
+            false,
+            'alt.test',
+            false,
+        )->andReturn(8);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertNotContains('backfill_permit_claim_grace', $result['reasons']);
+    }
+
+    /** @return array<string, array{int, bool}> */
+    public static function claimGraceRevocationCases(): array
+    {
+        return [
+            'hard database safety failure during grace' => [60, false],
+            'soft denial at exact grace expiry' => [120, true],
+        ];
     }
 }
