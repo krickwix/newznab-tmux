@@ -197,7 +197,15 @@ class DistributedJobCatalog
         $sleep = $this->backfillSleep($settings, $counts);
 
         if ($this->isOrchestratorManaged($settings) && ! $this->hasFreshActiveBackfillPermit($settings)) {
-            return $this->disabled('backfill', 'adaptive orchestrator has not granted a fresh permit', $sleep);
+            // A permit observation expires after 15 minutes. Polling the
+            // lightweight disabled plan within one minute guarantees a worker
+            // sleeping under a prior fail-safe profile can still claim a new
+            // one-shot permit before that evaluation window closes.
+            return $this->disabled(
+                'backfill',
+                'adaptive orchestrator has not granted a fresh permit',
+                min($sleep, 60),
+            );
         }
 
         if ($enabled === 0) {

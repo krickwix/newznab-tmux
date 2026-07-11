@@ -395,6 +395,7 @@ class DistributedJobCatalogTest extends TestCase
         $denied = $catalog->resolve('backfill', $this->runVar($base, ['backfill_groups_days' => 1]));
         self::assertFalse($denied['enabled']);
         self::assertStringContainsString('permit', (string) $denied['disabled_reason']);
+        self::assertSame(60, $denied['sleep']);
 
         $allowed = $catalog->resolve('backfill', $this->runVar(
             $base + ['orchestrator_bf_permit' => 9],
@@ -423,7 +424,9 @@ class DistributedJobCatalogTest extends TestCase
         self::assertSame(300, $catalog->resolve('binaries', $this->runVar($settings))['sleep']);
         self::assertSame(180, $catalog->resolve('releases', $this->runVar($settings))['sleep']);
         self::assertSame(180, $catalog->resolve('nzb-backlog', $this->runVar($settings))['sleep']);
-        self::assertFalse($catalog->resolve('backfill', $this->runVar($settings, ['backfill_groups_days' => 1]))['enabled']);
+        $backfill = $catalog->resolve('backfill', $this->runVar($settings, ['backfill_groups_days' => 1]));
+        self::assertFalse($backfill['enabled']);
+        self::assertSame(60, $backfill['sleep']);
     }
 
     public function test_shadow_mode_preserves_static_timers_but_denies_backfill(): void
