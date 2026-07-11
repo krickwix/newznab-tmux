@@ -96,7 +96,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         }
     }
 
-    public function test_nzb_backlog_and_metrics_share_the_durable_throughput_contract(): void
+    public function test_shadow_orchestrator_preserves_nzb_throughput_contract_and_backfill_zero(): void
     {
         $manifestRoot = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux';
         $workersPath = $manifestRoot.'/distributed-workers.yaml';
@@ -123,12 +123,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($metrics);
         self::assertSame('nntmux-metrics', $metrics['metadata']['name'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260711-nzb-selector-wide-v15',
+            ':microservices-pods-20260711-worker-orchestrator-v16',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
         $expected = [
-            'NNTMUX_BUILD_VERSION' => 'microservices-pods-20260711-nzb-selector-wide-v15',
             'NNTMUX_INLINE_NZB_CREATION' => 'false',
             'NNTMUX_DISTRIBUTED_NZB_LIMIT' => '20',
             'NNTMUX_DISTRIBUTED_NZB_SLEEP' => '55',
@@ -143,6 +142,8 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
         $backlogEnvironment = $environment($deployments['nntmux-worker-nzb-backlog'] ?? []);
         $metricsEnvironment = $environment($metrics);
+        self::assertSame('microservices-pods-20260711-nzb-selector-wide-v15', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260711-worker-orchestrator-v16', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
         ksort($expected);
@@ -153,6 +154,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame($expected, $metricsContract);
         self::assertSame(1, $deployments['nntmux-worker-nzb-backlog']['spec']['replicas'] ?? null);
         self::assertSame(0, $deployments['nntmux-worker-backfill']['spec']['replicas'] ?? null);
+        $orchestrator = $deployments['nntmux-worker-orchestrator'] ?? null;
+        self::assertIsArray($orchestrator);
+        self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
+        self::assertContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
+        self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);
 
         foreach ($deployments as $name => $deployment) {
             $container = $deployment['spec']['template']['spec']['containers'][0] ?? [];

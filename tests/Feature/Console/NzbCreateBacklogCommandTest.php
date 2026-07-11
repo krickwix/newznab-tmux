@@ -646,6 +646,20 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $service->create(limit: 1, scanCap: 1);
     }
 
+    public function test_exact_candidate_count_is_bounded_and_read_only(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+        $this->seedRelease(2, groupId: 1, leftGuid: 'a', withParts: false);
+        /** @var NzbService&MockInterface $nzb */
+        $nzb = Mockery::mock(NzbService::class);
+        $nzb->shouldNotReceive('writeNzbForReleaseId');
+
+        $count = (new NzbBacklogCreationService($nzb))->eligibleCandidateCount(2);
+
+        $this->assertSame(1, $count);
+        $this->assertSame(2, DB::table('releases')->where('nzbstatus', NzbService::NZB_NONE)->count());
+    }
+
     public function test_group_partition_switches_to_the_partition_covering_index(): void
     {
         /** @var NzbService&MockInterface $nzb */

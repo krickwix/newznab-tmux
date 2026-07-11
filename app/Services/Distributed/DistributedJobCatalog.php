@@ -72,7 +72,7 @@ class DistributedJobCatalog
                 'disabled in settings',
                 'multiprocessing:releases',
                 [],
-                (int) ($settings['rel_timer'] ?? 60)
+                $this->timer($settings, 'rel_timer', 60)
             ),
             'nzb-backlog' => $this->simple(
                 $job,
@@ -80,10 +80,10 @@ class DistributedJobCatalog
                 null,
                 'nntmux:nzb-create-backlog',
                 [
-                    '--limit' => max(1, (int) config('nntmux.distributed_nzb_limit', 1)),
+                    '--limit' => $this->nzbLimit($settings),
                     '--order' => 'desc',
                 ],
-                max(1, (int) config('nntmux.distributed_nzb_sleep', 60))
+                $this->nzbSleep($settings)
             ),
             'fixnames' => $this->fixNames($settings, $counts),
             'hashed-fixnames' => $this->hashedFixNames($settings, $counts),
@@ -125,10 +125,10 @@ class DistributedJobCatalog
     private function disabledBySequentialMode(string $job, int $sequential, array $settings): ?array
     {
         $sleep = match ($job) {
-            'binaries' => (int) ($settings['bins_timer'] ?? 60),
+            'binaries' => $this->timer($settings, 'bins_timer', 60),
             'backfill' => $this->backfillSleep($settings, []),
-            'releases' => (int) ($settings['rel_timer'] ?? 60),
-            'nzb-backlog' => max(1, (int) config('nntmux.distributed_nzb_sleep', 60)),
+            'releases' => $this->timer($settings, 'rel_timer', 60),
+            'nzb-backlog' => $this->nzbSleep($settings),
             'fixnames', 'hashed-fixnames' => (int) ($settings['fix_timer'] ?? 300),
             'removecrap' => (int) ($settings['crap_timer'] ?? 300),
             'post-additional' => (int) ($settings['post_timer'] ?? 300),
@@ -168,11 +168,11 @@ class DistributedJobCatalog
         $enabled = (int) ($settings['binaries_run'] ?? 0);
 
         if ($enabled !== 1) {
-            return $this->disabled('binaries', 'disabled in settings', (int) ($settings['bins_timer'] ?? 60));
+            return $this->disabled('binaries', 'disabled in settings', $this->timer($settings, 'bins_timer', 60));
         }
 
         if (($killswitch['pp'] ?? false) === true) {
-            return $this->disabled('binaries', 'postprocess kill limit exceeded', (int) ($settings['bins_timer'] ?? 60));
+            return $this->disabled('binaries', 'postprocess kill limit exceeded', $this->timer($settings, 'bins_timer', 60));
         }
 
         return $this->simple(
@@ -181,7 +181,7 @@ class DistributedJobCatalog
             null,
             'multiprocessing:safe',
             ['type' => 'binaries'],
-            (int) ($settings['bins_timer'] ?? 60)
+            $this->timer($settings, 'bins_timer', 60)
         );
     }
 
@@ -195,6 +195,10 @@ class DistributedJobCatalog
     {
         $enabled = (int) ($settings['backfill'] ?? 0);
         $sleep = $this->backfillSleep($settings, $counts);
+
+        if ($this->isOrchestratorManaged($settings) && ! $this->hasFreshActiveBackfillPermit($settings)) {
+            return $this->disabled('backfill', 'adaptive orchestrator has not granted a fresh permit', $sleep);
+        }
 
         if ($enabled === 0) {
             return $this->disabled('backfill', 'disabled in settings', $sleep);
@@ -235,7 +239,7 @@ class DistributedJobCatalog
      */
     private function backfillSleep(array $settings, array $counts): int
     {
-        $baseSleep = (int) ($settings['back_timer'] ?? 600);
+        $baseSleep = $this->timer($settings, 'back_timer', 600);
         $collections = (int) ($counts['collections_table'] ?? 0);
         $progressive = (int) ($settings['progressive'] ?? 0);
 
@@ -244,6 +248,76 @@ class DistributedJobCatalog
         }
 
         return $baseSleep;
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function timer(array $settings, string $name, int $default): int
+    {
+        $static = max(1, (int) ($settings[$name] ?? $default));
+        if (! $this->hasFreshActiveLease($settings)) {
+            return $this->isOrchestratorTimerManaged($settings) ? $this->failSafeTimer($name) : $static;
+        }
+
+        return max(1, (int) ($settings['orchestrator_'.$name] ?? $static));
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function nzbSleep(array $settings): int
+    {
+        $static = max(1, (int) config('nntmux.distributed_nzb_sleep', 60));
+        if (! $this->hasFreshActiveLease($settings)) {
+            return $this->isOrchestratorTimerManaged($settings) ? 180 : $static;
+        }
+
+        return max(20, min(180, (int) ($settings['orchestrator_nzb_timer'] ?? $static)));
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function nzbLimit(array $settings): int
+    {
+        $static = max(1, (int) config('nntmux.distributed_nzb_limit', 1));
+        if (! $this->hasFreshActiveLease($settings)) {
+            return $this->isOrchestratorTimerManaged($settings) ? min(5, $static) : $static;
+        }
+
+        return max(5, min(20, (int) ($settings['orchestrator_nzb_limit'] ?? $static)));
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function hasFreshActiveBackfillPermit(array $settings): bool
+    {
+        return $this->hasFreshActiveLease($settings)
+            && (int) ($settings['orchestrator_backfill_paused'] ?? 1) === 0
+            && (int) ($settings['orchestrator_backfill_permit'] ?? 0) > 0;
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function hasFreshActiveLease(array $settings): bool
+    {
+        return (string) ($settings['orchestrator_mode'] ?? '') === 'active'
+            && (int) ($settings['orchestrator_lease_until'] ?? 0) >= time();
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function isOrchestratorManaged(array $settings): bool
+    {
+        return in_array((string) ($settings['orchestrator_mode'] ?? ''), ['shadow', 'active', 'failsafe'], true);
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function isOrchestratorTimerManaged(array $settings): bool
+    {
+        return in_array((string) ($settings['orchestrator_mode'] ?? ''), ['active', 'failsafe'], true);
+    }
+
+    private function failSafeTimer(string $name): int
+    {
+        return match ($name) {
+            'bins_timer' => 300,
+            'back_timer' => 1800,
+            'rel_timer' => 180,
+            default => 300,
+        };
     }
 
     /**

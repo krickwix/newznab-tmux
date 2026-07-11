@@ -125,6 +125,28 @@ final class NzbBacklogCreationService
     }
 
     /**
+     * Count exact actionable candidates within the same bounded selector used
+     * by the worker, without creating files or mutating release state.
+     */
+    public function eligibleCandidateCount(int $scanCap = self::MAX_CANDIDATE_SCAN): int
+    {
+        $scanCap = max(1, min(self::MAX_CANDIDATE_SCAN, $scanCap));
+        $completion = $this->requiredCompletionPercent();
+        $pendingIds = $this->pendingIdQuery()
+            ->orderByDesc('id')
+            ->limit($scanCap)
+            ->pluck('id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+        $eligible = 0;
+        foreach (array_chunk($pendingIds, self::ELIGIBILITY_CHUNK_SIZE) as $chunk) {
+            $eligible += $this->eligibleReleasesByIds($chunk, $completion)->count();
+        }
+
+        return $eligible;
+    }
+
+    /**
      * @return Builder<Release>
      */
     private function pendingIdQuery(): Builder

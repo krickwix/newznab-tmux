@@ -18,6 +18,7 @@ class DistributedJobWorker
         private readonly DistributedJobCatalog $catalog,
         private readonly TmuxMonitorService $monitorService,
         private readonly DistributedWorkerTelemetry $workerTelemetry,
+        private readonly ?BackfillPermitGate $backfillPermitGate = null,
     ) {}
 
     public function run(
@@ -106,6 +107,14 @@ class DistributedJobWorker
         if (! $acquired) {
             $this->workerTelemetry->recordRunOutcome($plan['name'], 'lock_contended');
             $output->writeln(sprintf('[%s] skipped %s: another worker holds %s', now()->toDateTimeString(), $plan['name'], $lockName));
+
+            return 0;
+        }
+
+        if ($plan['name'] === 'backfill' && ! ($this->backfillPermitGate ?? app(BackfillPermitGate::class))->claim()) {
+            $this->workerTelemetry->recordRunOutcome('backfill', 'disabled');
+            $output->writeln(sprintf('[%s] skipped backfill: adaptive permit was absent or stale', now()->toDateTimeString()));
+            $lock->release();
 
             return 0;
         }

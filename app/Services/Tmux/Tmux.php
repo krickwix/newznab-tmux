@@ -23,9 +23,7 @@ class Tmux
     /**
      * Tmux constructor.
      */
-    public function __construct()
-    {
-    }
+    public function __construct() {}
 
     protected function pdo(): \PDO
     {
@@ -200,6 +198,17 @@ class Tmux
             'lookupnfo' => 'processnfo',
             'lookuppar2' => 'processpar2',
             'nzbthreads' => 'nzbthreads',
+            'orchestrator_mode' => 'orchestrator_mode',
+            'orchestrator_profile' => 'orchestrator_profile',
+            'orchestrator_lease_until' => 'orchestrator_lease_until',
+            'orchestrator_generation' => 'orchestrator_generation',
+            'orchestrator_bins_timer' => 'orchestrator_bins_timer',
+            'orchestrator_back_timer' => 'orchestrator_back_timer',
+            'orchestrator_rel_timer' => 'orchestrator_rel_timer',
+            'orchestrator_nzb_timer' => 'orchestrator_nzb_timer',
+            'orchestrator_nzb_limit' => 'orchestrator_nzb_limit',
+            'orchestrator_backfill_paused' => 'orchestrator_backfill_paused',
+            'orchestrator_backfill_permit' => 'orchestrator_backfill_permit',
             'maxsizetopostprocess' => 'maxsize_pp',
             'minsizetopostprocess' => 'minsize_pp',
         ];

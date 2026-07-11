@@ -38,6 +38,10 @@ class NntmuxPrometheusMetrics
         'post_timer_amazon',
         'metadata_refresh_timer',
         'seq_timer',
+        'orchestrator_bins_timer',
+        'orchestrator_back_timer',
+        'orchestrator_rel_timer',
+        'orchestrator_nzb_timer',
     ];
 
     public function __construct(
@@ -65,6 +69,7 @@ class NntmuxPrometheusMetrics
                 $this->externalMetadataMetrics(),
                 $this->imdbLookupMetrics(),
                 $this->timerMetrics(),
+                $this->orchestratorMetrics(),
                 $this->workerTelemetryMetrics(),
                 $this->lockMetrics(),
             );
@@ -517,6 +522,47 @@ class NntmuxPrometheusMetrics
         }
 
         return $lines;
+    }
+
+    /** @return list<string> */
+    private function orchestratorMetrics(): array
+    {
+        $settings = DB::table('settings')->whereIn('name', [
+            'orchestrator_mode',
+            'orchestrator_profile',
+            'orchestrator_lease_until',
+            'orchestrator_generation',
+            'orchestrator_nzb_limit',
+            'orchestrator_backfill_paused',
+            'orchestrator_backfill_permit',
+        ])->pluck('value', 'name');
+        $mode = (string) ($settings['orchestrator_mode'] ?? 'legacy');
+        $profile = (string) ($settings['orchestrator_profile'] ?? 'unknown');
+        $leaseUntil = (int) ($settings['orchestrator_lease_until'] ?? 0);
+
+        return [
+            '# HELP nntmux_orchestrator_mode_info Current deterministic worker orchestrator mode.',
+            '# TYPE nntmux_orchestrator_mode_info gauge',
+            $this->metric('nntmux_orchestrator_mode_info', 1, ['mode' => $mode]),
+            '# HELP nntmux_orchestrator_profile_info Current finite worker-control profile.',
+            '# TYPE nntmux_orchestrator_profile_info gauge',
+            $this->metric('nntmux_orchestrator_profile_info', 1, ['profile' => $profile]),
+            '# HELP nntmux_orchestrator_generation Last atomically applied worker profile generation.',
+            '# TYPE nntmux_orchestrator_generation gauge',
+            $this->metric('nntmux_orchestrator_generation', (int) ($settings['orchestrator_generation'] ?? 0)),
+            '# HELP nntmux_orchestrator_lease_remaining_seconds Remaining fail-safe lease lifetime.',
+            '# TYPE nntmux_orchestrator_lease_remaining_seconds gauge',
+            $this->metric('nntmux_orchestrator_lease_remaining_seconds', max(0, $leaseUntil - time())),
+            '# HELP nntmux_orchestrator_backfill_permit Current one-shot backfill permit generation; zero means denied.',
+            '# TYPE nntmux_orchestrator_backfill_permit gauge',
+            $this->metric('nntmux_orchestrator_backfill_permit', (int) ($settings['orchestrator_backfill_permit'] ?? 0)),
+            '# HELP nntmux_orchestrator_backfill_paused Whether adaptive backfill is paused.',
+            '# TYPE nntmux_orchestrator_backfill_paused gauge',
+            $this->metric('nntmux_orchestrator_backfill_paused', (int) ($settings['orchestrator_backfill_paused'] ?? 1)),
+            '# HELP nntmux_orchestrator_nzb_batch_size Desired bounded NZB batch size.',
+            '# TYPE nntmux_orchestrator_nzb_batch_size gauge',
+            $this->metric('nntmux_orchestrator_nzb_batch_size', (int) ($settings['orchestrator_nzb_limit'] ?? 0)),
+        ];
     }
 
     /**

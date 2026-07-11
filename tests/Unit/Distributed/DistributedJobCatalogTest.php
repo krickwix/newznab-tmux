@@ -357,6 +357,99 @@ class DistributedJobCatalogTest extends TestCase
         }
     }
 
+    public function test_orchestrator_active_profile_overrides_worker_timers_and_nzb_batch(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 20,
+            'nntmux.distributed_nzb_sleep' => 55,
+        ]);
+        $settings = [
+            'binaries_run' => 1,
+            'releases_run' => 1,
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() + 300,
+            'orchestrator_bins_timer' => 40,
+            'orchestrator_rel_timer' => 30,
+            'orchestrator_nzb_timer' => 90,
+            'orchestrator_nzb_limit' => 10,
+        ];
+        $catalog = new DistributedJobCatalog;
+
+        self::assertSame(40, $catalog->resolve('binaries', $this->runVar($settings))['sleep']);
+        self::assertSame(30, $catalog->resolve('releases', $this->runVar($settings))['sleep']);
+        $nzb = $catalog->resolve('nzb-backlog', $this->runVar($settings));
+        self::assertSame(90, $nzb['sleep']);
+        self::assertSame(10, $nzb['commands'][0]['arguments']['--limit']);
+    }
+
+    public function test_managed_backfill_requires_fresh_active_unpaused_permit(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $base = [
+            'backfill' => 4,
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() + 300,
+            'orchestrator_backfill_paused' => 0,
+        ];
+
+        $denied = $catalog->resolve('backfill', $this->runVar($base, ['backfill_groups_days' => 1]));
+        self::assertFalse($denied['enabled']);
+        self::assertStringContainsString('permit', (string) $denied['disabled_reason']);
+
+        $allowed = $catalog->resolve('backfill', $this->runVar(
+            $base + ['orchestrator_backfill_permit' => 9],
+            ['backfill_groups_days' => 1],
+        ));
+        self::assertTrue($allowed['enabled']);
+    }
+
+    public function test_stale_managed_profile_fails_closed(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 20,
+            'nntmux.distributed_nzb_sleep' => 55,
+        ]);
+        $settings = [
+            'binaries_run' => 1,
+            'releases_run' => 1,
+            'backfill' => 4,
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() - 1,
+            'orchestrator_backfill_paused' => 0,
+            'orchestrator_backfill_permit' => 1,
+        ];
+        $catalog = new DistributedJobCatalog;
+
+        self::assertSame(300, $catalog->resolve('binaries', $this->runVar($settings))['sleep']);
+        self::assertSame(180, $catalog->resolve('releases', $this->runVar($settings))['sleep']);
+        self::assertSame(180, $catalog->resolve('nzb-backlog', $this->runVar($settings))['sleep']);
+        self::assertFalse($catalog->resolve('backfill', $this->runVar($settings, ['backfill_groups_days' => 1]))['enabled']);
+    }
+
+    public function test_shadow_mode_preserves_static_timers_but_denies_backfill(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 20,
+            'nntmux.distributed_nzb_sleep' => 55,
+        ]);
+        $settings = [
+            'binaries_run' => 1,
+            'releases_run' => 1,
+            'backfill' => 4,
+            'bins_timer' => 5,
+            'rel_timer' => 120,
+            'orchestrator_mode' => 'shadow',
+            'orchestrator_lease_until' => 0,
+            'orchestrator_backfill_paused' => 1,
+        ];
+        $catalog = new DistributedJobCatalog;
+
+        self::assertSame(5, $catalog->resolve('binaries', $this->runVar($settings))['sleep']);
+        self::assertSame(120, $catalog->resolve('releases', $this->runVar($settings))['sleep']);
+        self::assertSame(55, $catalog->resolve('nzb-backlog', $this->runVar($settings))['sleep']);
+        self::assertFalse($catalog->resolve('backfill', $this->runVar($settings, ['backfill_groups_days' => 1]))['enabled']);
+    }
+
     /**
      * @param  array<string, mixed>  $settings
      * @param  array<string, mixed>  $counts
