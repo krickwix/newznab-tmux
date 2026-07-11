@@ -350,14 +350,14 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertStringNotContainsString('exists (', $sql);
     }
 
-    public function test_eligibility_query_is_bounded_to_one_exact_release_id(): void
+    public function test_eligibility_query_is_bounded_to_one_explicit_id_chunk(): void
     {
         $this->seedRelease(1, groupId: 1, leftGuid: 'a');
 
         /** @var NzbService&MockInterface $nzb */
         $nzb = Mockery::mock(NzbService::class);
         $service = new NzbBacklogCreationService($nzb);
-        $method = new ReflectionMethod($service, 'eligibleReleaseById');
+        $method = new ReflectionMethod($service, 'eligibleReleasesByIds');
         $method->setAccessible(true);
 
         $queries = [];
@@ -365,16 +365,48 @@ final class NzbCreateBacklogCommandTest extends TestCase
             $queries[] = strtolower($query->sql);
         });
 
-        $release = $method->invoke($service, 1, 100);
+        $releases = $method->invoke($service, [1], 100);
 
-        $this->assertInstanceOf(Release::class, $release);
+        $this->assertCount(1, $releases);
+        $this->assertInstanceOf(Release::class, $releases->first());
         $eligibilitySql = collect($queries)->first(
             static fn (string $sql): bool => str_contains($sql, 'from "releases"')
                 && str_contains($sql, 'collections')
         );
         $this->assertIsString($eligibilitySql);
-        $this->assertStringContainsString('"releases"."id" = ?', $eligibilitySql);
-        $this->assertStringNotContainsString('"releases"."id" in (', $eligibilitySql);
+        $this->assertStringContainsString('"releases"."id" in (?)', $eligibilitySql);
+    }
+
+    public function test_sparse_eligibility_scan_uses_bounded_chunks_instead_of_one_query_per_id(): void
+    {
+        foreach (range(1, 100) as $id) {
+            $this->seedRelease($id, groupId: 1, leftGuid: 'a', withPayload: false);
+        }
+        $this->seedRelease(101, groupId: 1, leftGuid: 'a');
+
+        $writtenIds = [];
+        $nzb = $this->bindNzbWriter(static function (Release $release) use (&$writtenIds): bool {
+            $writtenIds[] = (int) $release->id;
+
+            return true;
+        });
+
+        $eligibilityQueries = [];
+        DB::listen(static function ($query) use (&$eligibilityQueries): void {
+            $sql = strtolower($query->sql);
+            if (str_contains($sql, 'from "releases"') && str_contains($sql, 'collections')) {
+                $eligibilityQueries[] = $sql;
+            }
+        });
+
+        $service = new NzbBacklogCreationService($nzb);
+        $result = $service->create(limit: 1, scanCap: 101);
+
+        $this->assertSame([101], $writtenIds);
+        $this->assertSame(101, $result['scanned']);
+        $this->assertCount(2, $eligibilityQueries);
+        $this->assertStringContainsString('"releases"."id" in (', $eligibilityQueries[0]);
+        $this->assertStringContainsString('"releases"."id" in (?)', $eligibilityQueries[1]);
     }
 
     public function test_candidate_scan_cap_limits_the_number_of_pending_ids_considered(): void

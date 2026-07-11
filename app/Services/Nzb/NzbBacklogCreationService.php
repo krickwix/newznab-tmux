@@ -7,11 +7,14 @@ namespace App\Services\Nzb;
 use App\Models\Release;
 use App\Models\Settings;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Facades\DB;
 
 final class NzbBacklogCreationService
 {
     private const int MAX_CANDIDATE_SCAN = 5000;
+
+    private const int ELIGIBILITY_CHUNK_SIZE = 100;
 
     public function __construct(private readonly NzbService $nzb) {}
 
@@ -60,20 +63,29 @@ final class NzbBacklogCreationService
         $releases = [];
         $eligibleCount = 0;
         $scanned = 0;
-        foreach ($pendingIds->take($scanCap) as $pendingId) {
-            $scanned++;
-            $release = $this->eligibleReleaseById((int) $pendingId, $completion);
-            if ($release === null) {
-                continue;
-            }
+        $pendingIdValues = $pendingIds
+            ->take($scanCap)
+            ->map(static fn ($id): int => (int) $id)
+            ->values()
+            ->all();
+        foreach (array_chunk($pendingIdValues, self::ELIGIBILITY_CHUNK_SIZE) as $pendingIdChunk) {
+            $eligibleById = $this->eligibleReleasesByIds($pendingIdChunk, $completion)->keyBy('id');
 
-            $eligibleCount++;
-            if (count($releases) < $limit) {
-                $releases[] = $release;
-            }
+            foreach ($pendingIdChunk as $pendingId) {
+                $scanned++;
+                $release = $eligibleById->get($pendingId);
+                if (! $release instanceof Release) {
+                    continue;
+                }
 
-            if (! $countCandidates && count($releases) >= $limit) {
-                break;
+                $eligibleCount++;
+                if (count($releases) < $limit) {
+                    $releases[] = $release;
+                }
+
+                if (! $countCandidates && count($releases) >= $limit) {
+                    break 2;
+                }
             }
         }
         $candidateTotal = $countCandidates ? $eligibleCount : count($releases);
@@ -125,8 +137,17 @@ final class NzbBacklogCreationService
             ->select('id');
     }
 
-    private function eligibleReleaseById(int $releaseId, int $completion): ?Release
+    /**
+     * @param  list<int>  $releaseIds
+     * @return EloquentCollection<int, Release>
+     */
+    private function eligibleReleasesByIds(array $releaseIds, int $completion): EloquentCollection
     {
+        $releaseIds = array_values(array_unique(array_map('intval', $releaseIds)));
+        if ($releaseIds === []) {
+            return new EloquentCollection;
+        }
+
         $query = Release::query();
         if (DB::getDriverName() !== 'sqlite') {
             $query->getQuery()->forceIndex('PRIMARY');
@@ -134,7 +155,7 @@ final class NzbBacklogCreationService
 
         return $query
             ->with('category.parent')
-            ->whereKey($releaseId)
+            ->whereIn('releases.id', $releaseIds)
             ->where('nzbstatus', '=', NzbService::NZB_NONE)
             ->whereExists(function ($query): void {
                 $query->selectRaw('1')
@@ -161,7 +182,7 @@ final class NzbBacklogCreationService
                     });
             }, '=', 0)
             ->select(['id', 'guid', 'name', 'categories_id', 'groups_id', 'leftguid', 'nzbstatus'])
-            ->first();
+            ->get();
     }
 
     private function requiredCompletionPercent(): int
