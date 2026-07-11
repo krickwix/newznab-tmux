@@ -148,6 +148,11 @@ final class NzbBacklogCreationService
             return new EloquentCollection;
         }
 
+        $counterCompleteIds = $this->counterCompleteReleaseIds($releaseIds, $completion);
+        if ($counterCompleteIds === []) {
+            return new EloquentCollection;
+        }
+
         $query = Release::query();
         if (DB::getDriverName() !== 'sqlite') {
             $query->getQuery()->forceIndex('PRIMARY');
@@ -155,6 +160,37 @@ final class NzbBacklogCreationService
 
         return $query
             ->with('category.parent')
+            ->whereIn('releases.id', $counterCompleteIds)
+            ->where('nzbstatus', '=', NzbService::NZB_NONE)
+            ->where(function ($query): void {
+                $query->selectRaw('1')
+                    ->from('collections')
+                    ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                    ->whereColumn('collections.releases_id', 'releases.id')
+                    ->whereNotExists(function ($query): void {
+                        $query->selectRaw('1')
+                            ->from('parts')
+                            ->whereColumn('parts.binaries_id', 'binaries.id')
+                            ->limit(1);
+                    })
+                    ->limit(1);
+            }, '=', null)
+            ->select(['id', 'guid', 'name', 'categories_id', 'groups_id', 'leftguid', 'nzbstatus'])
+            ->get();
+    }
+
+    /**
+     * @param  list<int>  $releaseIds
+     * @return list<int>
+     */
+    private function counterCompleteReleaseIds(array $releaseIds, int $completion): array
+    {
+        $query = Release::query();
+        if (DB::getDriverName() !== 'sqlite') {
+            $query->getQuery()->forceIndex('PRIMARY');
+        }
+
+        return $query
             ->whereIn('releases.id', $releaseIds)
             ->where('nzbstatus', '=', NzbService::NZB_NONE)
             ->where(function ($query): void {
@@ -171,18 +207,14 @@ final class NzbBacklogCreationService
                     ->whereColumn('collections.releases_id', 'releases.id')
                     ->where(function ($query) use ($completion): void {
                         $query->whereRaw('binaries.currentparts < CEIL(binaries.totalparts * ? / 100)', [$completion])
-                            ->orWhere('binaries.totalparts', '<=', 0)
-                            ->orWhereNotExists(function ($query): void {
-                                $query->selectRaw('1')
-                                    ->from('parts')
-                                    ->whereColumn('parts.binaries_id', 'binaries.id')
-                                    ->limit(1);
-                            });
+                            ->orWhere('binaries.totalparts', '<=', 0);
                     })
                     ->limit(1);
             }, '=', null)
-            ->select(['id', 'guid', 'name', 'categories_id', 'groups_id', 'leftguid', 'nzbstatus'])
-            ->get();
+            ->pluck('id')
+            ->map(static fn ($id): int => (int) $id)
+            ->values()
+            ->all();
     }
 
     private function requiredCompletionPercent(): int

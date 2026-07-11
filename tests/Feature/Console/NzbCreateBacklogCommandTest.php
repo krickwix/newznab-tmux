@@ -427,11 +427,15 @@ final class NzbCreateBacklogCommandTest extends TestCase
 
         $this->assertCount(1, $releases);
         $this->assertInstanceOf(Release::class, $releases->first());
-        $eligibilitySql = collect($queries)->first(
+        $eligibilityQueries = collect($queries)->filter(
             static fn (string $sql): bool => str_contains($sql, 'from "releases"')
                 && str_contains($sql, 'collections')
-        );
+        )->values();
+        $this->assertCount(2, $eligibilityQueries);
+        $eligibilitySql = $eligibilityQueries->first();
+        $payloadSql = $eligibilityQueries->last();
         $this->assertIsString($eligibilitySql);
+        $this->assertIsString($payloadSql);
         $this->assertStringContainsString('"releases"."id" in (?)', $eligibilitySql);
         $this->assertStringContainsString('(select 1 from "collections"', $eligibilitySql);
         $this->assertStringContainsString('limit 1) is not null', $eligibilitySql);
@@ -439,6 +443,8 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertStringNotContainsString('inner join "parts"', $eligibilitySql);
         $this->assertStringNotContainsString('not exists (select 1 from "collections"', $eligibilitySql);
         $this->assertStringNotContainsString('(select count(*) from "collections"', $eligibilitySql);
+        $this->assertStringContainsString('not exists (select 1 from "parts"', $payloadSql);
+        $this->assertStringContainsString('limit 1) is null', $payloadSql);
     }
 
     public function test_sparse_eligibility_scan_uses_bounded_chunks_instead_of_one_query_per_id(): void
@@ -468,7 +474,7 @@ final class NzbCreateBacklogCommandTest extends TestCase
 
         $this->assertSame([101], $writtenIds);
         $this->assertSame(101, $result['scanned']);
-        $this->assertCount(2, $eligibilityQueries);
+        $this->assertCount(3, $eligibilityQueries);
         $this->assertStringContainsString('"releases"."id" in (', $eligibilityQueries[0]);
         $this->assertStringContainsString('"releases"."id" in (?)', $eligibilityQueries[1]);
     }
