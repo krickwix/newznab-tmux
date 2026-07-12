@@ -71,14 +71,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-backfill'
-                ? ':microservices-pods-20260712-recovery-pressure-v75'
+                ? ':microservices-pods-20260712-recovery-fairness-v76'
                 : (in_array($name, [
                     'nntmux-worker-binaries',
                     'nntmux-worker-releases',
                     'nntmux-worker-nzb-backlog',
                 ], true)
                 ? ($name === 'nntmux-worker-binaries'
-                    ? ':microservices-pods-20260712-recovery-pressure-v75'
+                    ? ':microservices-pods-20260712-recovery-fairness-v76'
                     : ':microservices-pods-20260711-worker-orchestrator-v22')
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
@@ -115,7 +115,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('*/5 * * * *', $bodyRecovery['spec']['schedule'] ?? null);
         self::assertSame('Forbid', $bodyRecovery['spec']['concurrencyPolicy'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-recovery-pressure-v75',
+            ':microservices-pods-20260712-recovery-fairness-v76',
             (string) ($bodyRecovery['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         $recoveryArgs = $bodyRecovery['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['args'] ?? [];
@@ -127,7 +127,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(2, $bodyRecoveryWorker['spec']['replicas'] ?? null);
         $bodyContainer = $bodyRecoveryWorker['spec']['template']['spec']['containers'][0] ?? [];
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-recovery-pressure-v75',
+            ':microservices-pods-20260712-recovery-fairness-v76',
             (string) ($bodyContainer['image'] ?? ''),
         );
         self::assertSame([
@@ -222,7 +222,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringContainsString('max without(instance, pod)', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringContainsString('[20m:1m]', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-recovery-pressure-v75',
+            ':microservices-pods-20260712-recovery-fairness-v76',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
@@ -242,7 +242,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $backlogEnvironment = $environment($deployments['nntmux-worker-nzb-backlog'] ?? []);
         $metricsEnvironment = $environment($metrics);
         self::assertSame('microservices-pods-20260711-worker-orchestrator-v22', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
-        self::assertSame('microservices-pods-20260712-recovery-pressure-v75', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260712-recovery-fairness-v76', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
         ksort($expected);
@@ -257,11 +257,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-recovery-pressure-v75',
+            ':microservices-pods-20260712-recovery-fairness-v76',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260712-recovery-pressure-v75',
+            'microservices-pods-20260712-recovery-fairness-v76',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
@@ -318,7 +318,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_COLLECTIONS_PER_10K'] ?? null,
         );
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-recovery-pressure-v75',
+            ':microservices-pods-20260712-recovery-fairness-v76',
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);
