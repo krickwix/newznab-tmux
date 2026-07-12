@@ -43,6 +43,25 @@ final class BinaryHandler
         $this->articles = [];
     }
 
+    /** @param list<int> $binaryIds */
+    public function prelockForPartWrites(array $binaryIds): void
+    {
+        if (DB::getDriverName() === 'sqlite') {
+            return;
+        }
+
+        $binaryIds = array_values(array_unique(array_map('intval', $binaryIds)));
+        sort($binaryIds, SORT_NUMERIC);
+
+        foreach (array_chunk($binaryIds, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
+            $placeholders = implode(',', array_fill(0, \count($chunk), '?'));
+            DB::select(
+                "SELECT id FROM binaries FORCE INDEX (PRIMARY) WHERE id IN ({$placeholders}) ORDER BY id FOR UPDATE",
+                $chunk,
+            );
+        }
+    }
+
     /**
      * Get or create a binary for the given header.
      *
@@ -155,6 +174,8 @@ final class BinaryHandler
             return $resolved;
         }
 
+        $this->sortBinaryInsertRows($pending);
+
         try {
             $result = $this->bulkInsertAndResolve($pending);
             $idsByKey = $result['ids'];
@@ -254,6 +275,9 @@ final class BinaryHandler
             }
         }
 
+        $this->sortBinaryInsertRows($insertRows);
+        $this->prelockForPartWrites(array_values($idsByKey));
+
         if (DB::getDriverName() === 'sqlite') {
             $this->bulkInsertBinariesSqlite($insertRows);
         } else {
@@ -284,6 +308,16 @@ final class BinaryHandler
         }
 
         return ['ids' => $idsByKey, 'existing' => $existingKeys];
+    }
+
+    /** @param array<int|string, array<string, mixed>> $rows */
+    private function sortBinaryInsertRows(array &$rows): void
+    {
+        uasort($rows, static function (array $left, array $right): int {
+            return ((int) $left['collections_id'] <=> (int) $right['collections_id'])
+                ?: ((int) $left['filenumber'] <=> (int) $right['filenumber'])
+                ?: strcmp((string) $left['hash'], (string) $right['hash']);
+        });
     }
 
     /**

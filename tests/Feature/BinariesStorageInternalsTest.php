@@ -123,6 +123,69 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(150, (int) $binary->partsize);
     }
 
+    public function test_binary_handler_prelocks_resolved_ids_in_primary_key_order_before_parts(): void
+    {
+        $handler = new BinaryHandler;
+
+        DB::shouldReceive('getDriverName')->once()->andReturn('mysql');
+        DB::shouldReceive('select')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FORCE INDEX (PRIMARY)')
+                    && str_contains($sql, 'ORDER BY id FOR UPDATE')),
+                [2, 9],
+            )
+            ->andReturn([(object) ['id' => 2], (object) ['id' => 9]]);
+
+        $handler->prelockForPartWrites([9, 2, 9]);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_binary_handler_prelocks_existing_ids_before_missing_binary_inserts(): void
+    {
+        $source = (string) file_get_contents(app_path('Services/Binaries/BinaryHandler.php'));
+        $method = strpos($source, 'private function bulkInsertAndResolve');
+        $prelock = strpos($source, '$this->prelockForPartWrites(array_values($idsByKey));', $method);
+        $insert = strpos($source, '$this->bulkInsertBinariesMysql($insertRows);', $method);
+
+        self::assertNotFalse($method);
+        self::assertNotFalse($prelock);
+        self::assertNotFalse($insert);
+        self::assertLessThan($insert, $prelock);
+    }
+
+    public function test_binary_handler_sorts_missing_inserts_by_stable_unique_key(): void
+    {
+        $handler = new BinaryHandler;
+        $method = new \ReflectionMethod($handler, 'sortBinaryInsertRows');
+        $rows = [
+            ['collections_id' => 2, 'filenumber' => 1, 'hash' => 'bbb'],
+            ['collections_id' => 1, 'filenumber' => 2, 'hash' => 'ccc'],
+            ['collections_id' => 1, 'filenumber' => 2, 'hash' => 'aaa'],
+        ];
+
+        $method->invokeArgs($handler, [&$rows]);
+
+        self::assertSame(['aaa', 'ccc', 'bbb'], array_column($rows, 'hash'));
+    }
+
+    public function test_header_storage_locks_and_updates_binaries_before_any_part_write(): void
+    {
+        $source = (string) file_get_contents(app_path('Services/Binaries/HeaderStorageService.php'));
+        $method = strpos($source, 'private function processHeaderChunk');
+        $resolve = strpos($source, '$this->binaryHandler->getOrCreateBinaries', $method);
+        $aggregate = strpos($source, '$this->binaryHandler->flushUpdates', $resolve);
+        $part = strpos($source, '$this->partHandler->addPart', $resolve);
+
+        self::assertNotFalse($method);
+        self::assertNotFalse($resolve);
+        self::assertNotFalse($aggregate);
+        self::assertNotFalse($part);
+        self::assertLessThan($aggregate, $resolve);
+        self::assertLessThan($part, $aggregate);
+    }
+
     public function test_sqlite_rollback_cleanup_keeps_unrelated_parts_with_same_article_number(): void
     {
         DB::statement('CREATE TABLE collections (id INTEGER PRIMARY KEY, collectionhash VARCHAR(40), noise VARCHAR(64))');

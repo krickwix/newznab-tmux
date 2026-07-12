@@ -155,13 +155,6 @@ final class HeaderStorageService
                 }
             }
 
-            // Flush binary aggregate updates
-            if (! $transaction->hasErrors()) {
-                if (! $this->binaryHandler->flushUpdates($this->config->binariesUpdateChunkSize)) {
-                    $transaction->markError();
-                }
-            }
-
             // Finish transaction
             if (! $transaction->finish()) {
                 if ($addToPartRepair) {
@@ -227,6 +220,15 @@ final class HeaderStorageService
         }
 
         $binaryIds = $this->binaryHandler->getOrCreateBinaries($binaryRecords, $groupMySQL['id']);
+
+        // Acquire/update binary parents before parts take shared foreign-key
+        // locks. This preserves collection -> binary -> parts lock order and
+        // prevents concurrent writers from deadlocking during late upgrades.
+        if (! $this->binaryHandler->flushUpdates($this->config->binariesUpdateChunkSize)) {
+            $transaction->markError();
+
+            return;
+        }
 
         foreach ($binaryRecords as $index => $record) {
             $header = $record['header'];
