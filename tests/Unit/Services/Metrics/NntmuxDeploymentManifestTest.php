@@ -234,7 +234,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_MAX_QUANTITY'] ?? null,
         );
         self::assertSame(
-            '0.30',
+            '0.15',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_SCALE_MIN_YIELD'] ?? null,
         );
         self::assertSame(
