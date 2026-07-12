@@ -50,9 +50,36 @@ final class WorkerOrchestratorTest extends TestCase
         }
     }
 
+    public function test_incomplete_release_context_grace_is_bounded_to_ten_minutes_minimum(): void
+    {
+        $key = 'NNTMUX_ORCHESTRATOR_BACKFILL_INCOMPLETE_RELEASE_GRACE_SECONDS';
+        $previous = getenv($key);
+        putenv($key.'=599');
+        $_ENV[$key] = '599';
+        $_SERVER[$key] = '599';
+
+        try {
+            $configuration = require base_path('config/nntmux.php');
+
+            self::assertSame(600, $configuration['orchestrator']['backfill_incomplete_release_grace_seconds']);
+        } finally {
+            if ($previous === false) {
+                putenv($key);
+                unset($_ENV[$key], $_SERVER[$key]);
+            } else {
+                putenv($key.'='.$previous);
+                $_ENV[$key] = $previous;
+                $_SERVER[$key] = $previous;
+            }
+        }
+    }
+
     public function test_zero_output_context_retry_requires_exact_completed_input_and_unambiguous_safety(): void
     {
-        config(['nntmux.orchestrator.backfill_zero_output_grace_seconds' => 300]);
+        config([
+            'nntmux.orchestrator.backfill_zero_output_grace_seconds' => 300,
+            'nntmux.orchestrator.backfill_incomplete_release_grace_seconds' => 600,
+        ]);
         $orchestrator = new WorkerOrchestrator(
             Mockery::mock(PipelineSnapshotRepository::class),
             new WorkerControlPolicy,
@@ -91,6 +118,8 @@ final class WorkerOrchestratorTest extends TestCase
             'releases' => 4_211,
             'release_high_watermark' => 560_367,
         ], $snapshot, true, true, 10_000, 0, 0, 1_000), 'an unrelated delayed release must not serialize the next exact cohort');
+        self::assertFalse($method->invoke($orchestrator, $observation, $outcome, $snapshot, true, true, 10_000, 1, 0, 1_299));
+        self::assertTrue($method->invoke($orchestrator, $observation, $outcome, $snapshot, true, true, 10_000, 1, 0, 1_300));
 
         foreach ([
             'unclaimed' => [$observation, $outcome, $snapshot, false, true, 10_000, 0, 0],

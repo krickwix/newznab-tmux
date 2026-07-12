@@ -285,7 +285,9 @@ class WorkerOrchestrator
         int $now,
     ): bool {
         $completedAt = (int) ($observation['completed_observed_at'] ?? 0);
-        $graceSeconds = (int) config('nntmux.orchestrator.backfill_zero_output_grace_seconds', 300);
+        $graceSeconds = $cohortReleases > 0
+            ? (int) config('nntmux.orchestrator.backfill_incomplete_release_grace_seconds', 600)
+            : (int) config('nntmux.orchestrator.backfill_zero_output_grace_seconds', 300);
         $quantity = (int) ($observation['backfill_quantity'] ?? 0);
 
         return $permitClaimed
@@ -294,7 +296,6 @@ class WorkerOrchestrator
             && $now - $completedAt >= $graceSeconds
             && $quantity >= 10_000
             && $cursorDelta === $quantity
-            && $cohortReleases === 0
             && $cohortNzbs === 0
             && (int) ($outcome['ready_collections'] ?? 0) <= (int) ($observation['ready_collections'] ?? 0)
             && $snapshot->eligibleNzbs === 0
