@@ -415,6 +415,35 @@ class BinariesStorageInternalsTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
+    public function test_collection_xref_updates_prelock_global_primary_key_order(): void
+    {
+        $handler = $this->deterministicCollectionHandler();
+        $method = new \ReflectionMethod($handler, 'bulkInsertCollectionsMysql');
+        $ids = new \ReflectionProperty($handler, 'existingIdsByHash');
+        $ids->setValue($handler, ['aaa' => 1, 'bbb' => 2]);
+
+        DB::shouldReceive('select')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FORCE INDEX (PRIMARY)')
+                    && str_contains($sql, 'ORDER BY id FOR UPDATE')),
+                [1, 2],
+            )
+            ->andReturn([(object) ['id' => 1], (object) ['id' => 2]]);
+
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(Mockery::on(static fn (string $sql): bool => str_contains($sql, 'u.id = c.id')), [1, 'xref-a', 2, 'xref-b', "\n"])
+            ->andReturn(true);
+
+        $method->invoke($handler, [], ['aaa' => true, 'bbb' => true], [
+            'second' => ['collectionhash' => 'bbb', 'xref_append' => 'xref-b'],
+            'first' => ['collectionhash' => 'aaa', 'xref_append' => 'xref-a'],
+        ]);
+
+        $this->addToAssertionCount(1);
+    }
+
     public function test_binary_handler_logs_bulk_insert_failures_when_debug_is_disabled(): void
     {
         config(['app.debug' => false]);

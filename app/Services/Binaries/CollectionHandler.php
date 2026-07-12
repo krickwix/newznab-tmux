@@ -377,10 +377,19 @@ final class CollectionHandler
     /**
      * @param  array<string, array<string, mixed>>  $rowsByCollectionKey
      * @param  array<string, true>  $existingHashes
+     * @param  array<string, array<string, mixed>>|null  $xrefRowsByCollectionKey
      */
     private function bulkInsertCollectionsMysql(array $rowsByCollectionKey, array $existingHashes, ?array $xrefRowsByCollectionKey = null): void
     {
-        foreach (array_chunk(array_values($rowsByCollectionKey), self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
+        $xrefUpdates = $this->prepareXrefUpdates($xrefRowsByCollectionKey ?? $rowsByCollectionKey, $existingHashes);
+        $this->prelockXrefUpdates($xrefUpdates);
+
+        $insertRows = array_values($rowsByCollectionKey);
+        usort(
+            $insertRows,
+            static fn (array $left, array $right): int => strcmp($left['collectionhash'], $right['collectionhash'])
+        );
+        foreach (array_chunk($insertRows, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
             $placeholders = [];
             $bindings = [];
             foreach ($chunk as $row) {
@@ -411,29 +420,59 @@ final class CollectionHandler
             ));
         }
 
-        $this->batchAppendXrefs($xrefRowsByCollectionKey ?? $rowsByCollectionKey, $existingHashes);
+        $this->batchAppendXrefs($xrefUpdates);
     }
 
     /**
-     * Append xref tokens for every existing collection in a chunk in a single
-     * UPDATE...JOIN per sub-chunk instead of N standalone UPDATEs (one per row).
-     * Same UNION ALL shape as BinaryHandler::flushUpdatesMysql().
-     *
      * @param  array<string, array<string, mixed>>  $rowsByCollectionKey
      * @param  array<string, true>  $existingHashes
+     * @return list<array{id:int,xref_append:string}>
      */
-    private function batchAppendXrefs(array $rowsByCollectionKey, array $existingHashes): void
+    private function prepareXrefUpdates(array $rowsByCollectionKey, array $existingHashes): array
     {
         $updates = [];
         foreach ($rowsByCollectionKey as $row) {
             if (($row['xref_append'] ?? '') !== '' && isset($existingHashes[$row['collectionhash']])) {
                 $updates[] = [
-                    'collectionhash' => $row['collectionhash'],
+                    'id' => $this->existingIdsByHash[$row['collectionhash']],
                     'xref_append' => $row['xref_append'],
                 ];
             }
         }
 
+        usort(
+            $updates,
+            static fn (array $left, array $right): int => $left['id'] <=> $right['id']
+        );
+
+        return $updates;
+    }
+
+    /**
+     * @param  list<array{id:int,xref_append:string}>  $updates
+     */
+    private function prelockXrefUpdates(array $updates): void
+    {
+        foreach (array_chunk($updates, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
+            $ids = array_column($chunk, 'id');
+            $idPlaceholders = implode(',', array_fill(0, count($ids), '?'));
+            DB::select(
+                "SELECT id FROM collections FORCE INDEX (PRIMARY) WHERE id IN ({$idPlaceholders}) ORDER BY id FOR UPDATE",
+                $ids,
+            );
+        }
+    }
+
+    /**
+     * Append xref tokens for every existing collection in a chunk in a single
+     * UPDATE...JOIN per sub-chunk instead of N standalone UPDATEs (one per row).
+     * Existing rows were already locked in global primary-key order before any
+     * new collection insert in this transaction.
+     *
+     * @param  list<array{id:int,xref_append:string}>  $updates
+     */
+    private function batchAppendXrefs(array $updates): void
+    {
         if ($updates === []) {
             return;
         }
@@ -442,14 +481,14 @@ final class CollectionHandler
             $selects = [];
             $bindings = [];
             foreach ($chunk as $u) {
-                $selects[] = 'SELECT ? AS collectionhash, ? AS xref_append';
-                $bindings[] = $u['collectionhash'];
+                $selects[] = 'SELECT ? AS id, ? AS xref_append';
+                $bindings[] = $u['id'];
                 $bindings[] = $u['xref_append'];
             }
 
             $sql = 'UPDATE collections c INNER JOIN ('
                 .implode(' UNION ALL ', $selects)
-                .') u ON u.collectionhash = c.collectionhash '
+                .') u ON u.id = c.id '
                 .'SET c.xref = CONCAT(c.xref, ?, u.xref_append)';
             $bindings[] = "\n";
 
