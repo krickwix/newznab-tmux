@@ -221,9 +221,6 @@ class WorkerControlStateStore
             $candidates[] = $target;
         }
         foreach ($candidates as $candidate) {
-            if (! is_array($candidate)) {
-                continue;
-            }
             foreach (array_keys($growth) as $stage) {
                 if (time() - (int) ($candidate['observed_at'][$stage] ?? 0) >= $ttl) {
                     continue;
