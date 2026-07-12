@@ -88,6 +88,10 @@ final readonly class BackfillTargetSelector
             });
 
             $best = $positive[0];
+            $pendingRepeat = $this->selectRecentPendingRepeat($candidates, $history, $now, $best['name']);
+            if ($pendingRepeat !== null) {
+                return $pendingRepeat;
+            }
             $attempts = (int) ($history[$best['name']]['attempts'] ?? 0);
             if ($attempts > 0
                 && $attempts % $this->exploitAttemptsBeforeExplore === 0
@@ -150,6 +154,47 @@ final readonly class BackfillTargetSelector
         }
 
         return null;
+    }
+
+    /**
+     * @param  list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $candidates
+     * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
+     * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
+     */
+    private function selectRecentPendingRepeat(array $candidates, array $history, int $now, string $bestGroup): ?array
+    {
+        $bestAttemptAt = (int) ($history[$bestGroup]['last_attempt_at'] ?? 0);
+        $mostRecent = null;
+        $mostRecentAttemptAt = 0;
+        $timestampTied = false;
+        foreach ($candidates as $candidate) {
+            if ($candidate['name'] === $bestGroup) {
+                continue;
+            }
+            $attemptAt = (int) ($history[$candidate['name']]['last_attempt_at'] ?? 0);
+            if ($attemptAt > $mostRecentAttemptAt) {
+                $mostRecent = $candidate;
+                $mostRecentAttemptAt = $attemptAt;
+                $timestampTied = false;
+            } elseif ($attemptAt > 0 && $attemptAt === $mostRecentAttemptAt) {
+                $timestampTied = true;
+            }
+        }
+        if ($mostRecent === null || $timestampTied || $mostRecentAttemptAt <= $bestAttemptAt) {
+            return null;
+        }
+
+        $entry = $history[$mostRecent['name']] ?? null;
+        if (! is_array($entry)
+            || $now - $mostRecentAttemptAt >= $this->historyTtlSeconds
+            || (int) ($entry['attempts'] ?? 0) !== 1
+            || (int) ($entry['last_cursor_delta'] ?? 0) <= 0
+            || (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) > 0.0
+        ) {
+            return null;
+        }
+
+        return $mostRecent;
     }
 
     /**

@@ -183,7 +183,7 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertSame('alt.probe.freak', $target['name'] ?? null);
     }
 
-    public function test_it_resumes_the_positive_target_after_one_forced_probe(): void
+    public function test_it_immediately_completes_an_input_bearing_exploration_probe(): void
     {
         $selector = new BackfillTargetSelector(
             probeGroups: ['alt.probe.criterion', 'alt.probe.freak'],
@@ -212,7 +212,111 @@ final class BackfillTargetSelectorTest extends TestCase
             $this->candidate('alt.probe.freak', '2016-08-27 18:02:03'),
         ], $history, now: 2_000_000_000);
 
+        self::assertSame('alt.probe.freak', $target['name'] ?? null);
+    }
+
+    public function test_it_resumes_the_positive_target_after_the_exploration_repeat(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.probe.criterion', 'alt.probe.freak'],
+            historyTtlSeconds: 86_400,
+            exploitAttemptsBeforeExplore: 3,
+        );
+        $history = [
+            'alt.probe.criterion' => [
+                'attempts' => 6,
+                'ewma_nzbs_per_10k' => 0.6875,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_999_000,
+                'last_cursor_delta' => 10_000,
+            ],
+            'alt.probe.freak' => [
+                'attempts' => 2,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_999_200,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.probe.criterion', '2009-05-15 06:49:20'),
+            $this->candidate('alt.probe.freak', '2016-08-27 18:02:03'),
+        ], $history, now: 2_000_000_000);
+
         self::assertSame('alt.probe.criterion', $target['name'] ?? null);
+    }
+
+    public function test_it_does_not_resurrect_an_older_probe_after_a_newer_intervening_attempt(): void
+    {
+        $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
+        $history = [
+            'alt.best' => [
+                'attempts' => 3,
+                'ewma_nzbs_per_10k' => 0.75,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_999_000,
+                'last_cursor_delta' => 10_000,
+            ],
+            'alt.older-probe' => [
+                'attempts' => 1,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_999_100,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 10_000,
+            ],
+            'alt.intervening' => [
+                'attempts' => 2,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_999_200,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.best', '2009-05-15 06:49:20'),
+            $this->candidate('alt.older-probe', '2016-08-27 18:02:03'),
+            $this->candidate('alt.intervening', '2017-08-27 18:02:03'),
+        ], $history, now: 2_000_000_000);
+
+        self::assertSame('alt.best', $target['name'] ?? null);
+    }
+
+    public function test_tied_recent_probe_timestamps_conservatively_prevent_a_repeat(): void
+    {
+        $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
+        $history = [
+            'alt.best' => [
+                'attempts' => 3,
+                'ewma_nzbs_per_10k' => 0.75,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_999_000,
+                'last_cursor_delta' => 10_000,
+            ],
+            'alt.probe-a' => [
+                'attempts' => 1,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_999_200,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 10_000,
+            ],
+            'alt.probe-b' => [
+                'attempts' => 1,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_999_200,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.best', '2009-05-15 06:49:20'),
+            $this->candidate('alt.probe-a', '2016-08-27 18:02:03'),
+            $this->candidate('alt.probe-b', '2017-08-27 18:02:03'),
+        ], $history, now: 2_000_000_000);
+
+        self::assertSame('alt.best', $target['name'] ?? null);
     }
 
     public function test_forced_exploration_can_select_an_unconfigured_untried_candidate(): void
