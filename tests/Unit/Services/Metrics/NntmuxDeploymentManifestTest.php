@@ -206,7 +206,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PERMIT_CLAIM_GRACE_SECONDS'] ?? null,
         );
         self::assertSame(
-            'alt.binaries.sounds.lossless.metal,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r',
+            'alt.binaries.sounds.lossless.metal,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null,
         );
         self::assertSame(
@@ -216,6 +216,10 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '3',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_EXPLOIT_ATTEMPTS_BEFORE_EXPLORE'] ?? null,
+        );
+        self::assertSame(
+            '1.0',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_AGGRESSIVE_EXPLORE_BELOW_YIELD'] ?? null,
         );
         self::assertStringEndsWith(
             ':microservices-pods-20260712-worker-orchestrator-v38',

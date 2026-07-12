@@ -151,6 +151,58 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertSame('alt.probe.freak', $target['name'] ?? null);
     }
 
+    public function test_it_explores_after_each_low_yield_exploit_until_a_better_target_is_found(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.probe.criterion', 'alt.probe.dvd-r'],
+            historyTtlSeconds: 86_400,
+            exploitAttemptsBeforeExplore: 3,
+            aggressiveExploreBelowYield: 1.0,
+        );
+        $history = [
+            'alt.probe.criterion' => [
+                'attempts' => 7,
+                'ewma_nzbs_per_10k' => 0.34375,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_999_000,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.probe.criterion', '2009-05-15 06:49:20'),
+            $this->candidate('alt.probe.dvd-r', '2019-04-14 12:49:16'),
+        ], $history, now: 2_000_000_000);
+
+        self::assertSame('alt.probe.dvd-r', $target['name'] ?? null);
+    }
+
+    public function test_satisfactory_yield_retains_the_configured_exploit_interval(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.probe.criterion', 'alt.probe.dvd-r'],
+            historyTtlSeconds: 86_400,
+            exploitAttemptsBeforeExplore: 3,
+            aggressiveExploreBelowYield: 1.0,
+        );
+        $history = [
+            'alt.probe.criterion' => [
+                'attempts' => 7,
+                'ewma_nzbs_per_10k' => 1.0,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_999_000,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.probe.criterion', '2009-05-15 06:49:20'),
+            $this->candidate('alt.probe.dvd-r', '2019-04-14 12:49:16'),
+        ], $history, now: 2_000_000_000);
+
+        self::assertSame('alt.probe.criterion', $target['name'] ?? null);
+    }
+
     public function test_forced_exploration_repeats_one_input_bearing_zero_yield_probe(): void
     {
         $selector = new BackfillTargetSelector(

@@ -197,7 +197,7 @@ class DistributedJobCatalog
         $sleep = $this->backfillSleep($settings, $counts);
 
         if ($this->isOrchestratorManaged($settings) && ! $this->hasFreshActiveBackfillPermit($settings)) {
-            // A permit observation expires after 15 minutes. Polling the
+            // A permit observation expires after 20 minutes. Polling the
             // lightweight disabled plan within one minute guarantees a worker
             // sleeping under a prior fail-safe profile can still claim a new
             // one-shot permit before that evaluation window closes.
@@ -221,7 +221,14 @@ class DistributedJobCatalog
             return $this->disabled('backfill', 'no backfill groups to process', $sleep);
         }
 
-        return $this->simple('backfill', true, null, 'multiprocessing:safe', ['type' => 'backfill'], $sleep);
+        return $this->simple(
+            'backfill',
+            true,
+            null,
+            'multiprocessing:safe',
+            ['type' => 'backfill'],
+            $this->isOrchestratorManaged($settings) ? min($sleep, 60) : $sleep,
+        );
     }
 
     /**

@@ -15,11 +15,14 @@ final readonly class BackfillTargetSelector
 
     private int $exploitAttemptsBeforeExplore;
 
+    private float $aggressiveExploreBelowYield;
+
     /** @param list<string> $probeGroups */
     public function __construct(
         ?array $probeGroups = null,
         ?int $historyTtlSeconds = null,
         ?int $exploitAttemptsBeforeExplore = null,
+        ?float $aggressiveExploreBelowYield = null,
     ) {
         $configuredGroups = $probeGroups ?? config('nntmux.orchestrator.backfill_probe_groups', []);
         $this->probeGroups = array_values(array_filter(array_map(
@@ -36,6 +39,12 @@ final readonly class BackfillTargetSelector
             $exploitAttemptsBeforeExplore ?? ($container->bound('config')
                 ? (int) config('nntmux.orchestrator.backfill_exploit_attempts_before_explore', 3)
                 : 3),
+        );
+        $this->aggressiveExploreBelowYield = max(
+            0.0,
+            $aggressiveExploreBelowYield ?? ($container->bound('config')
+                ? (float) config('nntmux.orchestrator.backfill_aggressive_explore_below_yield', 0.0)
+                : 0.0),
         );
     }
 
@@ -93,8 +102,13 @@ final readonly class BackfillTargetSelector
                 return $pendingRepeat;
             }
             $attempts = (int) ($history[$best['name']]['attempts'] ?? 0);
+            $bestYield = (float) ($history[$best['name']]['ewma_nzbs_per_10k'] ?? 0.0);
+            $exploreEvery = $this->aggressiveExploreBelowYield > 0.0
+                && $bestYield < $this->aggressiveExploreBelowYield
+                ? 1
+                : $this->exploitAttemptsBeforeExplore;
             if ($attempts > 0
-                && $attempts % $this->exploitAttemptsBeforeExplore === 0
+                && $attempts % $exploreEvery === 0
                 && $this->wasMostRecentlyAttempted($best['name'], $history)
             ) {
                 $probe = $this->selectConfiguredProbe($byName, $history, $now);

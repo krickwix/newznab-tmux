@@ -325,6 +325,158 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts']);
     }
 
+    public function test_a_claimed_permit_closes_early_on_exact_cohort_nzb_success(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => true,
+            'nntmux.orchestrator.permit_observation_seconds' => 1200,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+        ]);
+        $store = new WorkerControlStateStore;
+        $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, generation: 7, now: time() - 61, outcome: [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ]);
+        $current = new PipelineSnapshot(1, 2, 3, 4, 5, eligibleBackfillSupply: true, backfillGroup: 'alt.next', backfillCursor: 30_000);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($current);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(2);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertContains('backfill_permit_effective', $result['reasons']);
+        self::assertFalse($result['permit_granted']);
+        self::assertNull($store->permitObservation());
+        self::assertSame(2.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
+    }
+
+    public function test_aggregate_group_progress_does_not_close_a_current_observation_without_exact_nzbs(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.permit_observation_seconds' => 1200,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+        ]);
+        $store = new WorkerControlStateStore;
+        $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, generation: 7, now: time() - 61, outcome: [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ]);
+        $current = new PipelineSnapshot(1, 2, 3, 4, 5, eligibleBackfillSupply: true, backfillGroup: 'alt.next', backfillCursor: 30_000);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($current);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 1,
+            'releases' => 1,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldNotReceive('revokePermit');
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertNotContains('backfill_permit_effective', $result['reasons']);
+        self::assertNotNull($store->permitObservation());
+        self::assertSame([], $store->backfillYieldHistory());
+    }
+
+    public function test_timeout_uses_exact_cohort_nzbs_instead_of_aggregate_group_progress(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.permit_observation_seconds' => 1200,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+        ]);
+        $store = new WorkerControlStateStore;
+        $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, generation: 7, now: time() - 1201, outcome: [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ]);
+        $current = new PipelineSnapshot(1, 2, 3, 4, 5, eligibleBackfillSupply: true, backfillGroup: 'alt.next', backfillCursor: 30_000);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($current);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 1,
+            'releases' => 1,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertContains('backfill_permit_ineffective', $result['reasons']);
+        self::assertNull($store->permitObservation());
+        self::assertSame(0.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
+        self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts']);
+    }
+
     public function test_a_claimed_legacy_observation_closes_without_recording_yield(): void
     {
         config([

@@ -39,12 +39,15 @@ class WorkerOrchestrator
                 ];
             }
             $observationSeconds = (int) config('nntmux.orchestrator.permit_observation_seconds', 1200);
-            if ($permitObservation !== null && time() - $permitObservation['issued_at'] >= $observationSeconds) {
-                $permitClaimed = (int) Settings::settingValue('orchestrator_bf_claimed')
-                    === (int) $permitObservation['generation'];
-                if (! $shadow) {
-                    $this->applier->revokePermit();
-                }
+            $observationExpired = $permitObservation !== null
+                && time() - (int) $permitObservation['issued_at'] >= $observationSeconds;
+            $hasCohortBaseline = $permitObservation !== null
+                && array_key_exists('release_high_watermark', $permitObservation)
+                && array_key_exists('backfill_cursor_postdate', $permitObservation);
+            $permitClaimed = $permitObservation !== null
+                && ($observationExpired || $hasCohortBaseline)
+                && (int) Settings::settingValue('orchestrator_bf_claimed') === (int) $permitObservation['generation'];
+            if ($permitObservation !== null && ($observationExpired || ($permitClaimed && $hasCohortBaseline))) {
                 $observedGroup = (string) ($permitObservation['backfill_group'] ?? '');
                 $outcome = $observedGroup === ''
                     ? ['cursor' => 0, 'cursor_postdate' => '', 'ready_collections' => 0, 'releases' => 0, 'release_high_watermark' => 0]
@@ -53,30 +56,37 @@ class WorkerOrchestrator
                     && $outcome['cursor'] < (int) ($permitObservation['backfill_cursor'] ?? 0);
                 $produced = $outcome['ready_collections'] > (int) ($permitObservation['ready_collections'] ?? 0)
                     || $outcome['releases'] > (int) ($permitObservation['release_total'] ?? 0);
-                if ($permitClaimed
-                    && array_key_exists('release_high_watermark', $permitObservation)
-                    && array_key_exists('backfill_cursor_postdate', $permitObservation)
-                ) {
+                $cohortNzbs = 0;
+                if ($permitClaimed && $hasCohortBaseline && ($observationExpired || $cursorMoved)) {
+                    $cohortNzbs = $this->snapshots->backfillCreatedNzbsForCohort(
+                        $observedGroup,
+                        (int) $permitObservation['release_high_watermark'],
+                        (string) $permitObservation['backfill_cursor_postdate'],
+                        (string) ($outcome['cursor_postdate'] ?? ''),
+                    );
+                }
+                $closeObservation = $observationExpired || ($permitClaimed && $cursorMoved && $cohortNzbs > 0);
+                if ($closeObservation && ! $shadow) {
+                    $this->applier->revokePermit();
+                }
+                if ($closeObservation && $permitClaimed && $hasCohortBaseline) {
                     $this->store->recordBackfillYield(
                         $observedGroup,
                         cursorDelta: max(0, (int) $permitObservation['backfill_cursor'] - $outcome['cursor']),
-                        nzbCreatedDelta: $this->snapshots->backfillCreatedNzbsForCohort(
-                            $observedGroup,
-                            (int) $permitObservation['release_high_watermark'],
-                            (string) $permitObservation['backfill_cursor_postdate'],
-                            $outcome['cursor_postdate'],
-                        ),
+                        nzbCreatedDelta: $cohortNzbs,
                         now: time(),
                     );
                 }
-                $snapshot = $snapshot->withPermitOutcome(
-                    completed: true,
-                    effective: $permitClaimed && $cursorMoved && $produced,
-                    claimed: $permitClaimed,
-                    inputMoved: $cursorMoved,
-                    group: $observedGroup,
-                );
-                $this->store->clearPermitObservation();
+                if ($closeObservation) {
+                    $snapshot = $snapshot->withPermitOutcome(
+                        completed: true,
+                        effective: $permitClaimed && $cursorMoved && ($hasCohortBaseline ? $cohortNzbs > 0 : $produced),
+                        claimed: $permitClaimed,
+                        inputMoved: $cursorMoved,
+                        group: $observedGroup,
+                    );
+                    $this->store->clearPermitObservation();
+                }
             }
             $state = $this->store->loadState();
             $decision = $this->policy->decide($snapshot, $state, time());
