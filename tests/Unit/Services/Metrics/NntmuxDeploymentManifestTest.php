@@ -260,11 +260,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-wait-hysteresis-v83',
+            ':microservices-pods-20260712-context-grace-v84',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260712-wait-hysteresis-v83',
+            'microservices-pods-20260712-context-grace-v84',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
@@ -303,6 +303,10 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '50000',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_RETRY_QUANTITY'] ?? null,
+        );
+        self::assertSame(
+            '300',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_ZERO_OUTPUT_GRACE_SECONDS'] ?? null,
         );
         self::assertSame(
             '600000',
