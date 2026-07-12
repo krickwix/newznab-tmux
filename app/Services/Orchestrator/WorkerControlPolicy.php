@@ -28,9 +28,11 @@ final class WorkerControlPolicy
 
     public const float RECOVERY_DRAIN_MIN_EWMA_PER_MINUTE = 5.0;
 
-    public const int RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES = 7_200;
+    public const int RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES = 1_440;
 
     public const int RECOVERY_DRAIN_MAX_HOLD_SAMPLES = 3;
+
+    public const int RECOVERY_DRAIN_HOLD_MAX_SPACING_SECONDS = 90;
 
     private float $provenYieldOverrideThreshold;
 
@@ -194,6 +196,7 @@ final class WorkerControlPolicy
         $profile = $recovered ? ControlProfile::Drain : ControlProfile::FailSafe;
         $strongRecoveryDrain = $distinctSample && $this->strongRecoveryDrainSample($snapshot);
         $safeRecoveryPulse = $distinctSample
+            && $snapshot->observedAt - $state->failSafeLastObservedAt <= self::RECOVERY_DRAIN_HOLD_MAX_SPACING_SECONDS
             && $state->recoveryDrainSamples > 0
             && $state->recoveryDrainHoldSamples < self::RECOVERY_DRAIN_MAX_HOLD_SAMPLES
             && $this->safeRecoveryDrainTrend($snapshot);

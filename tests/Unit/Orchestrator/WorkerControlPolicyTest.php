@@ -418,6 +418,24 @@ final class WorkerControlPolicyTest extends TestCase
             recoveryDrainSamples: 1,
         ), 10_000);
         self::assertSame(0, $excessive->nextState->recoveryDrainSamples);
+
+        $delayed = $policy->decide($this->snapshot(
+            partsBacklog: $backlogs['parts'],
+            binariesBacklog: $backlogs['binaries'],
+            collectionsBacklog: $backlogs['collections'],
+            highPressure: true,
+            observedAt: 191,
+            backlogRatesPerMinute: $rates,
+            backlogEwmaPerMinute: array_replace($ewma, ['binaries' => 0.0]),
+            bodyRecoveryQueueBacklog: 10_000,
+        ), new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+            recoveryDrainSamples: 3,
+        ), 10_000);
+        self::assertSame(0, $delayed->nextState->recoveryDrainSamples);
+        self::assertNotContains('core_pipeline_draining', $delayed->reasons);
     }
 
     public function test_stable_ineligible_nzb_backlog_does_not_permanently_block_recovery_drain(): void
