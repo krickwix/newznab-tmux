@@ -108,12 +108,18 @@ class DistributedJobWorker
             return 0;
         }
 
-        if ($plan['name'] === 'backfill' && ! ($this->backfillPermitGate ?? app(BackfillPermitGate::class))->claim()) {
-            $this->workerTelemetry->recordRunOutcome('backfill', 'disabled');
-            $output->writeln(sprintf('[%s] skipped backfill: adaptive permit was absent or stale', now()->toDateTimeString()));
-            $lock->release();
+        $backfillPermitGate = null;
+        $claimedBackfillGeneration = null;
+        if ($plan['name'] === 'backfill') {
+            $backfillPermitGate = $this->backfillPermitGate ?? app(BackfillPermitGate::class);
+            $claimedBackfillGeneration = $backfillPermitGate->claimGeneration();
+            if ($claimedBackfillGeneration === null) {
+                $this->workerTelemetry->recordRunOutcome('backfill', 'disabled');
+                $output->writeln(sprintf('[%s] skipped backfill: adaptive permit was absent or stale', now()->toDateTimeString()));
+                $lock->release();
 
-            return 0;
+                return 0;
+            }
         }
 
         $startedAt = $this->workerTelemetry->startRun($plan['name']);
@@ -155,6 +161,18 @@ class DistributedJobWorker
             return 0;
         } finally {
             $this->workerTelemetry->finishRun($plan['name'], $runOutcome, $startedAt);
+            if ($runOutcome === 'success' && $backfillPermitGate !== null && $claimedBackfillGeneration !== null) {
+                try {
+                    $backfillPermitGate->complete($claimedBackfillGeneration);
+                } catch (Throwable $error) {
+                    $output->writeln(sprintf(
+                        '[%s] could not mark backfill generation %d complete: %s',
+                        now()->toDateTimeString(),
+                        $claimedBackfillGeneration,
+                        $error->getMessage(),
+                    ));
+                }
+            }
             $restoreSignalHandlers();
             $lock->release();
         }

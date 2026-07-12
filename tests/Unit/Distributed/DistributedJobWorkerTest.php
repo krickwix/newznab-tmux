@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Distributed;
 
+use App\Services\Distributed\BackfillPermitGate;
 use App\Services\Distributed\DistributedJobCatalog;
 use App\Services\Distributed\DistributedJobWorker;
 use App\Services\Metrics\DistributedWorkerTelemetry;
@@ -59,6 +60,39 @@ class DistributedJobWorkerTest extends TestCase
             'disabled_reason' => null,
             'commands' => [['command' => 'test:work', 'arguments' => []]],
             'sleep' => 1,
+        ], 60, new BufferedOutput);
+
+        self::assertSame(0, $exitCode);
+    }
+
+    public function test_successful_backfill_marks_the_claimed_generation_complete(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'array']);
+        Cache::store('array')->flush();
+        Artisan::shouldReceive('call')->once()->with('test:work', [], Mockery::type(BufferedOutput::class))->andReturn(0);
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('startRun')->once()->with('backfill')->andReturn(100.0);
+        $telemetry->shouldReceive('finishRun')->once()->with('backfill', 'success', 100.0);
+        $gate = Mockery::mock(BackfillPermitGate::class);
+        $gate->shouldReceive('claimGeneration')->once()->andReturn(17);
+        $gate->shouldReceive('complete')->once()->with(17)->andReturnTrue();
+
+        $worker = new DistributedJobWorker(
+            new DistributedJobCatalog,
+            Mockery::mock(TmuxMonitorService::class),
+            $telemetry,
+            $gate,
+        );
+        $method = new ReflectionMethod($worker, 'runLockedPlan');
+
+        $exitCode = $method->invoke($worker, [
+            'name' => 'backfill',
+            'description' => 'test backfill',
+            'enabled' => true,
+            'disabled_reason' => null,
+            'commands' => [['command' => 'test:work', 'arguments' => []]],
+            'sleep' => 60,
         ], 60, new BufferedOutput);
 
         self::assertSame(0, $exitCode);

@@ -14,7 +14,12 @@ class BackfillPermitGate
 {
     public function claim(): bool
     {
-        return DB::transaction(function (): bool {
+        return $this->claimGeneration() !== null;
+    }
+
+    public function claimGeneration(): ?int
+    {
+        return DB::transaction(function (): ?int {
             $rows = Settings::query()
                 ->whereIn('name', [
                     'orchestrator_mode',
@@ -34,7 +39,7 @@ class BackfillPermitGate
                 || (int) $rows->get('orchestrator_bf_paused', 1) !== 0
                 || (int) $rows->get('orchestrator_bf_permit', 0) <= 0
                 || trim((string) $rows->get('orchestrator_bf_group', '')) === '') {
-                return false;
+                return null;
             }
 
             $generation = (int) $rows->get('orchestrator_bf_permit');
@@ -43,6 +48,27 @@ class BackfillPermitGate
                 ['value' => (string) $generation],
             );
             Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
+            Settings::forgetCachedSettings();
+
+            return $generation;
+        }, 3);
+    }
+
+    public function complete(int $generation): bool
+    {
+        return DB::transaction(function () use ($generation): bool {
+            $claimed = (int) Settings::query()
+                ->where('name', 'orchestrator_bf_claimed')
+                ->lockForUpdate()
+                ->value('value');
+            if ($generation <= 0 || $claimed !== $generation) {
+                return false;
+            }
+
+            Settings::query()->updateOrCreate(
+                ['name' => 'orchestrator_bf_completed'],
+                ['value' => (string) $generation],
+            );
             Settings::forgetCachedSettings();
 
             return true;

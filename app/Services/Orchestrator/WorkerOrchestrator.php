@@ -47,6 +47,9 @@ class WorkerOrchestrator
             $permitClaimed = $permitObservation !== null
                 && ($observationExpired || $hasCohortBaseline)
                 && (int) Settings::settingValue('orchestrator_bf_claimed') === (int) $permitObservation['generation'];
+            $permitCompleted = $permitClaimed
+                && $hasCohortBaseline
+                && (int) Settings::settingValue('orchestrator_bf_completed') === (int) $permitObservation['generation'];
             if ($permitObservation !== null && ($observationExpired || ($permitClaimed && $hasCohortBaseline))) {
                 $observedGroup = (string) ($permitObservation['backfill_group'] ?? '');
                 $outcome = $observedGroup === ''
@@ -65,7 +68,9 @@ class WorkerOrchestrator
                         (string) ($outcome['cursor_postdate'] ?? ''),
                     );
                 }
-                $closeObservation = $observationExpired || ($permitClaimed && $cursorMoved && $cohortNzbs > 0);
+                $closeObservation = $observationExpired
+                    || ($permitClaimed && $cursorMoved && $cohortNzbs > 0)
+                    || ($permitCompleted && ! $cursorMoved);
                 if ($closeObservation && ! $shadow) {
                     $this->applier->revokePermit();
                 }

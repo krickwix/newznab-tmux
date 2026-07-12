@@ -35,6 +35,7 @@ final class WorkerProfileApplierTest extends TestCase
             ['name' => 'orchestrator_generation', 'value' => '4'],
             ['name' => 'orchestrator_bf_permit', 'value' => '3'],
             ['name' => 'orchestrator_bf_claimed', 'value' => '0'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '4'],
         ]);
     }
 
@@ -52,6 +53,7 @@ final class WorkerProfileApplierTest extends TestCase
             'orchestrator_generation' => 5,
             'orchestrator_bf_permit' => 5,
             'orchestrator_bf_claimed' => 0,
+            'orchestrator_bf_completed' => 0,
             'orchestrator_mode' => 'active',
             'orchestrator_lease_until' => 1_600,
             'orchestrator_bins_timer' => 40,
@@ -68,6 +70,7 @@ final class WorkerProfileApplierTest extends TestCase
             'orchestrator_generation',
             'orchestrator_bf_permit',
             'orchestrator_bf_claimed',
+            'orchestrator_bf_completed',
             'orchestrator_mode',
             'orchestrator_lease_until',
             'orchestrator_bins_timer',

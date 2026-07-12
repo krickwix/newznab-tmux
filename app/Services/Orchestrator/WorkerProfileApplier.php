@@ -31,6 +31,10 @@ class WorkerProfileApplier
                 ->where('name', 'orchestrator_bf_claimed')
                 ->lockForUpdate()
                 ->value('value');
+            $existingCompleted = (int) Settings::query()
+                ->where('name', 'orchestrator_bf_completed')
+                ->lockForUpdate()
+                ->value('value');
             $existingGroup = (string) Settings::query()
                 ->where('name', 'orchestrator_bf_group')
                 ->lockForUpdate()
@@ -51,6 +55,7 @@ class WorkerProfileApplier
                 'orchestrator_bf_paused' => $decision->backfillPermitted ? '0' : '1',
                 'orchestrator_bf_permit' => (string) $permit,
                 'orchestrator_bf_claimed' => $grantPermit ? '0' : (string) $existingClaimed,
+                'orchestrator_bf_completed' => $grantPermit ? '0' : (string) $existingCompleted,
                 'orchestrator_bf_group' => $decision->backfillPermitted ? (string) $backfillGroup : '',
                 'backfill_groups' => (string) max(1, $profile->backfillGroups),
                 'backfillthreads' => (string) max(1, $profile->backfillThreads),

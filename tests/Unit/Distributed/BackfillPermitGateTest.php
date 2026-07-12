@@ -33,10 +33,15 @@ class BackfillPermitGateTest extends TestCase
     {
         $this->settings('active', time() + 60, 0, 17);
 
-        self::assertTrue((new BackfillPermitGate)->claim());
+        $gate = new BackfillPermitGate;
+        self::assertSame(17, $gate->claimGeneration());
         self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
         self::assertSame(17, Settings::settingValue('orchestrator_bf_claimed'));
-        self::assertFalse((new BackfillPermitGate)->claim());
+        self::assertFalse($gate->claim());
+        self::assertTrue($gate->complete(17));
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_completed'));
+        self::assertFalse($gate->complete(18));
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_completed'));
     }
 
     public function test_it_denies_a_permit_without_a_pinned_target_group(): void
