@@ -627,7 +627,7 @@ class YencBodyDeobfuscationStorageTest extends TestCase
         ]);
         $header = static fn (int $number): array => [
             'Number' => (string) $number,
-            'Subject' => '[PRiVATE] \\'.$number.'\\::opaque.payload::/opaque/ [newzNZB] [7/14] - yEnc',
+            'Subject' => 'provider-overview-does-not-retain-the-stored-marker-'.$number,
             'From' => 'poster@example.invalid',
             'Date' => 'Sun, 14 Jun 2026 11:24:21 +0000',
             'Message-ID' => '<'.$number.'@example.invalid>',

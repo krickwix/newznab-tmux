@@ -88,6 +88,9 @@ class BinariesService
     /** @var array<int, true> */
     private array $partRepairDeferredBodyNumbers = [];
 
+    /** @var array<string, true> */
+    private array $partRepairForcedBodyNumbers = [];
+
     private ?float $partRepairBodyProbeStartedAt = null;
 
     private ?int $partRepairBodyProbesRemaining = null;
@@ -462,7 +465,7 @@ class BinariesService
         foreach ($headers as $header) {
             $number = (string) ($header['Number'] ?? '');
             if (($missingPartLookup !== null && ! isset($missingPartLookup[$number]))
-                || ! $this->shouldProbeBodyPreamble($header)
+                || (! isset($this->partRepairForcedBodyNumbers[$number]) && ! $this->shouldProbeBodyPreamble($header))
             ) {
                 continue;
             }
@@ -608,11 +611,17 @@ class BinariesService
     public function partRepair(array $groupArr): void
     {
         $this->partRepairDeferredBodyNumbers = [];
+        $this->partRepairForcedBodyNumbers = [];
         $this->partRepairBodyProbeStartedAt = microtime(true);
         $this->partRepairBodyProbesRemaining = $this->config->bodyPreambleDeobfuscateLimit;
         try {
             $missingParts = $this->missedPartHandler->getMissingParts($groupArr['id']);
             $missingCount = \count($missingParts);
+            foreach ($missingParts as $missingPart) {
+                if ((int) ($missingPart->attempts ?? 1) === 0) {
+                    $this->partRepairForcedBodyNumbers[(string) $missingPart->numberid] = true;
+                }
+            }
 
             if ($missingCount === 0) {
                 $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
@@ -656,6 +665,7 @@ class BinariesService
         } finally {
             $this->partRepairBodyProbeStartedAt = null;
             $this->partRepairBodyProbesRemaining = null;
+            $this->partRepairForcedBodyNumbers = [];
         }
     }
 
