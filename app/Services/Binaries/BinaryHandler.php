@@ -179,9 +179,7 @@ final class BinaryHandler
         try {
             $result = $this->bulkInsertAndResolve($pending);
             $idsByKey = $result['ids'];
-            $existingKeys = $result['existing'];
             $existingPartKeys = $this->existingPartKeysForResolvedRows($pending, $idsByKey, $extraUpdatesByArticleKey);
-            $seenLookupKeys = [];
             $seenPartKeys = [];
             foreach ($pending as $articleKey => $row) {
                 $hashLookupKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
@@ -192,21 +190,13 @@ final class BinaryHandler
                 }
 
                 $this->binariesUpdate[$binaryId] = $this->binariesUpdate[$binaryId] ?? ['Size' => 0, 'Parts' => 0];
-                if (isset($existingKeys[$hashLookupKey])
-                    || isset($existingKeys[$fileLookupKey])
-                    || isset($seenLookupKeys[$fileLookupKey])
-                ) {
-                    $this->addBinaryUpdateForNewPart(
-                        $binaryId,
-                        (int) $row['number'],
-                        (int) $row['partsize'],
-                        $existingPartKeys,
-                        $seenPartKeys
-                    );
-                } else {
-                    $seenPartKeys[$this->partKey($binaryId, (int) $row['number'])] = true;
-                }
-                $seenLookupKeys[$fileLookupKey] = true;
+                $this->addBinaryUpdateForNewPart(
+                    $binaryId,
+                    (int) $row['number'],
+                    (int) $row['partsize'],
+                    $existingPartKeys,
+                    $seenPartKeys
+                );
                 foreach ($extraUpdatesByArticleKey[$articleKey] ?? [] as $extraPart) {
                     $this->addBinaryUpdateForNewPart(
                         $binaryId,
@@ -359,9 +349,9 @@ final class BinaryHandler
                     'name' => $row['name'],
                     'collections_id' => $row['collections_id'],
                     'totalparts' => $row['totalparts'],
-                    'currentparts' => 1,
+                    'currentparts' => 0,
                     'filenumber' => $row['filenumber'],
-                    'partsize' => $row['partsize'],
+                    'partsize' => 0,
                 ];
             }
 
@@ -376,15 +366,14 @@ final class BinaryHandler
             $placeholders = [];
             $bindings = [];
             foreach ($chunk as $row) {
-                $placeholders[] = '(UNHEX(?), ?, ?, ?, 1, ?, ?)';
+                $placeholders[] = '(UNHEX(?), ?, ?, ?, 0, ?, 0)';
                 array_push(
                     $bindings,
                     $row['hash'],
                     $row['name'],
                     $row['collections_id'],
                     $row['totalparts'],
-                    $row['filenumber'],
-                    $row['partsize']
+                    $row['filenumber']
                 );
             }
 
@@ -507,6 +496,7 @@ final class BinaryHandler
         }
 
         $existing = [];
+        $lockClause = DB::getDriverName() === 'sqlite' ? '' : ' FOR UPDATE';
         foreach (array_chunk(array_values($pairs), self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
             $tuples = implode(',', array_fill(0, \count($chunk), '(?,?)'));
             $bindings = [];
@@ -515,7 +505,7 @@ final class BinaryHandler
                 $bindings[] = $number;
             }
 
-            $rows = DB::select("SELECT binaries_id, number FROM parts WHERE (binaries_id, number) IN ({$tuples})", $bindings);
+            $rows = DB::select("SELECT binaries_id, number FROM parts WHERE (binaries_id, number) IN ({$tuples}){$lockClause}", $bindings);
             foreach ($rows as $row) {
                 $existing[$this->partKey((int) $row->binaries_id, (int) $row->number)] = true;
             }

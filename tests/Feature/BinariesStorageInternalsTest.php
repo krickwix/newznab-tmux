@@ -186,6 +186,33 @@ class BinariesStorageInternalsTest extends TestCase
         self::assertLessThan($part, $aggregate);
     }
 
+    public function test_binary_part_existence_check_uses_current_locking_read(): void
+    {
+        $handler = new BinaryHandler;
+        $method = new \ReflectionMethod($handler, 'existingPartKeysForResolvedRows');
+
+        DB::shouldReceive('getDriverName')->once()->andReturn('mysql');
+        DB::shouldReceive('select')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FROM parts')
+                    && str_contains($sql, 'FOR UPDATE')),
+                [7, 100],
+            )
+            ->andReturn([(object) ['binaries_id' => 7, 'number' => 100]]);
+
+        $existing = $method->invoke($handler, [
+            'article' => [
+                'hash' => 'abc',
+                'collections_id' => 1,
+                'filenumber' => 1,
+                'number' => 100,
+            ],
+        ], ['abc:hash:1' => 7]);
+
+        self::assertSame(['7:100' => true], $existing);
+    }
+
     public function test_sqlite_rollback_cleanup_keeps_unrelated_parts_with_same_article_number(): void
     {
         DB::statement('CREATE TABLE collections (id INTEGER PRIMARY KEY, collectionhash VARCHAR(40), noise VARCHAR(64))');
@@ -563,6 +590,30 @@ class BinariesStorageInternalsTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
+    public function test_existing_collections_take_shared_parent_locks_without_xref_updates(): void
+    {
+        $handler = $this->deterministicCollectionHandler();
+        $method = new \ReflectionMethod($handler, 'bulkInsertCollectionsMysql');
+        $ids = new \ReflectionProperty($handler, 'existingIdsByHash');
+        $ids->setValue($handler, ['aaa' => 1]);
+
+        DB::shouldReceive('select')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'LOCK IN SHARE MODE')
+                    && str_contains($sql, 'ORDER BY id')),
+                [1],
+            )
+            ->andReturn([(object) ['id' => 1, 'xref' => 'alt.binaries.foo:100']]);
+        DB::shouldReceive('statement')->never();
+
+        $method->invoke($handler, [], ['aaa' => true], [
+            'first' => ['collectionhash' => 'aaa', 'xref_append' => ''],
+        ]);
+
+        $this->addToAssertionCount(1);
+    }
+
     public function test_binary_handler_logs_bulk_insert_failures_when_debug_is_disabled(): void
     {
         config(['app.debug' => false]);
@@ -619,6 +670,31 @@ class BinariesStorageInternalsTest extends TestCase
         $method->invoke($handler, [[
             'hash' => md5('retry-binary'),
             'name' => 'Retry.Binary',
+            'collections_id' => 1,
+            'totalparts' => 2,
+            'filenumber' => 1,
+            'partsize' => 100,
+        ]]);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_binary_bulk_insert_initializes_aggregates_at_zero(): void
+    {
+        $handler = new BinaryHandler;
+        $method = new \ReflectionMethod($handler, 'bulkInsertBinariesMysql');
+
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, '(UNHEX(?), ?, ?, ?, 0, ?, 0)')),
+                Mockery::type('array'),
+            )
+            ->andReturn(true);
+
+        $method->invoke($handler, [[
+            'hash' => md5('zero-binary'),
+            'name' => 'Zero.Binary',
             'collections_id' => 1,
             'totalparts' => 2,
             'filenumber' => 1,
