@@ -124,6 +124,8 @@ final class WorkerControlPolicy
             consecutiveIneffectiveBackfillPermits: $ineffectivePermits,
             backfillLocked: $backfillLocked,
             ineffectiveBackfillPermitsByTarget: $targetIneffectivePermits,
+            failSafeCause: $profile === ControlProfile::FailSafe ? FailSafeCause::Telemetry : null,
+            failSafeLastObservedAt: $profile === ControlProfile::FailSafe ? $snapshot->observedAt : 0,
         );
         $workerProfile = WorkerControlProfile::for($profile);
         $targetLockOverridden = $this->provenYieldOverrideThreshold > 0.0

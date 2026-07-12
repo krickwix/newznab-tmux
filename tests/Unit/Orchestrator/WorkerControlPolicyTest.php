@@ -98,6 +98,22 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertTrue($decision->transitioned);
     }
 
+    public function test_high_pressure_transition_into_fail_safe_records_a_telemetry_cause(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(highPressure: true),
+            new ControlState(
+                profile: ControlProfile::Drain,
+                consecutiveHigh: 2,
+                lastTransitionAt: 1_000,
+            ),
+            10_000,
+        );
+
+        self::assertSame(ControlProfile::FailSafe, $decision->profile->profile);
+        self::assertSame(FailSafeCause::Telemetry, $decision->nextState->failSafeCause);
+    }
+
     public function test_high_pressure_immediately_denies_new_backfill_supply_before_profile_transition(): void
     {
         $decision = (new WorkerControlPolicy)->decide(

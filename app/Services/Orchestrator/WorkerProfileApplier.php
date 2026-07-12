@@ -9,6 +9,8 @@ use Illuminate\Support\Facades\DB;
 
 class WorkerProfileApplier
 {
+    private const int SAFE_HIGH_PRESSURE_RECOVERY_TIMER_SECONDS = 150;
+
     public function apply(
         ControlDecision $decision,
         int $now,
@@ -24,6 +26,9 @@ class WorkerProfileApplier
                 ->value('value') + 1;
 
             $profile = $decision->profile;
+            $safeHighPressureRecovery = $profile->profile === ControlProfile::FailSafe
+                && in_array('high_pressure_sample', $decision->reasons, true)
+                && $decision->nextState->failSafeCause === FailSafeCause::Telemetry;
             $existingPermit = (int) Settings::query()
                 ->where('name', 'orchestrator_bf_permit')
                 ->lockForUpdate()
@@ -51,10 +56,12 @@ class WorkerProfileApplier
                 'orchestrator_mode' => 'active',
                 'orchestrator_profile' => $profile->profile->value,
                 'orchestrator_recovery_ok' => ($profile->profile !== ControlProfile::FailSafe
-                    || in_array('high_pressure_sample', $decision->reasons, true)) ? '1' : '0',
+                    || $safeHighPressureRecovery) ? '1' : '0',
                 'orchestrator_lease_until' => (string) ($now + 600),
                 'orchestrator_generation' => (string) $generation,
-                'orchestrator_bins_timer' => (string) $profile->binariesSleepSeconds,
+                'orchestrator_bins_timer' => (string) ($safeHighPressureRecovery
+                    ? self::SAFE_HIGH_PRESSURE_RECOVERY_TIMER_SECONDS
+                    : $profile->binariesSleepSeconds),
                 'orchestrator_back_timer' => (string) $profile->backfillSleepSeconds,
                 'orchestrator_rel_timer' => (string) $profile->releasesSleepSeconds,
                 'orchestrator_nzb_timer' => (string) $profile->nzbSleepSeconds,

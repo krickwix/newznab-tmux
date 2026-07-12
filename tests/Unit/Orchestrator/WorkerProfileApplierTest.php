@@ -8,6 +8,7 @@ use App\Models\Settings;
 use App\Services\Orchestrator\ControlDecision;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlState;
+use App\Services\Orchestrator\FailSafeCause;
 use App\Services\Orchestrator\WorkerControlProfile;
 use App\Services\Orchestrator\WorkerProfileApplier;
 use Illuminate\Database\Schema\Blueprint;
@@ -94,6 +95,33 @@ final class WorkerProfileApplierTest extends TestCase
         (new WorkerProfileApplier)->apply($this->decision(ControlProfile::FailSafe, false), 1_000, false);
 
         self::assertSame(0, Settings::settingValue('orchestrator_recovery_ok'));
+        self::assertSame(300, Settings::settingValue('orchestrator_bins_timer'));
+    }
+
+    public function test_safe_high_pressure_recovery_uses_the_measured_recovery_timer(): void
+    {
+        (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::FailSafe, false, ['high_pressure_sample'], FailSafeCause::Telemetry),
+            1_000,
+            false,
+        );
+
+        self::assertSame(1, Settings::settingValue('orchestrator_recovery_ok'));
+        self::assertSame(150, Settings::settingValue('orchestrator_bins_timer'));
+    }
+
+    public function test_hard_or_unknown_fail_safe_cannot_use_the_fast_recovery_lane(): void
+    {
+        foreach ([FailSafeCause::Hard, FailSafeCause::Unknown] as $cause) {
+            (new WorkerProfileApplier)->apply(
+                $this->decision(ControlProfile::FailSafe, false, ['high_pressure_sample'], $cause),
+                1_000,
+                false,
+            );
+
+            self::assertSame(0, Settings::settingValue('orchestrator_recovery_ok'));
+            self::assertSame(300, Settings::settingValue('orchestrator_bins_timer'));
+        }
     }
 
     public function test_it_preserves_an_unconsumed_permit_without_an_explicit_grant(): void
@@ -159,13 +187,18 @@ final class WorkerProfileApplierTest extends TestCase
         }
     }
 
-    private function decision(ControlProfile $profile, bool $backfillPermitted): ControlDecision
-    {
+    /** @param list<string> $reasons */
+    private function decision(
+        ControlProfile $profile,
+        bool $backfillPermitted,
+        array $reasons = ['test'],
+        ?FailSafeCause $failSafeCause = null,
+    ): ControlDecision {
         return new ControlDecision(
             profile: WorkerControlProfile::for($profile),
             backfillPermitted: $backfillPermitted,
-            reasons: ['test'],
-            nextState: new ControlState(profile: $profile),
+            reasons: $reasons,
+            nextState: new ControlState(profile: $profile, failSafeCause: $failSafeCause),
             transitioned: false,
         );
     }
