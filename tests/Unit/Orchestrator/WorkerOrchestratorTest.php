@@ -26,6 +26,25 @@ use Tests\TestCase;
 
 final class WorkerOrchestratorTest extends TestCase
 {
+    public function test_incomplete_release_lineage_requires_exact_completed_input(): void
+    {
+        $orchestrator = new WorkerOrchestrator(
+            Mockery::mock(PipelineSnapshotRepository::class),
+            new WorkerControlPolicy,
+            Mockery::mock(WorkerControlStateStore::class),
+            Mockery::mock(WorkerProfileApplier::class),
+        );
+        $method = new ReflectionMethod($orchestrator, 'shouldRememberIncompleteReleaseCohort');
+        $observation = ['backfill_quantity' => 10_000];
+
+        self::assertTrue($method->invoke($orchestrator, $observation, true, true, 10_000, 1, 0));
+        self::assertFalse($method->invoke($orchestrator, $observation, true, true, 9_999, 1, 0));
+        self::assertFalse($method->invoke($orchestrator, $observation, false, true, 10_000, 1, 0));
+        self::assertFalse($method->invoke($orchestrator, $observation, true, true, 10_000, 0, 0));
+        self::assertFalse($method->invoke($orchestrator, $observation, true, true, 10_000, 1, 1));
+        self::assertFalse($method->invoke($orchestrator, ['backfill_quantity' => 0], true, true, 0, 1, 0));
+    }
+
     public function test_zero_output_context_retry_grace_is_bounded_to_five_minutes_minimum(): void
     {
         $key = 'NNTMUX_ORCHESTRATOR_BACKFILL_ZERO_OUTPUT_GRACE_SECONDS';
@@ -592,6 +611,11 @@ final class WorkerOrchestratorTest extends TestCase
             ['name' => 'orchestrator_bf_completed', 'value' => '7'],
         ]);
         $store = new WorkerControlStateStore;
+        $store->rememberIncompleteReleaseCohort([
+            'backfill_group' => 'alt.test',
+            'release_high_watermark' => 90,
+            'backfill_cursor_postdate' => '2026-01-03 03:04:05',
+        ], 100, '2026-01-02 03:04:05', time());
         $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
         $store->beginPermitObservation($baseline, generation: 7, now: time() - 1201, outcome: [
             'cursor' => 20_000,
@@ -614,7 +638,14 @@ final class WorkerOrchestratorTest extends TestCase
             100,
             '2026-01-02 03:04:05',
             '2026-01-01 03:04:05',
-        )->andReturn(3);
+        )->andReturn(1);
+        $snapshots->shouldReceive('backfillCompletedNzbsForReleaseCohort')->once()->with(
+            'alt.test',
+            90,
+            100,
+            '2026-01-03 03:04:05',
+            '2026-01-02 03:04:05',
+        )->andReturn(2);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->with(
             'alt.test',
             100,

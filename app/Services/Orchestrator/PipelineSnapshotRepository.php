@@ -323,6 +323,39 @@ class PipelineSnapshotRepository
         ]);
     }
 
+    public function backfillCompletedNzbsForReleaseCohort(
+        string $group,
+        int $releaseIdLowExclusive,
+        int $releaseIdHighInclusive,
+        string $startPostdate,
+        string $endPostdate,
+    ): int {
+        if ($releaseIdHighInclusive <= $releaseIdLowExclusive) {
+            return 0;
+        }
+        $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+
+        return (int) DB::scalar('SELECT COUNT(*)
+            FROM releases r
+            INNER JOIN usenet_groups g ON g.id = r.groups_id
+            WHERE g.name = ?
+            AND r.id > ?
+            AND r.id <= ?
+            AND r.nzbstatus = 1
+            AND r.postdate BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)
+                AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', [
+            $group,
+            max(0, $releaseIdLowExclusive),
+            max(0, $releaseIdHighInclusive),
+            $startPostdate,
+            $endPostdate,
+            $postdateToleranceSeconds,
+            $startPostdate,
+            $endPostdate,
+            $postdateToleranceSeconds,
+        ]);
+    }
+
     public function backfillCreatedReleasesForCohort(
         string $group,
         int $releaseHighWatermark,

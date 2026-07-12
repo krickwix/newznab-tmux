@@ -20,6 +20,8 @@ class WorkerControlStateStore
 
     private const string BACKFILL_GROWTH_KEY = 'nntmux:orchestrator:backfill-growth';
 
+    private const string INCOMPLETE_RELEASE_COHORT_KEY = 'nntmux:orchestrator:incomplete-release-cohort';
+
     public const string DECISION_KEY = 'nntmux:orchestrator:last-decision';
 
     public function leaderLock(): Lock
@@ -143,7 +145,8 @@ class WorkerControlStateStore
     /** @param array{cursor: int, cursor_postdate: string, ready_collections: int, releases: int, release_high_watermark: int} $outcome */
     public function beginPermitObservation(PipelineSnapshot $snapshot, int $generation, int $now, array $outcome, int $quantity = 10000): void
     {
-        Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forever(self::PERMIT_OBSERVATION_KEY, [
+        $priorReleaseCohort = $this->takeIncompleteReleaseCohort($snapshot->backfillGroup, $now);
+        $observation = [
             'schema_version' => 2,
             'generation' => $generation,
             'issued_at' => $now,
@@ -166,7 +169,61 @@ class WorkerControlStateStore
             'backfill_cursor' => $outcome['cursor'],
             'backfill_cursor_postdate' => $outcome['cursor_postdate'],
             'backfill_quantity' => max(10000, $quantity),
+        ];
+        if ($priorReleaseCohort !== null) {
+            $observation['prior_release_cohort'] = $priorReleaseCohort;
+        }
+        Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forever(self::PERMIT_OBSERVATION_KEY, $observation);
+    }
+
+    /** @param array<string, mixed> $observation */
+    public function rememberIncompleteReleaseCohort(
+        array $observation,
+        int $releaseIdHighInclusive,
+        string $cursorEndPostdate,
+        int $now,
+    ): void {
+        $group = (string) ($observation['backfill_group'] ?? '');
+        $releaseIdLowExclusive = max(0, (int) ($observation['release_high_watermark'] ?? 0));
+        $cursorStartPostdate = (string) ($observation['backfill_cursor_postdate'] ?? '');
+        if ($group === '' || $releaseIdHighInclusive <= $releaseIdLowExclusive || $cursorStartPostdate === '' || $cursorEndPostdate === '') {
+            return;
+        }
+
+        Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forever(self::INCOMPLETE_RELEASE_COHORT_KEY, [
+            'group' => $group,
+            'id_low_exclusive' => $releaseIdLowExclusive,
+            'id_high_inclusive' => $releaseIdHighInclusive,
+            'cursor_start_postdate' => $cursorStartPostdate,
+            'cursor_end_postdate' => $cursorEndPostdate,
+            'expires_at' => $now + (int) config('nntmux.orchestrator.permit_observation_seconds', 1200),
         ]);
+    }
+
+    /** @return array{id_low_exclusive: int, id_high_inclusive: int, cursor_start_postdate: string, cursor_end_postdate: string}|null */
+    private function takeIncompleteReleaseCohort(string $group, int $now): ?array
+    {
+        $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+        $cohort = $cache->get(self::INCOMPLETE_RELEASE_COHORT_KEY);
+        if (! is_array($cohort)) {
+            return null;
+        }
+        if ((int) ($cohort['expires_at'] ?? 0) < $now) {
+            $cache->forget(self::INCOMPLETE_RELEASE_COHORT_KEY);
+
+            return null;
+        }
+        if ((string) ($cohort['group'] ?? '') !== $group) {
+            return null;
+        }
+        $cache->forget(self::INCOMPLETE_RELEASE_COHORT_KEY);
+
+        return [
+            'id_low_exclusive' => max(0, (int) ($cohort['id_low_exclusive'] ?? 0)),
+            'id_high_inclusive' => max(0, (int) ($cohort['id_high_inclusive'] ?? 0)),
+            'cursor_start_postdate' => (string) ($cohort['cursor_start_postdate'] ?? ''),
+            'cursor_end_postdate' => (string) ($cohort['cursor_end_postdate'] ?? ''),
+        ];
     }
 
     /** @return array<string, mixed>|null */

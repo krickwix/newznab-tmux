@@ -83,6 +83,16 @@ class WorkerOrchestrator
                         (string) $permitObservation['backfill_cursor_postdate'],
                         (string) ($outcome['cursor_postdate'] ?? ''),
                     );
+                    $priorReleaseCohort = $permitObservation['prior_release_cohort'] ?? null;
+                    if (is_array($priorReleaseCohort)) {
+                        $cohortNzbs += $this->snapshots->backfillCompletedNzbsForReleaseCohort(
+                            $observedGroup,
+                            (int) ($priorReleaseCohort['id_low_exclusive'] ?? 0),
+                            (int) ($priorReleaseCohort['id_high_inclusive'] ?? 0),
+                            (string) ($priorReleaseCohort['cursor_start_postdate'] ?? ''),
+                            (string) ($priorReleaseCohort['cursor_end_postdate'] ?? ''),
+                        );
+                    }
                 }
                 $cursorDelta = max(0, (int) ($permitObservation['backfill_cursor'] ?? 0) - (int) $outcome['cursor']);
                 $zeroOutputContextReady = $this->zeroOutputContextReady(
@@ -110,6 +120,21 @@ class WorkerOrchestrator
                     $this->applier->revokePermit();
                 }
                 if ($closeObservation && $permitClaimed && $hasCohortBaseline) {
+                    if ($this->shouldRememberIncompleteReleaseCohort(
+                        $permitObservation,
+                        $permitCompleted,
+                        $cursorMoved,
+                        $cursorDelta,
+                        $cohortReleases,
+                        $cohortNzbs,
+                    )) {
+                        $this->store->rememberIncompleteReleaseCohort(
+                            $permitObservation,
+                            (int) ($outcome['release_high_watermark'] ?? 0),
+                            (string) ($outcome['cursor_postdate'] ?? ''),
+                            time(),
+                        );
+                    }
                     $this->store->recordBackfillYield(
                         $observedGroup,
                         cursorDelta: $cursorDelta,
@@ -267,6 +292,25 @@ class WorkerOrchestrator
                 }
             }
         }
+    }
+
+    /** @param array<string, mixed> $observation */
+    private function shouldRememberIncompleteReleaseCohort(
+        array $observation,
+        bool $permitCompleted,
+        bool $cursorMoved,
+        int $cursorDelta,
+        int $cohortReleases,
+        int $cohortNzbs,
+    ): bool {
+        $quantity = (int) ($observation['backfill_quantity'] ?? 0);
+
+        return $permitCompleted
+            && $cursorMoved
+            && $quantity >= 10_000
+            && $cursorDelta === $quantity
+            && $cohortReleases > 0
+            && $cohortNzbs === 0;
     }
 
     /**

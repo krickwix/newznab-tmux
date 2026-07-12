@@ -183,6 +183,59 @@ final class WorkerControlStateStoreTest extends TestCase
         self::assertSame(1_000, $store->observePermitCompletion(7, 2_000)['completed_observed_at'] ?? null);
     }
 
+    public function test_incomplete_release_cohort_is_consumed_only_by_the_next_same_group_permit(): void
+    {
+        $store = new WorkerControlStateStore;
+        $store->rememberIncompleteReleaseCohort([
+            'backfill_group' => 'alt.test',
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], 103, '2026-01-01 03:04:05', 1_000);
+
+        $store->beginPermitObservation(new PipelineSnapshot(
+            1, 2, 3, 4, 5, backfillGroup: 'alt.other', backfillCursor: 10_000,
+        ), 8, 1_001, [
+            'cursor' => 10_000,
+            'cursor_postdate' => '2025-12-31 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 3,
+            'release_high_watermark' => 103,
+        ]);
+
+        self::assertArrayNotHasKey('prior_release_cohort', $store->permitObservation() ?? []);
+
+        $store->clearPermitObservation();
+        $store->beginPermitObservation(new PipelineSnapshot(
+            1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 10_000,
+        ), 9, 1_002, [
+            'cursor' => 10_000,
+            'cursor_postdate' => '2025-12-30 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 3,
+            'release_high_watermark' => 103,
+        ]);
+
+        self::assertSame([
+            'id_low_exclusive' => 100,
+            'id_high_inclusive' => 103,
+            'cursor_start_postdate' => '2026-01-02 03:04:05',
+            'cursor_end_postdate' => '2026-01-01 03:04:05',
+        ], $store->permitObservation()['prior_release_cohort'] ?? null);
+
+        $store->clearPermitObservation();
+        $store->beginPermitObservation(new PipelineSnapshot(
+            1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 10_000,
+        ), 10, 1_003, [
+            'cursor' => 10_000,
+            'cursor_postdate' => '2025-12-30 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 3,
+            'release_high_watermark' => 103,
+        ]);
+
+        self::assertArrayNotHasKey('prior_release_cohort', $store->permitObservation() ?? []);
+    }
+
     public function test_permit_observation_retains_peak_backlogs_after_later_drain(): void
     {
         $store = new WorkerControlStateStore;
