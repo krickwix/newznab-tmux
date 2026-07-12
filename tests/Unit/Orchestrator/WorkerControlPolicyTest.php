@@ -351,7 +351,7 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertSame(3, $state->recoveryDrainSamples);
     }
 
-    public function test_bounded_repair_growth_holds_streak_for_at_most_two_samples(): void
+    public function test_bounded_repair_growth_holds_streak_for_at_most_three_samples(): void
     {
         $policy = new WorkerControlPolicy;
         $state = new ControlState(
@@ -370,7 +370,7 @@ final class WorkerControlPolicyTest extends TestCase
             'nzbs' => 0.0,
         ];
 
-        foreach ([130, 160] as $expectedHoldSamples => $observedAt) {
+        foreach ([130, 160, 190] as $expectedHoldSamples => $observedAt) {
             $bounded = $policy->decide($this->snapshot(
                 partsBacklog: $backlogs['parts'],
                 binariesBacklog: $backlogs['binaries'],
@@ -392,7 +392,7 @@ final class WorkerControlPolicyTest extends TestCase
             binariesBacklog: $backlogs['binaries'],
             collectionsBacklog: $backlogs['collections'],
             highPressure: true,
-            observedAt: 190,
+            observedAt: 220,
             backlogRatesPerMinute: $rates,
             backlogEwmaPerMinute: $ewma,
             bodyRecoveryQueueBacklog: 10_000,

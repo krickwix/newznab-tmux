@@ -30,7 +30,7 @@ final class WorkerControlPolicy
 
     public const int RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES = 7_200;
 
-    public const int RECOVERY_DRAIN_MAX_HOLD_SAMPLES = 2;
+    public const int RECOVERY_DRAIN_MAX_HOLD_SAMPLES = 3;
 
     private float $provenYieldOverrideThreshold;
 
