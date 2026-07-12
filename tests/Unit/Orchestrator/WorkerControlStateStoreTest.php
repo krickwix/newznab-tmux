@@ -40,6 +40,7 @@ final class WorkerControlStateStoreTest extends TestCase
             failSafeCause: FailSafeCause::Telemetry,
             failSafeRecoverySamples: 1,
             failSafeLastObservedAt: 999,
+            recoveryDrainSamples: 2,
         );
 
         $store->storeState($state);

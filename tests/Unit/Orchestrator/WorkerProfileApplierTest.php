@@ -110,11 +110,28 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame(115, Settings::settingValue('orchestrator_bins_timer'));
     }
 
+    public function test_safe_draining_pipeline_uses_the_accelerated_recovery_timer(): void
+    {
+        (new WorkerProfileApplier)->apply(
+            $this->decision(
+                ControlProfile::FailSafe,
+                false,
+                ['high_pressure_sample', 'core_pipeline_draining'],
+                FailSafeCause::Telemetry,
+            ),
+            1_000,
+            false,
+        );
+
+        self::assertSame(1, Settings::settingValue('orchestrator_recovery_ok'));
+        self::assertSame(20, Settings::settingValue('orchestrator_bins_timer'));
+    }
+
     public function test_hard_or_unknown_fail_safe_cannot_use_the_fast_recovery_lane(): void
     {
         foreach ([FailSafeCause::Hard, FailSafeCause::Unknown] as $cause) {
             (new WorkerProfileApplier)->apply(
-                $this->decision(ControlProfile::FailSafe, false, ['high_pressure_sample'], $cause),
+                $this->decision(ControlProfile::FailSafe, false, ['high_pressure_sample', 'core_pipeline_draining'], $cause),
                 1_000,
                 false,
             );

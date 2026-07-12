@@ -136,7 +136,25 @@ class PipelineSnapshotRepository
             backfillTargetIneffectivePermits: (int) ($controlState->ineffectiveBackfillPermitsByTarget[$backfillGroup] ?? 0),
             backfillRemainingArticles: (int) ($backfillTarget['remaining_articles'] ?? 0),
             backfillSafeQuantity: $this->safeBackfillQuantity($backlogs, $backfillGroup),
+            bodyRecoveryQueueBacklog: $this->bodyRecoveryQueueBacklog(),
         );
+    }
+
+    private function bodyRecoveryQueueBacklog(): int
+    {
+        $groups = array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) config('nntmux.body_preamble_deobfuscate_groups', '')),
+        ), static fn (string $group): bool => $group !== ''));
+        if ($groups === []) {
+            return 0;
+        }
+
+        return (int) DB::table('missed_parts as mp')
+            ->join('usenet_groups as g', 'g.id', '=', 'mp.groups_id')
+            ->whereIn('g.name', $groups)
+            ->where('mp.attempts', '<', 3)
+            ->count('mp.id');
     }
 
     /** @param array{parts: int, binaries: int, collections: int, releases: int, nzbs: int} $backlogs */

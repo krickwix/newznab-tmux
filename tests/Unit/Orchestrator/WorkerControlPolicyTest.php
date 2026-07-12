@@ -220,6 +220,77 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertSame(0, $high->nextState->failSafeRecoverySamples);
     }
 
+    public function test_safe_high_pressure_marks_acceleration_only_while_all_core_backlogs_are_draining(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        );
+        $policy = new WorkerControlPolicy;
+        $drainingRates = ['parts' => 0.0, 'binaries' => 0.0, 'collections' => 0.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $drainingEwma = ['parts' => -5.0, 'binaries' => -6.0, 'collections' => -7.0, 'releases' => 0.0, 'nzbs' => 0.0];
+
+        foreach ([130, 190] as $observedAt) {
+            $warming = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: $observedAt,
+                backlogRatesPerMinute: $drainingRates,
+                backlogEwmaPerMinute: $drainingEwma,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $state, 10_000);
+            self::assertNotContains('core_pipeline_draining', $warming->reasons);
+            $state = $warming->nextState;
+            if ($observedAt === 130) {
+                $duplicate = $policy->decide($this->snapshot(
+                    highPressure: true,
+                    observedAt: 130,
+                    backlogRatesPerMinute: $drainingRates,
+                    backlogEwmaPerMinute: $drainingEwma,
+                    bodyRecoveryQueueBacklog: 1_000,
+                ), $state, 10_000);
+                self::assertSame(1, $duplicate->nextState->recoveryDrainSamples);
+                self::assertNotContains('core_pipeline_draining', $duplicate->reasons);
+            }
+        }
+        $draining = $policy->decide($this->snapshot(
+            highPressure: true,
+            observedAt: 250,
+            backlogRatesPerMinute: $drainingRates,
+            backlogEwmaPerMinute: $drainingEwma,
+            bodyRecoveryQueueBacklog: 1_000,
+        ), $state, 10_000);
+        self::assertContains('core_pipeline_draining', $draining->reasons);
+        self::assertSame(3, $draining->nextState->recoveryDrainSamples);
+
+        foreach (['parts', 'binaries', 'collections', 'releases', 'nzbs'] as $growingStage) {
+            $rates = $drainingRates;
+            $rates[$growingStage] = 0.1;
+            $notDraining = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: 310,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $drainingEwma,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $draining->nextState, 10_000);
+
+            self::assertNotContains('core_pipeline_draining', $notDraining->reasons, $growingStage);
+            self::assertSame(0, $notDraining->nextState->recoveryDrainSamples, $growingStage);
+        }
+
+        $nonFinite = $drainingEwma;
+        $nonFinite['parts'] = NAN;
+        $invalid = $policy->decide($this->snapshot(
+            highPressure: true,
+            observedAt: 310,
+            backlogRatesPerMinute: $drainingRates,
+            backlogEwmaPerMinute: $nonFinite,
+            bodyRecoveryQueueBacklog: 1_000,
+        ), $draining->nextState, 10_000);
+        self::assertNotContains('core_pipeline_draining', $invalid->reasons);
+        self::assertSame(0, $invalid->nextState->recoveryDrainSamples);
+    }
+
     public function test_hard_or_legacy_fail_safe_requires_five_safe_samples_and_the_latest_cooldown(): void
     {
         $policy = new WorkerControlPolicy;

@@ -186,6 +186,7 @@ class WorkerOrchestrator
                 'storage_available_bytes' => $snapshot->storageAvailableBytes,
                 'observed_at' => $snapshot->observedAt,
                 'eligible_nzbs' => $snapshot->eligibleNzbs,
+                'body_recovery_queue' => $snapshot->bodyRecoveryQueueBacklog,
                 'pressure' => $snapshot->highPressure ? 'high' : ($snapshot->lowPressure ? 'low' : 'neutral'),
                 'rates_per_minute' => $snapshot->backlogRatesPerMinute,
                 'ewma_per_minute' => $snapshot->backlogEwmaPerMinute,

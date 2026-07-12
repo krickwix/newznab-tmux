@@ -55,6 +55,7 @@ final readonly class PipelineSnapshot
         public int $backfillTargetIneffectivePermits = 0,
         public int $backfillRemainingArticles = 0,
         public int $backfillSafeQuantity = 10000,
+        public int $bodyRecoveryQueueBacklog = 0,
     ) {}
 
     public function withPermitOutcome(
@@ -111,6 +112,7 @@ final readonly class PipelineSnapshot
             backfillTargetIneffectivePermits: $this->backfillTargetIneffectivePermits,
             backfillRemainingArticles: $this->backfillRemainingArticles,
             backfillSafeQuantity: $this->backfillSafeQuantity,
+            bodyRecoveryQueueBacklog: $this->bodyRecoveryQueueBacklog,
         );
     }
 

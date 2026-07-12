@@ -600,6 +600,9 @@ class NntmuxPrometheusMetrics
         $lines[] = '# HELP nntmux_orchestrator_eligible_nzbs Exact actionable NZBs in the bounded selector frontier.';
         $lines[] = '# TYPE nntmux_orchestrator_eligible_nzbs gauge';
         $lines[] = $this->metric('nntmux_orchestrator_eligible_nzbs', (int) ($decision['eligible_nzbs'] ?? 0));
+        $lines[] = '# HELP nntmux_orchestrator_body_recovery_queue Current actionable BODY recovery queue across configured groups.';
+        $lines[] = '# TYPE nntmux_orchestrator_body_recovery_queue gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_body_recovery_queue', (int) ($decision['body_recovery_queue'] ?? 0));
         $targetGroup = (string) ($decision['backfill_target']['group'] ?? '');
         if ($targetGroup !== '') {
             $lines[] = '# HELP nntmux_orchestrator_backfill_target_info Selected adaptive backfill target group.';

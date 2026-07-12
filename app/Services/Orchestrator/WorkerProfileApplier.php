@@ -11,6 +11,8 @@ class WorkerProfileApplier
 {
     private const int SAFE_HIGH_PRESSURE_RECOVERY_TIMER_SECONDS = 115;
 
+    private const int ACCELERATED_RECOVERY_TIMER_SECONDS = 20;
+
     public function apply(
         ControlDecision $decision,
         int $now,
@@ -29,6 +31,8 @@ class WorkerProfileApplier
             $safeHighPressureRecovery = $profile->profile === ControlProfile::FailSafe
                 && in_array('high_pressure_sample', $decision->reasons, true)
                 && $decision->nextState->failSafeCause === FailSafeCause::Telemetry;
+            $acceleratedRecovery = $safeHighPressureRecovery
+                && in_array('core_pipeline_draining', $decision->reasons, true);
             $existingPermit = (int) Settings::query()
                 ->where('name', 'orchestrator_bf_permit')
                 ->lockForUpdate()
@@ -60,7 +64,9 @@ class WorkerProfileApplier
                 'orchestrator_lease_until' => (string) ($now + 600),
                 'orchestrator_generation' => (string) $generation,
                 'orchestrator_bins_timer' => (string) ($safeHighPressureRecovery
-                    ? self::SAFE_HIGH_PRESSURE_RECOVERY_TIMER_SECONDS
+                    ? ($acceleratedRecovery
+                        ? self::ACCELERATED_RECOVERY_TIMER_SECONDS
+                        : self::SAFE_HIGH_PRESSURE_RECOVERY_TIMER_SECONDS)
                     : $profile->binariesSleepSeconds),
                 'orchestrator_back_timer' => (string) $profile->backfillSleepSeconds,
                 'orchestrator_rel_timer' => (string) $profile->releasesSleepSeconds,

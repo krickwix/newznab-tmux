@@ -24,6 +24,10 @@ final class WorkerControlPolicy
 
     public const int RECOVERY_SAMPLE_MIN_SPACING_SECONDS = 30;
 
+    public const int RECOVERY_DRAIN_SAMPLES_TO_ACCELERATE = 3;
+
+    public const float RECOVERY_DRAIN_MIN_EWMA_PER_MINUTE = 5.0;
+
     private float $provenYieldOverrideThreshold;
 
     public function __construct(?float $provenYieldOverrideThreshold = null)
@@ -184,7 +188,19 @@ final class WorkerControlPolicy
         $cooldownSatisfied = $cause === FailSafeCause::Telemetry || $now >= $state->cooldownUntil;
         $recovered = $recoverySamples >= $requiredSamples && $cooldownSatisfied;
         $profile = $recovered ? ControlProfile::Drain : ControlProfile::FailSafe;
+        $recoveryDrainSamples = match (true) {
+            $recovered => 0,
+            ! $distinctSample => $state->recoveryDrainSamples,
+            $this->strongRecoveryDrainSample($snapshot) => min(
+                self::RECOVERY_DRAIN_SAMPLES_TO_ACCELERATE,
+                $state->recoveryDrainSamples + 1,
+            ),
+            default => 0,
+        };
         $reasons = [$pressureReason, $recovered ? 'fail_safe_recovered_to_drain' : 'fail_safe_recovery_pending'];
+        if ($recoveryDrainSamples >= self::RECOVERY_DRAIN_SAMPLES_TO_ACCELERATE) {
+            $reasons[] = 'core_pipeline_draining';
+        }
         $nextState = new ControlState(
             profile: $profile,
             lastTransitionAt: $recovered ? $now : $state->lastTransitionAt,
@@ -195,6 +211,7 @@ final class WorkerControlPolicy
             failSafeCause: $recovered ? null : $cause,
             failSafeRecoverySamples: $recovered ? 0 : min($requiredSamples, $recoverySamples),
             failSafeLastObservedAt: $distinctSample ? $snapshot->observedAt : $state->failSafeLastObservedAt,
+            recoveryDrainSamples: $recoveryDrainSamples,
         );
 
         return new ControlDecision(
@@ -204,6 +221,32 @@ final class WorkerControlPolicy
             nextState: $nextState,
             transitioned: $recovered,
         );
+    }
+
+    private function strongRecoveryDrainSample(PipelineSnapshot $snapshot): bool
+    {
+        if (! $snapshot->highPressure || $snapshot->bodyRecoveryQueueBacklog <= 0) {
+            return false;
+        }
+
+        foreach (['parts', 'binaries', 'collections'] as $stage) {
+            $instant = $snapshot->backlogRatesPerMinute[$stage] ?? NAN;
+            $ewma = $snapshot->backlogEwmaPerMinute[$stage] ?? NAN;
+            if (! is_finite($instant) || ! is_finite($ewma)
+                || $instant > 0.0
+                || $ewma > -self::RECOVERY_DRAIN_MIN_EWMA_PER_MINUTE) {
+                return false;
+            }
+        }
+        foreach (['releases', 'nzbs'] as $stage) {
+            $instant = $snapshot->backlogRatesPerMinute[$stage] ?? NAN;
+            $ewma = $snapshot->backlogEwmaPerMinute[$stage] ?? NAN;
+            if (! is_finite($instant) || ! is_finite($ewma) || $instant > 0.0 || $ewma > 0.0) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
