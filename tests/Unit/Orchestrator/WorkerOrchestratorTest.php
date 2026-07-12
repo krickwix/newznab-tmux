@@ -25,18 +25,18 @@ use Tests\TestCase;
 
 final class WorkerOrchestratorTest extends TestCase
 {
-    public function test_configuration_clamps_the_observation_window_to_twenty_minutes(): void
+    public function test_configuration_clamps_the_observation_window_to_five_minutes(): void
     {
         $key = 'NNTMUX_ORCHESTRATOR_PERMIT_OBSERVATION_SECONDS';
         $previous = getenv($key);
-        putenv($key.'=901');
-        $_ENV[$key] = '901';
-        $_SERVER[$key] = '901';
+        putenv($key.'=299');
+        $_ENV[$key] = '299';
+        $_SERVER[$key] = '299';
 
         try {
             $configuration = require base_path('config/nntmux.php');
 
-            self::assertSame(1200, $configuration['orchestrator']['permit_observation_seconds']);
+            self::assertSame(300, $configuration['orchestrator']['permit_observation_seconds']);
         } finally {
             if ($previous === false) {
                 putenv($key);
