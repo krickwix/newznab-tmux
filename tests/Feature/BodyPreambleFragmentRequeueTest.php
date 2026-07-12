@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Models\Settings;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
@@ -32,6 +33,7 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
             ['name' => 'categorizeforeign', 'value' => '0'],
             ['name' => 'catwebdl', 'value' => '0'],
         ]);
+        Settings::forgetCachedSettings();
 
         DB::statement('CREATE TABLE collections (
             id INTEGER PRIMARY KEY,
@@ -272,6 +274,11 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
     public function test_recovery_cycle_prunes_proven_sources_then_replenishes_a_bounded_queue(): void
     {
         $this->seedFragments();
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_profile', 'value' => 'drain'],
+            ['name' => 'orchestrator_lease_until', 'value' => (string) (time() + 600)],
+        ]);
+        Settings::forgetCachedSettings();
         DB::table('collections')->where('id', 1)->update([
             'subject' => '[PRiVATE] \\opaque\\::payload::/opaque/ [newzNZB] [2/41] - yEnc',
         ]);
@@ -301,6 +308,28 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
         self::assertSame(1, $output['prune']['deleted']);
         self::assertFalse(DB::table('collections')->where('id', 1)->exists());
         self::assertGreaterThanOrEqual(1, $output['requeue']['inserted']);
+    }
+
+    public function test_recovery_cycle_skips_all_mutation_under_fail_safe(): void
+    {
+        $this->seedFragments();
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_profile', 'value' => 'fail_safe'],
+            ['name' => 'orchestrator_lease_until', 'value' => (string) (time() + 600)],
+        ]);
+        Settings::forgetCachedSettings();
+
+        self::assertSame(0, Artisan::call('nntmux:body-preamble-recovery-cycle', [
+            'group' => 'alt.binaries.blu-ray',
+            '--regex' => ['88', '-10'],
+            '--json' => true,
+        ]));
+        $output = json_decode(Artisan::output(), true);
+
+        self::assertTrue($output['skipped']);
+        self::assertSame('orchestrator_profile_unsafe', $output['reason']);
+        self::assertSame(1, DB::table('missed_parts')->count());
+        self::assertSame(6, DB::table('collections')->count());
     }
 
     public function test_update_requires_regex_selector(): void

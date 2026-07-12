@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Models\Settings;
 use App\Services\Diagnostics\BodyPreambleFragmentRequeueService;
 use Illuminate\Console\Command;
 use InvalidArgumentException;
@@ -23,6 +24,19 @@ final class BodyPreambleRecoveryCycle extends Command
 
     public function handle(BodyPreambleFragmentRequeueService $service): int
     {
+        $profile = (string) Settings::settingValue('orchestrator_profile');
+        $leaseUntil = (int) Settings::settingValue('orchestrator_lease_until');
+        if (! in_array($profile, ['drain', 'balanced', 'fill'], true) || $leaseUntil < time()) {
+            $summary = [
+                'skipped' => true,
+                'reason' => $leaseUntil < time() ? 'orchestrator_lease_stale' : 'orchestrator_profile_unsafe',
+                'profile' => $profile,
+            ];
+            $this->line((string) json_encode($summary, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+
+            return self::SUCCESS;
+        }
+
         try {
             $group = (string) $this->argument('group');
             $regexIds = $this->regexIds();
@@ -70,7 +84,7 @@ final class BodyPreambleRecoveryCycle extends Command
             return self::FAILURE;
         }
 
-        $summary = ['prune' => $prune, 'requeue' => $requeue];
+        $summary = ['skipped' => false, 'profile' => $profile, 'prune' => $prune, 'requeue' => $requeue];
         if ((bool) $this->option('json')) {
             $this->line((string) json_encode($summary, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
         } else {
