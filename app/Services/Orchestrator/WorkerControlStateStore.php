@@ -50,6 +50,7 @@ class WorkerControlStateStore
             failSafeRecoverySamples: max(0, (int) ($data['fail_safe_recovery_samples'] ?? 0)),
             failSafeLastObservedAt: max(0, (int) ($data['fail_safe_last_observed_at'] ?? 0)),
             recoveryDrainSamples: max(0, (int) ($data['recovery_drain_samples'] ?? 0)),
+            recoveryDrainHoldSamples: max(0, (int) ($data['recovery_drain_hold_samples'] ?? 0)),
         );
     }
 
@@ -68,6 +69,7 @@ class WorkerControlStateStore
             'fail_safe_recovery_samples' => $state->failSafeRecoverySamples,
             'fail_safe_last_observed_at' => $state->failSafeLastObservedAt,
             'recovery_drain_samples' => $state->recoveryDrainSamples,
+            'recovery_drain_hold_samples' => $state->recoveryDrainHoldSamples,
         ]);
     }
 

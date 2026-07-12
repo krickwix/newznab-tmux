@@ -28,6 +28,10 @@ final class WorkerControlPolicy
 
     public const float RECOVERY_DRAIN_MIN_EWMA_PER_MINUTE = 5.0;
 
+    public const int RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES = 7_200;
+
+    public const int RECOVERY_DRAIN_MAX_HOLD_SAMPLES = 2;
+
     private float $provenYieldOverrideThreshold;
 
     public function __construct(?float $provenYieldOverrideThreshold = null)
@@ -188,14 +192,26 @@ final class WorkerControlPolicy
         $cooldownSatisfied = $cause === FailSafeCause::Telemetry || $now >= $state->cooldownUntil;
         $recovered = $recoverySamples >= $requiredSamples && $cooldownSatisfied;
         $profile = $recovered ? ControlProfile::Drain : ControlProfile::FailSafe;
+        $strongRecoveryDrain = $distinctSample && $this->strongRecoveryDrainSample($snapshot);
+        $safeRecoveryPulse = $distinctSample
+            && $state->recoveryDrainSamples > 0
+            && $state->recoveryDrainHoldSamples < self::RECOVERY_DRAIN_MAX_HOLD_SAMPLES
+            && $this->safeRecoveryDrainTrend($snapshot);
         $recoveryDrainSamples = match (true) {
             $recovered => 0,
             ! $distinctSample => $state->recoveryDrainSamples,
-            $this->strongRecoveryDrainSample($snapshot) => min(
+            $strongRecoveryDrain => min(
                 self::RECOVERY_DRAIN_SAMPLES_TO_ACCELERATE,
                 $state->recoveryDrainSamples + 1,
             ),
-            $this->safeRecoveryDrainTrend($snapshot) => $state->recoveryDrainSamples,
+            $safeRecoveryPulse => $state->recoveryDrainSamples,
+            default => 0,
+        };
+        $recoveryDrainHoldSamples = match (true) {
+            $recovered => 0,
+            ! $distinctSample => $state->recoveryDrainHoldSamples,
+            $strongRecoveryDrain => 0,
+            $safeRecoveryPulse => $state->recoveryDrainHoldSamples + 1,
             default => 0,
         };
         $reasons = [$pressureReason, $recovered ? 'fail_safe_recovered_to_drain' : 'fail_safe_recovery_pending'];
@@ -213,6 +229,7 @@ final class WorkerControlPolicy
             failSafeRecoverySamples: $recovered ? 0 : min($requiredSamples, $recoverySamples),
             failSafeLastObservedAt: $distinctSample ? $snapshot->observedAt : $state->failSafeLastObservedAt,
             recoveryDrainSamples: $recoveryDrainSamples,
+            recoveryDrainHoldSamples: $recoveryDrainHoldSamples,
         );
 
         return new ControlDecision(
@@ -231,7 +248,9 @@ final class WorkerControlPolicy
         }
 
         foreach (['parts', 'binaries', 'collections'] as $stage) {
-            if (($snapshot->backlogRatesPerMinute[$stage] ?? NAN) > 0.0) {
+            $instant = $snapshot->backlogRatesPerMinute[$stage] ?? NAN;
+            $ewma = $snapshot->backlogEwmaPerMinute[$stage] ?? NAN;
+            if ($instant > 0.0 || $ewma > -self::RECOVERY_DRAIN_MIN_EWMA_PER_MINUTE) {
                 return false;
             }
         }
@@ -248,8 +267,14 @@ final class WorkerControlPolicy
         foreach (['parts', 'binaries', 'collections'] as $stage) {
             $instant = $snapshot->backlogRatesPerMinute[$stage] ?? NAN;
             $ewma = $snapshot->backlogEwmaPerMinute[$stage] ?? NAN;
+            $backlog = match ($stage) {
+                'parts' => $snapshot->partsBacklog,
+                'binaries' => $snapshot->binariesBacklog,
+                'collections' => $snapshot->collectionsBacklog,
+            };
+            $maximumEwma = $backlog * log(2.0) / self::RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES;
             if (! is_finite($instant) || ! is_finite($ewma)
-                || $ewma > -self::RECOVERY_DRAIN_MIN_EWMA_PER_MINUTE) {
+                || $ewma > $maximumEwma) {
                 return false;
             }
         }

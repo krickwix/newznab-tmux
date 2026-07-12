@@ -41,6 +41,7 @@ final class WorkerControlStateStoreTest extends TestCase
             failSafeRecoverySamples: 1,
             failSafeLastObservedAt: 999,
             recoveryDrainSamples: 2,
+            recoveryDrainHoldSamples: 1,
         );
 
         $store->storeState($state);
@@ -59,6 +60,7 @@ final class WorkerControlStateStoreTest extends TestCase
 
         self::assertSame(FailSafeCause::Unknown, $state->failSafeCause);
         self::assertSame(0, $state->failSafeRecoverySamples);
+        self::assertSame(0, $state->recoveryDrainHoldSamples);
     }
 
     public function test_it_round_trips_the_snapshot_projection_used_for_delta_calculation(): void

@@ -20,8 +20,9 @@ final readonly class ControlState
         public int $failSafeRecoverySamples = 0,
         public int $failSafeLastObservedAt = 0,
         public int $recoveryDrainSamples = 0,
+        public int $recoveryDrainHoldSamples = 0,
     ) {
-        if ($consecutiveHigh < 0 || $consecutiveLow < 0 || $consecutiveIneffectiveBackfillPermits < 0 || $failSafeRecoverySamples < 0 || $failSafeLastObservedAt < 0 || $recoveryDrainSamples < 0) {
+        if ($consecutiveHigh < 0 || $consecutiveLow < 0 || $consecutiveIneffectiveBackfillPermits < 0 || $failSafeRecoverySamples < 0 || $failSafeLastObservedAt < 0 || $recoveryDrainSamples < 0 || $recoveryDrainHoldSamples < 0) {
             throw new \InvalidArgumentException('Control state counters cannot be negative.');
         }
         foreach ($ineffectiveBackfillPermitsByTarget as $group => $count) {
