@@ -5,8 +5,12 @@ declare(strict_types=1);
 namespace App\Services\Binaries;
 
 use App\Models\MissedPart;
+use Carbon\CarbonImmutable;
+use Carbon\CarbonInterface;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Handles missed parts tracking and repair during header processing.
@@ -18,6 +22,8 @@ final class MissedPartHandler
     private int $partRepairMaxTries;
 
     private int $chunkSize;
+
+    private ?bool $claimColumnsAvailable = null;
 
     public function __construct(int $partRepairLimit = 15000, int $partRepairMaxTries = 3, int $chunkSize = 500)
     {
@@ -125,9 +131,22 @@ final class MissedPartHandler
     public function getMissingParts(int $groupId): array
     {
         try {
-            return DB::table('missed_parts')
+            $query = DB::table('missed_parts')
                 ->where('groups_id', $groupId)
-                ->where('attempts', '<', $this->partRepairMaxTries)
+                ->where('attempts', '<', $this->partRepairMaxTries);
+
+            if ($this->supportsClaims()) {
+                // Explicit BODY-recovery rows belong exclusively to the
+                // lease-based worker lane. Letting the legacy lane select an
+                // unclaimed/expired tagged row would permit its tokenless
+                // acknowledgement path to race a dedicated worker.
+                $query->where(static function (Builder $query): void {
+                    $query->whereNull('recovery_kind')
+                        ->orWhere('recovery_kind', '!=', 'body_preamble');
+                });
+            }
+
+            return $query
                 ->orderBy('numberid')
                 ->limit($this->partRepairLimit)
                 ->get()
@@ -139,6 +158,143 @@ final class MissedPartHandler
 
             return [];
         }
+    }
+
+    /**
+     * Atomically lease BODY-preamble recovery rows for one worker pass.
+     *
+     * MariaDB workers skip rows locked by concurrent claimers. SQLite has no
+     * row-level locking, so its write transaction provides the safe fallback.
+     * Expired claims are eligible for reclaim.
+     *
+     * @return array<int, object>
+     */
+    public function claimBodyRecoveryParts(
+        int $groupId,
+        string $token,
+        string $owner,
+        int $limit,
+        CarbonInterface|string $leaseUntil
+    ): array {
+        if ($token === '' || $owner === '' || $limit <= 0) {
+            return [];
+        }
+
+        $limit = min($limit, $this->partRepairLimit);
+        $expiresAt = $leaseUntil instanceof CarbonInterface
+            ? CarbonImmutable::instance($leaseUntil)
+            : CarbonImmutable::parse($leaseUntil);
+
+        return DB::transaction(function () use ($groupId, $token, $owner, $limit, $expiresAt): array {
+            $query = DB::table('missed_parts')
+                ->select(['id', 'numberid', 'groups_id', 'attempts', 'claim_token'])
+                ->where('groups_id', $groupId)
+                ->where('recovery_kind', 'body_preamble')
+                ->where('attempts', '<', $this->partRepairMaxTries);
+            $this->whereClaimAvailable($query);
+
+            $query->orderBy('numberid')->limit($limit);
+            if (DB::getDriverName() !== 'sqlite') {
+                $query->lock('FOR UPDATE SKIP LOCKED');
+            }
+
+            $ids = $query->pluck('id')->map(static fn (mixed $id): int => (int) $id)->all();
+            if ($ids === []) {
+                return [];
+            }
+
+            $claim = DB::table('missed_parts')
+                ->whereIn('id', $ids)
+                ->where('groups_id', $groupId)
+                ->where('recovery_kind', 'body_preamble')
+                ->where('attempts', '<', $this->partRepairMaxTries);
+            $this->whereClaimAvailable($claim);
+            $claim->update([
+                'claim_token' => $token,
+                'claim_owner' => $owner,
+                'claim_expires_at' => $expiresAt,
+                'updated_at' => now(),
+            ]);
+
+            return DB::table('missed_parts')
+                ->select(['id', 'numberid', 'groups_id', 'attempts', 'claim_token'])
+                ->whereIn('id', $ids)
+                ->where('claim_token', $token)
+                ->orderBy('numberid')
+                ->get()
+                ->all();
+        }, 3);
+    }
+
+    /** @param list<int> $ids */
+    public function removeRepairedClaimedParts(array $ids, string $token): int
+    {
+        return $this->mutateClaimedChunks(
+            $ids,
+            $token,
+            static fn (Builder $query): int => $query->delete()
+        );
+    }
+
+    /** @param list<int> $ids */
+    public function incrementClaimedAttempts(array $ids, string $token): int
+    {
+        return $this->mutateClaimedChunks(
+            $ids,
+            $token,
+            static fn (Builder $query): int => $query->increment('attempts')
+        );
+    }
+
+    /** @param list<int> $ids */
+    public function releaseClaimedParts(array $ids, string $token): int
+    {
+        return $this->mutateClaimedChunks(
+            $ids,
+            $token,
+            static fn (Builder $query): int => $query->update([
+                'claim_token' => null,
+                'claim_owner' => null,
+                'claim_expires_at' => null,
+                'updated_at' => now(),
+            ])
+        );
+    }
+
+    /** @param list<int> $ids */
+    public function renewClaimedParts(array $ids, string $token, CarbonInterface|string $leaseUntil): int
+    {
+        $expiresAt = $leaseUntil instanceof CarbonInterface
+            ? CarbonImmutable::instance($leaseUntil)
+            : CarbonImmutable::parse($leaseUntil);
+
+        return $this->mutateClaimedChunks(
+            $ids,
+            $token,
+            static fn (Builder $query): int => $query->update([
+                'claim_expires_at' => $expiresAt,
+                'updated_at' => now(),
+            ])
+        );
+    }
+
+    /** @param list<int> $ids */
+    public function countExistingClaimedIds(array $ids, string $token): int
+    {
+        if ($token === '') {
+            return 0;
+        }
+
+        $count = 0;
+        foreach ($this->idChunks($ids) as $chunk) {
+            $count += DB::table('missed_parts')
+                ->whereIn('id', $chunk)
+                ->where('claim_token', $token)
+                ->where('claim_expires_at', '>', now())
+                ->count('id');
+        }
+
+        return $count;
     }
 
     /**
@@ -229,9 +385,67 @@ final class MissedPartHandler
     {
         // Single DELETE — InnoDB autocommits atomically; the explicit
         // transaction wrapper would just add round-trips.
-        DB::table('missed_parts')
+        $query = DB::table('missed_parts')
             ->where('groups_id', $groupId)
-            ->where('attempts', '>=', $this->partRepairMaxTries)
-            ->delete();
+            ->where('attempts', '>=', $this->partRepairMaxTries);
+
+        if ($this->supportsClaims()) {
+            $query->where(static function (Builder $query): void {
+                $query->whereNull('recovery_kind')
+                    ->orWhere('recovery_kind', '!=', 'body_preamble');
+            });
+        }
+
+        $query->delete();
+    }
+
+    private function supportsClaims(): bool
+    {
+        return $this->claimColumnsAvailable ??= Schema::hasColumns('missed_parts', [
+            'recovery_kind',
+            'claim_token',
+            'claim_expires_at',
+        ]);
+    }
+
+    private function whereClaimAvailable(Builder $query): void
+    {
+        $query->where(static function (Builder $query): void {
+            $query->whereNull('claim_token')
+                ->orWhereNull('claim_expires_at')
+                ->orWhere('claim_expires_at', '<=', now());
+        });
+    }
+
+    /**
+     * @param  list<int>  $ids
+     * @param  callable(Builder): int  $mutation
+     */
+    private function mutateClaimedChunks(array $ids, string $token, callable $mutation): int
+    {
+        if ($token === '') {
+            return 0;
+        }
+
+        $affected = 0;
+        foreach ($this->idChunks($ids) as $chunk) {
+            $affected += $mutation(
+                DB::table('missed_parts')
+                    ->whereIn('id', $chunk)
+                    ->where('claim_token', $token)
+                    ->where('claim_expires_at', '>', now())
+            );
+        }
+
+        return $affected;
+    }
+
+    /**
+     * @param  list<int>  $ids
+     * @return list<list<int>>
+     */
+    private function idChunks(array $ids): array
+    {
+        return array_chunk(array_values(array_unique($ids)), $this->chunkSize);
     }
 }

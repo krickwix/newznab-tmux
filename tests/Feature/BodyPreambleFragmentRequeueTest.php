@@ -59,6 +59,12 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
             numberid INT,
             groups_id INT,
             attempts INT DEFAULT 0,
+            recovery_kind VARCHAR(32) NULL,
+            recovery_source_collection_id INT NULL,
+            recovery_source_binary_id INT NULL,
+            claim_token VARCHAR(64) NULL,
+            claim_owner VARCHAR(128) NULL,
+            claim_expires_at DATETIME NULL,
             created_at DATETIME NULL,
             updated_at DATETIME NULL,
             UNIQUE(numberid, groups_id)
@@ -127,6 +133,29 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
             0,
             (int) DB::table('missed_parts')->where(['groups_id' => 5, 'numberid' => 7304209420])->value('attempts')
         );
+        $provenance = DB::table('missed_parts')->orderBy('numberid')->get([
+            'numberid',
+            'attempts',
+            'recovery_kind',
+            'recovery_source_collection_id',
+            'recovery_source_binary_id',
+        ])->map(static fn (object $row): array => (array) $row)->all();
+        $this->assertSame([
+            [
+                'numberid' => 7304209420,
+                'attempts' => 0,
+                'recovery_kind' => 'body_preamble',
+                'recovery_source_collection_id' => 1,
+                'recovery_source_binary_id' => 101,
+            ],
+            [
+                'numberid' => 7304209421,
+                'attempts' => 1,
+                'recovery_kind' => 'body_preamble',
+                'recovery_source_collection_id' => 2,
+                'recovery_source_binary_id' => 102,
+            ],
+        ], $provenance);
     }
 
     public function test_json_output_includes_full_trace_metadata_for_batch_followup(): void
@@ -308,7 +337,8 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
 
         self::assertSame(1, $output['prune']['deleted']);
         self::assertFalse(DB::table('collections')->where('id', 1)->exists());
-        self::assertGreaterThanOrEqual(1, $output['requeue']['inserted']);
+        self::assertSame(0, $output['requeue']['inserted']);
+        self::assertSame(1, $output['requeue']['skipped_existing']);
     }
 
     public function test_recovery_cycle_skips_all_mutation_under_fail_safe(): void
@@ -468,7 +498,7 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
     ): void {
         DB::table('collections')->insert([
             'id' => $id,
-            'subject' => '[2/41] - "opaque-'.$id.'" yEnc',
+            'subject' => '[PRiVATE]-[newzNZB] [2/41] - "opaque-'.$id.'" yEnc',
             'xref' => $xref,
             'groups_id' => 5,
             'totalfiles' => 41,

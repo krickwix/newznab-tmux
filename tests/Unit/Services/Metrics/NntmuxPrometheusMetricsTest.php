@@ -550,4 +550,34 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_mode_info{mode="failsafe"} 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_profile_info{profile="fail_safe"} 1', $output);
     }
+
+    public function test_body_recovery_claim_metrics_split_ready_claimed_expired_and_exhausted_rows(): void
+    {
+        DB::statement('CREATE TABLE usenet_groups (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL)');
+        DB::statement('CREATE TABLE missed_parts (
+            id INTEGER PRIMARY KEY,
+            groups_id INTEGER NOT NULL,
+            attempts INTEGER NOT NULL,
+            recovery_kind VARCHAR(32) NULL,
+            claim_token VARCHAR(64) NULL,
+            claim_expires_at DATETIME NULL
+        )');
+        DB::table('usenet_groups')->insert(['id' => 5, 'name' => 'alt.binaries.lossless']);
+        DB::table('missed_parts')->insert([
+            ['id' => 1, 'groups_id' => 5, 'attempts' => 0, 'recovery_kind' => 'body_preamble', 'claim_token' => null, 'claim_expires_at' => null],
+            ['id' => 2, 'groups_id' => 5, 'attempts' => 1, 'recovery_kind' => 'body_preamble', 'claim_token' => 'active', 'claim_expires_at' => now()->addMinute()],
+            ['id' => 3, 'groups_id' => 5, 'attempts' => 2, 'recovery_kind' => 'body_preamble', 'claim_token' => 'expired', 'claim_expires_at' => now()->subMinute()],
+            ['id' => 4, 'groups_id' => 5, 'attempts' => 3, 'recovery_kind' => 'body_preamble', 'claim_token' => null, 'claim_expires_at' => null],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('bodyRecoveryClaimMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="ready"} 1', $output);
+        $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="claimed"} 1', $output);
+        $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="expired"} 1', $output);
+        $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="exhausted"} 1', $output);
+    }
 }

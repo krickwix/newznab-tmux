@@ -64,6 +64,7 @@ class NntmuxPrometheusMetrics
                 $lines,
                 $this->buildConfigMetrics(),
                 $this->tableEstimateMetrics(),
+                $this->bodyRecoveryClaimMetrics(),
                 $this->groupMetrics(),
                 $this->collectionFormationMetrics(),
                 $this->pipelineLifecycleMetrics(),
@@ -194,6 +195,41 @@ class NntmuxPrometheusMetrics
             $lines[] = $this->metric('nntmux_table_rows_estimate', (float) ($row->table_rows ?? 0), [
                 'table' => (string) $row->table_name,
             ]);
+        }
+
+        return $lines;
+    }
+
+    /** @return list<string> */
+    private function bodyRecoveryClaimMetrics(): array
+    {
+        $lines = [
+            '# HELP nntmux_body_recovery_rows BODY-preamble recovery rows by claim state and group.',
+            '# TYPE nntmux_body_recovery_rows gauge',
+        ];
+        if (! Schema::hasColumns('missed_parts', ['recovery_kind', 'claim_token', 'claim_expires_at'])) {
+            $lines[] = $this->metric('nntmux_body_recovery_rows', 0, ['group' => 'unavailable', 'state' => 'unavailable']);
+
+            return $lines;
+        }
+
+        $rows = DB::table('missed_parts as mp')
+            ->join('usenet_groups as ug', 'ug.id', '=', 'mp.groups_id')
+            ->where('mp.recovery_kind', 'body_preamble')
+            ->selectRaw('ug.name as group_name')
+            ->selectRaw('SUM(CASE WHEN mp.attempts >= 3 THEN 1 ELSE 0 END) as exhausted')
+            ->selectRaw('SUM(CASE WHEN mp.attempts < 3 AND mp.claim_token IS NULL THEN 1 ELSE 0 END) as ready')
+            ->selectRaw('SUM(CASE WHEN mp.attempts < 3 AND mp.claim_token IS NOT NULL AND mp.claim_expires_at > ? THEN 1 ELSE 0 END) as claimed', [now()])
+            ->selectRaw('SUM(CASE WHEN mp.attempts < 3 AND mp.claim_token IS NOT NULL AND (mp.claim_expires_at IS NULL OR mp.claim_expires_at <= ?) THEN 1 ELSE 0 END) as expired', [now()])
+            ->groupBy('ug.name')
+            ->get();
+        foreach ($rows as $row) {
+            foreach (['ready', 'claimed', 'expired', 'exhausted'] as $state) {
+                $lines[] = $this->metric('nntmux_body_recovery_rows', (float) ($row->{$state} ?? 0), [
+                    'group' => (string) $row->group_name,
+                    'state' => $state,
+                ]);
+            }
         }
 
         return $lines;

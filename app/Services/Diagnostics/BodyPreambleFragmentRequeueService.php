@@ -54,7 +54,16 @@ final class BodyPreambleFragmentRequeueService
         $minTotalParts = max(1, $minTotalParts);
         $afterCollectionId = max(0, $afterCollectionId);
 
-        $rows = $this->candidateRows($groupId, $regexIds, $limit, $maxCurrentParts, $minTotalParts, $before, $afterCollectionId);
+        $rows = $this->candidateRows(
+            $groupId,
+            $regexIds,
+            $limit,
+            $maxCurrentParts,
+            $minTotalParts,
+            $before,
+            $afterCollectionId,
+            true,
+        );
 
         $candidates = [];
         $skippedWithoutArticle = 0;
@@ -464,14 +473,13 @@ final class BodyPreambleFragmentRequeueService
         $rows = [];
         foreach ($candidates as $candidate) {
             $article = (int) $candidate['article'];
-            if (isset($existing[$article])) {
-                continue;
-            }
-
             $rows[$article] = [
                 'numberid' => $article,
                 'groups_id' => $groupId,
                 'attempts' => 0,
+                'recovery_kind' => 'body_preamble',
+                'recovery_source_collection_id' => (int) $candidate['collection_id'],
+                'recovery_source_binary_id' => (int) $candidate['binary_id'],
                 'created_at' => $now,
                 'updated_at' => $now,
             ];
@@ -481,6 +489,52 @@ final class BodyPreambleFragmentRequeueService
             return 0;
         }
 
-        return DB::table('missed_parts')->insertOrIgnore(array_values($rows));
+        if (DB::getDriverName() === 'mysql') {
+            foreach (array_chunk(array_values($rows), 250) as $chunk) {
+                $bindings = [];
+                $placeholders = [];
+                foreach ($chunk as $row) {
+                    $placeholders[] = '(?, ?, ?, ?, ?, ?, ?, ?)';
+                    array_push(
+                        $bindings,
+                        $row['numberid'],
+                        $row['groups_id'],
+                        $row['attempts'],
+                        $row['recovery_kind'],
+                        $row['recovery_source_collection_id'],
+                        $row['recovery_source_binary_id'],
+                        $row['created_at'],
+                        $row['updated_at'],
+                    );
+                }
+                DB::statement(
+                    'INSERT INTO missed_parts '
+                    .'(numberid, groups_id, attempts, recovery_kind, recovery_source_collection_id, recovery_source_binary_id, created_at, updated_at) VALUES '
+                    .implode(',', $placeholders)
+                    .' ON DUPLICATE KEY UPDATE '
+                    .'recovery_kind = COALESCE(recovery_kind, VALUES(recovery_kind)), '
+                    .'recovery_source_collection_id = COALESCE(recovery_source_collection_id, VALUES(recovery_source_collection_id)), '
+                    .'recovery_source_binary_id = COALESCE(recovery_source_binary_id, VALUES(recovery_source_binary_id)), '
+                    .'updated_at = VALUES(updated_at)',
+                    $bindings,
+                );
+            }
+        } else {
+            foreach ($rows as $row) {
+                DB::table('missed_parts')
+                    ->where('groups_id', $groupId)
+                    ->where('numberid', $row['numberid'])
+                    ->whereNull('recovery_kind')
+                    ->update([
+                        'recovery_kind' => $row['recovery_kind'],
+                        'recovery_source_collection_id' => $row['recovery_source_collection_id'],
+                        'recovery_source_binary_id' => $row['recovery_source_binary_id'],
+                        'updated_at' => $row['updated_at'],
+                    ]);
+            }
+            DB::table('missed_parts')->insertOrIgnore(array_values($rows));
+        }
+
+        return count(array_diff(array_keys($rows), array_keys($existing)));
     }
 }

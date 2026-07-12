@@ -11,6 +11,7 @@ use App\Services\Binaries\YencBodyPreamble;
 use App\Services\BlacklistService;
 use App\Services\CollectionsCleaningService;
 use App\Services\NNTP\NNTPService;
+use DariusIII\NetNntp\Error;
 use Illuminate\Support\Facades\DB;
 use Mockery;
 use Mockery\Adapter\Phpunit\MockeryPHPUnitIntegration;
@@ -67,6 +68,14 @@ class YencBodyDeobfuscationStorageTest extends TestCase
             numberid INT,
             groups_id INT,
             attempts INT DEFAULT 0,
+            recovery_kind VARCHAR(32) NULL,
+            recovery_source_collection_id INT NULL,
+            recovery_source_binary_id INT NULL,
+            claim_token VARCHAR(64) NULL,
+            claim_owner VARCHAR(128) NULL,
+            claim_expires_at DATETIME NULL,
+            created_at DATETIME NULL,
+            updated_at DATETIME NULL,
             UNIQUE(numberid, groups_id)
         )');
 
@@ -667,6 +676,325 @@ class YencBodyDeobfuscationStorageTest extends TestCase
 
         $this->assertFalse(DB::table('missed_parts')->where(['groups_id' => 5, 'numberid' => 100])->exists());
         $this->assertSame(0, (int) DB::table('missed_parts')->where(['groups_id' => 5, 'numberid' => 200])->value('attempts'));
+    }
+
+    public function test_body_recovery_provenance_forces_every_retry_and_prevents_false_xover_acknowledgement(): void
+    {
+        DB::table('missed_parts')->insert([
+            'id' => 300,
+            'numberid' => 300,
+            'groups_id' => 5,
+            'attempts' => 1,
+            'recovery_kind' => 'body_preamble',
+            'claim_token' => 'claim-300',
+            'claim_owner' => 'worker-a',
+            'claim_expires_at' => now()->addMinutes(3),
+        ]);
+        $nntp = Mockery::mock(NNTPService::class);
+        $nntp->shouldReceive('selectGroup')->once()->with('alt.binaries.lossless')->andReturn([
+            'group' => 'alt.binaries.lossless',
+            'first' => '1',
+            'last' => '999',
+        ]);
+        $nntp->shouldReceive('getOverview')->once()->with('300-300', true, false)->andReturn([[
+            'Number' => '300',
+            'Subject' => 'Readable.Provider.Subject.part001.rar yEnc (1/70)',
+            'From' => 'poster@example.invalid',
+            'Date' => 'Sun, 14 Jun 2026 11:24:21 +0000',
+            'Message-ID' => '<300@example.invalid>',
+            'Bytes' => '50000000',
+            'Xref' => 'news.example alt.binaries.lossless:300',
+        ]]);
+        $nntp->shouldReceive('getYencBodyPreambleLines')
+            ->once()
+            ->with('alt.binaries.lossless', '300', 8)
+            ->andReturn(new Error('BODY unavailable', 430));
+        $service = new BinariesService(
+            new BinariesConfig(
+                partRepairLimit: 10,
+                partRepairMaxTries: 3,
+                partsChunkSize: 10,
+                headerChunkSize: 10,
+                bodyPreambleDeobfuscateGroups: ['alt.binaries.lossless'],
+                bodyPreambleDeobfuscateLimit: 10,
+                bodyPreambleLineLimit: 8,
+            ),
+            headerParser: new HeaderParser(new class extends BlacklistService
+            {
+                public function isBlackListed(array $msg, string $groupName): bool
+                {
+                    return false;
+                }
+            }),
+            headerStorage: $this->deterministicHeaderStorage(),
+            nntp: $nntp,
+        );
+
+        $claimed = DB::table('missed_parts')->where('id', 300)->get()->all();
+        $summary = $service->partRepairClaimedCohort(
+            ['id' => 5, 'name' => 'alt.binaries.lossless'],
+            $claimed,
+            'claim-300',
+        );
+
+        $this->assertTrue(DB::table('missed_parts')->where(['groups_id' => 5, 'numberid' => 300])->exists());
+        $this->assertSame(2, (int) DB::table('missed_parts')->where(['groups_id' => 5, 'numberid' => 300])->value('attempts'));
+        $this->assertSame(0, DB::table('parts')->where('number', 300)->count());
+        $this->assertSame(0, $summary['repaired']);
+        $this->assertSame(0, $summary['ownership_lost']);
+    }
+
+    public function test_expired_claim_is_reported_as_ownership_loss_not_repair(): void
+    {
+        DB::table('missed_parts')->insert([
+            'id' => 302,
+            'numberid' => 302,
+            'groups_id' => 5,
+            'attempts' => 1,
+            'recovery_kind' => 'body_preamble',
+            'claim_token' => 'expired-302',
+            'claim_owner' => 'worker-a',
+            'claim_expires_at' => now()->subSecond(),
+        ]);
+        $nntp = Mockery::mock(NNTPService::class);
+        $nntp->shouldReceive('selectGroup')->once()->with('alt.binaries.lossless')->andReturn([
+            'group' => 'alt.binaries.lossless',
+            'first' => '1',
+            'last' => '999',
+        ]);
+        $nntp->shouldNotReceive('getOverview');
+        $service = new BinariesService(
+            new BinariesConfig(partRepairLimit: 10, partRepairMaxTries: 3),
+            headerParser: new HeaderParser(new class extends BlacklistService
+            {
+                public function isBlackListed(array $msg, string $groupName): bool
+                {
+                    return false;
+                }
+            }),
+            headerStorage: $this->deterministicHeaderStorage(),
+            nntp: $nntp,
+        );
+
+        $claimed = DB::table('missed_parts')->where('id', 302)->get()->all();
+        $summary = $service->partRepairClaimedCohort(
+            ['id' => 5, 'name' => 'alt.binaries.lossless'],
+            $claimed,
+            'expired-302',
+        );
+
+        $this->assertSame(0, $summary['repaired']);
+        $this->assertSame(1, $summary['ownership_lost']);
+        $this->assertTrue(DB::table('missed_parts')->where('id', 302)->exists());
+        $this->assertSame(1, (int) DB::table('missed_parts')->where('id', 302)->value('attempts'));
+    }
+
+    public function test_partial_ownership_loss_defers_unscanned_owned_rows_without_spending_an_attempt(): void
+    {
+        DB::table('missed_parts')->insert([
+            [
+                'id' => 303,
+                'numberid' => 303,
+                'groups_id' => 5,
+                'attempts' => 1,
+                'recovery_kind' => 'body_preamble',
+                'claim_token' => 'partial-token',
+                'claim_owner' => 'worker-a',
+                'claim_expires_at' => now()->subSecond(),
+            ],
+            [
+                'id' => 403,
+                'numberid' => 403,
+                'groups_id' => 5,
+                'attempts' => 1,
+                'recovery_kind' => 'body_preamble',
+                'claim_token' => 'partial-token',
+                'claim_owner' => 'worker-a',
+                'claim_expires_at' => now()->addMinutes(3),
+            ],
+        ]);
+        $nntp = Mockery::mock(NNTPService::class);
+        $nntp->shouldReceive('selectGroup')->once()->andReturn([
+            'group' => 'alt.binaries.lossless',
+            'first' => '1',
+            'last' => '999',
+        ]);
+        $nntp->shouldNotReceive('getOverview');
+        $service = new BinariesService(
+            new BinariesConfig(partRepairLimit: 10, partRepairMaxTries: 3),
+            headerParser: new HeaderParser(new class extends BlacklistService
+            {
+                public function isBlackListed(array $msg, string $groupName): bool
+                {
+                    return false;
+                }
+            }),
+            headerStorage: $this->deterministicHeaderStorage(),
+            nntp: $nntp,
+        );
+        $claimed = DB::table('missed_parts')->where('claim_token', 'partial-token')->orderBy('numberid')->get()->all();
+
+        $summary = $service->partRepairClaimedCohort(
+            ['id' => 5, 'name' => 'alt.binaries.lossless'],
+            $claimed,
+            'partial-token',
+        );
+
+        $this->assertSame(0, $summary['repaired']);
+        $this->assertSame(1, $summary['ownership_lost']);
+        $this->assertSame(1, $summary['deferred']);
+        $this->assertSame(0, $summary['failed']);
+        $this->assertSame(1, (int) DB::table('missed_parts')->where('id', 403)->value('attempts'));
+        $this->assertNull(DB::table('missed_parts')->where('id', 403)->value('claim_token'));
+    }
+
+    public function test_claimed_body_recovery_cohort_deletes_only_after_corrected_header_is_stored(): void
+    {
+        DB::table('missed_parts')->insert([
+            'id' => 301,
+            'numberid' => 301,
+            'groups_id' => 5,
+            'attempts' => 1,
+            'recovery_kind' => 'body_preamble',
+            'claim_token' => 'claim-301',
+            'claim_owner' => 'worker-a',
+            'claim_expires_at' => now()->addMinutes(3),
+        ]);
+        $nntp = Mockery::mock(NNTPService::class);
+        $nntp->shouldReceive('selectGroup')->once()->with('alt.binaries.lossless')->andReturn([
+            'group' => 'alt.binaries.lossless',
+            'first' => 1,
+            'last' => 1_000,
+        ]);
+        $nntp->shouldReceive('getOverview')->once()->with('301-301', true, false)->andReturn([[
+            'Number' => '301',
+            'Subject' => 'provider-overview-subject yEnc (1/70)',
+            'From' => 'poster@example.invalid',
+            'Date' => 'Sun, 14 Jun 2026 11:24:21 +0000',
+            'Message-ID' => '<301@example.invalid>',
+            'Bytes' => '50000000',
+            'Xref' => 'news.example alt.binaries.lossless:301',
+        ]]);
+        $nntp->shouldReceive('getYencBodyPreambleLines')->once()->with('alt.binaries.lossless', '301', 8)->andReturn([
+            '=ybegin part=1 total=70 line=128 size=3500000000 name=Recovered.Album.part001.rar',
+            '=ypart begin=1 end=50000000',
+        ]);
+        $service = new BinariesService(
+            new BinariesConfig(
+                messageBuffer: 100,
+                partRepairMaxTries: 3,
+                partsChunkSize: 10,
+                headerChunkSize: 10,
+                bodyPreambleDeobfuscateGroups: ['alt.binaries.lossless'],
+                bodyPreambleDeobfuscateLimit: 10,
+                bodyPreambleLineLimit: 8,
+            ),
+            headerParser: new HeaderParser(new class extends BlacklistService
+            {
+                public function isBlackListed(array $msg, string $groupName): bool
+                {
+                    return false;
+                }
+            }),
+            headerStorage: $this->deterministicHeaderStorage(),
+            nntp: $nntp,
+        );
+        $claimed = DB::table('missed_parts')->where('claim_token', 'claim-301')->get()->all();
+
+        $summary = $service->partRepairClaimedCohort(
+            ['id' => 5, 'name' => 'alt.binaries.lossless'],
+            $claimed,
+            'claim-301',
+        );
+
+        self::assertSame(1, $summary['claimed']);
+        self::assertSame(1, $summary['repaired']);
+        self::assertSame(0, $summary['failed']);
+        self::assertFalse(DB::table('missed_parts')->where('id', 301)->exists());
+        self::assertSame(1, DB::table('parts')->where('number', 301)->count());
+    }
+
+    public function test_claimed_body_recovery_continues_after_an_earlier_disjoint_range_is_repaired(): void
+    {
+        DB::table('missed_parts')->insert([
+            [
+                'id' => 310,
+                'numberid' => 310,
+                'groups_id' => 5,
+                'attempts' => 1,
+                'recovery_kind' => 'body_preamble',
+                'claim_token' => 'claim-multi',
+                'claim_owner' => 'worker-a',
+                'claim_expires_at' => now()->addMinutes(3),
+            ],
+            [
+                'id' => 410,
+                'numberid' => 410,
+                'groups_id' => 5,
+                'attempts' => 1,
+                'recovery_kind' => 'body_preamble',
+                'claim_token' => 'claim-multi',
+                'claim_owner' => 'worker-a',
+                'claim_expires_at' => now()->addMinutes(3),
+            ],
+        ]);
+        $nntp = Mockery::mock(NNTPService::class);
+        $nntp->shouldReceive('selectGroup')->once()->andReturn([
+            'group' => 'alt.binaries.lossless',
+            'first' => 1,
+            'last' => 1_000,
+        ]);
+        foreach ([310, 410] as $number) {
+            $nntp->shouldReceive('getOverview')->once()->with("{$number}-{$number}", true, false)->andReturn([[
+                'Number' => (string) $number,
+                'Subject' => "provider-overview-{$number} yEnc (1/70)",
+                'From' => 'poster@example.invalid',
+                'Date' => 'Sun, 14 Jun 2026 11:24:21 +0000',
+                'Message-ID' => "<{$number}@example.invalid>",
+                'Bytes' => '50000000',
+                'Xref' => "news.example alt.binaries.lossless:{$number}",
+            ]]);
+            $nntp->shouldReceive('getYencBodyPreambleLines')->once()->with(
+                'alt.binaries.lossless',
+                (string) $number,
+                8,
+            )->andReturn([
+                "=ybegin part=1 total=70 line=128 size=3500000000 name=Recovered.{$number}.part001.rar",
+                '=ypart begin=1 end=50000000',
+            ]);
+        }
+        $service = new BinariesService(
+            new BinariesConfig(
+                messageBuffer: 100,
+                partRepairMaxTries: 3,
+                partsChunkSize: 10,
+                headerChunkSize: 10,
+                bodyPreambleDeobfuscateGroups: ['alt.binaries.lossless'],
+                bodyPreambleDeobfuscateLimit: 10,
+                bodyPreambleLineLimit: 8,
+            ),
+            headerParser: new HeaderParser(new class extends BlacklistService
+            {
+                public function isBlackListed(array $msg, string $groupName): bool
+                {
+                    return false;
+                }
+            }),
+            headerStorage: $this->deterministicHeaderStorage(),
+            nntp: $nntp,
+        );
+        $claimed = DB::table('missed_parts')->where('claim_token', 'claim-multi')->orderBy('numberid')->get()->all();
+
+        $summary = $service->partRepairClaimedCohort(
+            ['id' => 5, 'name' => 'alt.binaries.lossless'],
+            $claimed,
+            'claim-multi',
+        );
+
+        self::assertSame(2, $summary['repaired']);
+        self::assertSame(0, $summary['ownership_lost']);
+        self::assertSame(0, DB::table('missed_parts')->whereIn('id', [310, 410])->count());
+        self::assertSame(2, DB::table('parts')->whereIn('number', [310, 410])->count());
     }
 
     public function test_part_repair_keeps_returned_unparseable_articles_in_missed_parts(): void
