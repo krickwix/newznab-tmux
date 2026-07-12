@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Services\Orchestrator;
 
+use Illuminate\Container\Container;
+
 final readonly class BackfillTargetSelector
 {
     /** @var list<string> */
@@ -11,10 +13,13 @@ final readonly class BackfillTargetSelector
 
     private int $historyTtlSeconds;
 
+    private int $exploitAttemptsBeforeExplore;
+
     /** @param list<string> $probeGroups */
     public function __construct(
         ?array $probeGroups = null,
         ?int $historyTtlSeconds = null,
+        ?int $exploitAttemptsBeforeExplore = null,
     ) {
         $configuredGroups = $probeGroups ?? config('nntmux.orchestrator.backfill_probe_groups', []);
         $this->probeGroups = array_values(array_filter(array_map(
@@ -24,6 +29,13 @@ final readonly class BackfillTargetSelector
         $this->historyTtlSeconds = max(
             1,
             $historyTtlSeconds ?? (int) config('nntmux.orchestrator.backfill_yield_ttl_seconds', 86_400),
+        );
+        $container = Container::getInstance();
+        $this->exploitAttemptsBeforeExplore = max(
+            1,
+            $exploitAttemptsBeforeExplore ?? ($container->bound('config')
+                ? (int) config('nntmux.orchestrator.backfill_exploit_attempts_before_explore', 3)
+                : 3),
         );
     }
 
@@ -73,9 +85,78 @@ final readonly class BackfillTargetSelector
                 return $score !== 0 ? $score : $left['name'] <=> $right['name'];
             });
 
-            return $positive[0];
+            $best = $positive[0];
+            $attempts = (int) ($history[$best['name']]['attempts'] ?? 0);
+            if ($attempts > 0
+                && $attempts % $this->exploitAttemptsBeforeExplore === 0
+                && $this->wasMostRecentlyAttempted($best['name'], $history)
+            ) {
+                $probe = $this->selectConfiguredProbe($byName, $history, $now);
+                if ($probe !== null) {
+                    return $probe;
+                }
+                $untried = $this->selectUntried($candidates, $history, $now);
+                if ($untried !== null) {
+                    return $untried;
+                }
+            }
+
+            return $best;
         }
 
+        $probe = $this->selectConfiguredProbe($byName, $history, $now);
+        if ($probe !== null) {
+            return $probe;
+        }
+
+        $untried = $this->selectUntried($candidates, $history, $now);
+        if ($untried !== null) {
+            return $untried;
+        }
+
+        usort($candidates, static function (array $left, array $right) use ($history): int {
+            $attempt = (int) $history[$left['name']]['last_attempt_at']
+                <=> (int) $history[$right['name']]['last_attempt_at'];
+
+            return $attempt !== 0 ? $attempt : $left['name'] <=> $right['name'];
+        });
+
+        return $candidates[0];
+    }
+
+    /**
+     * @param  list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $candidates
+     * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
+     * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
+     */
+    private function selectUntried(array $candidates, array $history, int $now): ?array
+    {
+        $untried = array_values(array_filter(
+            $candidates,
+            function (array $candidate) use ($history, $now): bool {
+                $entry = $history[$candidate['name']] ?? null;
+
+                return ! is_array($entry)
+                    || $now - (int) ($entry['last_attempt_at'] ?? 0) >= $this->historyTtlSeconds;
+            },
+        ));
+        if ($untried !== []) {
+            usort($untried, static fn (array $left, array $right): int => $right['cursor_postdate'] <=> $left['cursor_postdate']
+                ?: $left['name'] <=> $right['name']);
+
+            return $untried[0];
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<string, array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $byName
+     * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
+     * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
+     */
+    private function selectConfiguredProbe(array $byName, array $history, int $now): ?array
+    {
         foreach ($this->probeGroups as $group) {
             $entry = $history[$group] ?? null;
             $isRecent = is_array($entry)
@@ -93,29 +174,19 @@ final readonly class BackfillTargetSelector
             }
         }
 
-        $untried = array_values(array_filter(
-            $candidates,
-            function (array $candidate) use ($history, $now): bool {
-                $entry = $history[$candidate['name']] ?? null;
+        return null;
+    }
 
-                return ! is_array($entry)
-                    || $now - (int) ($entry['last_attempt_at'] ?? 0) >= $this->historyTtlSeconds;
-            },
-        ));
-        if ($untried !== []) {
-            usort($untried, static fn (array $left, array $right): int => $right['cursor_postdate'] <=> $left['cursor_postdate']
-                ?: $left['name'] <=> $right['name']);
-
-            return $untried[0];
+    /** @param array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}> $history */
+    private function wasMostRecentlyAttempted(string $group, array $history): bool
+    {
+        $lastAttemptAt = (int) ($history[$group]['last_attempt_at'] ?? 0);
+        foreach ($history as $otherGroup => $entry) {
+            if ($otherGroup !== $group && (int) ($entry['last_attempt_at'] ?? 0) >= $lastAttemptAt) {
+                return false;
+            }
         }
 
-        usort($candidates, static function (array $left, array $right) use ($history): int {
-            $attempt = (int) $history[$left['name']]['last_attempt_at']
-                <=> (int) $history[$right['name']]['last_attempt_at'];
-
-            return $attempt !== 0 ? $attempt : $left['name'] <=> $right['name'];
-        });
-
-        return $candidates[0];
+        return $lastAttemptAt > 0;
     }
 }
