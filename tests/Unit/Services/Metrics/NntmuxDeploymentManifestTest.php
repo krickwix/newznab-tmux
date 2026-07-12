@@ -260,11 +260,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-release-lineage-v89',
+            ':microservices-pods-20260713-growth-learning-v90',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-release-lineage-v89',
+            'microservices-pods-20260713-growth-learning-v90',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
@@ -335,6 +335,22 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '1000',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_COLLECTIONS_PER_10K'] ?? null,
+        );
+        self::assertSame(
+            '12',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_MIN_SAMPLES'] ?? null,
+        );
+        self::assertSame(
+            '2.0',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_SAFETY_MULTIPLIER'] ?? null,
+        );
+        self::assertSame(
+            '0.25',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_PRIOR_FLOOR_FRACTION'] ?? null,
+        );
+        self::assertSame(
+            '7200',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_LATEST_SAMPLE_SECONDS'] ?? null,
         );
         self::assertStringEndsWith(
             ':microservices-pods-20260712-part-gap-lock-v82',
