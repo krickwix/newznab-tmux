@@ -127,6 +127,28 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $metrics = $parser->parse($monitoringDocuments[0]);
         self::assertIsArray($metrics);
         self::assertSame('nntmux-metrics', $metrics['metadata']['name'] ?? null);
+
+        $prometheusRule = null;
+        foreach ($monitoringDocuments as $document) {
+            $resource = $parser->parse($document);
+            if (is_array($resource) && ($resource['kind'] ?? null) === 'PrometheusRule') {
+                $prometheusRule = $resource;
+                break;
+            }
+        }
+        self::assertIsArray($prometheusRule);
+        $permitAlert = null;
+        foreach ($prometheusRule['spec']['groups'] ?? [] as $group) {
+            foreach ($group['rules'] ?? [] as $rule) {
+                if (($rule['alert'] ?? null) === 'NntmuxBackfillPermitWithoutProgress') {
+                    $permitAlert = $rule;
+                    break 2;
+                }
+            }
+        }
+        self::assertIsArray($permitAlert);
+        self::assertStringContainsString('max without(instance, pod)', (string) ($permitAlert['expr'] ?? ''));
+        self::assertStringContainsString('[20m:1m]', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringEndsWith(
             ':microservices-pods-20260712-worker-orchestrator-v38',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
