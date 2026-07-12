@@ -49,6 +49,7 @@ final class WorkerProfileApplierTest extends TestCase
         );
 
         self::assertSame(5, $generation);
+        self::assertSame(1, Settings::settingValue('orchestrator_recovery_ok'));
         self::assertSame([
             'orchestrator_generation' => 5,
             'orchestrator_bf_permit' => 5,
@@ -86,6 +87,13 @@ final class WorkerProfileApplierTest extends TestCase
             'orchestrator_bf_group',
             'orchestrator_bf_qty',
         ])->toArray());
+    }
+
+    public function test_fail_safe_denies_recovery_without_an_explicit_high_pressure_admission(): void
+    {
+        (new WorkerProfileApplier)->apply($this->decision(ControlProfile::FailSafe, false), 1_000, false);
+
+        self::assertSame(0, Settings::settingValue('orchestrator_recovery_ok'));
     }
 
     public function test_it_preserves_an_unconsumed_permit_without_an_explicit_grant(): void

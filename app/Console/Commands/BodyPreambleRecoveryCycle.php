@@ -26,7 +26,9 @@ final class BodyPreambleRecoveryCycle extends Command
     {
         $profile = (string) Settings::settingValue('orchestrator_profile');
         $leaseUntil = (int) Settings::settingValue('orchestrator_lease_until');
-        if (! in_array($profile, ['drain', 'balanced', 'fill'], true) || $leaseUntil < time()) {
+        $recoveryAllowed = in_array($profile, ['drain', 'balanced', 'fill'], true)
+            || (int) Settings::settingValue('orchestrator_recovery_ok') === 1;
+        if (! $recoveryAllowed || $leaseUntil < time()) {
             $summary = [
                 'skipped' => true,
                 'reason' => $leaseUntil < time() ? 'orchestrator_lease_stale' : 'orchestrator_profile_unsafe',

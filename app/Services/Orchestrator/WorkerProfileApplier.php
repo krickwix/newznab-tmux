@@ -50,6 +50,8 @@ class WorkerProfileApplier
             $values = [
                 'orchestrator_mode' => 'active',
                 'orchestrator_profile' => $profile->profile->value,
+                'orchestrator_recovery_ok' => ($profile->profile !== ControlProfile::FailSafe
+                    || in_array('high_pressure_sample', $decision->reasons, true)) ? '1' : '0',
                 'orchestrator_lease_until' => (string) ($now + 600),
                 'orchestrator_generation' => (string) $generation,
                 'orchestrator_bins_timer' => (string) $profile->binariesSleepSeconds,

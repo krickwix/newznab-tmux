@@ -275,7 +275,8 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
     {
         $this->seedFragments();
         DB::table('settings')->insert([
-            ['name' => 'orchestrator_profile', 'value' => 'drain'],
+            ['name' => 'orchestrator_profile', 'value' => 'fail_safe'],
+            ['name' => 'orchestrator_recovery_ok', 'value' => '1'],
             ['name' => 'orchestrator_lease_until', 'value' => (string) (time() + 600)],
         ]);
         Settings::forgetCachedSettings();
