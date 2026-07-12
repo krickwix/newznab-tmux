@@ -198,7 +198,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
-            '1200',
+            '600',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PERMIT_OBSERVATION_SECONDS'] ?? null,
         );
         self::assertSame(
