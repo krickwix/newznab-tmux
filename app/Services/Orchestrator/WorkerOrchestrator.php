@@ -69,8 +69,14 @@ class WorkerOrchestrator
                     );
                 }
                 $closeObservation = $observationExpired
-                    || ($permitClaimed && $cursorMoved && $cohortNzbs > 0)
+                    || ($permitCompleted && $cursorMoved && $cohortNzbs > 0)
                     || ($permitCompleted && ! $cursorMoved);
+                if ($observationExpired && $permitClaimed && $hasCohortBaseline && ! $permitCompleted) {
+                    $closeObservation = false;
+                    if (! $shadow) {
+                        $this->applier->revokePermit();
+                    }
+                }
                 if ($closeObservation && ! $shadow) {
                     $this->applier->revokePermit();
                 }
@@ -102,25 +108,40 @@ class WorkerOrchestrator
                 && $permitObservation === null
                 && (int) Settings::settingValue('orchestrator_bf_permit') === 0;
             $issuePermit = $grantPermit || $autoGrant;
+            $backfillQuantity = $decision->profile->quantityForYield(
+                $snapshot->backfillYieldNzbsPer10k,
+                $snapshot->backfillRemainingArticles,
+                $snapshot->backfillSafeQuantity,
+            );
             $preserveUnclaimedPermit = ! $shadow
                 && $permitObservation !== null
                 && time() - (int) $permitObservation['issued_at'] < (int) config('nntmux.orchestrator.permit_claim_grace_seconds', 120)
                 && (int) Settings::settingValue('orchestrator_bf_permit') === (int) $permitObservation['generation']
                 && in_array('backfill_no_eligible_supply', $decision->reasons, true);
             if (! $shadow) {
-                $generation = $this->applier->apply(
-                    $decision,
-                    time(),
-                    $issuePermit,
-                    $snapshot->backfillGroup,
-                    $preserveUnclaimedPermit,
-                );
+                $generation = $issuePermit
+                    ? $this->applier->apply(
+                        $decision,
+                        time(),
+                        true,
+                        $snapshot->backfillGroup,
+                        $preserveUnclaimedPermit,
+                        $backfillQuantity,
+                    )
+                    : $this->applier->apply(
+                        $decision,
+                        time(),
+                        false,
+                        $snapshot->backfillGroup,
+                        $preserveUnclaimedPermit,
+                    );
                 if ($issuePermit && $decision->backfillPermitted) {
                     $this->store->beginPermitObservation(
                         $snapshot,
                         $generation,
                         time(),
                         $this->snapshots->backfillOutcomeForGroup($snapshot->backfillGroup),
+                        $backfillQuantity,
                     );
                 }
             }
@@ -160,6 +181,9 @@ class WorkerOrchestrator
                 'backfill_target' => [
                     'group' => $snapshot->backfillGroup,
                     'cursor' => $snapshot->backfillCursor,
+                    'yield_nzbs_per_10k' => $snapshot->backfillYieldNzbsPer10k,
+                    'quantity' => $issuePermit && $decision->backfillPermitted ? $backfillQuantity : 0,
+                    'safe_quantity' => $snapshot->backfillSafeQuantity,
                 ],
             ];
             $this->store->storeDecision($result);

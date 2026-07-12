@@ -15,8 +15,9 @@ class WorkerProfileApplier
         bool $grantPermit,
         ?string $backfillGroup = null,
         bool $preserveUnclaimedPermit = false,
+        ?int $backfillQuantity = null,
     ): int {
-        return DB::transaction(function () use ($decision, $now, $grantPermit, $backfillGroup, $preserveUnclaimedPermit): int {
+        return DB::transaction(function () use ($decision, $now, $grantPermit, $backfillGroup, $preserveUnclaimedPermit, $backfillQuantity): int {
             $generation = (int) Settings::query()
                 ->where('name', 'orchestrator_generation')
                 ->lockForUpdate()
@@ -39,6 +40,10 @@ class WorkerProfileApplier
                 ->where('name', 'orchestrator_bf_group')
                 ->lockForUpdate()
                 ->value('value');
+            $existingPinnedQuantity = (int) Settings::query()
+                ->where('name', 'orchestrator_bf_qty')
+                ->lockForUpdate()
+                ->value('value');
             $permit = ($decision->backfillPermitted || $preserveUnclaimedPermit)
                 ? ($grantPermit ? $generation : $existingPermit)
                 : 0;
@@ -57,6 +62,9 @@ class WorkerProfileApplier
                 'orchestrator_bf_claimed' => $grantPermit ? '0' : (string) $existingClaimed,
                 'orchestrator_bf_completed' => $grantPermit ? '0' : (string) $existingCompleted,
                 'orchestrator_bf_group' => $decision->backfillPermitted ? (string) $backfillGroup : '',
+                'orchestrator_bf_qty' => (string) ($grantPermit
+                    ? max(10000, $backfillQuantity ?? $profile->backfillQuantity)
+                    : $existingPinnedQuantity),
                 'backfill_groups' => (string) max(1, $profile->backfillGroups),
                 'backfillthreads' => (string) max(1, $profile->backfillThreads),
                 'backfill_qty' => (string) max(10000, $profile->backfillQuantity),
@@ -85,6 +93,7 @@ class WorkerProfileApplier
                 'orchestrator_bf_paused' => '1',
                 'orchestrator_bf_permit' => '0',
                 'orchestrator_bf_group' => '',
+                'orchestrator_bf_qty' => '0',
             ] as $name => $value) {
                 Settings::query()->updateOrCreate(['name' => $name], ['value' => $value]);
             }

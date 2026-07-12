@@ -9,6 +9,20 @@ use Tests\TestCase;
 
 final class BackfillRunnerTest extends TestCase
 {
+    public function test_orchestrated_quantity_uses_the_permit_pinned_value(): void
+    {
+        $runner = new class extends BackfillRunner
+        {
+            public function quantity(int $legacy, string $group, int $pinned): int
+            {
+                return $this->resolveBackfillQuantity($legacy, $group, $pinned);
+            }
+        };
+
+        self::assertSame(200_000, $runner->quantity(75_000, 'alt.proven', 200_000));
+        self::assertSame(75_000, $runner->quantity(75_000, '', 200_000));
+    }
+
     public function test_safe_backfill_schedules_meaningful_final_partial_chunk_to_provider_first_article(): void
     {
         $runner = new class extends BackfillRunner

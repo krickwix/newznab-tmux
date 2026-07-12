@@ -97,6 +97,18 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertTrue($decision->transitioned);
     }
 
+    public function test_high_pressure_immediately_denies_new_backfill_supply_before_profile_transition(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->greenBackfillSnapshot(highPressure: true, lowPressure: false),
+            new ControlState(profile: ControlProfile::Fill, lastTransitionAt: 9_999),
+            10_000,
+        );
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_high_pressure', $decision->reasons);
+    }
+
     public function test_five_consecutive_low_samples_are_required_to_move_one_rung_toward_fill(): void
     {
         $policy = new WorkerControlPolicy;

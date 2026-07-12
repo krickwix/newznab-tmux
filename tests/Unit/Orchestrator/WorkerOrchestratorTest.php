@@ -289,6 +289,7 @@ final class WorkerOrchestratorTest extends TestCase
         DB::table('settings')->insert([
             ['name' => 'orchestrator_bf_permit', 'value' => '0'],
             ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '7'],
         ]);
         $store = new WorkerControlStateStore;
         $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
@@ -344,6 +345,7 @@ final class WorkerOrchestratorTest extends TestCase
         DB::table('settings')->insert([
             ['name' => 'orchestrator_bf_permit', 'value' => '0'],
             ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '7'],
         ]);
         $store = new WorkerControlStateStore;
         $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
@@ -471,10 +473,9 @@ final class WorkerOrchestratorTest extends TestCase
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
 
-        self::assertContains('backfill_permit_ineffective', $result['reasons']);
-        self::assertNull($store->permitObservation());
-        self::assertSame(0.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
-        self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts']);
+        self::assertNotContains('backfill_permit_ineffective', $result['reasons']);
+        self::assertNotNull($store->permitObservation());
+        self::assertSame([], $store->backfillYieldHistory());
     }
 
     public function test_a_completed_no_input_permit_closes_early_without_consuming_a_strike(): void

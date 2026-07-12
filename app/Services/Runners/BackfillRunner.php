@@ -72,6 +72,8 @@ class BackfillRunner extends BaseRunner
         $threads = (int) Settings::settingValue('backfillthreads');
         $minimumSafeRange = $this->minimumSafeBackfillRange();
         $orchestratorGroup = trim((string) Settings::settingValue('orchestrator_bf_group'));
+        $orchestratorQuantity = (int) Settings::settingValue('orchestrator_bf_qty');
+        $backfill_qty = $this->resolveBackfillQuantity($backfill_qty, $orchestratorGroup, $orchestratorQuantity);
         $orchestratorGroupFilter = $orchestratorGroup === ''
             ? ''
             : ' AND g.name = '.DB::getPdo()->quote($orchestratorGroup);
@@ -220,6 +222,13 @@ class BackfillRunner extends BaseRunner
         }
 
         return [$queues, $queueGroups];
+    }
+
+    protected function resolveBackfillQuantity(int $legacyQuantity, string $orchestratorGroup, int $pinnedQuantity): int
+    {
+        return $orchestratorGroup !== '' && $pinnedQuantity >= 10000
+            ? $pinnedQuantity
+            : $legacyQuantity;
     }
 
     private function reportSafeBackfillNoWork(string $backfilldays): void

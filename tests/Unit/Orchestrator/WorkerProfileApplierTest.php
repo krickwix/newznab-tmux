@@ -63,6 +63,7 @@ final class WorkerProfileApplierTest extends TestCase
             'orchestrator_nzb_limit' => 20,
             'orchestrator_bf_paused' => 0,
             'orchestrator_bf_group' => 'alt.test',
+            'orchestrator_bf_qty' => 10_000,
             'backfill_groups' => 1,
             'backfillthreads' => 1,
             'backfill_qty' => 10_000,
@@ -83,6 +84,7 @@ final class WorkerProfileApplierTest extends TestCase
             'backfillthreads',
             'backfill_qty',
             'orchestrator_bf_group',
+            'orchestrator_bf_qty',
         ])->toArray());
     }
 
@@ -92,6 +94,19 @@ final class WorkerProfileApplierTest extends TestCase
 
         self::assertSame(3, Settings::settingValue('orchestrator_bf_permit'));
         self::assertSame(5, Settings::settingValue('orchestrator_generation'));
+    }
+
+    public function test_it_pins_scaled_quantity_to_the_granted_permit_and_preserves_it_without_a_new_grant(): void
+    {
+        $applier = new WorkerProfileApplier;
+        $applier->apply($this->decision(ControlProfile::Fill, true), 1_000, true, 'alt.proven', false, 200_000);
+
+        self::assertSame(200_000, Settings::settingValue('orchestrator_bf_qty'));
+        self::assertSame('alt.proven', Settings::settingValue('orchestrator_bf_group'));
+
+        $applier->apply($this->decision(ControlProfile::Fill, true), 1_001, false, 'alt.probe');
+
+        self::assertSame(200_000, Settings::settingValue('orchestrator_bf_qty'));
     }
 
     public function test_it_revokes_the_permit_when_the_policy_closes_the_backfill_gate(): void

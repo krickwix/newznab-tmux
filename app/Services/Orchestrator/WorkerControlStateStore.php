@@ -109,7 +109,7 @@ class WorkerControlStateStore
     }
 
     /** @param array{cursor: int, cursor_postdate: string, ready_collections: int, releases: int, release_high_watermark: int} $outcome */
-    public function beginPermitObservation(PipelineSnapshot $snapshot, int $generation, int $now, array $outcome): void
+    public function beginPermitObservation(PipelineSnapshot $snapshot, int $generation, int $now, array $outcome, int $quantity = 10000): void
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forever(self::PERMIT_OBSERVATION_KEY, [
             'generation' => $generation,
@@ -122,6 +122,7 @@ class WorkerControlStateStore
             'backfill_group' => $snapshot->backfillGroup,
             'backfill_cursor' => $outcome['cursor'],
             'backfill_cursor_postdate' => $outcome['cursor_postdate'],
+            'backfill_quantity' => max(10000, $quantity),
         ]);
     }
 

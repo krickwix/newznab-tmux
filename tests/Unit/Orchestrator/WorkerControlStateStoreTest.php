@@ -99,6 +99,7 @@ final class WorkerControlStateStoreTest extends TestCase
             'backfill_group' => 'alt.test',
             'backfill_cursor' => 12345,
             'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+            'backfill_quantity' => 10000,
         ], $store->permitObservation());
 
         $store->clearPermitObservation();

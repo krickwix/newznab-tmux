@@ -47,6 +47,9 @@ final readonly class PipelineSnapshot
         public array $backlogEwmaPerMinute = [],
         public string $backfillGroup = '',
         public int $backfillCursor = 0,
+        public float $backfillYieldNzbsPer10k = 0.0,
+        public int $backfillRemainingArticles = 0,
+        public int $backfillSafeQuantity = 10000,
     ) {}
 
     public function withPermitOutcome(
@@ -95,6 +98,9 @@ final readonly class PipelineSnapshot
             backlogEwmaPerMinute: $this->backlogEwmaPerMinute,
             backfillGroup: $this->backfillGroup,
             backfillCursor: $this->backfillCursor,
+            backfillYieldNzbsPer10k: $this->backfillYieldNzbsPer10k,
+            backfillRemainingArticles: $this->backfillRemainingArticles,
+            backfillSafeQuantity: $this->backfillSafeQuantity,
         );
     }
 

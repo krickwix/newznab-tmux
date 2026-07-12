@@ -28,4 +28,26 @@ final readonly class WorkerControlProfile
             ControlProfile::Fill => new self($profile, 20, 600, 90, 55, 20, true, 1, 1, 10000),
         };
     }
+
+    public function quantityForYield(
+        float $nzbsPer10k,
+        int $remainingArticles = PHP_INT_MAX,
+        int $safeQuantity = PHP_INT_MAX,
+    ): int {
+        $minimumYield = (float) config('nntmux.orchestrator.backfill_scale_min_yield', 1.0);
+        if ($this->profile !== ControlProfile::Fill || ! is_finite($nzbsPer10k) || $nzbsPer10k < $minimumYield) {
+            return $this->backfillQuantity;
+        }
+
+        $targetNzbs = (int) config('nntmux.orchestrator.backfill_target_nzbs_per_permit', 60);
+        $maxQuantity = (int) config('nntmux.orchestrator.backfill_max_quantity', 200000);
+        $quantity = (int) ceil($targetNzbs / $nzbsPer10k) * 10000;
+
+        $availableQuantity = max(
+            $this->backfillQuantity,
+            intdiv(max(0, $remainingArticles - 10000), 10000) * 10000,
+        );
+
+        return max($this->backfillQuantity, min($maxQuantity, $availableQuantity, $safeQuantity, $quantity));
+    }
 }

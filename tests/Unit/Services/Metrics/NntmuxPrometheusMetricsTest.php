@@ -494,7 +494,7 @@ class NntmuxPrometheusMetricsTest extends TestCase
             'rates_per_minute' => ['parts' => 1.5],
             'ewma_per_minute' => ['parts' => 0.5],
             'oldest_age_seconds' => ['binaries' => 11, 'collections' => 12, 'releases' => 13, 'nzbs' => 14],
-            'backfill_target' => ['group' => 'alt.test', 'cursor' => 12345],
+            'backfill_target' => ['group' => 'alt.test', 'cursor' => 12345, 'quantity' => 200000],
         ]);
         $store = new WorkerControlStateStore;
         $store->recordBackfillYield('alt.test', 10_000, 5, time());
@@ -512,6 +512,7 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_stage_oldest_age_seconds{stage="nzbs"} 14', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_policy_permitted 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_target_info{group="alt.test"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_planned_quantity{group="alt.test"} 200000', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_yield_nzbs_per_10k{group="alt.test"} 5', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_yield_attempts{group="alt.test"} 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_target_ineffective_permits{group="alt.test"} 1', $output);

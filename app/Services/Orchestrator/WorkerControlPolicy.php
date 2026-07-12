@@ -80,6 +80,7 @@ final class WorkerControlPolicy
         $targetLocked = $snapshot->backfillGroup !== ''
             && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= self::INEFFECTIVE_BACKFILL_LIMIT;
         $backfillPermitted = $workerProfile->backfillEnabled
+            && ! $snapshot->highPressure
             && ! $backfillLocked
             && ! $targetLocked
             && $snapshot->backfillGatesPassed();
@@ -237,6 +238,9 @@ final class WorkerControlPolicy
     ): string {
         if (! $profile->backfillEnabled) {
             return 'backfill_disabled_by_profile';
+        }
+        if ($snapshot->highPressure) {
+            return 'backfill_high_pressure';
         }
         if ($backfillLocked) {
             return 'backfill_locked';

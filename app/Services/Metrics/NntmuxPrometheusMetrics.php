@@ -538,6 +538,7 @@ class NntmuxPrometheusMetrics
             'orchestrator_nzb_limit',
             'orchestrator_bf_paused',
             'orchestrator_bf_permit',
+            'orchestrator_bf_qty',
         ])->pluck('value', 'name');
         $mode = (string) ($settings['orchestrator_mode'] ?? 'legacy');
         $profile = (string) ($settings['orchestrator_profile'] ?? 'unknown');
@@ -578,6 +579,9 @@ class NntmuxPrometheusMetrics
             '# HELP nntmux_orchestrator_backfill_paused Whether adaptive backfill is paused.',
             '# TYPE nntmux_orchestrator_backfill_paused gauge',
             $this->metric('nntmux_orchestrator_backfill_paused', (int) ($settings['orchestrator_bf_paused'] ?? 1)),
+            '# HELP nntmux_orchestrator_backfill_permit_quantity Articles pinned atomically to the current one-shot permit.',
+            '# TYPE nntmux_orchestrator_backfill_permit_quantity gauge',
+            $this->metric('nntmux_orchestrator_backfill_permit_quantity', (int) ($settings['orchestrator_bf_qty'] ?? 0)),
             '# HELP nntmux_orchestrator_nzb_batch_size Desired bounded NZB batch size.',
             '# TYPE nntmux_orchestrator_nzb_batch_size gauge',
             $this->metric('nntmux_orchestrator_nzb_batch_size', (int) ($settings['orchestrator_nzb_limit'] ?? 0)),
@@ -604,6 +608,9 @@ class NntmuxPrometheusMetrics
             $lines[] = '# HELP nntmux_orchestrator_backfill_target_cursor Selected adaptive backfill target cursor.';
             $lines[] = '# TYPE nntmux_orchestrator_backfill_target_cursor gauge';
             $lines[] = $this->metric('nntmux_orchestrator_backfill_target_cursor', (int) ($decision['backfill_target']['cursor'] ?? 0), ['group' => $targetGroup]);
+            $lines[] = '# HELP nntmux_orchestrator_backfill_planned_quantity Articles selected for the newest permit decision; zero means no permit issued.';
+            $lines[] = '# TYPE nntmux_orchestrator_backfill_planned_quantity gauge';
+            $lines[] = $this->metric('nntmux_orchestrator_backfill_planned_quantity', (int) ($decision['backfill_target']['quantity'] ?? 0), ['group' => $targetGroup]);
         }
         $lines[] = '# HELP nntmux_orchestrator_backfill_yield_nzbs_per_10k Recent target NZB yield EWMA per 10,000 cursor articles.';
         $lines[] = '# TYPE nntmux_orchestrator_backfill_yield_nzbs_per_10k gauge';

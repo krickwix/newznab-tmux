@@ -54,13 +54,18 @@ class PipelineSnapshotRepository
         $signals = $this->safety->signals();
         $eligibleNzbs = $this->nzbBacklog->eligibleCandidateCount((int) config('nntmux.distributed_nzb_scan_cap', 10000));
         $controlState = $this->state->loadState();
+        $yieldHistory = $this->state->backfillYieldHistory();
         $backfillTarget = $this->targets->select(
             $this->backfillCandidates(),
-            $this->state->backfillYieldHistory(),
+            $yieldHistory,
             time(),
             $controlState->ineffectiveBackfillPermitsByTarget,
         );
         $backfillGroup = (string) ($backfillTarget['name'] ?? '');
+        $targetHistory = $yieldHistory[$backfillGroup] ?? null;
+        $historyIsProven = is_array($targetHistory)
+            && (int) ($targetHistory['attempts'] ?? 0) >= (int) config('nntmux.orchestrator.backfill_scale_min_attempts', 2)
+            && time() - (int) ($targetHistory['last_attempt_at'] ?? 0) < (int) config('nntmux.orchestrator.backfill_yield_ttl_seconds', 86_400);
 
         $backlogs = [
             'parts' => (int) ($tables->parts_count ?? 0),
@@ -118,7 +123,26 @@ class PipelineSnapshotRepository
             backlogEwmaPerMinute: $ewma,
             backfillGroup: $backfillGroup,
             backfillCursor: (int) ($backfillTarget['cursor'] ?? 0),
+            backfillYieldNzbsPer10k: $historyIsProven ? (float) ($targetHistory['ewma_nzbs_per_10k'] ?? 0.0) : 0.0,
+            backfillRemainingArticles: (int) ($backfillTarget['remaining_articles'] ?? 0),
+            backfillSafeQuantity: $this->safeBackfillQuantity($backlogs),
         );
+    }
+
+    /** @param array{parts: int, binaries: int, collections: int, releases: int, nzbs: int} $backlogs */
+    private function safeBackfillQuantity(array $backlogs): int
+    {
+        $fraction = (float) config('nntmux.orchestrator.backfill_headroom_fraction', 0.10);
+        $high = (array) config('nntmux.orchestrator.high_watermarks', []);
+        $growth = (array) config('nntmux.orchestrator.backfill_growth_per_10k', []);
+        $quantities = [];
+        foreach (['parts', 'binaries', 'collections'] as $stage) {
+            $headroom = max(0, (int) ($high[$stage] ?? 0) - $backlogs[$stage]);
+            $permits = (int) floor(($headroom * $fraction) / max(1, (int) ($growth[$stage] ?? 1)));
+            $quantities[] = max(10000, $permits * 10000);
+        }
+
+        return min($quantities);
     }
 
     /** @return array{cursor: int, cursor_postdate: string, ready_collections: int, releases: int, release_high_watermark: int} */
