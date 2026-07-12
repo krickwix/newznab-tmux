@@ -111,7 +111,7 @@ class WorkerControlStateStore
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forget(self::PERMIT_OBSERVATION_KEY);
     }
 
-    /** @return array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int}> */
+    /** @return array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}> */
     public function backfillYieldHistory(): array
     {
         $value = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->get(self::BACKFILL_YIELD_KEY);
@@ -129,6 +129,7 @@ class WorkerControlStateStore
                 'ewma_nzbs_per_10k' => max(0.0, (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0)),
                 'last_attempt_at' => max(0, (int) ($entry['last_attempt_at'] ?? 0)),
                 'last_effective_at' => max(0, (int) ($entry['last_effective_at'] ?? 0)),
+                'last_cursor_delta' => max(0, (int) ($entry['last_cursor_delta'] ?? 0)),
             ];
         }
 
@@ -143,6 +144,7 @@ class WorkerControlStateStore
             'ewma_nzbs_per_10k' => 0.0,
             'last_attempt_at' => 0,
             'last_effective_at' => 0,
+            'last_cursor_delta' => 0,
         ];
         $yield = $cursorDelta > 0
             ? max(0, $nzbCreatedDelta) * 10_000 / $cursorDelta
@@ -157,6 +159,7 @@ class WorkerControlStateStore
             'last_effective_at' => $cursorDelta > 0 && $nzbCreatedDelta > 0
                 ? max(0, $now)
                 : $existing['last_effective_at'],
+            'last_cursor_delta' => max(0, $cursorDelta),
         ];
         uasort($history, static fn (array $left, array $right): int => $right['last_attempt_at'] <=> $left['last_attempt_at']);
         $history = array_slice($history, 0, 16, preserve_keys: true);

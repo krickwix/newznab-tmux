@@ -133,6 +133,7 @@ final class WorkerControlStateStoreTest extends TestCase
                 'ewma_nzbs_per_10k' => 2.5,
                 'last_attempt_at' => 2_000,
                 'last_effective_at' => 1_000,
+                'last_cursor_delta' => 10_000,
             ],
         ], $store->backfillYieldHistory());
     }
@@ -145,6 +146,7 @@ final class WorkerControlStateStoreTest extends TestCase
 
         self::assertSame(0.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
         self::assertSame(0, $store->backfillYieldHistory()['alt.test']['last_effective_at']);
+        self::assertSame(0, $store->backfillYieldHistory()['alt.test']['last_cursor_delta']);
     }
 
     public function test_yield_history_is_bounded_to_the_sixteen_most_recent_groups(): void

@@ -107,7 +107,7 @@ final class WorkerControlPolicy
 
         if ($snapshot->backfillPermitClaimed && ! $snapshot->backfillPermitInputMoved) {
             return [
-                $state->consecutiveIneffectiveBackfillPermits,
+                0,
                 $state->backfillLocked,
                 ['backfill_permit_no_input'],
             ];

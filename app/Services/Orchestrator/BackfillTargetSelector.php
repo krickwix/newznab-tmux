@@ -29,7 +29,7 @@ final readonly class BackfillTargetSelector
 
     /**
      * @param  list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $candidates
-     * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int}>  $history
+     * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
      * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
      */
     public function select(array $candidates, array $history, int $now): ?array
@@ -59,6 +59,14 @@ final readonly class BackfillTargetSelector
             $isRecent = is_array($entry)
                 && $now - (int) ($entry['last_attempt_at'] ?? 0) < $this->historyTtlSeconds;
             if (isset($byName[$group]) && ! $isRecent) {
+                return $byName[$group];
+            }
+            if (isset($byName[$group])
+                && $isRecent
+                && (int) ($entry['attempts'] ?? 0) === 1
+                && (int) ($entry['last_cursor_delta'] ?? 0) > 0
+                && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) <= 0.0
+            ) {
                 return $byName[$group];
             }
         }
