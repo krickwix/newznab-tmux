@@ -112,7 +112,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('80000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_COLLECTIONS_TOTAL_HIGH'] ?? null);
         self::assertSame('60000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_RECOVERY_SOURCES_HIGH'] ?? null);
         self::assertIsArray($bodyRecovery);
-        self::assertSame('*/2 * * * *', $bodyRecovery['spec']['schedule'] ?? null);
+        self::assertSame('*/5 * * * *', $bodyRecovery['spec']['schedule'] ?? null);
         self::assertSame('Forbid', $bodyRecovery['spec']['concurrencyPolicy'] ?? null);
         self::assertStringEndsWith(
             ':microservices-pods-20260712-recovery-fairness-v76',
