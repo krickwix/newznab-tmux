@@ -148,6 +148,8 @@ final class WorkerControlStateStoreTest extends TestCase
             'ready_collections' => 66,
             'release_total' => 77,
             'release_high_watermark' => 88,
+            'baseline_deadlocks' => 0,
+            'safety_clean' => true,
             'backfill_group' => 'alt.test',
             'backfill_cursor' => 12345,
             'backfill_cursor_postdate' => '2026-01-02 03:04:05',
@@ -269,6 +271,25 @@ final class WorkerControlStateStoreTest extends TestCase
         ], $observation['peak_backlogs'] ?? null);
     }
 
+    public function test_growth_safety_rejects_invalid_telemetry_and_conflicting_pressure(): void
+    {
+        $store = new WorkerControlStateStore;
+        $store->beginPermitObservation(new PipelineSnapshot(
+            -1, 2, 3, 4, 5,
+            highPressure: true,
+            lowPressure: true,
+            backfillGroup: 'alt.test',
+        ), 8, 9, [
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 10,
+        ]);
+
+        self::assertFalse($store->permitObservation()['safety_clean'] ?? true);
+    }
+
     public function test_exact_completed_permits_learn_conservative_backlog_growth_without_lowering_static_priors(): void
     {
         config()->set('nntmux.orchestrator.backfill_growth_per_10k', [
@@ -279,6 +300,9 @@ final class WorkerControlStateStoreTest extends TestCase
         $store = new WorkerControlStateStore;
         $observation = [
             'schema_version' => 2,
+            'generation' => 1,
+            'safety_clean' => true,
+            'backfill_quantity' => 20_000,
             'baseline_backlogs' => ['parts' => 100, 'binaries' => 200, 'collections' => 300],
             'peak_backlogs' => ['parts' => 20_100, 'binaries' => 1_400, 'collections' => 2_100],
         ];
@@ -290,7 +314,7 @@ final class WorkerControlStateStoreTest extends TestCase
             'collections' => 1_000,
         ], $store->backfillGrowthFor('alt.other'));
 
-        self::assertTrue($store->recordBackfillGrowth('alt.test', $observation, 20_000, 20_000));
+        self::assertTrue($store->recordBackfillGrowth('alt.test', [...$observation, 'generation' => 2], 20_000, 20_000));
         self::assertSame([
             'parts' => 12_500,
             'binaries' => 750,
@@ -308,12 +332,136 @@ final class WorkerControlStateStoreTest extends TestCase
         $store = new WorkerControlStateStore;
         $observation = [
             'schema_version' => 2,
+            'generation' => 1,
+            'safety_clean' => true,
+            'backfill_quantity' => 20_000,
             'baseline_backlogs' => ['parts' => 100, 'binaries' => 200, 'collections' => 300],
             'peak_backlogs' => ['parts' => 20_100, 'binaries' => 1_400, 'collections' => 2_100],
         ];
 
         self::assertFalse($store->recordBackfillGrowth('alt.test', $observation, 10_000, 20_000));
         self::assertFalse($store->recordBackfillGrowth('alt.test', ['schema_version' => 1], 20_000, 20_000));
+        self::assertFalse($store->recordBackfillGrowth('alt.test', [
+            ...$observation,
+            'safety_clean' => false,
+        ], 20_000, 20_000));
+        self::assertFalse($store->recordBackfillGrowth('alt.test', [
+            ...$observation,
+            'baseline_backlogs' => ['parts' => -1, 'binaries' => 200, 'collections' => 300],
+        ], 20_000, 20_000));
+    }
+
+    public function test_mature_target_growth_uses_a_doubled_observed_envelope_with_a_prior_floor(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_growth_per_10k', [
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ]);
+        config()->set('nntmux.orchestrator.backfill_growth_learning_min_samples', 12);
+        config()->set('nntmux.orchestrator.backfill_growth_learning_safety_multiplier', 2.0);
+        config()->set('nntmux.orchestrator.backfill_growth_learning_prior_floor_fraction', 0.25);
+        $store = new WorkerControlStateStore;
+        $observation = [
+            'schema_version' => 2,
+            'generation' => 1,
+            'safety_clean' => true,
+            'backfill_quantity' => 20_000,
+            'baseline_backlogs' => ['parts' => 100, 'binaries' => 200, 'collections' => 300],
+            'peak_backlogs' => [
+                'parts' => 100 + 23_386,
+                'binaries' => 200 + 218,
+                'collections' => 300 + 16,
+            ],
+        ];
+
+        for ($sample = 0; $sample < 11; $sample++) {
+            self::assertTrue($store->recordBackfillGrowth('alt.test', [
+                ...$observation,
+                'generation' => $sample + 1,
+            ], 20_000, 20_000));
+        }
+        self::assertSame([
+            'parts' => 14_617,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ], $store->backfillGrowthFor('alt.test'));
+
+        $twelfth = [...$observation, 'generation' => 12];
+        self::assertTrue($store->recordBackfillGrowth('alt.test', $twelfth, 20_000, 20_000));
+        for ($replay = 0; $replay < 12; $replay++) {
+            self::assertTrue($store->recordBackfillGrowth('alt.test', $twelfth, 20_000, 20_000));
+        }
+
+        self::assertSame([
+            'parts' => 23_386,
+            'binaries' => 218,
+            'collections' => 250,
+        ], $store->backfillGrowthFor('alt.test'));
+        self::assertSame([
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ], $store->backfillGrowthFor('alt.other'));
+        $history = Cache::store('array')->get('nntmux:orchestrator:backfill-growth');
+        self::assertCount(12, $history['targets']['alt.test']['recent_samples'] ?? []);
+        self::assertSame(12, $history['targets']['alt.test']['samples'] ?? null);
+        self::assertSame(12, $history['global']['samples'] ?? null);
+
+        self::assertTrue($store->recordBackfillGrowth('alt.test', [
+            ...$observation,
+            'generation' => 13,
+            'peak_backlogs' => [
+                'parts' => 2_000_100,
+                'binaries' => 200,
+                'collections' => 300,
+            ],
+        ], 20_000, 20_000));
+        self::assertSame([
+            'parts' => 1_250_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ], $store->backfillGrowthFor('alt.test'));
+        $history = Cache::store('array')->get('nntmux:orchestrator:backfill-growth');
+        self::assertCount(1, $history['targets']['alt.test']['recent_samples'] ?? []);
+    }
+
+    public function test_future_or_malformed_growth_samples_never_enable_the_learned_override(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_growth_per_10k', [
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ]);
+        $sample = [
+            'schema_version' => 1,
+            'observed_at' => time() + 60,
+            'requested_quantity' => 20_000,
+            'cursor_delta' => 20_000,
+            'safety_clean' => true,
+            'parts' => 1,
+            'binaries' => 1,
+            'collections' => 1,
+        ];
+        Cache::store('array')->forever('nntmux:orchestrator:backfill-growth', [
+            'global' => ['samples' => 0, 'growth' => []],
+            'targets' => [
+                'alt.test' => [
+                    'samples' => 12,
+                    'growth' => [],
+                    'recent_samples' => array_map(
+                        static fn (int $generation): array => [...$sample, 'generation' => $generation],
+                        range(1, 12),
+                    ),
+                ],
+            ],
+        ]);
+
+        self::assertSame([
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ], (new WorkerControlStateStore)->backfillGrowthFor('alt.test'));
     }
 
     public function test_missing_state_uses_the_conservative_initial_profile(): void

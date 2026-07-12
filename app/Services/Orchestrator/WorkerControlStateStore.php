@@ -165,6 +165,8 @@ class WorkerControlStateStore
             'ready_collections' => $outcome['ready_collections'],
             'release_total' => $outcome['releases'],
             'release_high_watermark' => $outcome['release_high_watermark'],
+            'baseline_deadlocks' => $snapshot->databaseDeadlocks,
+            'safety_clean' => $this->growthTelemetrySafe($snapshot, $snapshot->databaseDeadlocks),
             'backfill_group' => $snapshot->backfillGroup,
             'backfill_cursor' => $outcome['cursor'],
             'backfill_cursor_postdate' => $outcome['cursor_postdate'],
@@ -248,6 +250,8 @@ class WorkerControlStateStore
                 },
             );
         }
+        $observation['safety_clean'] = (bool) ($observation['safety_clean'] ?? false)
+            && $this->growthTelemetrySafe($snapshot, (int) ($observation['baseline_deadlocks'] ?? -1));
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
             ->forever(self::PERMIT_OBSERVATION_KEY, $observation);
 
@@ -307,6 +311,12 @@ class WorkerControlStateStore
         ) {
             $candidates[] = $target;
         }
+        if ($group !== '' && is_array($target)) {
+            $learned = $this->learnedGrowthEnvelope($target, $growth, time());
+            if ($learned !== null) {
+                return $learned;
+            }
+        }
         foreach ($candidates as $candidate) {
             foreach (array_keys($growth) as $stage) {
                 if (time() - (int) ($candidate['observed_at'][$stage] ?? 0) >= $ttl) {
@@ -322,6 +332,69 @@ class WorkerControlStateStore
         return $growth;
     }
 
+    /**
+     * @param  array<string, mixed>  $target
+     * @param  array{parts: int, binaries: int, collections: int}  $configured
+     * @return array{parts: int, binaries: int, collections: int}|null
+     */
+    private function learnedGrowthEnvelope(array $target, array $configured, int $now): ?array
+    {
+        $samples = $target['recent_samples'] ?? null;
+        if (! is_array($samples)) {
+            return null;
+        }
+        $ttl = (int) config('nntmux.orchestrator.backfill_yield_ttl_seconds', 86_400);
+        $recent = [];
+        foreach ($samples as $sample) {
+            if (! is_array($sample)
+                || (int) ($sample['schema_version'] ?? 0) !== 1
+                || (int) ($sample['generation'] ?? 0) <= 0
+                || (int) ($sample['observed_at'] ?? 0) <= 0
+                || (int) $sample['observed_at'] > $now
+                || $now - (int) $sample['observed_at'] >= $ttl
+                || (int) ($sample['requested_quantity'] ?? 0) < 10_000
+                || (int) ($sample['cursor_delta'] ?? 0) !== (int) $sample['requested_quantity']
+                || ($sample['safety_clean'] ?? false) !== true
+            ) {
+                continue;
+            }
+            $valid = true;
+            foreach (array_keys($configured) as $stage) {
+                $valid = $valid && isset($sample[$stage]) && is_numeric($sample[$stage]) && (int) $sample[$stage] >= 0;
+            }
+            if ($valid) {
+                $recent[] = $sample;
+            }
+        }
+        $recent = array_values(array_reduce($recent, static function (array $unique, array $sample): array {
+            $unique[(int) $sample['generation']] = $sample;
+
+            return $unique;
+        }, []));
+        $minimumSamples = (int) config('nntmux.orchestrator.backfill_growth_learning_min_samples', 12);
+        if (count($recent) < $minimumSamples) {
+            return null;
+        }
+        $latest = max(array_map(static fn (array $sample): int => (int) $sample['observed_at'], $recent));
+        if ($now - $latest > (int) config('nntmux.orchestrator.backfill_growth_learning_latest_sample_seconds', 7200)) {
+            return null;
+        }
+
+        $multiplier = (float) config('nntmux.orchestrator.backfill_growth_learning_safety_multiplier', 2.0);
+        $floorFraction = (float) config('nntmux.orchestrator.backfill_growth_learning_prior_floor_fraction', 0.25);
+        $envelope = [];
+        foreach (array_keys($configured) as $stage) {
+            $maximum = max(array_map(static fn (array $sample): int => (int) $sample[$stage], $recent));
+            $envelope[$stage] = max(
+                1,
+                (int) ceil($configured[$stage] * $floorFraction),
+                (int) ceil($maximum * $multiplier),
+            );
+        }
+
+        return $envelope;
+    }
+
     /** @param array<string, mixed> $observation */
     public function recordBackfillGrowth(
         string $group,
@@ -331,22 +404,42 @@ class WorkerControlStateStore
     ): bool {
         $baseline = $observation['baseline_backlogs'] ?? null;
         $peak = $observation['peak_backlogs'] ?? null;
+        $generation = (int) ($observation['generation'] ?? 0);
         if ($group === ''
             || (int) ($observation['schema_version'] ?? 0) !== 2
             || ! is_array($baseline)
             || ! is_array($peak)
+            || $generation <= 0
             || $cursorDelta < 10_000
             || $cursorDelta !== $requestedQuantity
+            || (int) ($observation['backfill_quantity'] ?? 0) !== $requestedQuantity
+            || ($observation['safety_clean'] ?? false) !== true
         ) {
             return false;
         }
 
+        foreach (['parts', 'binaries', 'collections'] as $stage) {
+            if (! isset($baseline[$stage], $peak[$stage])
+                || ! is_numeric($baseline[$stage])
+                || ! is_numeric($peak[$stage])
+                || (int) $baseline[$stage] < 0
+                || (int) $peak[$stage] < (int) $baseline[$stage]
+            ) {
+                return false;
+            }
+        }
+
         $configured = (array) config('nntmux.orchestrator.backfill_growth_per_10k', []);
+        $configuredGrowth = [
+            'parts' => max(1, (int) ($configured['parts'] ?? 1)),
+            'binaries' => max(1, (int) ($configured['binaries'] ?? 1)),
+            'collections' => max(1, (int) ($configured['collections'] ?? 1)),
+        ];
         $sample = [];
         foreach (['parts', 'binaries', 'collections'] as $stage) {
             $delta = max(0, (int) ($peak[$stage] ?? 0) - (int) ($baseline[$stage] ?? 0));
             $measured = (int) ceil($delta * 10_000 / $cursorDelta);
-            $sample[$stage] = min(max(1, (int) ($configured[$stage] ?? 1)) * 4, $measured);
+            $sample[$stage] = $measured;
         }
         $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
         $history = $cache->get(self::BACKFILL_GROWTH_KEY);
@@ -355,8 +448,39 @@ class WorkerControlStateStore
         }
         $global = $history['global'] ?? ['samples' => 0, 'growth' => []];
         $target = $history['targets'][$group] ?? ['samples' => 0, 'growth' => []];
+        if ((int) ($target['last_recorded_generation'] ?? 0) >= $generation) {
+            return true;
+        }
+        $existingEnvelope = is_array($target)
+            ? $this->learnedGrowthEnvelope($target, $configuredGrowth, time())
+            : null;
+        $recentSamples = is_array($target['recent_samples'] ?? null) ? $target['recent_samples'] : [];
+        if ($existingEnvelope !== null) {
+            foreach (array_keys($sample) as $stage) {
+                if ($sample[$stage] > $existingEnvelope[$stage]) {
+                    $recentSamples = [];
+                    break;
+                }
+            }
+        }
+        $recentSamples[] = [
+            'schema_version' => 1,
+            'generation' => $generation,
+            'observed_at' => time(),
+            'requested_quantity' => $requestedQuantity,
+            'cursor_delta' => $cursorDelta,
+            'safety_clean' => true,
+            ...$sample,
+        ];
+        $target['recent_samples'] = array_slice($recentSamples, -16);
+        $target['last_recorded_generation'] = $generation;
+        $globalGenerations = is_array($global['recent_generations'] ?? null) ? $global['recent_generations'] : [];
+        $recordGlobal = ! in_array($generation, $globalGenerations, true);
+        if ($recordGlobal) {
+            $global['recent_generations'] = array_slice([...$globalGenerations, $generation], -64);
+        }
         foreach (array_keys($sample) as $stage) {
-            if ($sample[$stage] >= (int) ($global['growth'][$stage] ?? 0)) {
+            if ($recordGlobal && $sample[$stage] >= (int) ($global['growth'][$stage] ?? 0)) {
                 $global['growth'][$stage] = $sample[$stage];
                 $global['observed_at'][$stage] = time();
             }
@@ -365,13 +489,22 @@ class WorkerControlStateStore
                 $target['observed_at'][$stage] = time();
             }
         }
-        $global['samples'] = max(0, (int) ($global['samples'] ?? 0)) + 1;
+        $global['samples'] = max(0, (int) ($global['samples'] ?? 0)) + ($recordGlobal ? 1 : 0);
         $target['samples'] = max(0, (int) ($target['samples'] ?? 0)) + 1;
         $history['global'] = $global;
         $history['targets'][$group] = $target;
         $cache->forever(self::BACKFILL_GROWTH_KEY, $history);
 
         return true;
+    }
+
+    private function growthTelemetrySafe(PipelineSnapshot $snapshot, int $baselineDeadlocks): bool
+    {
+        return $snapshot->telemetryIsValid()
+            && $snapshot->hardSafetyPassed()
+            && ! $snapshot->highPressure
+            && $snapshot->databaseCurrentWaits === 0
+            && $snapshot->databaseDeadlocks === $baselineDeadlocks;
     }
 
     /** @return array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}> */
