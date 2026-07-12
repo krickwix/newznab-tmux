@@ -77,6 +77,10 @@ return [
             'releases' => (int) env('NNTMUX_ORCHESTRATOR_RELEASES_HIGH', 20000),
             'nzbs' => (int) env('NNTMUX_ORCHESTRATOR_NZBS_HIGH', 12000),
         ],
+        'low_watermarks' => [
+            'collections_total' => (int) env('NNTMUX_ORCHESTRATOR_COLLECTIONS_TOTAL_LOW', 48000),
+            'recovery_sources' => (int) env('NNTMUX_ORCHESTRATOR_RECOVERY_SOURCES_LOW', 36000),
+        ],
         'age_slo_seconds' => [
             'binaries' => (int) env('NNTMUX_ORCHESTRATOR_BINARIES_AGE_SLO', 172800),
             'collections' => (int) env('NNTMUX_ORCHESTRATOR_COLLECTIONS_AGE_SLO', 172800),

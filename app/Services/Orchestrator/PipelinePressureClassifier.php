@@ -4,16 +4,20 @@ declare(strict_types=1);
 
 namespace App\Services\Orchestrator;
 
+use Illuminate\Container\Container;
+
 final readonly class PipelinePressureClassifier
 {
     /**
      * @param  array<string, int>|null  $highWatermarks
      * @param  array<string, int>|null  $ageSloSeconds
+     * @param  array<string, int>|null  $lowWatermarks
      */
     public function __construct(
         private ?array $highWatermarks = null,
         private ?array $ageSloSeconds = null,
         private ?int $projectionHorizonMinutes = null,
+        private ?array $lowWatermarks = null,
     ) {}
 
     /**
@@ -31,7 +35,7 @@ final readonly class PipelinePressureClassifier
         }
 
         foreach ($ages as $stage => $age) {
-            $low = (int) floor($this->highWatermark($stage) * 0.6);
+            $low = $this->lowWatermark($stage);
             if (($backlogs[$stage] ?? 0) > $low && $age >= $this->ageSlo($stage)) {
                 return true;
             }
@@ -59,7 +63,7 @@ final readonly class PipelinePressureClassifier
             if (! array_key_exists($stage, $backlogs)) {
                 continue;
             }
-            $low = (int) floor($this->highWatermark($stage) * 0.6);
+            $low = $this->lowWatermark($stage);
             if ($backlogs[$stage] >= $low
                 || $this->projectsBreach($backlogs[$stage], $low, $ewma[$stage] ?? 0.0)
             ) {
@@ -86,6 +90,20 @@ final readonly class PipelinePressureClassifier
     {
         return max(1, (int) ($this->highWatermarks[$stage]
             ?? config('nntmux.orchestrator.high_watermarks.'.$stage, PHP_INT_MAX)));
+    }
+
+    private function lowWatermark(string $stage): int
+    {
+        if (isset($this->lowWatermarks[$stage])) {
+            return max(1, (int) $this->lowWatermarks[$stage]);
+        }
+
+        $container = Container::getInstance();
+        $configured = $container->bound('config')
+            ? (int) config('nntmux.orchestrator.low_watermarks.'.$stage, 0)
+            : 0;
+
+        return max(1, $configured > 0 ? $configured : (int) floor($this->highWatermark($stage) * 0.6));
     }
 
     private function ageSlo(string $stage): int

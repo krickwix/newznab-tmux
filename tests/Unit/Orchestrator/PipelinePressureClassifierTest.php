@@ -141,6 +141,41 @@ final class PipelinePressureClassifierTest extends TestCase
         ));
     }
 
+    public function test_quarantined_sources_can_use_explicit_low_watermarks_without_relaxing_high_gates(): void
+    {
+        $classifier = new PipelinePressureClassifier(
+            highWatermarks: [
+                'parts' => 300_000_000,
+                'binaries' => 1_000_000,
+                'collections' => 20_000,
+                'collections_total' => 80_000,
+                'recovery_sources' => 60_000,
+                'releases' => 20_000,
+                'nzbs' => 12_000,
+            ],
+            ageSloSeconds: [],
+            projectionHorizonMinutes: 120,
+            lowWatermarks: ['collections_total' => 60_000, 'recovery_sources' => 50_000],
+        );
+        $backlogs = $this->backlogs(collections: 9_100) + [
+            'collections_total' => 57_500,
+            'recovery_sources' => 48_400,
+        ];
+        $rates = $this->rates() + ['collections_total' => 0.0, 'recovery_sources' => 0.0];
+
+        self::assertTrue($classifier->isLow($backlogs, $rates));
+        self::assertFalse($classifier->isHigh($backlogs, [], $rates));
+        self::assertFalse($classifier->isLow(
+            array_replace($backlogs, ['recovery_sources' => 50_000]),
+            $rates,
+        ));
+        self::assertTrue($classifier->isHigh(
+            array_replace($backlogs, ['recovery_sources' => 60_000]),
+            [],
+            $rates,
+        ));
+    }
+
     /** @return array<string, int> */
     private function backlogs(int $parts = 186_000_000, int $binaries = 40_000, int $collections = 4_000): array
     {
