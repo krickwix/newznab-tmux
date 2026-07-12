@@ -73,6 +73,7 @@ final class BodyPreambleRecoveryWorker extends Command
                 $claimed,
                 $token,
                 $leaseSeconds,
+                $idleSleep,
             );
             $this->emit([
                 'status' => 'processed',

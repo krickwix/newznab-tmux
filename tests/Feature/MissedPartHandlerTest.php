@@ -254,6 +254,27 @@ class MissedPartHandlerTest extends TestCase
         $this->assertTrue(DB::table('missed_parts')->where('id', $id)->exists());
     }
 
+    public function test_deferred_claim_is_unavailable_until_its_cooldown_expires(): void
+    {
+        $handler = new MissedPartHandler(partRepairLimit: 10, partRepairMaxTries: 3);
+        DB::table('missed_parts')->insert([
+            'numberid' => 100,
+            'groups_id' => 9,
+            'attempts' => 0,
+            'recovery_kind' => 'body_preamble',
+        ]);
+        $claimed = $handler->claimBodyRecoveryParts(9, 'token-a', 'worker-a', 1, now()->addMinute());
+        $id = (int) $claimed[0]->id;
+
+        $this->assertSame(1, $handler->deferClaimedParts([$id], 'token-a', now()->addSeconds(20)));
+        $this->assertSame([], $handler->claimBodyRecoveryParts(9, 'token-b', 'worker-b', 1, now()->addMinute()));
+
+        DB::table('missed_parts')->where('id', $id)->update(['claim_expires_at' => now()->subSecond()]);
+        $reclaimed = $handler->claimBodyRecoveryParts(9, 'token-b', 'worker-b', 1, now()->addMinute());
+        $this->assertCount(1, $reclaimed);
+        $this->assertSame('token-b', $reclaimed[0]->claim_token);
+    }
+
     public function test_claim_migration_is_additive_and_reversible_on_sqlite(): void
     {
         DB::statement('DROP TABLE missed_parts');

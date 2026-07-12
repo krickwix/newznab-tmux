@@ -262,6 +262,28 @@ final class MissedPartHandler
     }
 
     /** @param list<int> $ids */
+    public function deferClaimedParts(
+        array $ids,
+        string $token,
+        CarbonInterface|string $availableAt
+    ): int {
+        $nextAttemptAt = $availableAt instanceof CarbonInterface
+            ? CarbonImmutable::instance($availableAt)
+            : CarbonImmutable::parse($availableAt);
+
+        return $this->mutateClaimedChunks(
+            $ids,
+            $token,
+            static fn (Builder $query): int => $query->update([
+                'claim_token' => null,
+                'claim_owner' => null,
+                'claim_expires_at' => $nextAttemptAt,
+                'updated_at' => now(),
+            ])
+        );
+    }
+
+    /** @param list<int> $ids */
     public function renewClaimedParts(array $ids, string $token, CarbonInterface|string $leaseUntil): int
     {
         $expiresAt = $leaseUntil instanceof CarbonInterface
@@ -411,8 +433,7 @@ final class MissedPartHandler
     private function whereClaimAvailable(Builder $query): void
     {
         $query->where(static function (Builder $query): void {
-            $query->whereNull('claim_token')
-                ->orWhereNull('claim_expires_at')
+            $query->whereNull('claim_expires_at')
                 ->orWhere('claim_expires_at', '<=', now());
         });
     }

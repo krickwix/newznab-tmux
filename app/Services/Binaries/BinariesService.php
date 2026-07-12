@@ -707,7 +707,8 @@ class BinariesService
         array $groupArr,
         array $claimedParts,
         string $claimToken,
-        int $leaseSeconds = 180
+        int $leaseSeconds = 180,
+        int $deferSeconds = 20
     ): array {
         if ($claimedParts === []) {
             return ['claimed' => 0, 'repaired' => 0, 'deferred' => 0, 'failed' => 0, 'ownership_lost' => 0, 'group_available' => true];
@@ -731,7 +732,11 @@ class BinariesService
             if ($this->selectNntpGroup($groupArr, $this->getNntp()) === null) {
                 $existing = $this->missedPartHandler->countExistingIds($cohortIds, (int) $groupArr['id']);
                 $ownedRemaining = $this->missedPartHandler->countExistingClaimedIds($cohortIds, $claimToken);
-                $this->missedPartHandler->releaseClaimedParts($cohortIds, $claimToken);
+                $this->missedPartHandler->deferClaimedParts(
+                    $cohortIds,
+                    $claimToken,
+                    now()->addSeconds(max(1, $deferSeconds)),
+                );
 
                 return [
                     'claimed' => count($cohortIds),
@@ -780,7 +785,12 @@ class BinariesService
             $deferredCount = $this->missedPartHandler->countExistingClaimedIds($deferredCandidates, $claimToken);
             $attemptedIds = array_values(array_diff($processedIds, $deferredIds));
             $this->missedPartHandler->incrementClaimedAttempts($attemptedIds, $claimToken);
-            $this->missedPartHandler->releaseClaimedParts($cohortIds, $claimToken);
+            $this->missedPartHandler->deferClaimedParts(
+                $deferredCandidates,
+                $claimToken,
+                now()->addSeconds(max(1, $deferSeconds)),
+            );
+            $this->missedPartHandler->releaseClaimedParts($attemptedIds, $claimToken);
 
             return [
                 'claimed' => count($cohortIds),

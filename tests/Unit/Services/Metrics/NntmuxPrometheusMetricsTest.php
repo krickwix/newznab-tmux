@@ -568,6 +568,7 @@ class NntmuxPrometheusMetricsTest extends TestCase
             ['id' => 2, 'groups_id' => 5, 'attempts' => 1, 'recovery_kind' => 'body_preamble', 'claim_token' => 'active', 'claim_expires_at' => now()->addMinute()],
             ['id' => 3, 'groups_id' => 5, 'attempts' => 2, 'recovery_kind' => 'body_preamble', 'claim_token' => 'expired', 'claim_expires_at' => now()->subMinute()],
             ['id' => 4, 'groups_id' => 5, 'attempts' => 3, 'recovery_kind' => 'body_preamble', 'claim_token' => null, 'claim_expires_at' => null],
+            ['id' => 5, 'groups_id' => 5, 'attempts' => 1, 'recovery_kind' => 'body_preamble', 'claim_token' => null, 'claim_expires_at' => now()->addMinute()],
         ]);
 
         $metrics = new NntmuxPrometheusMetrics;
@@ -576,6 +577,7 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $output = implode("\n", $method->invoke($metrics));
 
         $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="ready"} 1', $output);
+        $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="cooling"} 1', $output);
         $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="claimed"} 1', $output);
         $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="expired"} 1', $output);
         $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="exhausted"} 1', $output);

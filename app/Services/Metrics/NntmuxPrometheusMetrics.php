@@ -218,13 +218,14 @@ class NntmuxPrometheusMetrics
             ->where('mp.recovery_kind', 'body_preamble')
             ->selectRaw('ug.name as group_name')
             ->selectRaw('SUM(CASE WHEN mp.attempts >= 3 THEN 1 ELSE 0 END) as exhausted')
-            ->selectRaw('SUM(CASE WHEN mp.attempts < 3 AND mp.claim_token IS NULL THEN 1 ELSE 0 END) as ready')
+            ->selectRaw('SUM(CASE WHEN mp.attempts < 3 AND mp.claim_token IS NULL AND (mp.claim_expires_at IS NULL OR mp.claim_expires_at <= ?) THEN 1 ELSE 0 END) as ready', [now()])
+            ->selectRaw('SUM(CASE WHEN mp.attempts < 3 AND mp.claim_token IS NULL AND mp.claim_expires_at > ? THEN 1 ELSE 0 END) as cooling', [now()])
             ->selectRaw('SUM(CASE WHEN mp.attempts < 3 AND mp.claim_token IS NOT NULL AND mp.claim_expires_at > ? THEN 1 ELSE 0 END) as claimed', [now()])
             ->selectRaw('SUM(CASE WHEN mp.attempts < 3 AND mp.claim_token IS NOT NULL AND (mp.claim_expires_at IS NULL OR mp.claim_expires_at <= ?) THEN 1 ELSE 0 END) as expired', [now()])
             ->groupBy('ug.name')
             ->get();
         foreach ($rows as $row) {
-            foreach (['ready', 'claimed', 'expired', 'exhausted'] as $state) {
+            foreach (['ready', 'cooling', 'claimed', 'expired', 'exhausted'] as $state) {
                 $lines[] = $this->metric('nntmux_body_recovery_rows', (float) ($row->{$state} ?? 0), [
                     'group' => (string) $row->group_name,
                     'state' => $state,
