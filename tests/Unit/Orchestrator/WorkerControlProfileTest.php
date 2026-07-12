@@ -26,6 +26,7 @@ final class WorkerControlProfileTest extends TestCase
 
         self::assertSame(200_000, $profile->quantityForYield(3.0, 1_000_000));
         self::assertSame(100_000, $profile->quantityForYield(6.1, 1_000_000));
+        self::assertSame(40_000, $profile->quantityForYield(3.0, 1_000_000, 40_000));
     }
 
     public function test_unknown_invalid_and_balanced_targets_remain_bounded_to_probe_quantity(): void

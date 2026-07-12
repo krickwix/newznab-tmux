@@ -23,6 +23,30 @@ final class BackfillRunnerTest extends TestCase
         self::assertSame(75_000, $runner->quantity(75_000, '', 200_000));
     }
 
+    public function test_orchestrated_queue_preserves_ten_thousand_live_provider_articles(): void
+    {
+        $runner = new class extends BackfillRunner
+        {
+            /** @return array{0: array<string, string>, 1: array<string, string>} */
+            public function queues(object $group): array
+            {
+                return $this->buildSafeBackfillQueues([$group], 200_000, 10_000, 1, 10_000);
+            }
+        };
+
+        [$queues] = $runner->queues((object) [
+            'name' => 'alt.proven',
+            'our_first' => 35_000,
+            'their_first' => 5_000,
+            'their_last' => 1_000_000,
+        ]);
+
+        self::assertSame([
+            'alt.proven#1' => 'get_range  backfill  alt.proven  25000  34999  1',
+            'alt.proven#2' => 'get_range  backfill  alt.proven  15000  24999  2',
+        ], $queues);
+    }
+
     public function test_safe_backfill_schedules_meaningful_final_partial_chunk_to_provider_first_article(): void
     {
         $runner = new class extends BackfillRunner

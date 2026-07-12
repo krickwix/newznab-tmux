@@ -38,7 +38,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-backfill'
-                ? ':microservices-pods-20260712-worker-orchestrator-v40'
+                ? ':microservices-pods-20260712-worker-orchestrator-v42'
                 : (in_array($name, [
                     'nntmux-worker-binaries',
                     'nntmux-worker-releases',
@@ -150,7 +150,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringContainsString('max without(instance, pod)', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringContainsString('[20m:1m]', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-worker-orchestrator-v40',
+            ':microservices-pods-20260712-worker-orchestrator-v42',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
@@ -170,7 +170,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $backlogEnvironment = $environment($deployments['nntmux-worker-nzb-backlog'] ?? []);
         $metricsEnvironment = $environment($metrics);
         self::assertSame('microservices-pods-20260711-worker-orchestrator-v22', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
-        self::assertSame('microservices-pods-20260712-worker-orchestrator-v40', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260712-worker-orchestrator-v42', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
         ksort($expected);

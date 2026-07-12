@@ -61,7 +61,7 @@ class WorkerProfileApplier
                 'orchestrator_bf_permit' => (string) $permit,
                 'orchestrator_bf_claimed' => $grantPermit ? '0' : (string) $existingClaimed,
                 'orchestrator_bf_completed' => $grantPermit ? '0' : (string) $existingCompleted,
-                'orchestrator_bf_group' => $decision->backfillPermitted ? (string) $backfillGroup : '',
+                'orchestrator_bf_group' => $grantPermit ? (string) $backfillGroup : $existingGroup,
                 'orchestrator_bf_qty' => (string) ($grantPermit
                     ? max(10000, $backfillQuantity ?? $profile->backfillQuantity)
                     : $existingPinnedQuantity),

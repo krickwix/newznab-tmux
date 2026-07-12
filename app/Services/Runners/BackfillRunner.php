@@ -71,8 +71,8 @@ class BackfillRunner extends BaseRunner
         $maxMessages = (int) Settings::settingValue('maxmssgs');
         $threads = (int) Settings::settingValue('backfillthreads');
         $minimumSafeRange = $this->minimumSafeBackfillRange();
-        $orchestratorGroup = trim((string) Settings::settingValue('orchestrator_bf_group'));
-        $orchestratorQuantity = (int) Settings::settingValue('orchestrator_bf_qty');
+        $orchestratorGroup = trim((string) Settings::settingValue('orchestrator_bfc_group'));
+        $orchestratorQuantity = (int) Settings::settingValue('orchestrator_bfc_qty');
         $backfill_qty = $this->resolveBackfillQuantity($backfill_qty, $orchestratorGroup, $orchestratorQuantity);
         $orchestratorGroupFilter = $orchestratorGroup === ''
             ? ''
@@ -114,7 +114,13 @@ class BackfillRunner extends BaseRunner
             return;
         }
 
-        [$queues, $queueGroups] = $this->buildSafeBackfillQueues($data, $backfill_qty, $maxMessages, $threads);
+        [$queues, $queueGroups] = $this->buildSafeBackfillQueues(
+            $data,
+            $backfill_qty,
+            $maxMessages,
+            $threads,
+            $orchestratorGroup === '' ? 0 : 10000,
+        );
 
         if ($queues === []) {
             $this->reportSafeBackfillNoWork($backfilldays);
@@ -155,8 +161,13 @@ class BackfillRunner extends BaseRunner
      * @param  array<int, object>  $data
      * @return array{0: array<string, string>, 1: array<string, string>}
      */
-    protected function buildSafeBackfillQueues(array $data, int $backfillQty, int $maxMessages, int $threads): array
-    {
+    protected function buildSafeBackfillQueues(
+        array $data,
+        int $backfillQty,
+        int $maxMessages,
+        int $threads,
+        int $reserveArticles = 0,
+    ): array {
         if ($maxMessages < 1) {
             $maxMessages = 20000;
         }
@@ -194,14 +205,15 @@ class BackfillRunner extends BaseRunner
                 continue;
             }
 
-            $getEach = ($count > ($backfillQty * $threads))
-                ? (int) ceil(($backfillQty * $threads) / $maxMessages)
-                : (int) ceil($count / $maxMessages);
+            $floor = $theirFirst + max(0, $reserveArticles);
+            $available = max(0, $ourFirst - $floor);
+            $requested = min($available, $backfillQty * $threads);
+            $getEach = (int) ceil($requested / $maxMessages);
 
             for ($i = 0; $i <= $getEach - 1; $i++) {
                 $end = $ourFirst - $i * $maxMessages - 1;
-                $start = max($theirFirst, $end - $maxMessages + 1);
-                if ($end < $theirFirst || $start > $end) {
+                $start = max($floor, $end - $maxMessages + 1);
+                if ($end < $floor || $start > $end) {
                     continue;
                 }
 

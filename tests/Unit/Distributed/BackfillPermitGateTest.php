@@ -37,6 +37,8 @@ class BackfillPermitGateTest extends TestCase
         self::assertSame(17, $gate->claimGeneration());
         self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
         self::assertSame(17, Settings::settingValue('orchestrator_bf_claimed'));
+        self::assertSame('alt.test', Settings::settingValue('orchestrator_bfc_group'));
+        self::assertSame(160_000, Settings::settingValue('orchestrator_bfc_qty'));
         self::assertFalse($gate->claim());
         self::assertTrue($gate->complete(17));
         self::assertSame(17, Settings::settingValue('orchestrator_bf_completed'));
@@ -82,6 +84,7 @@ class BackfillPermitGateTest extends TestCase
             ['name' => 'orchestrator_bf_permit', 'value' => (string) $permit],
             ['name' => 'orchestrator_bf_claimed', 'value' => '0'],
             ['name' => 'orchestrator_bf_group', 'value' => 'alt.test'],
+            ['name' => 'orchestrator_bf_qty', 'value' => '160000'],
         ]);
     }
 }

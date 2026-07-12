@@ -27,6 +27,7 @@ class BackfillPermitGate
                     'orchestrator_bf_paused',
                     'orchestrator_bf_permit',
                     'orchestrator_bf_group',
+                    'orchestrator_bf_qty',
                 ])
                 ->lockForUpdate()
                 ->get()
@@ -38,7 +39,8 @@ class BackfillPermitGate
                 || (int) $rows->get('orchestrator_lease_until', 0) < time()
                 || (int) $rows->get('orchestrator_bf_paused', 1) !== 0
                 || (int) $rows->get('orchestrator_bf_permit', 0) <= 0
-                || trim((string) $rows->get('orchestrator_bf_group', '')) === '') {
+                || trim((string) $rows->get('orchestrator_bf_group', '')) === ''
+                || (int) $rows->get('orchestrator_bf_qty', 0) < 10000) {
                 return null;
             }
 
@@ -46,6 +48,14 @@ class BackfillPermitGate
             Settings::query()->updateOrCreate(
                 ['name' => 'orchestrator_bf_claimed'],
                 ['value' => (string) $generation],
+            );
+            Settings::query()->updateOrCreate(
+                ['name' => 'orchestrator_bfc_group'],
+                ['value' => trim((string) $rows->get('orchestrator_bf_group'))],
+            );
+            Settings::query()->updateOrCreate(
+                ['name' => 'orchestrator_bfc_qty'],
+                ['value' => (string) (int) $rows->get('orchestrator_bf_qty')],
             );
             Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
             Settings::forgetCachedSettings();

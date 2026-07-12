@@ -483,6 +483,7 @@ class NntmuxPrometheusMetricsTest extends TestCase
     {
         config(['nntmux.orchestrator.state_store' => 'array']);
         DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        DB::table('settings')->insert(['name' => 'orchestrator_bf_qty', 'value' => '200000']);
         Cache::store('array')->flush();
         Cache::store('array')->forever(WorkerControlStateStore::DECISION_KEY, [
             'mode' => 'shadow',
@@ -511,6 +512,7 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_stage_rate_per_minute{stage="parts",estimator="ewma"} 0.5', $output);
         $this->assertStringContainsString('nntmux_orchestrator_stage_oldest_age_seconds{stage="nzbs"} 14', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_policy_permitted 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_permit_quantity 200000', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_target_info{group="alt.test"} 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_planned_quantity{group="alt.test"} 200000', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_yield_nzbs_per_10k{group="alt.test"} 5', $output);
