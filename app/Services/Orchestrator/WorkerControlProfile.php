@@ -33,9 +33,33 @@ final readonly class WorkerControlProfile
         float $nzbsPer10k,
         int $remainingArticles = PHP_INT_MAX,
         int $safeQuantity = PHP_INT_MAX,
+        int $yieldAttempts = 0,
+        int $lastCursorDelta = 0,
+        int $lastEffectiveAt = 0,
+        bool $historyRecent = false,
+        int $targetIneffectivePermits = 0,
     ): int {
         $minimumYield = (float) config('nntmux.orchestrator.backfill_scale_min_yield', 1.0);
         if ($this->profile !== ControlProfile::Fill || ! is_finite($nzbsPer10k) || $nzbsPer10k < $minimumYield) {
+            if ($this->profile === ControlProfile::Fill
+                && $yieldAttempts === 1
+                && $lastCursorDelta > 0
+                && $lastEffectiveAt === 0
+                && $historyRecent
+                && $targetIneffectivePermits === 1
+                && is_finite($nzbsPer10k)
+                && $nzbsPer10k === 0.0
+            ) {
+                $retryQuantity = (int) config('nntmux.orchestrator.backfill_context_retry_quantity', 50000);
+                $maxQuantity = (int) config('nntmux.orchestrator.backfill_max_quantity', 200000);
+                $availableQuantity = max(
+                    $this->backfillQuantity,
+                    intdiv(max(0, $remainingArticles - 10000), 10000) * 10000,
+                );
+
+                return max($this->backfillQuantity, min($retryQuantity, $maxQuantity, $availableQuantity, $safeQuantity));
+            }
+
             return $this->backfillQuantity;
         }
 

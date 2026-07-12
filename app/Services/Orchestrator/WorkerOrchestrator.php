@@ -112,6 +112,11 @@ class WorkerOrchestrator
                 $snapshot->backfillYieldNzbsPer10k,
                 $snapshot->backfillRemainingArticles,
                 $snapshot->backfillSafeQuantity,
+                $snapshot->backfillYieldAttempts,
+                $snapshot->backfillLastCursorDelta,
+                $snapshot->backfillLastEffectiveAt,
+                $snapshot->backfillHistoryRecent,
+                $snapshot->backfillTargetIneffectivePermits,
             );
             $preserveUnclaimedPermit = ! $shadow
                 && $permitObservation !== null

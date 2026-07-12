@@ -48,6 +48,11 @@ final readonly class PipelineSnapshot
         public string $backfillGroup = '',
         public int $backfillCursor = 0,
         public float $backfillYieldNzbsPer10k = 0.0,
+        public int $backfillYieldAttempts = 0,
+        public int $backfillLastCursorDelta = 0,
+        public int $backfillLastEffectiveAt = 0,
+        public bool $backfillHistoryRecent = false,
+        public int $backfillTargetIneffectivePermits = 0,
         public int $backfillRemainingArticles = 0,
         public int $backfillSafeQuantity = 10000,
     ) {}
@@ -99,6 +104,11 @@ final readonly class PipelineSnapshot
             backfillGroup: $this->backfillGroup,
             backfillCursor: $this->backfillCursor,
             backfillYieldNzbsPer10k: $this->backfillYieldNzbsPer10k,
+            backfillYieldAttempts: $this->backfillYieldAttempts,
+            backfillLastCursorDelta: $this->backfillLastCursorDelta,
+            backfillLastEffectiveAt: $this->backfillLastEffectiveAt,
+            backfillHistoryRecent: $this->backfillHistoryRecent,
+            backfillTargetIneffectivePermits: $this->backfillTargetIneffectivePermits,
             backfillRemainingArticles: $this->backfillRemainingArticles,
             backfillSafeQuantity: $this->backfillSafeQuantity,
         );

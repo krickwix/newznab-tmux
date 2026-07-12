@@ -225,6 +225,10 @@ final class NntmuxDeploymentManifestTest extends TestCase
             '1.0',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_AGGRESSIVE_EXPLORE_BELOW_YIELD'] ?? null,
         );
+        self::assertSame(
+            '50000',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_RETRY_QUANTITY'] ?? null,
+        );
         self::assertStringEndsWith(
             ':microservices-pods-20260712-worker-orchestrator-v44',
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),

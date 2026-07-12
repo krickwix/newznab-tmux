@@ -16,6 +16,7 @@ final class WorkerControlProfileTest extends TestCase
         config([
             'nntmux.orchestrator.backfill_scale_min_yield' => 1.0,
             'nntmux.orchestrator.backfill_target_nzbs_per_permit' => 60,
+            'nntmux.orchestrator.backfill_context_retry_quantity' => 50_000,
             'nntmux.orchestrator.backfill_max_quantity' => 200_000,
         ]);
     }
@@ -42,5 +43,33 @@ final class WorkerControlProfileTest extends TestCase
 
         self::assertSame(20_000, $profile->quantityForYield(10.0, 30_000));
         self::assertSame(10_000, $profile->quantityForYield(10.0, 20_000));
+    }
+
+    public function test_one_input_bearing_zero_yield_probe_gets_one_bounded_context_retry(): void
+    {
+        $balanced = WorkerControlProfile::for(ControlProfile::Balanced);
+        $fill = WorkerControlProfile::for(ControlProfile::Fill);
+
+        self::assertSame(10_000, $balanced->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
+        self::assertSame(50_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
+        self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 0, 0, 0, true, 1));
+        self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 0, 0, true, 1));
+        self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 1, true, 1));
+        self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, false, 1));
+        self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 0));
+        self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 2, 10_000, 0, true, 1));
+    }
+
+    public function test_context_retry_is_capped_by_live_headroom_and_source_reserve(): void
+    {
+        $profile = WorkerControlProfile::for(ControlProfile::Fill);
+
+        self::assertSame(40_000, $profile->quantityForYield(0.0, 1_000_000, 40_000, 1, 10_000, 0, true, 1));
+        self::assertSame(20_000, $profile->quantityForYield(0.0, 30_000, 150_000, 1, 10_000, 0, true, 1));
+        self::assertSame(10_000, $profile->quantityForYield(0.0, 20_000, 150_000, 1, 10_000, 0, true, 1));
+
+        config(['nntmux.orchestrator.backfill_context_retry_quantity' => 100_000]);
+        config(['nntmux.orchestrator.backfill_max_quantity' => 30_000]);
+        self::assertSame(30_000, $profile->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
     }
 }

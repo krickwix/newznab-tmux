@@ -67,9 +67,10 @@ class PipelineSnapshotRepository
         );
         $backfillGroup = (string) ($backfillTarget['name'] ?? '');
         $targetHistory = $yieldHistory[$backfillGroup] ?? null;
-        $historyIsProven = is_array($targetHistory)
-            && (int) ($targetHistory['attempts'] ?? 0) >= (int) config('nntmux.orchestrator.backfill_scale_min_attempts', 2)
+        $historyIsRecent = is_array($targetHistory)
             && time() - (int) ($targetHistory['last_attempt_at'] ?? 0) < (int) config('nntmux.orchestrator.backfill_yield_ttl_seconds', 86_400);
+        $historyIsProven = $historyIsRecent
+            && (int) ($targetHistory['attempts'] ?? 0) >= (int) config('nntmux.orchestrator.backfill_scale_min_attempts', 2);
 
         $backlogs = [
             'parts' => (int) ($tables->parts_count ?? 0),
@@ -128,6 +129,11 @@ class PipelineSnapshotRepository
             backfillGroup: $backfillGroup,
             backfillCursor: (int) ($backfillTarget['cursor'] ?? 0),
             backfillYieldNzbsPer10k: $historyIsProven ? (float) ($targetHistory['ewma_nzbs_per_10k'] ?? 0.0) : 0.0,
+            backfillYieldAttempts: is_array($targetHistory) ? (int) ($targetHistory['attempts'] ?? 0) : 0,
+            backfillLastCursorDelta: is_array($targetHistory) ? (int) ($targetHistory['last_cursor_delta'] ?? 0) : 0,
+            backfillLastEffectiveAt: is_array($targetHistory) ? (int) ($targetHistory['last_effective_at'] ?? 0) : 0,
+            backfillHistoryRecent: $historyIsRecent,
+            backfillTargetIneffectivePermits: (int) ($controlState->ineffectiveBackfillPermitsByTarget[$backfillGroup] ?? 0),
             backfillRemainingArticles: (int) ($backfillTarget['remaining_articles'] ?? 0),
             backfillSafeQuantity: $this->safeBackfillQuantity($backlogs),
         );

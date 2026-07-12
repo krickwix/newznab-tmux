@@ -47,6 +47,33 @@ final class BackfillRunnerTest extends TestCase
         ], $queues);
     }
 
+    public function test_context_retry_builds_five_contiguous_ten_thousand_article_chunks(): void
+    {
+        $runner = new class extends BackfillRunner
+        {
+            /** @return array{0: array<string, string>, 1: array<string, string>} */
+            public function queues(object $group): array
+            {
+                return $this->buildSafeBackfillQueues([$group], 50_000, 10_000, 1, 10_000);
+            }
+        };
+
+        [$queues] = $runner->queues((object) [
+            'name' => 'alt.multipart',
+            'our_first' => 100_000,
+            'their_first' => 1,
+            'their_last' => 1_000_000,
+        ]);
+
+        self::assertSame([
+            'alt.multipart#1' => 'get_range  backfill  alt.multipart  90000  99999  1',
+            'alt.multipart#2' => 'get_range  backfill  alt.multipart  80000  89999  2',
+            'alt.multipart#3' => 'get_range  backfill  alt.multipart  70000  79999  3',
+            'alt.multipart#4' => 'get_range  backfill  alt.multipart  60000  69999  4',
+            'alt.multipart#5' => 'get_range  backfill  alt.multipart  50000  59999  5',
+        ], $queues);
+    }
+
     public function test_safe_backfill_schedules_meaningful_final_partial_chunk_to_provider_first_article(): void
     {
         $runner = new class extends BackfillRunner

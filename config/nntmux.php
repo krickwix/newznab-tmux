@@ -43,6 +43,7 @@ return [
         'backfill_scale_min_yield' => max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_SCALE_MIN_YIELD', 1.0)),
         'backfill_scale_min_attempts' => max(2, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_SCALE_MIN_ATTEMPTS', 2)),
         'backfill_target_nzbs_per_permit' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_TARGET_NZBS_PER_PERMIT', 60)),
+        'backfill_context_retry_quantity' => max(10000, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_RETRY_QUANTITY', 50000)),
         'backfill_max_quantity' => max(10000, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_QUANTITY', 200000)),
         'backfill_headroom_fraction' => min(0.5, max(0.01, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_HEADROOM_FRACTION', 0.10))),
         'backfill_growth_per_10k' => [
