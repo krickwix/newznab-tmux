@@ -323,6 +323,32 @@ class PipelineSnapshotRepository
         ]);
     }
 
+    public function backfillCreatedReleasesForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): int {
+        $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+
+        return (int) DB::scalar('SELECT COUNT(*)
+            FROM releases r
+            INNER JOIN usenet_groups g ON g.id = r.groups_id
+            WHERE g.name = ?
+            AND r.id > ?
+            AND r.postdate BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)
+                AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', [
+            $group,
+            max(0, $releaseHighWatermark),
+            $startPostdate,
+            $endPostdate,
+            $postdateToleranceSeconds,
+            $startPostdate,
+            $endPostdate,
+            $postdateToleranceSeconds,
+        ]);
+    }
+
     /**
      * @return list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>
      */

@@ -303,6 +303,45 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         ));
     }
 
+    public function test_group_cohort_release_count_uses_the_same_exact_attribution_window_without_requiring_an_nzb(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+
+        DB::shouldReceive('scalar')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('r.id > ?', $sql);
+                self::assertStringNotContainsString('r.nzbstatus = 1', $sql);
+                self::assertStringContainsString('r.postdate BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)', $sql);
+                self::assertStringContainsString('AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', $sql);
+                self::assertSame([
+                    'alt.test',
+                    123,
+                    '2026-01-02 03:04:05',
+                    '2026-01-01 03:04:05',
+                    3600,
+                    '2026-01-02 03:04:05',
+                    '2026-01-01 03:04:05',
+                    3600,
+                ], $bindings);
+
+                return true;
+            })
+            ->andReturn(2);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame(2, $repository->backfillCreatedReleasesForCohort(
+            'alt.test',
+            123,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        ));
+    }
+
     public function test_body_recovery_queue_excludes_ordinary_and_exhausted_missed_parts(): void
     {
         config()->set('nntmux.body_preamble_deobfuscate_groups', 'alt.test');

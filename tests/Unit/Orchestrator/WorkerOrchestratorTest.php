@@ -84,28 +84,32 @@ final class WorkerOrchestratorTest extends TestCase
             backfillSafeQuantity: 50_000,
         );
 
-        self::assertFalse($method->invoke($orchestrator, $observation, $outcome, $snapshot, true, true, 10_000, 0, 999));
-        self::assertTrue($method->invoke($orchestrator, $observation, $outcome, $snapshot, true, true, 10_000, 0, 1_000));
+        self::assertFalse($method->invoke($orchestrator, $observation, $outcome, $snapshot, true, true, 10_000, 0, 0, 999));
+        self::assertTrue($method->invoke($orchestrator, $observation, $outcome, $snapshot, true, true, 10_000, 0, 0, 1_000));
+        self::assertTrue($method->invoke($orchestrator, $observation, [
+            ...$outcome,
+            'releases' => 4_211,
+            'release_high_watermark' => 560_367,
+        ], $snapshot, true, true, 10_000, 0, 0, 1_000), 'an unrelated delayed release must not serialize the next exact cohort');
 
         foreach ([
-            'unclaimed' => [$observation, $outcome, $snapshot, false, true, 10_000, 0],
-            'incomplete' => [$observation, $outcome, $snapshot, true, false, 10_000, 0],
-            'partial cursor' => [$observation, $outcome, $snapshot, true, true, 9_999, 0],
-            'oversized cursor' => [$observation, $outcome, $snapshot, true, true, 10_001, 0],
-            'cohort nzb' => [$observation, $outcome, $snapshot, true, true, 10_000, 1],
-            'ready collection' => [$observation, [...$outcome, 'ready_collections' => 1], $snapshot, true, true, 10_000, 0],
-            'release count' => [$observation, [...$outcome, 'releases' => 4_211], $snapshot, true, true, 10_000, 0],
-            'release high watermark' => [$observation, [...$outcome, 'release_high_watermark' => 560_367], $snapshot, true, true, 10_000, 0],
-            'eligible nzb' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, eligibleBackfillSupply: true, eligibleNzbs: 1, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0],
-            'database busy' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, databaseCurrentWaits: 1, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0],
-            'high pressure' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, highPressure: true, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0],
-            'no safe quantity' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 0), true, true, 10_000, 0],
+            'unclaimed' => [$observation, $outcome, $snapshot, false, true, 10_000, 0, 0],
+            'incomplete' => [$observation, $outcome, $snapshot, true, false, 10_000, 0, 0],
+            'partial cursor' => [$observation, $outcome, $snapshot, true, true, 9_999, 0, 0],
+            'oversized cursor' => [$observation, $outcome, $snapshot, true, true, 10_001, 0, 0],
+            'cohort release' => [$observation, $outcome, $snapshot, true, true, 10_000, 1, 0],
+            'cohort nzb' => [$observation, $outcome, $snapshot, true, true, 10_000, 1, 1],
+            'ready collection' => [$observation, [...$outcome, 'ready_collections' => 1], $snapshot, true, true, 10_000, 0, 0],
+            'eligible nzb' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, eligibleBackfillSupply: true, eligibleNzbs: 1, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0, 0],
+            'database busy' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, databaseCurrentWaits: 1, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0, 0],
+            'high pressure' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, highPressure: true, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0, 0],
+            'no safe quantity' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 0), true, true, 10_000, 0, 0],
         ] as $label => $arguments) {
             self::assertFalse($method->invoke($orchestrator, ...[...$arguments, 1_000]), $label);
         }
     }
 
-    public function test_completed_zero_output_permit_closes_after_grace_and_records_one_target_strike(): void
+    public function test_completed_zero_output_permit_ignores_an_unrelated_delayed_release_after_grace(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => false,
@@ -157,10 +161,11 @@ final class WorkerOrchestratorTest extends TestCase
             'cursor' => 10_000,
             'cursor_postdate' => '2026-01-01 03:04:05',
             'ready_collections' => 0,
-            'releases' => 4_210,
-            'release_high_watermark' => 560_366,
+            'releases' => 4_211,
+            'release_high_watermark' => 560_367,
         ]);
         $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
         $applier->shouldReceive('apply')->once()->andReturn(8);
@@ -581,6 +586,12 @@ final class WorkerOrchestratorTest extends TestCase
             '2026-01-02 03:04:05',
             '2026-01-01 03:04:05',
         )->andReturn(3);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->with(
+            'alt.test',
+            100,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        )->andReturn(3);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
         $applier->shouldReceive('apply')->once()->andReturn(8);
@@ -645,6 +656,7 @@ final class WorkerOrchestratorTest extends TestCase
             'releases' => 0,
         ]);
         $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(2);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(2);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->times($closes ? 1 : 0);
         $applier->shouldReceive('apply')->once()->andReturn(8);
@@ -707,6 +719,7 @@ final class WorkerOrchestratorTest extends TestCase
             'releases' => 1,
         ]);
         $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldNotReceive('revokePermit');
         $applier->shouldReceive('apply')->once()->andReturn(8);
@@ -757,6 +770,7 @@ final class WorkerOrchestratorTest extends TestCase
             'releases' => 1,
         ]);
         $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
         $applier->shouldReceive('apply')->once()->andReturn(8);

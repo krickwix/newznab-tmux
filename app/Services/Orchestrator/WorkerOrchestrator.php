@@ -69,7 +69,14 @@ class WorkerOrchestrator
                 $produced = $outcome['ready_collections'] > (int) ($permitObservation['ready_collections'] ?? 0)
                     || $outcome['releases'] > (int) ($permitObservation['release_total'] ?? 0);
                 $cohortNzbs = 0;
+                $cohortReleases = 0;
                 if ($permitClaimed && $hasCohortBaseline && ($observationExpired || $cursorMoved)) {
+                    $cohortReleases = $this->snapshots->backfillCreatedReleasesForCohort(
+                        $observedGroup,
+                        (int) $permitObservation['release_high_watermark'],
+                        (string) $permitObservation['backfill_cursor_postdate'],
+                        (string) ($outcome['cursor_postdate'] ?? ''),
+                    );
                     $cohortNzbs = $this->snapshots->backfillCreatedNzbsForCohort(
                         $observedGroup,
                         (int) $permitObservation['release_high_watermark'],
@@ -85,6 +92,7 @@ class WorkerOrchestrator
                     $permitClaimed,
                     $permitCompleted,
                     $cursorDelta,
+                    $cohortReleases,
                     $cohortNzbs,
                     time(),
                 );
@@ -272,6 +280,7 @@ class WorkerOrchestrator
         bool $permitClaimed,
         bool $permitCompleted,
         int $cursorDelta,
+        int $cohortReleases,
         int $cohortNzbs,
         int $now,
     ): bool {
@@ -285,10 +294,9 @@ class WorkerOrchestrator
             && $now - $completedAt >= $graceSeconds
             && $quantity >= 10_000
             && $cursorDelta === $quantity
+            && $cohortReleases === 0
             && $cohortNzbs === 0
             && (int) ($outcome['ready_collections'] ?? 0) <= (int) ($observation['ready_collections'] ?? 0)
-            && (int) ($outcome['releases'] ?? 0) <= (int) ($observation['release_total'] ?? 0)
-            && (int) ($outcome['release_high_watermark'] ?? 0) <= (int) ($observation['release_high_watermark'] ?? 0)
             && $snapshot->eligibleNzbs === 0
             && $snapshot->telemetryIsValid()
             && $snapshot->hardSafetyPassed()
