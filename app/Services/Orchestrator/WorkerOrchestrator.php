@@ -180,8 +180,15 @@ class WorkerOrchestrator
                     'parts' => $snapshot->partsBacklog,
                     'binaries' => $snapshot->binariesBacklog,
                     'collections' => $snapshot->collectionsBacklog,
+                    'collections_total' => $snapshot->physicalCollectionsBacklog(),
+                    'recovery_sources' => $snapshot->bodyRecoverySourceBacklog,
                     'releases' => $snapshot->releasesBacklog,
                     'nzbs' => $snapshot->nzbsBacklog,
+                ],
+                'collection_backlogs' => [
+                    'total' => $snapshot->physicalCollectionsBacklog(),
+                    'ordinary' => $snapshot->collectionsBacklog,
+                    'body_recovery_sources' => $snapshot->bodyRecoverySourceBacklog,
                 ],
                 'storage_available_bytes' => $snapshot->storageAvailableBytes,
                 'observed_at' => $snapshot->observedAt,
@@ -193,6 +200,7 @@ class WorkerOrchestrator
                 'oldest_age_seconds' => [
                     'binaries' => $snapshot->oldestBinaryAgeSeconds,
                     'collections' => $snapshot->oldestCollectionAgeSeconds,
+                    'recovery_sources' => $snapshot->oldestBodyRecoverySourceAgeSeconds,
                     'releases' => $snapshot->oldestReleaseAgeSeconds,
                     'nzbs' => $snapshot->oldestNzbAgeSeconds,
                 ],

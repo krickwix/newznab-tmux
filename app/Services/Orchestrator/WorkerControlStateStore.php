@@ -111,9 +111,12 @@ class WorkerControlStateStore
     public function storeSnapshot(PipelineSnapshot $snapshot): void
     {
         $value = [
+            'schema_version' => 2,
             'parts' => $snapshot->partsBacklog,
             'binaries' => $snapshot->binariesBacklog,
             'collections' => $snapshot->collectionsBacklog,
+            'collections_total' => $snapshot->physicalCollectionsBacklog(),
+            'recovery_sources' => $snapshot->bodyRecoverySourceBacklog,
             'releases' => $snapshot->releasesBacklog,
             'nzbs' => $snapshot->nzbsBacklog,
             'database_deadlocks' => $snapshot->databaseDeadlocks,
@@ -145,12 +148,12 @@ class WorkerControlStateStore
             'baseline_backlogs' => [
                 'parts' => $snapshot->partsBacklog,
                 'binaries' => $snapshot->binariesBacklog,
-                'collections' => $snapshot->collectionsBacklog,
+                'collections' => $snapshot->physicalCollectionsBacklog(),
             ],
             'peak_backlogs' => [
                 'parts' => $snapshot->partsBacklog,
                 'binaries' => $snapshot->binariesBacklog,
-                'collections' => $snapshot->collectionsBacklog,
+                'collections' => $snapshot->physicalCollectionsBacklog(),
             ],
             'ready_collections' => $outcome['ready_collections'],
             'release_total' => $outcome['releases'],
@@ -180,7 +183,7 @@ class WorkerControlStateStore
                 match ($stage) {
                     'parts' => $snapshot->partsBacklog,
                     'binaries' => $snapshot->binariesBacklog,
-                    'collections' => $snapshot->collectionsBacklog,
+                    'collections' => $snapshot->physicalCollectionsBacklog(),
                 },
             );
         }

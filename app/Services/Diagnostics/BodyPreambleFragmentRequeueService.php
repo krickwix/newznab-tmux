@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Diagnostics;
 
+use App\Services\Orchestrator\BodyRecoverySourceCriteria;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -404,7 +405,7 @@ final class BodyPreambleFragmentRequeueService
         int $afterCollectionId,
         bool $privateOnly = false,
     ): Collection {
-        return DB::table('collections as c')
+        $query = DB::table('collections as c')
             ->join('binaries as b', 'b.collections_id', '=', 'c.id')
             ->select([
                 'c.id as collection_id',
@@ -417,19 +418,33 @@ final class BodyPreambleFragmentRequeueService
                 'b.currentparts',
                 'b.totalparts',
             ])
-            ->where('c.groups_id', $groupId)
-            ->where('c.filecheck', 0)
-            ->where('c.totalfiles', '>', 1)
             ->where('c.id', '>', $afterCollectionId)
-            ->where('b.currentparts', '<=', $maxCurrentParts)
-            ->where('b.totalparts', '>=', $minTotalParts)
-            ->whereRaw('(SELECT COUNT(*) FROM binaries b2 WHERE b2.collections_id = c.id) = 1')
-            ->when($regexIds !== [], static fn ($query) => $query->whereIn('c.collection_regexes_id', $regexIds))
-            ->when($privateOnly, static fn ($query) => $query->where('c.subject', 'like', '[PRiVATE]%[newzNZB]%'))
-            ->when($before !== null && $before !== '', static fn ($query) => $query->where('c.dateadded', '<', $before))
             ->orderBy('c.id')
-            ->limit($limit)
-            ->get();
+            ->limit($limit);
+
+        if ($privateOnly) {
+            $criteria = new BodyRecoverySourceCriteria(
+                groupIds: [$groupId],
+                regexIds: $regexIds,
+                maxCurrentParts: $maxCurrentParts,
+                minTotalParts: $minTotalParts,
+                before: $before,
+            );
+            $predicate = $criteria->eligibilityPredicate();
+            $query->whereRaw($predicate['sql'], $predicate['bindings']);
+        } else {
+            $query
+                ->where('c.groups_id', $groupId)
+                ->where('c.filecheck', 0)
+                ->where('c.totalfiles', '>', 1)
+                ->where('b.currentparts', '<=', $maxCurrentParts)
+                ->where('b.totalparts', '>=', $minTotalParts)
+                ->whereRaw('NOT EXISTS (SELECT 1 FROM binaries b2 WHERE b2.collections_id = c.id AND b2.id <> b.id)')
+                ->when($regexIds !== [], static fn ($builder) => $builder->whereIn('c.collection_regexes_id', $regexIds))
+                ->when($before !== null && $before !== '', static fn ($builder) => $builder->where('c.dateadded', '<', $before));
+        }
+
+        return $query->get();
     }
 
     private function extractGroupArticle(string $xref, string $groupName): ?int

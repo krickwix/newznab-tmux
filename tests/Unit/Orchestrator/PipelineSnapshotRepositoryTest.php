@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit\Orchestrator;
 
 use App\Services\Nzb\NzbBacklogCreationService;
+use App\Services\Orchestrator\BodyRecoverySourceCriteria;
 use App\Services\Orchestrator\PipelineSnapshotRepository;
 use App\Services\Orchestrator\PrometheusSafetySignalProvider;
 use App\Services\Orchestrator\WorkerControlStateStore;
@@ -15,6 +16,56 @@ use Tests\TestCase;
 
 final class PipelineSnapshotRepositoryTest extends TestCase
 {
+    public function test_body_recovery_source_backlog_uses_the_exact_bounded_reconciliation_contract(): void
+    {
+        DB::shouldReceive('selectOne')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('COUNT(*)', $sql);
+                self::assertStringContainsString('c.filecheck = 0', $sql);
+                self::assertStringContainsString('c.releases_id IS NULL', $sql);
+                self::assertStringContainsString("c.subject LIKE '[PRiVATE]%[newzNZB]%'", $sql);
+                self::assertStringContainsString('c.collection_regexes_id IN (?)', $sql);
+                self::assertStringNotContainsString('b.currentparts <= ?', $sql);
+                self::assertStringNotContainsString('b.totalparts >= ?', $sql);
+                self::assertStringContainsString('c.totalfiles > 1', $sql);
+                self::assertStringContainsString('NOT EXISTS', $sql);
+                self::assertStringContainsString('b2.collections_id = c.id', $sql);
+                self::assertStringNotContainsString('c.dateadded < ?', $sql);
+                self::assertStringContainsString('c.groups_id IN (?, ?)', $sql);
+                self::assertSame([11, 22, -20], $bindings);
+
+                return true;
+            })
+            ->andReturn((object) ['backlog' => 4321, 'oldest_age' => 7200]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'bodyRecoverySourceSnapshot');
+
+        self::assertSame(['backlog' => 4321, 'oldest_age' => 7200], $method->invoke(
+            $repository,
+            new BodyRecoverySourceCriteria([11, 22], [-20], 2, 10, '2026-07-12 16:00:00'),
+        ));
+    }
+
+    public function test_body_recovery_identity_is_stable_while_work_eligibility_keeps_dynamic_bounds(): void
+    {
+        $criteria = new BodyRecoverySourceCriteria([11], [-20], 2, 10, '2026-07-12 16:00:00');
+        $identity = $criteria->identityPredicate();
+        $eligibility = $criteria->eligibilityPredicate();
+
+        self::assertStringNotContainsString('dateadded < ?', $identity['sql']);
+        self::assertStringNotContainsString('currentparts <= ?', $identity['sql']);
+        self::assertSame([11, -20], $identity['bindings']);
+        self::assertStringContainsString('dateadded < ?', $eligibility['sql']);
+        self::assertStringContainsString('currentparts <= ?', $eligibility['sql']);
+        self::assertStringContainsString('totalparts >= ?', $eligibility['sql']);
+        self::assertSame([11, -20, '2026-07-12 16:00:00', 2, 10], $eligibility['bindings']);
+    }
+
     public function test_safe_backfill_quantity_is_zero_when_any_stage_lacks_one_quantum_of_headroom(): void
     {
         config()->set('nntmux.orchestrator.backfill_headroom_fraction', 0.10);
@@ -50,6 +101,36 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         ]);
 
         self::assertSame(0, $quantity);
+    }
+
+    public function test_legacy_snapshot_resets_new_collection_split_rates_without_a_fake_drain(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'rates');
+        [$rates, $ewma] = $method->invoke($repository, [
+            'parts' => 190_000_000,
+            'binaries' => 80_000,
+            'collections' => 8_000,
+            'collections_total' => 48_000,
+            'recovery_sources' => 40_000,
+            'releases' => 12,
+            'nzbs' => 6_791,
+        ], [
+            'parts' => 189_999_000,
+            'binaries' => 80_100,
+            'collections' => 49_000,
+            'observed_at' => time() - 60,
+            'ewma_collections' => 123.0,
+        ]);
+
+        self::assertSame(0.0, $rates['collections']);
+        self::assertSame(0.0, $rates['collections_total']);
+        self::assertSame(0.0, $rates['recovery_sources']);
+        self::assertSame(0.0, $ewma['collections']);
+        self::assertEquals(1000.0, $rates['parts']);
     }
 
     public function test_backfill_candidates_are_bounded_to_fresh_current_valid_ranges(): void
@@ -158,5 +239,31 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             '2026-01-02 03:04:05',
             '2026-01-01 03:04:05',
         ));
+    }
+
+    public function test_body_recovery_queue_excludes_ordinary_and_exhausted_missed_parts(): void
+    {
+        config()->set('nntmux.body_preamble_deobfuscate_groups', 'alt.test');
+        DB::statement('CREATE TABLE usenet_groups (id INTEGER PRIMARY KEY, name VARCHAR(255))');
+        DB::statement('CREATE TABLE missed_parts (
+            id INTEGER PRIMARY KEY,
+            groups_id INTEGER,
+            attempts INTEGER,
+            recovery_kind VARCHAR(32)
+        )');
+        DB::table('usenet_groups')->insert(['id' => 1, 'name' => 'alt.test']);
+        DB::table('missed_parts')->insert([
+            ['id' => 1, 'groups_id' => 1, 'attempts' => 0, 'recovery_kind' => 'body_preamble'],
+            ['id' => 2, 'groups_id' => 1, 'attempts' => 0, 'recovery_kind' => null],
+            ['id' => 3, 'groups_id' => 1, 'attempts' => 3, 'recovery_kind' => 'body_preamble'],
+        ]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'bodyRecoveryQueueBacklog');
+
+        self::assertSame(1, $method->invoke($repository));
     }
 }

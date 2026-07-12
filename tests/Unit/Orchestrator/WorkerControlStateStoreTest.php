@@ -77,9 +77,12 @@ final class WorkerControlStateStoreTest extends TestCase
         ));
 
         self::assertSame([
+            'schema_version' => 2,
             'parts' => 11,
             'binaries' => 22,
             'collections' => 33,
+            'collections_total' => 33,
+            'recovery_sources' => 0,
             'releases' => 44,
             'nzbs' => 55,
             'database_deadlocks' => 6,

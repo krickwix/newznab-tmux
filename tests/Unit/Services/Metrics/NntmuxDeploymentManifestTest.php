@@ -41,6 +41,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $backfill = null;
         $bodyRecovery = null;
         $bodyRecoveryWorker = null;
+        $orchestrator = null;
         foreach ($manifest['items'] as $deployment) {
             if (is_array($deployment)
                 && ($deployment['kind'] ?? null) === 'CronJob'
@@ -54,6 +55,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
             if (($deployment['metadata']['name'] ?? null) === 'nntmux-body-recovery-worker') {
                 $bodyRecoveryWorker = $deployment;
+            }
+            if (($deployment['metadata']['name'] ?? null) === 'nntmux-worker-orchestrator') {
+                $orchestrator = $deployment;
             }
 
             if (($deployment['metadata']['name'] ?? null) === 'nntmux-worker-backfill') {
@@ -98,6 +102,15 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertNotEmpty($workers);
         self::assertIsArray($backfill);
         self::assertSame(1, $backfill['spec']['replicas'] ?? null);
+        self::assertIsArray($orchestrator);
+        $orchestratorEnv = array_column(
+            $orchestrator['spec']['template']['spec']['containers'][0]['env'] ?? [],
+            'value',
+            'name',
+        );
+        self::assertSame('alt.binaries.lossless', $orchestratorEnv['NNTMUX_ORCHESTRATOR_BODY_RECOVERY_SOURCE_GROUPS'] ?? null);
+        self::assertSame('80000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_COLLECTIONS_TOTAL_HIGH'] ?? null);
+        self::assertSame('60000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_RECOVERY_SOURCES_HIGH'] ?? null);
         self::assertIsArray($bodyRecovery);
         self::assertSame('*/5 * * * *', $bodyRecovery['spec']['schedule'] ?? null);
         self::assertSame('Forbid', $bodyRecovery['spec']['concurrencyPolicy'] ?? null);
@@ -105,6 +118,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
             ':microservices-pods-20260712-xref-lock-order-v74',
             (string) ($bodyRecovery['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
+        $recoveryArgs = $bodyRecovery['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['args'] ?? [];
+        self::assertNotContains('--regex=-20', $recoveryArgs);
+        self::assertNotContains('--max-current-parts=2', $recoveryArgs);
+        self::assertNotContains('--min-total-parts=10', $recoveryArgs);
+        self::assertNotContains('--cutoff-hours=2', $recoveryArgs);
         self::assertIsArray($bodyRecoveryWorker);
         self::assertSame(2, $bodyRecoveryWorker['spec']['replicas'] ?? null);
         $bodyContainer = $bodyRecoveryWorker['spec']['template']['spec']['containers'][0] ?? [];

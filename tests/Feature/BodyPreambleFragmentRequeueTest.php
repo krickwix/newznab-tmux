@@ -43,6 +43,7 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
             totalfiles INT,
             collection_regexes_id INT,
             filecheck INT DEFAULT 0,
+            releases_id INT NULL,
             dateadded DATETIME NULL
         )');
 

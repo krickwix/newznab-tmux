@@ -15,9 +15,9 @@ final class BodyPreambleRecoveryCycle extends Command
                             {group : Exact group name}
                             {--regex=* : Legacy collection regex id; repeatable}
                             {--limit=1000 : Maximum sources pruned and requeued per cycle}
-                            {--max-current-parts=2}
-                            {--min-total-parts=10}
-                            {--cutoff-hours=2 : Protect collections newer than this many hours}
+                            {--max-current-parts= : Override configured maximum current parts}
+                            {--min-total-parts= : Override configured minimum total parts}
+                            {--cutoff-hours= : Override configured source cutoff hours}
                             {--json : Emit machine-readable JSON}';
 
     protected $description = 'Prune proven BODY recoveries and replenish one bounded repair cohort';
@@ -43,9 +43,12 @@ final class BodyPreambleRecoveryCycle extends Command
             $group = (string) $this->argument('group');
             $regexIds = $this->regexIds();
             $limit = max(1, min(1000, (int) $this->option('limit')));
-            $maxCurrentParts = max(1, (int) $this->option('max-current-parts'));
-            $minTotalParts = max(1, (int) $this->option('min-total-parts'));
-            $cutoff = now()->subHours(max(1, (int) $this->option('cutoff-hours')))->toDateTimeString();
+            $maxCurrentParts = max(1, (int) ($this->option('max-current-parts')
+                ?: config('nntmux.orchestrator.body_recovery_source_max_current_parts', 2)));
+            $minTotalParts = max(1, (int) ($this->option('min-total-parts')
+                ?: config('nntmux.orchestrator.body_recovery_source_min_total_parts', 10)));
+            $cutoff = now()->subHours(max(1, (int) ($this->option('cutoff-hours')
+                ?: config('nntmux.orchestrator.body_recovery_source_cutoff_hours', 2))))->toDateTimeString();
 
             $prune = $service->pruneRecovered(
                 $group,
@@ -116,7 +119,13 @@ final class BodyPreambleRecoveryCycle extends Command
             (array) $this->option('regex'),
         )));
         if ($ids === []) {
-            throw new InvalidArgumentException('At least one --regex selector is required.');
+            $ids = array_values(array_unique(array_map(
+                'intval',
+                (array) config('nntmux.orchestrator.body_recovery_source_regex_ids', []),
+            )));
+        }
+        if ($ids === []) {
+            throw new InvalidArgumentException('At least one recovery source regex selector is required.');
         }
 
         return $ids;

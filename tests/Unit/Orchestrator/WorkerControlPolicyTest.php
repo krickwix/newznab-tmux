@@ -475,6 +475,44 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('core_pipeline_draining', $decision->reasons);
     }
 
+    public function test_classification_drain_cannot_accelerate_recovery_while_physical_collections_grow(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide($this->snapshot(
+            partsBacklog: 192_000_000,
+            binariesBacklog: 89_000,
+            collectionsBacklog: 9_000,
+            collectionsTotalBacklog: 48_000,
+            highPressure: true,
+            observedAt: 130,
+            backlogRatesPerMinute: [
+                'parts' => 0.0,
+                'binaries' => 0.0,
+                'collections' => -500.0,
+                'collections_total' => 1.0,
+                'recovery_sources' => 501.0,
+                'releases' => 0.0,
+                'nzbs' => 0.0,
+            ],
+            backlogEwmaPerMinute: [
+                'parts' => 0.0,
+                'binaries' => 0.0,
+                'collections' => -100.0,
+                'collections_total' => 0.1,
+                'recovery_sources' => 100.1,
+                'releases' => 0.0,
+                'nzbs' => 0.0,
+            ],
+            bodyRecoveryQueueBacklog: 10_000,
+        ), new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        ), 10_000);
+
+        self::assertSame(0, $decision->nextState->recoveryDrainSamples);
+        self::assertNotContains('core_pipeline_draining', $decision->reasons);
+    }
+
     public function test_stable_ineligible_nzb_backlog_does_not_permanently_block_recovery_drain(): void
     {
         $policy = new WorkerControlPolicy;

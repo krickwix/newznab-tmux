@@ -56,11 +56,24 @@ return [
         'database_memory_limit_bytes' => (int) env('NNTMUX_ORCHESTRATOR_DB_MEMORY_LIMIT_BYTES', 4456448000),
         'database_cpu_limit_cores' => (float) env('NNTMUX_ORCHESTRATOR_DB_CPU_LIMIT_CORES', 3),
         'pressure_projection_horizon_minutes' => max(1, (int) env('NNTMUX_ORCHESTRATOR_PRESSURE_HORIZON_MINUTES', 120)),
+        'body_recovery_source_regex_ids' => array_values(array_map(
+            'intval',
+            array_filter(array_map('trim', explode(',', (string) env('NNTMUX_ORCHESTRATOR_BODY_RECOVERY_SOURCE_REGEX_IDS', '-20'))), static fn (string $value): bool => $value !== '')
+        )),
+        'body_recovery_source_groups' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('NNTMUX_ORCHESTRATOR_BODY_RECOVERY_SOURCE_GROUPS', 'alt.binaries.lossless'))
+        ))),
+        'body_recovery_source_max_current_parts' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BODY_RECOVERY_SOURCE_MAX_CURRENT_PARTS', 2)),
+        'body_recovery_source_min_total_parts' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BODY_RECOVERY_SOURCE_MIN_TOTAL_PARTS', 10)),
+        'body_recovery_source_cutoff_hours' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BODY_RECOVERY_SOURCE_CUTOFF_HOURS', 2)),
         'storage_floor_bytes' => (int) env('NNTMUX_ORCHESTRATOR_STORAGE_FLOOR_BYTES', 18500000000),
         'high_watermarks' => [
             'parts' => (int) env('NNTMUX_ORCHESTRATOR_PARTS_HIGH', 300000000),
             'binaries' => (int) env('NNTMUX_ORCHESTRATOR_BINARIES_HIGH', 1000000),
             'collections' => (int) env('NNTMUX_ORCHESTRATOR_COLLECTIONS_HIGH', 20000),
+            'collections_total' => (int) env('NNTMUX_ORCHESTRATOR_COLLECTIONS_TOTAL_HIGH', 80000),
+            'recovery_sources' => (int) env('NNTMUX_ORCHESTRATOR_RECOVERY_SOURCES_HIGH', 60000),
             'releases' => (int) env('NNTMUX_ORCHESTRATOR_RELEASES_HIGH', 20000),
             'nzbs' => (int) env('NNTMUX_ORCHESTRATOR_NZBS_HIGH', 12000),
         ],

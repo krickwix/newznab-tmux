@@ -6,14 +6,21 @@ namespace App\Services\Orchestrator;
 
 final readonly class PipelinePressureClassifier
 {
-    /** @param array<string, int>|null $highWatermarks @param array<string, int>|null $ageSloSeconds */
+    /**
+     * @param  array<string, int>|null  $highWatermarks
+     * @param  array<string, int>|null  $ageSloSeconds
+     */
     public function __construct(
         private ?array $highWatermarks = null,
         private ?array $ageSloSeconds = null,
         private ?int $projectionHorizonMinutes = null,
     ) {}
 
-    /** @param array<string, int> $backlogs @param array<string, int> $ages @param array<string, float> $ewma */
+    /**
+     * @param  array<string, int>  $backlogs
+     * @param  array<string, int>  $ages
+     * @param  array<string, float>  $ewma
+     */
     public function isHigh(array $backlogs, array $ages, array $ewma): bool
     {
         foreach ($backlogs as $stage => $value) {
@@ -33,7 +40,10 @@ final readonly class PipelinePressureClassifier
         return false;
     }
 
-    /** @param array<string, int> $backlogs @param array<string, float> $ewma */
+    /**
+     * @param  array<string, int>  $backlogs
+     * @param  array<string, float>  $ewma
+     */
     public function isLow(array $backlogs, array $ewma): bool
     {
         foreach (['parts', 'binaries'] as $stage) {
@@ -45,7 +55,10 @@ final readonly class PipelinePressureClassifier
             }
         }
 
-        foreach (['collections', 'releases', 'nzbs'] as $stage) {
+        foreach (['collections', 'collections_total', 'recovery_sources', 'releases', 'nzbs'] as $stage) {
+            if (! array_key_exists($stage, $backlogs)) {
+                continue;
+            }
             $low = (int) floor($this->highWatermark($stage) * 0.6);
             if ($backlogs[$stage] >= $low
                 || $this->projectsBreach($backlogs[$stage], $low, $ewma[$stage] ?? 0.0)

@@ -640,6 +640,15 @@ class NntmuxPrometheusMetrics
         $lines[] = '# HELP nntmux_orchestrator_body_recovery_queue Current actionable BODY recovery queue across configured groups.';
         $lines[] = '# TYPE nntmux_orchestrator_body_recovery_queue gauge';
         $lines[] = $this->metric('nntmux_orchestrator_body_recovery_queue', (int) ($decision['body_recovery_queue'] ?? 0));
+        $lines[] = '# HELP nntmux_orchestrator_collection_backlog Collection backlog split into physical total, ordinary pressure, and proven BODY recovery sources.';
+        $lines[] = '# TYPE nntmux_orchestrator_collection_backlog gauge';
+        foreach (['total', 'ordinary', 'body_recovery_sources'] as $scope) {
+            $lines[] = $this->metric(
+                'nntmux_orchestrator_collection_backlog',
+                (int) ($decision['collection_backlogs'][$scope] ?? 0),
+                ['scope' => $scope],
+            );
+        }
         $targetGroup = (string) ($decision['backfill_target']['group'] ?? '');
         if ($targetGroup !== '') {
             $lines[] = '# HELP nntmux_orchestrator_backfill_target_info Selected adaptive backfill target group.';
@@ -681,7 +690,7 @@ class NntmuxPrometheusMetrics
         $lines[] = '# TYPE nntmux_orchestrator_stage_oldest_age_seconds gauge';
         $lines[] = '# HELP nntmux_orchestrator_stage_projected_runway_minutes Minutes until the stage high watermark at its current positive EWMA; -1 means stable, draining, or invalid rate telemetry.';
         $lines[] = '# TYPE nntmux_orchestrator_stage_projected_runway_minutes gauge';
-        foreach (['parts', 'binaries', 'collections', 'releases', 'nzbs'] as $stage) {
+        foreach (['parts', 'binaries', 'collections', 'collections_total', 'recovery_sources', 'releases', 'nzbs'] as $stage) {
             $lines[] = $this->metric('nntmux_orchestrator_stage_backlog', (float) ($decision['backlogs'][$stage] ?? 0), ['stage' => $stage]);
             $rate = (float) ($decision['ewma_per_minute'][$stage] ?? 0.0);
             $limit = (int) config('nntmux.orchestrator.high_watermarks.'.$stage, 0);
@@ -695,7 +704,7 @@ class NntmuxPrometheusMetrics
                     'estimator' => $estimator,
                 ]);
             }
-            if ($stage !== 'parts') {
+            if (! in_array($stage, ['parts', 'collections_total'], true)) {
                 $lines[] = $this->metric('nntmux_orchestrator_stage_oldest_age_seconds', (float) ($decision['oldest_age_seconds'][$stage] ?? 0), ['stage' => $stage]);
             }
         }

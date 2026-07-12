@@ -32,6 +32,8 @@ class PipelineSnapshotRepository
     /** @param array<string, int|float>|null $previous */
     public function capture(?array $previous = null): PipelineSnapshot
     {
+        $recoveryCriteria = $this->bodyRecoveryCriteria();
+        $recoverySources = $this->bodyRecoverySourceSnapshot($recoveryCriteria);
         $tables = DB::selectOne("SELECT
             COALESCE(MAX(CASE WHEN TABLE_NAME = 'parts' THEN TABLE_ROWS END), 0) AS parts_count,
             COALESCE(MAX(CASE WHEN TABLE_NAME = 'binaries' THEN TABLE_ROWS END), 0) AS binaries_count
@@ -72,16 +74,22 @@ class PipelineSnapshotRepository
         $historyIsProven = $historyIsRecent
             && (int) ($targetHistory['attempts'] ?? 0) >= (int) config('nntmux.orchestrator.backfill_scale_min_attempts', 2);
 
+        $totalCollections = (int) ($pipeline->collections_backlog ?? 0);
+        $recoverySourceCollections = (int) $recoverySources['backlog'];
+        $ordinaryCollections = max(0, $totalCollections - $recoverySourceCollections);
+        $splitConsistent = $recoverySourceCollections <= $totalCollections;
         $backlogs = [
             'parts' => (int) ($tables->parts_count ?? 0),
             'binaries' => (int) ($pipeline->binaries_backlog ?? 0),
-            'collections' => (int) ($pipeline->collections_backlog ?? 0),
+            'collections' => $ordinaryCollections,
+            'collections_total' => $totalCollections,
+            'recovery_sources' => $recoverySourceCollections,
             'releases' => (int) ($pipeline->releases_backlog ?? 0),
             'nzbs' => (int) ($pipeline->nzbs_backlog ?? 0),
         ];
         $ages = [
             'binaries' => (int) ($pipeline->oldest_binary_age ?? 0),
-            'collections' => (int) ($pipeline->oldest_collection_age ?? 0),
+            'collections' => $this->oldestOrdinaryCollectionAge($recoveryCriteria),
             'releases' => (int) ($pipeline->oldest_release_age ?? 0),
             'nzbs' => (int) ($pipeline->oldest_nzb_age ?? 0),
         ];
@@ -103,6 +111,7 @@ class PipelineSnapshotRepository
             nzbsBacklog: $backlogs['nzbs'],
             telemetryFresh: $signals['fresh'],
             telemetryComplete: $tables !== null && $pipeline !== null,
+            telemetryConsistent: $splitConsistent,
             databaseMemorySafe: $signals['memory_safe'],
             databaseCpuSafe: $signals['cpu_safe'],
             databaseWaitsSafe: $waits === 0 && ! $deadlockDelta,
@@ -137,7 +146,79 @@ class PipelineSnapshotRepository
             backfillRemainingArticles: (int) ($backfillTarget['remaining_articles'] ?? 0),
             backfillSafeQuantity: $this->safeBackfillQuantity($backlogs, $backfillGroup),
             bodyRecoveryQueueBacklog: $this->bodyRecoveryQueueBacklog(),
+            collectionsTotalBacklog: $totalCollections,
+            bodyRecoverySourceBacklog: $recoverySourceCollections,
+            oldestBodyRecoverySourceAgeSeconds: (int) $recoverySources['oldest_age'],
         );
+    }
+
+    private function bodyRecoveryCriteria(): ?BodyRecoverySourceCriteria
+    {
+        $groups = array_values(array_filter(array_map(
+            'trim',
+            (array) config('nntmux.orchestrator.body_recovery_source_groups', []),
+        ), static fn (string $group): bool => $group !== ''));
+        $regexIds = array_values(array_unique(array_map(
+            'intval',
+            (array) config('nntmux.orchestrator.body_recovery_source_regex_ids', []),
+        )));
+        if ($groups === [] || $regexIds === []) {
+            return null;
+        }
+        $groupIds = DB::table('usenet_groups')
+            ->where('active', 1)
+            ->whereIn('name', $groups)
+            ->pluck('id')
+            ->map(static fn (mixed $id): int => (int) $id)
+            ->all();
+        if ($groupIds === []) {
+            return null;
+        }
+
+        return new BodyRecoverySourceCriteria(
+            groupIds: $groupIds,
+            regexIds: $regexIds,
+            maxCurrentParts: (int) config('nntmux.orchestrator.body_recovery_source_max_current_parts', 2),
+            minTotalParts: (int) config('nntmux.orchestrator.body_recovery_source_min_total_parts', 10),
+            before: now()->subHours((int) config('nntmux.orchestrator.body_recovery_source_cutoff_hours', 2))->toDateTimeString(),
+        );
+    }
+
+    /** @return array{backlog:int,oldest_age:int} */
+    private function bodyRecoverySourceSnapshot(?BodyRecoverySourceCriteria $criteria): array
+    {
+        if ($criteria === null) {
+            return ['backlog' => 0, 'oldest_age' => 0];
+        }
+        $predicate = $criteria->identityPredicate();
+        $row = DB::selectOne("SELECT COUNT(*) AS backlog,
+            COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) AS oldest_age
+            FROM collections c FORCE INDEX (ix_collections_release_stage6)
+            STRAIGHT_JOIN binaries b FORCE INDEX (ix_binaries_collection_hash) ON b.collections_id = c.id
+            WHERE {$predicate['sql']}", $predicate['bindings']);
+
+        return [
+            'backlog' => (int) ($row->backlog ?? 0),
+            'oldest_age' => (int) ($row->oldest_age ?? 0),
+        ];
+    }
+
+    private function oldestOrdinaryCollectionAge(?BodyRecoverySourceCriteria $criteria): int
+    {
+        if ($criteria === null) {
+            return (int) DB::scalar('SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0)
+                FROM collections c WHERE c.filecheck IN (0, 1, 2, 15, 16)');
+        }
+        $predicate = $criteria->identityPredicate();
+
+        return (int) DB::scalar("SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0)
+            FROM collections c
+            WHERE c.filecheck IN (0, 1, 2, 15, 16)
+            AND NOT EXISTS (
+                SELECT 1 FROM binaries b FORCE INDEX (ix_binaries_collection_hash)
+                WHERE b.collections_id = c.id
+                AND {$predicate['sql']}
+            )", $predicate['bindings']);
     }
 
     private function bodyRecoveryQueueBacklog(): int
@@ -153,6 +234,7 @@ class PipelineSnapshotRepository
         return (int) DB::table('missed_parts as mp')
             ->join('usenet_groups as g', 'g.id', '=', 'mp.groups_id')
             ->whereIn('g.name', $groups)
+            ->where('mp.recovery_kind', 'body_preamble')
             ->where('mp.attempts', '<', 3)
             ->count('mp.id');
     }
@@ -164,9 +246,12 @@ class PipelineSnapshotRepository
         $high = (array) config('nntmux.orchestrator.high_watermarks', []);
         $growth = $this->state->backfillGrowthFor($backfillGroup);
         $quantities = [];
-        foreach (['parts', 'binaries', 'collections'] as $stage) {
-            $headroom = max(0, (int) ($high[$stage] ?? 0) - $backlogs[$stage]);
-            $permits = (int) floor(($headroom * $fraction) / max(1, (int) ($growth[$stage] ?? 1)));
+        foreach (['parts', 'binaries', 'collections', 'collections_total'] as $stage) {
+            $current = $backlogs[$stage] ?? ($stage === 'collections_total' ? $backlogs['collections'] : 0);
+            $limit = $high[$stage] ?? ($stage === 'collections_total' ? $high['collections'] ?? 0 : 0);
+            $headroom = max(0, (int) $limit - $current);
+            $growthStage = $stage === 'collections_total' ? 'collections' : $stage;
+            $permits = (int) floor(($headroom * $fraction) / max(1, (int) ($growth[$growthStage] ?? 1)));
             $quantities[] = $permits * 10000;
         }
 
@@ -263,9 +348,11 @@ class PipelineSnapshotRepository
         $ewma = [];
         $elapsed = $previous === null ? 0 : max(1, time() - (int) ($previous['observed_at'] ?? time()));
         foreach ($now as $stage => $value) {
-            $rate = $previous === null ? 0.0 : ($value - (int) ($previous[$stage] ?? $value)) * 60 / $elapsed;
+            $splitStage = in_array($stage, ['collections', 'collections_total', 'recovery_sources'], true);
+            $previousCompatible = $previous !== null && (! $splitStage || (int) ($previous['schema_version'] ?? 0) === 2);
+            $rate = ! $previousCompatible ? 0.0 : ($value - (int) ($previous[$stage] ?? $value)) * 60 / $elapsed;
             $rates[$stage] = $rate;
-            $ewma[$stage] = 0.3 * $rate + 0.7 * (float) ($previous['ewma_'.$stage] ?? 0.0);
+            $ewma[$stage] = ! $previousCompatible ? 0.0 : 0.3 * $rate + 0.7 * (float) ($previous['ewma_'.$stage] ?? 0.0);
         }
 
         return [$rates, $ewma];

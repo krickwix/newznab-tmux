@@ -56,6 +56,9 @@ final readonly class PipelineSnapshot
         public int $backfillRemainingArticles = 0,
         public int $backfillSafeQuantity = 10000,
         public int $bodyRecoveryQueueBacklog = 0,
+        public int $collectionsTotalBacklog = 0,
+        public int $bodyRecoverySourceBacklog = 0,
+        public int $oldestBodyRecoverySourceAgeSeconds = 0,
     ) {}
 
     public function withPermitOutcome(
@@ -113,6 +116,9 @@ final readonly class PipelineSnapshot
             backfillRemainingArticles: $this->backfillRemainingArticles,
             backfillSafeQuantity: $this->backfillSafeQuantity,
             bodyRecoveryQueueBacklog: $this->bodyRecoveryQueueBacklog,
+            collectionsTotalBacklog: $this->collectionsTotalBacklog,
+            bodyRecoverySourceBacklog: $this->bodyRecoverySourceBacklog,
+            oldestBodyRecoverySourceAgeSeconds: $this->oldestBodyRecoverySourceAgeSeconds,
         );
     }
 
@@ -142,11 +148,20 @@ final readonly class PipelineSnapshot
             && $this->backfillSafeQuantity >= 10_000;
     }
 
+    public function physicalCollectionsBacklog(): int
+    {
+        return $this->collectionsTotalBacklog > 0
+            ? $this->collectionsTotalBacklog
+            : $this->collectionsBacklog;
+    }
+
     private function hasNegativeBacklog(): bool
     {
         return $this->partsBacklog < 0
             || $this->binariesBacklog < 0
             || $this->collectionsBacklog < 0
+            || $this->collectionsTotalBacklog < 0
+            || $this->bodyRecoverySourceBacklog < 0
             || $this->releasesBacklog < 0
             || $this->nzbsBacklog < 0;
     }

@@ -495,10 +495,11 @@ class NntmuxPrometheusMetricsTest extends TestCase
             'backfill_permitted' => true,
             'eligible_nzbs' => 0,
             'body_recovery_queue' => 17,
-            'backlogs' => ['parts' => 100, 'binaries' => 20, 'collections' => 30, 'releases' => 4, 'nzbs' => 50],
-            'rates_per_minute' => ['parts' => 1.5],
-            'ewma_per_minute' => ['parts' => 0.5],
-            'oldest_age_seconds' => ['binaries' => 11, 'collections' => 12, 'releases' => 13, 'nzbs' => 14],
+            'collection_backlogs' => ['total' => 70, 'ordinary' => 30, 'body_recovery_sources' => 40],
+            'backlogs' => ['parts' => 100, 'binaries' => 20, 'collections' => 30, 'collections_total' => 70, 'recovery_sources' => 40, 'releases' => 4, 'nzbs' => 50],
+            'rates_per_minute' => ['parts' => 1.5, 'collections_total' => -2.0, 'recovery_sources' => -2.0],
+            'ewma_per_minute' => ['parts' => 0.5, 'collections_total' => -1.0, 'recovery_sources' => -1.0],
+            'oldest_age_seconds' => ['binaries' => 11, 'collections' => 12, 'recovery_sources' => 15, 'releases' => 13, 'nzbs' => 14],
             'backfill_target' => ['group' => 'alt.test', 'cursor' => 12345, 'quantity' => 200000],
         ]);
         $store = new WorkerControlStateStore;
@@ -518,6 +519,13 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_stage_oldest_age_seconds{stage="nzbs"} 14', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_policy_permitted 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_body_recovery_queue 17', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="total"} 70', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="ordinary"} 30', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="body_recovery_sources"} 40', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_backlog{stage="collections_total"} 70', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_backlog{stage="recovery_sources"} 40', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_rate_per_minute{stage="recovery_sources",estimator="instant"} -2', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_oldest_age_seconds{stage="recovery_sources"} 15', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_permit_quantity 200000', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_target_info{group="alt.test"} 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_planned_quantity{group="alt.test"} 200000', $output);

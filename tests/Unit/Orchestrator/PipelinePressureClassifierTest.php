@@ -105,6 +105,42 @@ final class PipelinePressureClassifierTest extends TestCase
         ));
     }
 
+    public function test_recovery_sources_and_physical_total_have_independent_capacity_gates(): void
+    {
+        $classifier = new PipelinePressureClassifier(
+            highWatermarks: [
+                'parts' => 300_000_000,
+                'binaries' => 1_000_000,
+                'collections' => 20_000,
+                'collections_total' => 80_000,
+                'recovery_sources' => 60_000,
+                'releases' => 20_000,
+                'nzbs' => 12_000,
+            ],
+            ageSloSeconds: ['recovery_sources' => 86_400],
+            projectionHorizonMinutes: 120,
+        );
+        $safe = $this->backlogs() + ['collections_total' => 48_000, 'recovery_sources' => 40_000];
+        $rates = $this->rates() + ['collections_total' => 0.0, 'recovery_sources' => 0.0];
+
+        self::assertFalse($classifier->isHigh($safe, ['recovery_sources' => 0], $rates));
+        self::assertTrue($classifier->isHigh(
+            array_replace($safe, ['recovery_sources' => 60_000]),
+            ['recovery_sources' => 0],
+            $rates,
+        ));
+        self::assertTrue($classifier->isHigh(
+            array_replace($safe, ['collections_total' => 80_000]),
+            ['recovery_sources' => 0],
+            $rates,
+        ));
+        self::assertFalse($classifier->isLow($safe, $rates));
+        self::assertTrue($classifier->isLow(
+            array_replace($safe, ['collections_total' => 47_999, 'recovery_sources' => 35_999]),
+            $rates,
+        ));
+    }
+
     /** @return array<string, int> */
     private function backlogs(int $parts = 186_000_000, int $binaries = 40_000, int $collections = 4_000): array
     {

@@ -248,7 +248,7 @@ final class WorkerControlPolicy
             return false;
         }
 
-        foreach (['parts', 'binaries', 'collections'] as $stage) {
+        foreach ($this->recoveryCoreStages($snapshot) as $stage) {
             $instant = $snapshot->backlogRatesPerMinute[$stage] ?? NAN;
             if ($instant > 0.0) {
                 return false;
@@ -264,13 +264,15 @@ final class WorkerControlPolicy
             return false;
         }
 
-        foreach (['parts', 'binaries', 'collections'] as $stage) {
+        foreach ($this->recoveryCoreStages($snapshot) as $stage) {
             $instant = $snapshot->backlogRatesPerMinute[$stage] ?? NAN;
             $ewma = $snapshot->backlogEwmaPerMinute[$stage] ?? NAN;
             $backlog = match ($stage) {
                 'parts' => $snapshot->partsBacklog,
                 'binaries' => $snapshot->binariesBacklog,
                 'collections' => $snapshot->collectionsBacklog,
+                'collections_total' => $snapshot->physicalCollectionsBacklog(),
+                default => throw new \LogicException('Unsupported recovery core stage: '.$stage),
             };
             $maximumEwma = $backlog * log(2.0) / self::RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES;
             if (! is_finite($instant) || ! is_finite($ewma)
@@ -290,6 +292,18 @@ final class WorkerControlPolicy
         }
 
         return true;
+    }
+
+    /** @return list<string> */
+    private function recoveryCoreStages(PipelineSnapshot $snapshot): array
+    {
+        return [
+            'parts',
+            'binaries',
+            array_key_exists('collections_total', $snapshot->backlogRatesPerMinute)
+                ? 'collections_total'
+                : 'collections',
+        ];
     }
 
     /**
