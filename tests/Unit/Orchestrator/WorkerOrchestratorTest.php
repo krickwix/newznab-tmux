@@ -49,6 +49,41 @@ final class WorkerOrchestratorTest extends TestCase
         }
     }
 
+    #[DataProvider('cohortPostdateToleranceProvider')]
+    public function test_configuration_bounds_the_cohort_postdate_tolerance(string $input, int $expected): void
+    {
+        $key = 'NNTMUX_ORCHESTRATOR_BACKFILL_COHORT_POSTDATE_TOLERANCE_SECONDS';
+        $previous = getenv($key);
+        putenv($key.'='.$input);
+        $_ENV[$key] = $input;
+        $_SERVER[$key] = $input;
+
+        try {
+            $configuration = require base_path('config/nntmux.php');
+
+            self::assertSame($expected, $configuration['orchestrator']['backfill_cohort_postdate_tolerance_seconds']);
+        } finally {
+            if ($previous === false) {
+                putenv($key);
+                unset($_ENV[$key], $_SERVER[$key]);
+            } else {
+                putenv($key.'='.$previous);
+                $_ENV[$key] = $previous;
+                $_SERVER[$key] = $previous;
+            }
+        }
+    }
+
+    /** @return array<string, array{string, int}> */
+    public static function cohortPostdateToleranceProvider(): array
+    {
+        return [
+            'negative becomes exact' => ['-1', 0],
+            'one hour remains bounded' => ['3600', 3600],
+            'more than one day is capped' => ['86401', 86400],
+        ];
+    }
+
     public function test_active_no_backfill_mode_applies_profile_without_issuing_a_permit(): void
     {
         config(['nntmux.orchestrator.auto_backfill' => false]);

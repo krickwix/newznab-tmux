@@ -181,19 +181,24 @@ class PipelineSnapshotRepository
         string $startPostdate,
         string $endPostdate,
     ): int {
+        $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+
         return (int) DB::scalar('SELECT COUNT(*)
             FROM releases r
             INNER JOIN usenet_groups g ON g.id = r.groups_id
             WHERE g.name = ?
             AND r.id > ?
             AND r.nzbstatus = 1
-            AND r.postdate BETWEEN LEAST(?, ?) AND GREATEST(?, ?)', [
+            AND r.postdate BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)
+                AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', [
             $group,
             max(0, $releaseHighWatermark),
             $startPostdate,
             $endPostdate,
+            $postdateToleranceSeconds,
             $startPostdate,
             $endPostdate,
+            $postdateToleranceSeconds,
         ]);
     }
 

@@ -81,21 +81,26 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         ], $repository->backfillOutcomeForGroup('alt.test'));
     }
 
-    public function test_group_cohort_nzb_count_is_bounded_by_release_id_and_consumed_postdate_range(): void
+    public function test_group_cohort_nzb_count_is_bounded_by_release_id_and_tolerates_provider_date_disorder(): void
     {
+        config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+
         DB::shouldReceive('scalar')
             ->once()
             ->withArgs(function (string $sql, array $bindings): bool {
                 self::assertStringContainsString('r.id > ?', $sql);
                 self::assertStringContainsString('r.nzbstatus = 1', $sql);
-                self::assertStringContainsString('r.postdate BETWEEN LEAST(?, ?) AND GREATEST(?, ?)', $sql);
+                self::assertStringContainsString('r.postdate BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)', $sql);
+                self::assertStringContainsString('AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', $sql);
                 self::assertSame([
                     'alt.test',
                     123,
                     '2026-01-02 03:04:05',
                     '2026-01-01 03:04:05',
+                    3600,
                     '2026-01-02 03:04:05',
                     '2026-01-01 03:04:05',
+                    3600,
                 ], $bindings);
 
                 return true;
