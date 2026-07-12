@@ -152,6 +152,17 @@ final class MissedPartHandler
             ->increment('attempts');
     }
 
+    /** @param list<int> $ids */
+    public function incrementAttemptsForIds(array $ids, int $groupId): void
+    {
+        foreach (array_chunk(array_values(array_unique($ids)), $this->chunkSize) as $chunk) {
+            DB::table('missed_parts')
+                ->where('groups_id', $groupId)
+                ->whereIn('id', $chunk)
+                ->increment('attempts');
+        }
+    }
+
     /** @param list<int> $numbers */
     public function decrementAttempts(array $numbers, int $groupId): void
     {
@@ -159,11 +170,13 @@ final class MissedPartHandler
             return;
         }
 
-        DB::table('missed_parts')
-            ->where('groups_id', $groupId)
-            ->whereIn('numberid', $numbers)
-            ->where('attempts', '>', 0)
-            ->decrement('attempts');
+        foreach (array_chunk(array_values(array_unique($numbers)), $this->chunkSize) as $chunk) {
+            DB::table('missed_parts')
+                ->where('groups_id', $groupId)
+                ->whereIn('numberid', $chunk)
+                ->where('attempts', '>', 0)
+                ->decrement('attempts');
+        }
     }
 
     /**
@@ -193,6 +206,20 @@ final class MissedPartHandler
             ->where('groups_id', $groupId)
             ->where('numberid', '<=', $maxNumberId)
             ->count('id');
+    }
+
+    /** @param list<int> $ids */
+    public function countExistingIds(array $ids, int $groupId): int
+    {
+        $count = 0;
+        foreach (array_chunk(array_values(array_unique($ids)), $this->chunkSize) as $chunk) {
+            $count += DB::table('missed_parts')
+                ->where('groups_id', $groupId)
+                ->whereIn('id', $chunk)
+                ->count('id');
+        }
+
+        return $count;
     }
 
     /**

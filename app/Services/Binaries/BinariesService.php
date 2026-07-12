@@ -617,6 +617,10 @@ class BinariesService
         try {
             $missingParts = $this->missedPartHandler->getMissingParts($groupArr['id']);
             $missingCount = \count($missingParts);
+            $cohortIds = array_map(
+                static fn (object $part): int => (int) $part->id,
+                $missingParts,
+            );
             foreach ($missingParts as $missingPart) {
                 if ((int) ($missingPart->attempts ?? 1) === 0) {
                     $this->partRepairForcedBodyNumbers[(string) $missingPart->numberid] = true;
@@ -646,13 +650,12 @@ class BinariesService
             }
 
             // Calculate parts repaired
-            $lastPartNumber = $missingParts[$missingCount - 1]->numberid;
-            $remainingCount = $this->missedPartHandler->getCount($groupArr['id'], $lastPartNumber);
+            $remainingCount = $this->missedPartHandler->countExistingIds($cohortIds, $groupArr['id']);
             $partsRepaired = $missingCount - $remainingCount;
 
             // Update attempts on remaining parts
             if (isset($missingParts[$missingCount - 1]->id)) {
-                $this->missedPartHandler->incrementAttempts($groupArr['id'], $lastPartNumber);
+                $this->missedPartHandler->incrementAttemptsForIds($cohortIds, $groupArr['id']);
                 $this->missedPartHandler->decrementAttempts(array_keys($this->partRepairDeferredBodyNumbers), $groupArr['id']);
             }
 

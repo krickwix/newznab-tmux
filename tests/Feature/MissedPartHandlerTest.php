@@ -100,4 +100,24 @@ class MissedPartHandlerTest extends TestCase
         $this->assertSame(1, (int) DB::table('missed_parts')->where(['groups_id' => 1, 'numberid' => 12])->value('attempts'));
         $this->assertSame(0, (int) DB::table('missed_parts')->where(['groups_id' => 2, 'numberid' => 12])->value('attempts'));
     }
+
+    public function test_exact_cohort_accounting_ignores_concurrently_replenished_rows(): void
+    {
+        $handler = new MissedPartHandler(partRepairLimit: 10, partRepairMaxTries: 3, chunkSize: 50);
+        DB::table('missed_parts')->insert([
+            ['numberid' => 10, 'groups_id' => 1, 'attempts' => 0],
+            ['numberid' => 20, 'groups_id' => 1, 'attempts' => 0],
+        ]);
+        $cohortIds = DB::table('missed_parts')->where('groups_id', 1)->orderBy('numberid')->pluck('id')->map(fn (mixed $id): int => (int) $id)->all();
+
+        DB::table('missed_parts')->insert(['numberid' => 15, 'groups_id' => 1, 'attempts' => 0]);
+        DB::table('missed_parts')->where(['groups_id' => 1, 'numberid' => 10])->delete();
+        DB::table('missed_parts')->insert(['numberid' => 10, 'groups_id' => 1, 'attempts' => 0]);
+        $handler->incrementAttemptsForIds($cohortIds, 1);
+
+        $this->assertSame(1, $handler->countExistingIds($cohortIds, 1));
+        $this->assertSame(0, (int) DB::table('missed_parts')->where(['groups_id' => 1, 'numberid' => 10])->value('attempts'));
+        $this->assertSame(1, (int) DB::table('missed_parts')->where(['groups_id' => 1, 'numberid' => 20])->value('attempts'));
+        $this->assertSame(0, (int) DB::table('missed_parts')->where(['groups_id' => 1, 'numberid' => 15])->value('attempts'));
+    }
 }
