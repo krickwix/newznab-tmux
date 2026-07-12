@@ -216,13 +216,15 @@ class WorkerControlStateStore
         $ttl = (int) config('nntmux.orchestrator.backfill_yield_ttl_seconds', 86_400);
         $candidates = [];
         $global = $history['global'] ?? null;
-        if (is_array($global)
+        if ($group === ''
+            && is_array($global)
             && (int) ($global['samples'] ?? 0) >= 2
         ) {
             $candidates[] = $global;
         }
         $target = $history['targets'][$group] ?? null;
-        if (is_array($target)
+        if ($group !== ''
+            && is_array($target)
             && (int) ($target['samples'] ?? 0) >= 2
         ) {
             $candidates[] = $target;

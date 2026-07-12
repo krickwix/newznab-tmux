@@ -193,6 +193,11 @@ final class WorkerControlStateStoreTest extends TestCase
             'binaries' => 750,
             'collections' => 1_125,
         ], $store->backfillGrowthFor('alt.test'));
+        self::assertSame([
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ], $store->backfillGrowthFor('alt.other'));
     }
 
     public function test_growth_learning_rejects_partial_or_legacy_observations(): void
