@@ -417,6 +417,54 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('backfill_target_locked_after_ineffective_permits', $second->reasons);
     }
 
+    public function test_recent_proven_yield_at_threshold_overrides_target_ineffective_lock(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            lastTransitionAt: 9_900,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 2],
+        );
+        $snapshot = $this->greenBackfillSnapshot(
+            backfillGroup: 'alt.a',
+            backfillYieldNzbsPer10k: 0.15,
+            backfillHistoryRecent: true,
+        );
+
+        $decision = (new WorkerControlPolicy(provenYieldOverrideThreshold: 0.15))->decide($snapshot, $state, 10_000);
+
+        self::assertTrue($decision->backfillPermitted);
+        self::assertContains('backfill_target_lock_overridden_by_proven_yield', $decision->reasons);
+    }
+
+    #[DataProvider('nonProvenTargetLockProvider')]
+    public function test_expired_or_below_threshold_history_remains_target_locked(float $yield, bool $recent): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            lastTransitionAt: 9_900,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 2],
+        );
+        $snapshot = $this->greenBackfillSnapshot(
+            backfillGroup: 'alt.a',
+            backfillYieldNzbsPer10k: $yield,
+            backfillHistoryRecent: $recent,
+        );
+
+        $decision = (new WorkerControlPolicy(provenYieldOverrideThreshold: 0.15))->decide($snapshot, $state, 10_000);
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_target_locked', $decision->reasons);
+    }
+
+    /** @return array<string, array{float, bool}> */
+    public static function nonProvenTargetLockProvider(): array
+    {
+        return [
+            'below threshold' => [0.149, true],
+            'expired history' => [0.23, false],
+        ];
+    }
+
     public function test_a_legacy_strike_is_conservatively_seeded_to_the_observed_target(): void
     {
         $state = new ControlState(

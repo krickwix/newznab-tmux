@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Services\Orchestrator;
 
+use Illuminate\Container\Container;
+
 final class WorkerControlPolicy
 {
     public const int HIGH_SAMPLES_TO_DRAIN = 3;
@@ -21,6 +23,19 @@ final class WorkerControlPolicy
     public const int HARD_RECOVERY_SAMPLES = 5;
 
     public const int RECOVERY_SAMPLE_MIN_SPACING_SECONDS = 30;
+
+    private float $provenYieldOverrideThreshold;
+
+    public function __construct(?float $provenYieldOverrideThreshold = null)
+    {
+        $container = Container::getInstance();
+        $this->provenYieldOverrideThreshold = max(
+            0.0,
+            $provenYieldOverrideThreshold ?? ($container->bound('config')
+                ? (float) config('nntmux.orchestrator.backfill_aggressive_explore_below_yield', 0.0)
+                : 0.0),
+        );
+    }
 
     public function decide(PipelineSnapshot $snapshot, ControlState $state, int $now): ControlDecision
     {
@@ -111,8 +126,18 @@ final class WorkerControlPolicy
             ineffectiveBackfillPermitsByTarget: $targetIneffectivePermits,
         );
         $workerProfile = WorkerControlProfile::for($profile);
+        $targetLockOverridden = $this->provenYieldOverrideThreshold > 0.0
+            && $snapshot->backfillHistoryRecent
+            && $snapshot->backfillYieldNzbsPer10k >= $this->provenYieldOverrideThreshold;
         $targetLocked = $snapshot->backfillGroup !== ''
-            && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= self::INEFFECTIVE_BACKFILL_LIMIT;
+            && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= self::INEFFECTIVE_BACKFILL_LIMIT
+            && ! $targetLockOverridden;
+        if ($targetLockOverridden
+            && $snapshot->backfillGroup !== ''
+            && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= self::INEFFECTIVE_BACKFILL_LIMIT
+        ) {
+            $reasons[] = 'backfill_target_lock_overridden_by_proven_yield';
+        }
         $backfillPermitted = $workerProfile->backfillEnabled
             && ! $snapshot->highPressure
             && ! $backfillLocked

@@ -235,6 +235,39 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertSame('alt.probe.freak', $target['name'] ?? null);
     }
 
+    public function test_productive_target_skips_zero_yield_context_repeat_above_exploration_threshold(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.probe.criterion', 'alt.probe.freak'],
+            historyTtlSeconds: 86_400,
+            exploitAttemptsBeforeExplore: 3,
+            aggressiveExploreBelowYield: 0.15,
+        );
+        $history = [
+            'alt.probe.criterion' => [
+                'attempts' => 8,
+                'ewma_nzbs_per_10k' => 0.23,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_999_000,
+                'last_cursor_delta' => 10_000,
+            ],
+            'alt.probe.freak' => [
+                'attempts' => 1,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_999_100,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.probe.criterion', '2009-05-15 06:49:20'),
+            $this->candidate('alt.probe.freak', '2016-08-27 18:02:03'),
+        ], $history, now: 2_000_000_000);
+
+        self::assertSame('alt.probe.criterion', $target['name'] ?? null);
+    }
+
     public function test_it_immediately_completes_an_input_bearing_exploration_probe(): void
     {
         $selector = new BackfillTargetSelector(
@@ -517,6 +550,31 @@ final class BackfillTargetSelectorTest extends TestCase
         ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: ['alt.probe.criterion' => 2]);
 
         self::assertSame('alt.probe.freak', $target['name'] ?? null);
+    }
+
+    public function test_recent_productive_target_overrides_short_term_ineffective_lock_at_threshold(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.probe.criterion', 'alt.probe.freak'],
+            historyTtlSeconds: 86_400,
+            aggressiveExploreBelowYield: 0.15,
+        );
+        $history = [
+            'alt.probe.criterion' => [
+                'attempts' => 8,
+                'ewma_nzbs_per_10k' => 0.23,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_998_000,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.probe.criterion', '2009-05-15 06:49:20'),
+            $this->candidate('alt.probe.freak', '2016-08-27 18:02:03'),
+        ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: ['alt.probe.criterion' => 2]);
+
+        self::assertSame('alt.probe.criterion', $target['name'] ?? null);
     }
 
     public function test_it_returns_null_when_every_candidate_has_two_ineffective_permits(): void

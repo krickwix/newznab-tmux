@@ -58,15 +58,21 @@ final readonly class BackfillTargetSelector
     {
         $candidates = array_values(array_filter(
             $candidates,
-            static function (array $candidate) use ($now, $ineffectivePermitsByTarget): bool {
+            function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget): bool {
                 $timestamp = strtotime($candidate['cursor_postdate']);
+                $entry = $history[$candidate['name']] ?? null;
+                $provenAboveThreshold = $this->aggressiveExploreBelowYield > 0.0
+                    && is_array($entry)
+                    && $now - (int) ($entry['last_attempt_at'] ?? 0) < $this->historyTtlSeconds
+                    && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) >= $this->aggressiveExploreBelowYield;
 
                 return $candidate['cursor'] > 0
                     && $candidate['remaining_articles'] >= 20_000
                     && $timestamp !== false
                     && (int) substr($candidate['cursor_postdate'], 0, 4) >= 2000
                     && $timestamp <= $now
-                    && (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) < WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT;
+                    && ($provenAboveThreshold
+                        || (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) < WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT);
             },
         ));
         if ($candidates === []) {
@@ -97,12 +103,15 @@ final readonly class BackfillTargetSelector
             });
 
             $best = $positive[0];
-            $pendingRepeat = $this->selectRecentPendingRepeat($candidates, $history, $now, $best['name']);
+            $bestYield = (float) ($history[$best['name']]['ewma_nzbs_per_10k'] ?? 0.0);
+            $pendingRepeat = ($this->aggressiveExploreBelowYield <= 0.0
+                || $bestYield < $this->aggressiveExploreBelowYield)
+                ? $this->selectRecentPendingRepeat($candidates, $history, $now, $best['name'])
+                : null;
             if ($pendingRepeat !== null) {
                 return $pendingRepeat;
             }
             $attempts = (int) ($history[$best['name']]['attempts'] ?? 0);
-            $bestYield = (float) ($history[$best['name']]['ewma_nzbs_per_10k'] ?? 0.0);
             $exploreEvery = $this->aggressiveExploreBelowYield > 0.0
                 && $bestYield < $this->aggressiveExploreBelowYield
                 ? 1
