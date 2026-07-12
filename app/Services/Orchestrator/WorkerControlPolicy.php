@@ -195,6 +195,7 @@ final class WorkerControlPolicy
                 self::RECOVERY_DRAIN_SAMPLES_TO_ACCELERATE,
                 $state->recoveryDrainSamples + 1,
             ),
+            $this->safeRecoveryDrainTrend($snapshot) => $state->recoveryDrainSamples,
             default => 0,
         };
         $reasons = [$pressureReason, $recovered ? 'fail_safe_recovered_to_drain' : 'fail_safe_recovery_pending'];
@@ -225,6 +226,21 @@ final class WorkerControlPolicy
 
     private function strongRecoveryDrainSample(PipelineSnapshot $snapshot): bool
     {
+        if (! $this->safeRecoveryDrainTrend($snapshot)) {
+            return false;
+        }
+
+        foreach (['parts', 'binaries', 'collections'] as $stage) {
+            if (($snapshot->backlogRatesPerMinute[$stage] ?? NAN) > 0.0) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function safeRecoveryDrainTrend(PipelineSnapshot $snapshot): bool
+    {
         if (! $snapshot->highPressure || $snapshot->bodyRecoveryQueueBacklog <= 0) {
             return false;
         }
@@ -233,7 +249,6 @@ final class WorkerControlPolicy
             $instant = $snapshot->backlogRatesPerMinute[$stage] ?? NAN;
             $ewma = $snapshot->backlogEwmaPerMinute[$stage] ?? NAN;
             if (! is_finite($instant) || ! is_finite($ewma)
-                || $instant > 0.0
                 || $ewma > -self::RECOVERY_DRAIN_MIN_EWMA_PER_MINUTE) {
                 return false;
             }

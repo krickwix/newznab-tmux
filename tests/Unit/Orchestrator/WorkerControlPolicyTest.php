@@ -263,7 +263,7 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('core_pipeline_draining', $draining->reasons);
         self::assertSame(3, $draining->nextState->recoveryDrainSamples);
 
-        foreach (['parts', 'binaries', 'collections', 'releases', 'nzbs'] as $growingStage) {
+        foreach (['releases', 'nzbs'] as $growingStage) {
             $rates = $drainingRates;
             $rates[$growingStage] = 0.1;
             $notDraining = $policy->decide($this->snapshot(
@@ -278,6 +278,34 @@ final class WorkerControlPolicyTest extends TestCase
             self::assertSame(0, $notDraining->nextState->recoveryDrainSamples, $growingStage);
         }
 
+        foreach (['parts', 'binaries', 'collections'] as $growingStage) {
+            $rates = $drainingRates;
+            $rates[$growingStage] = 0.1;
+            $transientPulse = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: 310,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $drainingEwma,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $draining->nextState, 10_000);
+
+            self::assertContains('core_pipeline_draining', $transientPulse->reasons, $growingStage);
+            self::assertSame(3, $transientPulse->nextState->recoveryDrainSamples, $growingStage);
+
+            $lostDrainMargin = $drainingEwma;
+            $lostDrainMargin[$growingStage] = -4.9;
+            $unsafe = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: 310,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $lostDrainMargin,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $draining->nextState, 10_000);
+
+            self::assertNotContains('core_pipeline_draining', $unsafe->reasons, $growingStage);
+            self::assertSame(0, $unsafe->nextState->recoveryDrainSamples, $growingStage);
+        }
+
         $nonFinite = $drainingEwma;
         $nonFinite['parts'] = NAN;
         $invalid = $policy->decide($this->snapshot(
@@ -289,6 +317,37 @@ final class WorkerControlPolicyTest extends TestCase
         ), $draining->nextState, 10_000);
         self::assertNotContains('core_pipeline_draining', $invalid->reasons);
         self::assertSame(0, $invalid->nextState->recoveryDrainSamples);
+    }
+
+    public function test_transient_core_ingestion_pulses_preserve_but_do_not_advance_recovery_drain_streak(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        );
+        $draining = ['parts' => 0.0, 'binaries' => 0.0, 'collections' => 0.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $pulse = ['parts' => 4.0, 'binaries' => 2.0, 'collections' => 0.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $ewma = ['parts' => -800.0, 'binaries' => -26.0, 'collections' => -25.0, 'releases' => 0.0, 'nzbs' => 0.0];
+
+        foreach ([[130, $draining, 1], [190, $pulse, 1], [250, $draining, 2], [310, $pulse, 2], [370, $draining, 3]] as [$observedAt, $rates, $expectedSamples]) {
+            $decision = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: $observedAt,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $ewma,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $state, 10_000);
+            $state = $decision->nextState;
+            self::assertSame($expectedSamples, $state->recoveryDrainSamples);
+            if ($expectedSamples < 3) {
+                self::assertNotContains('core_pipeline_draining', $decision->reasons);
+            }
+        }
+
+        self::assertContains('core_pipeline_draining', $decision->reasons);
+        self::assertSame(3, $state->recoveryDrainSamples);
     }
 
     public function test_stable_ineligible_nzb_backlog_does_not_permanently_block_recovery_drain(): void
