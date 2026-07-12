@@ -78,7 +78,11 @@ final class WorkerControlPolicy
             return new ControlDecision(
                 profile: WorkerControlProfile::for(ControlProfile::FailSafe),
                 backfillPermitted: false,
-                reasons: [...$this->failSafeReasons($snapshot), ...$effectivenessReasons],
+                reasons: [
+                    ...$this->failSafeReasons($snapshot),
+                    ...($snapshot->databaseCurrentWaits > 0 ? ['backfill_database_busy'] : []),
+                    ...$effectivenessReasons,
+                ],
                 nextState: $nextState,
                 transitioned: $transitioned,
             );
@@ -236,7 +240,12 @@ final class WorkerControlPolicy
         return new ControlDecision(
             profile: WorkerControlProfile::for($profile),
             backfillPermitted: false,
-            reasons: [...$reasons, ...$effectivenessReasons, 'backfill_disabled_by_profile'],
+            reasons: [
+                ...$reasons,
+                ...$effectivenessReasons,
+                ...($snapshot->databaseCurrentWaits > 0 ? ['backfill_database_busy'] : []),
+                'backfill_disabled_by_profile',
+            ],
             nextState: $nextState,
             transitioned: $recovered,
         );
@@ -444,6 +453,9 @@ final class WorkerControlPolicy
         bool $backfillLocked,
         bool $targetLocked,
     ): string {
+        if ($snapshot->databaseCurrentWaits > 0) {
+            return 'backfill_database_busy';
+        }
         if (! $profile->backfillEnabled) {
             return 'backfill_disabled_by_profile';
         }

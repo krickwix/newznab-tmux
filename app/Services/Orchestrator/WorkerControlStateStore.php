@@ -120,6 +120,7 @@ class WorkerControlStateStore
             'releases' => $snapshot->releasesBacklog,
             'nzbs' => $snapshot->nzbsBacklog,
             'database_deadlocks' => $snapshot->databaseDeadlocks,
+            'database_current_waits' => $snapshot->databaseCurrentWaits,
             'observed_at' => $snapshot->observedAt,
         ];
         foreach ($snapshot->backlogEwmaPerMinute as $stage => $rate) {

@@ -141,7 +141,8 @@ final readonly class PipelineSnapshot
 
     public function backfillGatesPassed(): bool
     {
-        return $this->providerAvailable
+        return $this->databaseCurrentWaits === 0
+            && $this->providerAvailable
             && $this->cursorAvailable
             && $this->currentGroupsAvailable
             && $this->eligibleBackfillSupply

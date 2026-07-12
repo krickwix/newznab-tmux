@@ -99,9 +99,8 @@ class PipelineSnapshotRepository
         [$rates, $ewma] = $this->rates($backlogs, $previous);
         $high = $this->pressure->isHigh($backlogs, $ages, $ewma);
         $low = $this->pressure->isLow($backlogs, $ewma);
-        $deadlocks = $status['Innodb_deadlocks'] ?? 0;
-        $waits = $status['Innodb_row_lock_current_waits'] ?? 0;
-        $deadlockDelta = $previous !== null && isset($previous['database_deadlocks']) && $deadlocks > $previous['database_deadlocks'];
+        $deadlocks = isset($status['Innodb_deadlocks']) ? (int) $status['Innodb_deadlocks'] : null;
+        $waits = isset($status['Innodb_row_lock_current_waits']) ? (int) $status['Innodb_row_lock_current_waits'] : null;
 
         return new PipelineSnapshot(
             partsBacklog: $backlogs['parts'],
@@ -114,7 +113,7 @@ class PipelineSnapshotRepository
             telemetryConsistent: $splitConsistent,
             databaseMemorySafe: $signals['memory_safe'],
             databaseCpuSafe: $signals['cpu_safe'],
-            databaseWaitsSafe: $waits === 0 && ! $deadlockDelta,
+            databaseWaitsSafe: $this->databaseWaitsSafe($deadlocks, $waits, $previous),
             storageSafe: $signals['storage_safe'],
             highPressure: $high,
             lowPressure: $low,
@@ -122,8 +121,8 @@ class PipelineSnapshotRepository
             cursorAvailable: $backfillGroup !== '',
             currentGroupsAvailable: (bool) ($pipeline->current_groups ?? false),
             eligibleBackfillSupply: $eligibleNzbs === 0 && $backfillGroup !== '',
-            databaseDeadlocks: $deadlocks,
-            databaseCurrentWaits: $waits,
+            databaseDeadlocks: $deadlocks ?? 0,
+            databaseCurrentWaits: $waits ?? 0,
             storageAvailableBytes: $signals['storage_available_bytes'],
             observedAt: time(),
             readyCollections: (int) ($pipeline->ready_collections ?? 0),
@@ -150,6 +149,25 @@ class PipelineSnapshotRepository
             bodyRecoverySourceBacklog: $recoverySourceCollections,
             oldestBodyRecoverySourceAgeSeconds: (int) $recoverySources['oldest_age'],
         );
+    }
+
+    /** @param array<string, int|float>|null $previous */
+    private function databaseWaitsSafe(?int $deadlocks, ?int $currentWaits, ?array $previous): bool
+    {
+        if ($deadlocks === null || $currentWaits === null) {
+            return false;
+        }
+
+        $deadlockDelta = $previous !== null
+            && isset($previous['database_deadlocks'])
+            && $deadlocks > (int) $previous['database_deadlocks'];
+        $elapsed = $previous === null ? 0 : time() - (int) ($previous['observed_at'] ?? 0);
+        $previousIsConsecutive = $elapsed >= 30 && $elapsed <= 180;
+        $persistentWaits = $currentWaits > 0
+            && $previousIsConsecutive
+            && (int) ($previous['database_current_waits'] ?? 0) > 0;
+
+        return ! $deadlockDelta && ! $persistentWaits;
     }
 
     private function bodyRecoveryCriteria(): ?BodyRecoverySourceCriteria

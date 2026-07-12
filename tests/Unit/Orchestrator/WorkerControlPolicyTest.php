@@ -885,6 +885,51 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertTrue($decision->backfillPermitted);
     }
 
+    public function test_a_transient_database_wait_denies_backfill_without_forcing_fail_safe(): void
+    {
+        $state = new ControlState(profile: ControlProfile::Balanced);
+        $snapshot = $this->greenBackfillSnapshot(
+            databaseWaitsSafe: true,
+            databaseCurrentWaits: 1,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($snapshot, $state, 10_000);
+
+        self::assertSame(ControlProfile::Balanced, $decision->profile->profile);
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_database_busy', $decision->reasons);
+        self::assertNotContains('database_wait_or_deadlock', $decision->reasons);
+    }
+
+    public function test_database_busy_reason_is_visible_under_every_other_denial_state(): void
+    {
+        $cases = [
+            'drain' => [new ControlState(profile: ControlProfile::Drain), []],
+            'high pressure' => [new ControlState(profile: ControlProfile::Balanced), [
+                'highPressure' => true,
+                'lowPressure' => false,
+            ]],
+            'fail safe recovery' => [new ControlState(
+                profile: ControlProfile::FailSafe,
+                failSafeCause: FailSafeCause::Hard,
+                cooldownUntil: 20_000,
+            ), []],
+        ];
+
+        foreach ($cases as $label => [$state, $override]) {
+            $decision = (new WorkerControlPolicy)->decide($this->greenBackfillSnapshot(
+                ...array_replace($override, [
+                    'databaseWaitsSafe' => true,
+                    'databaseCurrentWaits' => 1,
+                    'observedAt' => 10_000,
+                ])
+            ), $state, 10_000);
+
+            self::assertFalse($decision->backfillPermitted, $label);
+            self::assertContains('backfill_database_busy', $decision->reasons, $label);
+        }
+    }
+
     public function test_a_claimed_no_input_probe_rotates_without_consuming_an_output_strike(): void
     {
         $state = new ControlState(

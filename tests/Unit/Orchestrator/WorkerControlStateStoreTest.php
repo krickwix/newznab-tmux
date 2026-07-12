@@ -73,6 +73,7 @@ final class WorkerControlStateStoreTest extends TestCase
             releasesBacklog: 44,
             nzbsBacklog: 55,
             databaseDeadlocks: 6,
+            databaseCurrentWaits: 3,
             observedAt: 7,
         ));
 
@@ -86,6 +87,7 @@ final class WorkerControlStateStoreTest extends TestCase
             'releases' => 44,
             'nzbs' => 55,
             'database_deadlocks' => 6,
+            'database_current_waits' => 3,
             'observed_at' => 7,
         ], $store->previousSnapshot());
     }

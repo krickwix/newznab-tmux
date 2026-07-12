@@ -6,6 +6,7 @@ namespace Tests\Unit\Orchestrator;
 
 use App\Services\Nzb\NzbBacklogCreationService;
 use App\Services\Orchestrator\BodyRecoverySourceCriteria;
+use App\Services\Orchestrator\PipelineSnapshot;
 use App\Services\Orchestrator\PipelineSnapshotRepository;
 use App\Services\Orchestrator\PrometheusSafetySignalProvider;
 use App\Services\Orchestrator\WorkerControlStateStore;
@@ -16,6 +17,67 @@ use Tests\TestCase;
 
 final class PipelineSnapshotRepositoryTest extends TestCase
 {
+    public function test_database_wait_safety_requires_persistence_but_never_ignores_a_deadlock_delta(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'databaseWaitsSafe');
+
+        $observedAt = time() - 60;
+        self::assertTrue($method->invoke($repository, 24, 0, [
+            'database_deadlocks' => 24,
+            'database_current_waits' => 0,
+            'observed_at' => $observedAt,
+        ]));
+        self::assertTrue($method->invoke($repository, 24, 3, [
+            'database_deadlocks' => 24,
+            'database_current_waits' => 0,
+            'observed_at' => $observedAt,
+        ]), 'One transient busy sample must not renew the hard fail-safe cooldown.');
+        self::assertFalse($method->invoke($repository, 24, 2, [
+            'database_deadlocks' => 24,
+            'database_current_waits' => 3,
+            'observed_at' => $observedAt,
+        ]), 'Two consecutive busy samples represent persistent contention.');
+        self::assertTrue($method->invoke($repository, 24, 2, [
+            'database_deadlocks' => 24,
+            'database_current_waits' => 3,
+            'observed_at' => time() - 5,
+        ]), 'Rapid manual samples must not manufacture persistence.');
+        self::assertTrue($method->invoke($repository, 24, 2, [
+            'database_deadlocks' => 24,
+            'database_current_waits' => 3,
+            'observed_at' => time() - 300,
+        ]), 'A stale pre-restart sample must not manufacture persistence.');
+        self::assertFalse($method->invoke($repository, 25, 0, [
+            'database_deadlocks' => 24,
+            'database_current_waits' => 0,
+            'observed_at' => $observedAt,
+        ]), 'Any deadlock delta remains an immediate hard-safety failure.');
+        self::assertFalse($method->invoke($repository, null, 0, null));
+        self::assertFalse($method->invoke($repository, 24, null, null));
+    }
+
+    public function test_current_database_waits_block_backfill_even_before_persistent_fail_safe(): void
+    {
+        $snapshot = new PipelineSnapshot(
+            partsBacklog: 1,
+            binariesBacklog: 1,
+            collectionsBacklog: 1,
+            releasesBacklog: 0,
+            nzbsBacklog: 0,
+            databaseWaitsSafe: true,
+            databaseCurrentWaits: 1,
+            eligibleBackfillSupply: true,
+            backfillSafeQuantity: 10_000,
+        );
+
+        self::assertFalse($snapshot->backfillGatesPassed());
+        self::assertSame(1, $snapshot->withPermitOutcome(true, false)->databaseCurrentWaits);
+    }
+
     public function test_body_recovery_source_backlog_uses_the_exact_bounded_reconciliation_contract(): void
     {
         DB::shouldReceive('selectOne')
