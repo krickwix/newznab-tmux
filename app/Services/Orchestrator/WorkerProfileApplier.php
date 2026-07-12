@@ -28,9 +28,15 @@ class WorkerProfileApplier
                 ->value('value') + 1;
 
             $profile = $decision->profile;
+            $hardRecoveryCooldownSatisfied = in_array(
+                $decision->nextState->failSafeCause,
+                [FailSafeCause::Hard, FailSafeCause::Unknown],
+                true,
+            ) && $now >= $decision->nextState->cooldownUntil;
             $safeHighPressureRecovery = $profile->profile === ControlProfile::FailSafe
                 && in_array('high_pressure_sample', $decision->reasons, true)
-                && $decision->nextState->failSafeCause === FailSafeCause::Telemetry;
+                && ($decision->nextState->failSafeCause === FailSafeCause::Telemetry
+                    || $hardRecoveryCooldownSatisfied);
             $acceleratedRecovery = $safeHighPressureRecovery
                 && in_array('core_pipeline_draining', $decision->reasons, true);
             $existingPermit = (int) Settings::query()

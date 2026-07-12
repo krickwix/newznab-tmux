@@ -127,17 +127,35 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame(20, Settings::settingValue('orchestrator_bins_timer'));
     }
 
-    public function test_hard_or_unknown_fail_safe_cannot_use_the_fast_recovery_lane(): void
+    public function test_hard_or_unknown_fail_safe_cannot_use_the_recovery_lane_before_cooldown(): void
     {
         foreach ([FailSafeCause::Hard, FailSafeCause::Unknown] as $cause) {
+            $decision = $this->decision(
+                ControlProfile::FailSafe,
+                false,
+                ['high_pressure_sample', 'core_pipeline_draining'],
+                $cause,
+                2_000,
+            );
             (new WorkerProfileApplier)->apply(
-                $this->decision(ControlProfile::FailSafe, false, ['high_pressure_sample', 'core_pipeline_draining'], $cause),
+                $decision,
                 1_000,
                 false,
             );
 
             self::assertSame(0, Settings::settingValue('orchestrator_recovery_ok'));
             self::assertSame(300, Settings::settingValue('orchestrator_bins_timer'));
+        }
+    }
+
+    public function test_hard_or_unknown_fail_safe_uses_bounded_recovery_after_cooldown(): void
+    {
+        foreach ([FailSafeCause::Hard, FailSafeCause::Unknown] as $cause) {
+            $decision = $this->decision(ControlProfile::FailSafe, false, ['high_pressure_sample'], $cause, 900);
+            (new WorkerProfileApplier)->apply($decision, 1_000, false);
+
+            self::assertSame(1, Settings::settingValue('orchestrator_recovery_ok'));
+            self::assertSame(115, Settings::settingValue('orchestrator_bins_timer'));
         }
     }
 
@@ -210,12 +228,17 @@ final class WorkerProfileApplierTest extends TestCase
         bool $backfillPermitted,
         array $reasons = ['test'],
         ?FailSafeCause $failSafeCause = null,
+        int $cooldownUntil = 0,
     ): ControlDecision {
         return new ControlDecision(
             profile: WorkerControlProfile::for($profile),
             backfillPermitted: $backfillPermitted,
             reasons: $reasons,
-            nextState: new ControlState(profile: $profile, failSafeCause: $failSafeCause),
+            nextState: new ControlState(
+                profile: $profile,
+                cooldownUntil: $cooldownUntil,
+                failSafeCause: $failSafeCause,
+            ),
             transitioned: false,
         );
     }
