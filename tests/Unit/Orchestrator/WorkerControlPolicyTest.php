@@ -224,6 +224,26 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('backfill_target_locked_after_ineffective_permits', $second->reasons);
     }
 
+    public function test_a_legacy_strike_is_conservatively_seeded_to_the_observed_target(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            consecutiveIneffectiveBackfillPermits: 1,
+        );
+        $ineffective = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($ineffective, $state, 10_000);
+
+        self::assertSame(2, $decision->nextState->ineffectiveBackfillPermitsByTarget['alt.a']);
+        self::assertTrue($decision->backfillPermitted);
+        self::assertContains('backfill_target_locked_after_ineffective_permits', $decision->reasons);
+    }
+
     public function test_a_legacy_global_lock_remains_fail_closed(): void
     {
         $state = new ControlState(

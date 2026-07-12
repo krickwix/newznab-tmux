@@ -114,6 +114,12 @@ final class WorkerControlPolicy
         $target = $snapshot->backfillPermitGroup;
         $targetCounts = $state->ineffectiveBackfillPermitsByTarget;
         if ($target !== '') {
+            if ($targetCounts === [] && $state->consecutiveIneffectiveBackfillPermits > 0) {
+                $targetCounts[$target] = min(
+                    self::INEFFECTIVE_BACKFILL_LIMIT,
+                    $state->consecutiveIneffectiveBackfillPermits,
+                );
+            }
             if ($snapshot->backfillPermitEffective) {
                 unset($targetCounts[$target]);
 
