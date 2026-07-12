@@ -6,6 +6,7 @@ namespace Tests\Unit\Orchestrator;
 
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlState;
+use App\Services\Orchestrator\FailSafeCause;
 use App\Services\Orchestrator\PipelineSnapshot;
 use App\Services\Orchestrator\WorkerControlPolicy;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -158,6 +159,186 @@ final class WorkerControlPolicyTest extends TestCase
 
         self::assertSame(ControlProfile::Drain, $decision->profile->profile);
         self::assertFalse($decision->transitioned);
+    }
+
+    public function test_telemetry_fail_safe_recovers_only_to_drain_after_two_distinct_safe_samples(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            lastTransitionAt: 10_000,
+            cooldownUntil: 99_999,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        );
+
+        $first = $policy->decide($this->snapshot(lowPressure: true, observedAt: 130), $state, 10_060);
+        self::assertSame(ControlProfile::FailSafe, $first->profile->profile);
+        self::assertFalse($first->backfillPermitted);
+        self::assertSame(1, $first->nextState->failSafeRecoverySamples);
+
+        $second = $policy->decide($this->greenBackfillSnapshot(observedAt: 160), $first->nextState, 10_120);
+        self::assertSame(ControlProfile::Drain, $second->profile->profile);
+        self::assertTrue($second->transitioned);
+        self::assertFalse($second->backfillPermitted);
+        self::assertNull($second->nextState->failSafeCause);
+        self::assertSame(10_120 + WorkerControlPolicy::TRANSITION_COOLDOWN_SECONDS, $second->nextState->cooldownUntil);
+        self::assertContains('fail_safe_recovered_to_drain', $second->reasons);
+    }
+
+    public function test_duplicate_or_high_pressure_samples_do_not_advance_fail_safe_recovery(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeRecoverySamples: 1,
+            failSafeLastObservedAt: 100,
+        );
+
+        $duplicate = $policy->decide($this->snapshot(lowPressure: true, observedAt: 100), $state, 10_000);
+        self::assertSame(1, $duplicate->nextState->failSafeRecoverySamples);
+
+        $high = $policy->decide($this->snapshot(highPressure: true, observedAt: 130), $state, 10_060);
+        self::assertSame(ControlProfile::FailSafe, $high->profile->profile);
+        self::assertSame(0, $high->nextState->failSafeRecoverySamples);
+    }
+
+    public function test_hard_or_legacy_fail_safe_requires_five_safe_samples_and_the_latest_cooldown(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            cooldownUntil: 20_000,
+            failSafeCause: FailSafeCause::Unknown,
+            failSafeLastObservedAt: 100,
+        );
+
+        foreach ([130, 160, 190, 220, 250] as $observedAt) {
+            $decision = $policy->decide($this->snapshot(lowPressure: true, observedAt: $observedAt), $state, 19_999);
+            $state = $decision->nextState;
+        }
+        self::assertSame(ControlProfile::FailSafe, $decision->profile->profile);
+        self::assertSame(5, $state->failSafeRecoverySamples);
+
+        $recovered = $policy->decide($this->snapshot(lowPressure: true, observedAt: 280), $state, 20_000);
+        self::assertSame(ControlProfile::Drain, $recovered->profile->profile);
+        self::assertFalse($recovered->backfillPermitted);
+    }
+
+    public function test_a_hard_breach_during_telemetry_recovery_latches_hard_and_resets_the_streak(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(databaseMemorySafe: false, observedAt: 102),
+            new ControlState(
+                profile: ControlProfile::FailSafe,
+                failSafeCause: FailSafeCause::Telemetry,
+                failSafeRecoverySamples: 1,
+                failSafeLastObservedAt: 101,
+            ),
+            10_000,
+        );
+
+        self::assertSame(FailSafeCause::Hard, $decision->nextState->failSafeCause);
+        self::assertSame(0, $decision->nextState->failSafeRecoverySamples);
+        self::assertSame(10_000 + WorkerControlPolicy::TRANSITION_COOLDOWN_SECONDS, $decision->nextState->cooldownUntil);
+    }
+
+    public function test_invalid_telemetry_cannot_downgrade_a_hard_or_legacy_fail_safe(): void
+    {
+        foreach ([FailSafeCause::Hard, FailSafeCause::Unknown] as $cause) {
+            $decision = (new WorkerControlPolicy)->decide(
+                $this->snapshot(telemetryFresh: false, observedAt: 102),
+                new ControlState(
+                    profile: ControlProfile::FailSafe,
+                    failSafeCause: $cause,
+                    failSafeRecoverySamples: 1,
+                    failSafeLastObservedAt: 101,
+                ),
+                10_000,
+            );
+
+            self::assertSame($cause, $decision->nextState->failSafeCause);
+            self::assertSame(0, $decision->nextState->failSafeRecoverySamples);
+        }
+    }
+
+    public function test_an_explicit_database_wait_is_hard_even_when_prometheus_telemetry_is_invalid(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(telemetryFresh: false, databaseWaitsSafe: false, observedAt: 102),
+            new ControlState(profile: ControlProfile::Fill),
+            10_000,
+        );
+
+        self::assertSame(FailSafeCause::Hard, $decision->nextState->failSafeCause);
+    }
+
+    public function test_a_fresh_prometheus_breach_is_hard_even_when_backlog_telemetry_is_invalid(): void
+    {
+        foreach ([
+            ['databaseMemorySafe' => false],
+            ['databaseCpuSafe' => false],
+            ['storageSafe' => false],
+        ] as $override) {
+            $decision = (new WorkerControlPolicy)->decide(
+                $this->snapshot(...array_replace([
+                    'telemetryComplete' => false,
+                    'telemetryFresh' => true,
+                    'observedAt' => 102,
+                ], $override)),
+                new ControlState(
+                    profile: ControlProfile::FailSafe,
+                    failSafeCause: FailSafeCause::Telemetry,
+                    failSafeRecoverySamples: 1,
+                    failSafeLastObservedAt: 101,
+                ),
+                10_000,
+            );
+
+            self::assertSame(FailSafeCause::Hard, $decision->nextState->failSafeCause);
+            self::assertSame(0, $decision->nextState->failSafeRecoverySamples);
+            self::assertSame(10_000 + WorkerControlPolicy::TRANSITION_COOLDOWN_SECONDS, $decision->nextState->cooldownUntil);
+        }
+    }
+
+    public function test_equal_or_older_observations_do_not_advance_or_regress_the_recovery_watermark(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeRecoverySamples: 1,
+            failSafeLastObservedAt: 100,
+        );
+
+        foreach ([100, 99] as $observedAt) {
+            $decision = $policy->decide($this->snapshot(lowPressure: true, observedAt: $observedAt), $state, 10_000);
+            self::assertSame(1, $decision->nextState->failSafeRecoverySamples);
+            self::assertSame(100, $decision->nextState->failSafeLastObservedAt);
+            $state = $decision->nextState;
+        }
+    }
+
+    public function test_early_samples_do_not_slide_the_recovery_watermark_forever(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeRecoverySamples: 1,
+            failSafeLastObservedAt: 100,
+        );
+
+        foreach ([110, 120] as $observedAt) {
+            $decision = $policy->decide($this->snapshot(lowPressure: true, observedAt: $observedAt), $state, 10_000);
+            self::assertSame(100, $decision->nextState->failSafeLastObservedAt);
+            self::assertSame(ControlProfile::FailSafe, $decision->profile->profile);
+            $state = $decision->nextState;
+        }
+
+        $recovered = $policy->decide($this->snapshot(lowPressure: true, observedAt: 130), $state, 10_030);
+        self::assertSame(ControlProfile::Drain, $recovered->profile->profile);
     }
 
     public function test_a_transition_is_clamped_to_one_profile_rung(): void

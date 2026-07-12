@@ -6,6 +6,7 @@ namespace Tests\Unit\Orchestrator;
 
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlState;
+use App\Services\Orchestrator\FailSafeCause;
 use App\Services\Orchestrator\PipelineSnapshot;
 use App\Services\Orchestrator\WorkerControlStateStore;
 use Illuminate\Support\Facades\Cache;
@@ -28,7 +29,7 @@ final class WorkerControlStateStoreTest extends TestCase
     {
         $store = new WorkerControlStateStore;
         $state = new ControlState(
-            profile: ControlProfile::Fill,
+            profile: ControlProfile::FailSafe,
             consecutiveHigh: 3,
             consecutiveLow: 5,
             lastTransitionAt: 1_000,
@@ -36,11 +37,27 @@ final class WorkerControlStateStoreTest extends TestCase
             consecutiveIneffectiveBackfillPermits: 1,
             backfillLocked: true,
             ineffectiveBackfillPermitsByTarget: ['alt.a' => 2, 'alt.b' => 1],
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeRecoverySamples: 1,
+            failSafeLastObservedAt: 999,
         );
 
         $store->storeState($state);
 
         self::assertEquals($state, $store->loadState());
+    }
+
+    public function test_a_legacy_fail_safe_state_without_recovery_metadata_loads_as_unknown(): void
+    {
+        Cache::store('array')->forever('nntmux:orchestrator:state', [
+            'profile' => ControlProfile::FailSafe->value,
+            'cooldown_until' => 2_000,
+        ]);
+
+        $state = (new WorkerControlStateStore)->loadState();
+
+        self::assertSame(FailSafeCause::Unknown, $state->failSafeCause);
+        self::assertSame(0, $state->failSafeRecoverySamples);
     }
 
     public function test_it_round_trips_the_snapshot_projection_used_for_delta_calculation(): void

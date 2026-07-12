@@ -41,6 +41,9 @@ class WorkerControlStateStore
             consecutiveIneffectiveBackfillPermits: max(0, (int) ($data['ineffective_permits'] ?? 0)),
             backfillLocked: (bool) ($data['backfill_locked'] ?? false),
             ineffectiveBackfillPermitsByTarget: $this->targetIneffectivePermits($data['ineffective_permits_by_target'] ?? []),
+            failSafeCause: $this->failSafeCause($data),
+            failSafeRecoverySamples: max(0, (int) ($data['fail_safe_recovery_samples'] ?? 0)),
+            failSafeLastObservedAt: max(0, (int) ($data['fail_safe_last_observed_at'] ?? 0)),
         );
     }
 
@@ -55,7 +58,20 @@ class WorkerControlStateStore
             'ineffective_permits' => $state->consecutiveIneffectiveBackfillPermits,
             'backfill_locked' => $state->backfillLocked,
             'ineffective_permits_by_target' => $state->ineffectiveBackfillPermitsByTarget,
+            'fail_safe_cause' => $state->failSafeCause?->value,
+            'fail_safe_recovery_samples' => $state->failSafeRecoverySamples,
+            'fail_safe_last_observed_at' => $state->failSafeLastObservedAt,
         ]);
+    }
+
+    /** @param array<string, mixed> $data */
+    private function failSafeCause(array $data): ?FailSafeCause
+    {
+        if (($data['profile'] ?? null) !== ControlProfile::FailSafe->value) {
+            return null;
+        }
+
+        return FailSafeCause::tryFrom((string) ($data['fail_safe_cause'] ?? '')) ?? FailSafeCause::Unknown;
     }
 
     /** @return array<string, int> */

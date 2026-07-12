@@ -16,8 +16,11 @@ final readonly class ControlState
         public bool $backfillLocked = false,
         /** @var array<string, int> */
         public array $ineffectiveBackfillPermitsByTarget = [],
+        public ?FailSafeCause $failSafeCause = null,
+        public int $failSafeRecoverySamples = 0,
+        public int $failSafeLastObservedAt = 0,
     ) {
-        if ($consecutiveHigh < 0 || $consecutiveLow < 0 || $consecutiveIneffectiveBackfillPermits < 0) {
+        if ($consecutiveHigh < 0 || $consecutiveLow < 0 || $consecutiveIneffectiveBackfillPermits < 0 || $failSafeRecoverySamples < 0 || $failSafeLastObservedAt < 0) {
             throw new \InvalidArgumentException('Control state counters cannot be negative.');
         }
         foreach ($ineffectiveBackfillPermitsByTarget as $group => $count) {

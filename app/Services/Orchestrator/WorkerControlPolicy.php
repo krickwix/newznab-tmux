@@ -16,19 +16,40 @@ final class WorkerControlPolicy
 
     public const int INEFFECTIVE_BACKFILL_LIMIT = 2;
 
+    public const int TELEMETRY_RECOVERY_SAMPLES = 2;
+
+    public const int HARD_RECOVERY_SAMPLES = 5;
+
+    public const int RECOVERY_SAMPLE_MIN_SPACING_SECONDS = 30;
+
     public function decide(PipelineSnapshot $snapshot, ControlState $state, int $now): ControlDecision
     {
         [$ineffectivePermits, $backfillLocked, $targetIneffectivePermits, $effectivenessReasons] = $this->applyPermitOutcome($snapshot, $state);
 
         if (! $snapshot->telemetryIsValid() || ! $snapshot->hardSafetyPassed()) {
             $transitioned = $state->profile !== ControlProfile::FailSafe;
+            $prometheusHardBreach = $snapshot->telemetryFresh && (
+                ! $snapshot->databaseMemorySafe
+                || ! $snapshot->databaseCpuSafe
+                || ! $snapshot->storageSafe
+            );
+            $hardBreach = ! $snapshot->databaseWaitsSafe || $prometheusHardBreach;
+            $cause = $hardBreach
+                ? FailSafeCause::Hard
+                : ($state->profile === ControlProfile::FailSafe && in_array($state->failSafeCause, [FailSafeCause::Hard, FailSafeCause::Unknown], true)
+                    ? $state->failSafeCause
+                    : FailSafeCause::Telemetry);
             $nextState = new ControlState(
                 profile: ControlProfile::FailSafe,
                 lastTransitionAt: $transitioned ? $now : $state->lastTransitionAt,
-                cooldownUntil: $transitioned ? $now + self::TRANSITION_COOLDOWN_SECONDS : $state->cooldownUntil,
+                cooldownUntil: $hardBreach
+                    ? $now + self::TRANSITION_COOLDOWN_SECONDS
+                    : ($transitioned ? $now + self::TRANSITION_COOLDOWN_SECONDS : $state->cooldownUntil),
                 consecutiveIneffectiveBackfillPermits: $ineffectivePermits,
                 backfillLocked: $backfillLocked,
                 ineffectiveBackfillPermitsByTarget: $targetIneffectivePermits,
+                failSafeCause: $cause,
+                failSafeLastObservedAt: max($state->failSafeLastObservedAt, $snapshot->observedAt),
             );
 
             return new ControlDecision(
@@ -44,6 +65,19 @@ final class WorkerControlPolicy
         $profile = $state->profile;
         $transitioned = false;
         $reasons = [$pressureReason];
+
+        if ($profile === ControlProfile::FailSafe) {
+            return $this->recoverFromFailSafe(
+                $snapshot,
+                $state,
+                $now,
+                $ineffectivePermits,
+                $backfillLocked,
+                $targetIneffectivePermits,
+                $effectivenessReasons,
+                $pressureReason,
+            );
+        }
 
         if ($this->mayTransition($state, $now)) {
             if ($highSamples >= self::HIGH_SAMPLES_TO_DRAIN) {
@@ -95,6 +129,53 @@ final class WorkerControlPolicy
             reasons: [...$reasons, ...$effectivenessReasons],
             nextState: $nextState,
             transitioned: $transitioned,
+        );
+    }
+
+    /**
+     * @param  array<string, int>  $targetIneffectivePermits
+     * @param  list<string>  $effectivenessReasons
+     */
+    private function recoverFromFailSafe(
+        PipelineSnapshot $snapshot,
+        ControlState $state,
+        int $now,
+        int $ineffectivePermits,
+        bool $backfillLocked,
+        array $targetIneffectivePermits,
+        array $effectivenessReasons,
+        string $pressureReason,
+    ): ControlDecision {
+        $cause = $state->failSafeCause ?? FailSafeCause::Unknown;
+        $distinctSample = $snapshot->observedAt - $state->failSafeLastObservedAt >= self::RECOVERY_SAMPLE_MIN_SPACING_SECONDS;
+        $recoverySamples = $snapshot->highPressure
+            ? 0
+            : ($distinctSample ? $state->failSafeRecoverySamples + 1 : $state->failSafeRecoverySamples);
+        $requiredSamples = $cause === FailSafeCause::Telemetry
+            ? self::TELEMETRY_RECOVERY_SAMPLES
+            : self::HARD_RECOVERY_SAMPLES;
+        $cooldownSatisfied = $cause === FailSafeCause::Telemetry || $now >= $state->cooldownUntil;
+        $recovered = $recoverySamples >= $requiredSamples && $cooldownSatisfied;
+        $profile = $recovered ? ControlProfile::Drain : ControlProfile::FailSafe;
+        $reasons = [$pressureReason, $recovered ? 'fail_safe_recovered_to_drain' : 'fail_safe_recovery_pending'];
+        $nextState = new ControlState(
+            profile: $profile,
+            lastTransitionAt: $recovered ? $now : $state->lastTransitionAt,
+            cooldownUntil: $recovered ? $now + self::TRANSITION_COOLDOWN_SECONDS : $state->cooldownUntil,
+            consecutiveIneffectiveBackfillPermits: $ineffectivePermits,
+            backfillLocked: $backfillLocked,
+            ineffectiveBackfillPermitsByTarget: $targetIneffectivePermits,
+            failSafeCause: $recovered ? null : $cause,
+            failSafeRecoverySamples: $recovered ? 0 : min($requiredSamples, $recoverySamples),
+            failSafeLastObservedAt: $distinctSample ? $snapshot->observedAt : $state->failSafeLastObservedAt,
+        );
+
+        return new ControlDecision(
+            profile: WorkerControlProfile::for($profile),
+            backfillPermitted: false,
+            reasons: [...$reasons, ...$effectivenessReasons, 'backfill_disabled_by_profile'],
+            nextState: $nextState,
+            transitioned: $recovered,
         );
     }
 
