@@ -26,8 +26,6 @@ final class WorkerControlPolicy
 
     public const int RECOVERY_DRAIN_SAMPLES_TO_ACCELERATE = 3;
 
-    public const float RECOVERY_DRAIN_MIN_EWMA_PER_MINUTE = 5.0;
-
     public const int RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES = 1_440;
 
     public const int RECOVERY_DRAIN_MAX_HOLD_SAMPLES = 3;
@@ -252,8 +250,7 @@ final class WorkerControlPolicy
 
         foreach (['parts', 'binaries', 'collections'] as $stage) {
             $instant = $snapshot->backlogRatesPerMinute[$stage] ?? NAN;
-            $ewma = $snapshot->backlogEwmaPerMinute[$stage] ?? NAN;
-            if ($instant > 0.0 || $ewma > -self::RECOVERY_DRAIN_MIN_EWMA_PER_MINUTE) {
+            if ($instant > 0.0) {
                 return false;
             }
         }

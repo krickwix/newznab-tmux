@@ -438,6 +438,43 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertNotContains('core_pipeline_draining', $delayed->reasons);
     }
 
+    public function test_non_growing_core_samples_advance_while_ewma_remains_inside_bounded_envelope(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        );
+        $backlogs = ['parts' => 192_000_000, 'binaries' => 89_000, 'collections' => 52_000];
+        $rates = ['parts' => 0.0, 'binaries' => -1.0, 'collections' => 0.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $ewma = [
+            'parts' => 700.0,
+            'binaries' => 20.0,
+            'collections' => 10.0,
+            'releases' => 0.0,
+            'nzbs' => 0.0,
+        ];
+
+        foreach ([130, 190, 250] as $expectedSamples => $observedAt) {
+            $decision = $policy->decide($this->snapshot(
+                partsBacklog: $backlogs['parts'],
+                binariesBacklog: $backlogs['binaries'],
+                collectionsBacklog: $backlogs['collections'],
+                highPressure: true,
+                observedAt: $observedAt,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $ewma,
+                bodyRecoveryQueueBacklog: 10_000,
+            ), $state, 10_000);
+            $state = $decision->nextState;
+            self::assertSame($expectedSamples + 1, $state->recoveryDrainSamples);
+            self::assertSame(0, $state->recoveryDrainHoldSamples);
+        }
+
+        self::assertContains('core_pipeline_draining', $decision->reasons);
+    }
+
     public function test_stable_ineligible_nzb_backlog_does_not_permanently_block_recovery_drain(): void
     {
         $policy = new WorkerControlPolicy;
