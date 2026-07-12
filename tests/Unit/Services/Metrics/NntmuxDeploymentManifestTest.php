@@ -78,7 +78,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                     'nntmux-worker-nzb-backlog',
                 ], true)
                 ? ($name === 'nntmux-worker-binaries'
-                    ? ':microservices-pods-20260712-recovery-fairness-v76'
+                    ? ':microservices-pods-20260712-xref-group-v79'
                     : ':microservices-pods-20260711-worker-orchestrator-v22')
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
