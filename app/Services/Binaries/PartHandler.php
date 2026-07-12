@@ -18,7 +18,7 @@ final class PartHandler
      * when we flush; this constant guarantees the actual SQL we emit is
      * never large enough to blow up PHP/MySQL memory.
      */
-    private const MAX_SQL_ROWS_PER_STATEMENT = 500;
+    private const MAX_SQL_ROWS_PER_STATEMENT = 100;
 
     /** @var array<string, mixed> Pending parts to insert */
     private array $parts = [];
@@ -149,6 +149,18 @@ final class PartHandler
     {
         $driver = DB::getDriverName();
         $totalInserted = 0;
+
+        // `parts` is clustered by PRIMARY KEY (binaries_id, number). Concurrent
+        // header transactions must visit that key space in the same order or
+        // their multi-row inserts can deadlock on the same leaf-page supremum.
+        $parts = array_values($parts);
+        usort($parts, static function (array $left, array $right): int {
+            $binaryOrder = (int) $left['binaries_id'] <=> (int) $right['binaries_id'];
+
+            return $binaryOrder !== 0
+                ? $binaryOrder
+                : (int) $left['number'] <=> (int) $right['number'];
+        });
 
         try {
             foreach (array_chunk($parts, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {

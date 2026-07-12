@@ -95,6 +95,59 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(1, $this->countValueTuplesForTable($queries, 'parts'));
     }
 
+    public function test_part_handler_sorts_pending_inserts_by_composite_primary_key(): void
+    {
+        $handler = new PartHandler(100);
+        $this->assertTrue($handler->addPart(9, $this->parsedHeader(300, 1)));
+        $this->assertTrue($handler->addPart(2, $this->parsedHeader(700, 1)));
+        $this->assertTrue($handler->addPart(2, $this->parsedHeader(100, 2)));
+
+        DB::shouldReceive('getDriverName')->once()->andReturn('mysql');
+        DB::shouldReceive('affectingStatement')
+            ->once()
+            ->with(
+                'INSERT IGNORE INTO parts (binaries_id, number, messageid, partnumber, size) VALUES (?,?,?,?,?),(?,?,?,?,?),(?,?,?,?,?)',
+                [
+                    2, 100, '<msg100@example.com>', 2, 100,
+                    2, 700, '<msg700@example.com>', 1, 100,
+                    9, 300, '<msg300@example.com>', 1, 100,
+                ]
+            )
+            ->andReturn(3);
+
+        $this->assertTrue($handler->flush());
+        $this->assertSame([300, 700, 100], $handler->getInsertedNumbers());
+    }
+
+    public function test_part_handler_caps_each_insert_statement_at_one_hundred_rows(): void
+    {
+        DB::statement('CREATE TABLE parts (
+            binaries_id INT,
+            number INT,
+            messageid VARCHAR(255),
+            partnumber INT,
+            size INT,
+            UNIQUE(binaries_id, number)
+        )');
+
+        $handler = new PartHandler(5000);
+        for ($number = 201; $number >= 1; $number--) {
+            $this->assertTrue($handler->addPart(1, $this->parsedHeader($number, 1)));
+        }
+
+        $queries = $this->captureQueries(fn (): bool => $handler->flush());
+        $partInserts = array_values(array_filter(
+            $queries,
+            static fn (string $sql): bool => str_contains($sql, 'INSERT OR IGNORE INTO parts')
+        ));
+
+        $this->assertCount(3, $partInserts);
+        $this->assertSame([100, 100, 1], array_map(
+            static fn (string $sql): int => substr_count($sql, '(?,?,?,?,?)'),
+            $partInserts
+        ));
+    }
+
     public function test_binary_handler_flushes_cached_article_aggregate_updates(): void
     {
         DB::statement('CREATE TABLE binaries (
@@ -186,17 +239,16 @@ class BinariesStorageInternalsTest extends TestCase
         self::assertLessThan($part, $aggregate);
     }
 
-    public function test_binary_part_existence_check_uses_current_locking_read(): void
+    public function test_binary_part_existence_check_uses_plain_read_under_read_committed(): void
     {
         $handler = new BinaryHandler;
         $method = new \ReflectionMethod($handler, 'existingPartKeysForResolvedRows');
 
-        DB::shouldReceive('getDriverName')->once()->andReturn('mysql');
         DB::shouldReceive('select')
             ->once()
             ->with(
                 Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FROM parts')
-                    && str_contains($sql, 'FOR UPDATE')),
+                    && ! str_contains($sql, 'FOR UPDATE')),
                 [7, 100],
             )
             ->andReturn([(object) ['binaries_id' => 7, 'number' => 100]]);
@@ -211,6 +263,25 @@ class BinariesStorageInternalsTest extends TestCase
         ], ['abc:hash:1' => 7]);
 
         self::assertSame(['7:100' => true], $existing);
+    }
+
+    public function test_header_storage_transaction_uses_read_committed_on_mariadb(): void
+    {
+        $transaction = new HeaderStorageTransaction(
+            new CollectionHandler,
+            new BinaryHandler,
+            new PartHandler
+        );
+
+        DB::shouldReceive('getDriverName')->once()->andReturn('mariadb');
+        DB::shouldReceive('statement')
+            ->once()
+            ->with('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+            ->andReturnTrue();
+        DB::shouldReceive('beginTransaction')->once();
+
+        $transaction->begin();
+        $this->assertFalse($transaction->hasErrors());
     }
 
     public function test_sqlite_rollback_cleanup_keeps_unrelated_parts_with_same_article_number(): void

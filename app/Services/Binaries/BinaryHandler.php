@@ -496,7 +496,6 @@ final class BinaryHandler
         }
 
         $existing = [];
-        $lockClause = DB::getDriverName() === 'sqlite' ? '' : ' FOR UPDATE';
         foreach (array_chunk(array_values($pairs), self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
             $tuples = implode(',', array_fill(0, \count($chunk), '(?,?)'));
             $bindings = [];
@@ -505,7 +504,11 @@ final class BinaryHandler
                 $bindings[] = $number;
             }
 
-            $rows = DB::select("SELECT binaries_id, number FROM parts WHERE (binaries_id, number) IN ({$tuples}){$lockClause}", $bindings);
+            // Header storage uses READ COMMITTED and holds each parent binary's
+            // X lock before this current read. A locking read for absent part
+            // keys would add next-key/gap locks that later part inserts must
+            // convert, creating PRIMARY-supremum deadlocks across transactions.
+            $rows = DB::select("SELECT binaries_id, number FROM parts WHERE (binaries_id, number) IN ({$tuples})", $bindings);
             foreach ($rows as $row) {
                 $existing[$this->partKey((int) $row->binaries_id, (int) $row->number)] = true;
             }
