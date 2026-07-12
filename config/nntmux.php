@@ -25,6 +25,7 @@ return [
     'distributed_nzb_scan_cap' => (int) env('NNTMUX_DISTRIBUTED_NZB_SCAN_CAP', 10000),
     'distributed_nzb_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS', 7200),
     'orchestrator' => [
+        'leader_lock_seconds' => min(600, max(120, (int) env('NNTMUX_ORCHESTRATOR_LEADER_LOCK_SECONDS', 120))),
         'lock_store' => env('NNTMUX_ORCHESTRATOR_LOCK_STORE', 'redis'),
         'state_store' => env('NNTMUX_ORCHESTRATOR_STATE_STORE', 'redis'),
         'auto_backfill' => filter_var(env('NNTMUX_ORCHESTRATOR_AUTO_BACKFILL', false), FILTER_VALIDATE_BOOL),

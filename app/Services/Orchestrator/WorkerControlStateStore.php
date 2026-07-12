@@ -27,7 +27,10 @@ class WorkerControlStateStore
         /** @var LockProvider $cache */
         $cache = Cache::store((string) config('nntmux.orchestrator.lock_store', 'redis'));
 
-        return $cache->lock('nntmux:worker-orchestrator:leader', 600);
+        return $cache->lock(
+            'nntmux:worker-orchestrator:leader',
+            (int) config('nntmux.orchestrator.leader_lock_seconds', 120),
+        );
     }
 
     public function loadState(): ControlState

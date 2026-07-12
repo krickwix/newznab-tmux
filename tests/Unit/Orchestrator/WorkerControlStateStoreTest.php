@@ -14,6 +14,30 @@ use Tests\TestCase;
 
 final class WorkerControlStateStoreTest extends TestCase
 {
+    public function test_leader_lease_is_bounded_to_two_minutes_minimum(): void
+    {
+        $key = 'NNTMUX_ORCHESTRATOR_LEADER_LOCK_SECONDS';
+        $previous = getenv($key);
+        putenv($key.'=30');
+        $_ENV[$key] = '30';
+        $_SERVER[$key] = '30';
+
+        try {
+            $configuration = require base_path('config/nntmux.php');
+
+            self::assertSame(120, $configuration['orchestrator']['leader_lock_seconds']);
+        } finally {
+            if ($previous === false) {
+                putenv($key);
+                unset($_ENV[$key], $_SERVER[$key]);
+            } else {
+                putenv($key.'='.$previous);
+                $_ENV[$key] = $previous;
+                $_SERVER[$key] = $previous;
+            }
+        }
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
