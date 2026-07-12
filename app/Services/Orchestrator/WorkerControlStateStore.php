@@ -40,6 +40,7 @@ class WorkerControlStateStore
             cooldownUntil: max(0, (int) ($data['cooldown_until'] ?? 0)),
             consecutiveIneffectiveBackfillPermits: max(0, (int) ($data['ineffective_permits'] ?? 0)),
             backfillLocked: (bool) ($data['backfill_locked'] ?? false),
+            ineffectiveBackfillPermitsByTarget: $this->targetIneffectivePermits($data['ineffective_permits_by_target'] ?? []),
         );
     }
 
@@ -53,7 +54,25 @@ class WorkerControlStateStore
             'cooldown_until' => $state->cooldownUntil,
             'ineffective_permits' => $state->consecutiveIneffectiveBackfillPermits,
             'backfill_locked' => $state->backfillLocked,
+            'ineffective_permits_by_target' => $state->ineffectiveBackfillPermitsByTarget,
         ]);
+    }
+
+    /** @return array<string, int> */
+    private function targetIneffectivePermits(mixed $value): array
+    {
+        if (! is_array($value)) {
+            return [];
+        }
+
+        $counts = [];
+        foreach ($value as $group => $count) {
+            if (is_string($group) && $group !== '') {
+                $counts[$group] = min(WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT, max(0, (int) $count));
+            }
+        }
+
+        return $counts;
     }
 
     /** @return array<string, int|float>|null */

@@ -53,10 +53,12 @@ class PipelineSnapshotRepository
         }
         $signals = $this->safety->signals();
         $eligibleNzbs = $this->nzbBacklog->eligibleCandidateCount((int) config('nntmux.distributed_nzb_scan_cap', 10000));
+        $controlState = $this->state->loadState();
         $backfillTarget = $this->targets->select(
             $this->backfillCandidates(),
             $this->state->backfillYieldHistory(),
             time(),
+            $controlState->ineffectiveBackfillPermitsByTarget,
         );
         $backfillGroup = (string) ($backfillTarget['name'] ?? '');
 

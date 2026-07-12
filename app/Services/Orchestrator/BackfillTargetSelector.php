@@ -42,20 +42,22 @@ final readonly class BackfillTargetSelector
     /**
      * @param  list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $candidates
      * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
+     * @param  array<string, int>  $ineffectivePermitsByTarget
      * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
      */
-    public function select(array $candidates, array $history, int $now): ?array
+    public function select(array $candidates, array $history, int $now, array $ineffectivePermitsByTarget = []): ?array
     {
         $candidates = array_values(array_filter(
             $candidates,
-            static function (array $candidate) use ($now): bool {
+            static function (array $candidate) use ($now, $ineffectivePermitsByTarget): bool {
                 $timestamp = strtotime($candidate['cursor_postdate']);
 
                 return $candidate['cursor'] > 0
                     && $candidate['remaining_articles'] >= 20_000
                     && $timestamp !== false
                     && (int) substr($candidate['cursor_postdate'], 0, 4) >= 2000
-                    && $timestamp <= $now;
+                    && $timestamp <= $now
+                    && (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) < WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT;
             },
         ));
         if ($candidates === []) {

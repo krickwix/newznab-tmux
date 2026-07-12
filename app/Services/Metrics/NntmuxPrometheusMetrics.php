@@ -8,6 +8,7 @@ use App\Enums\CollectionFileCheckStatus;
 use App\Models\Category;
 use App\Services\Distributed\DistributedJobCatalog;
 use App\Services\Nzb\NzbService;
+use App\Services\Orchestrator\WorkerControlPolicy;
 use App\Services\Orchestrator\WorkerControlStateStore;
 use Illuminate\Redis\Connections\PhpRedisConnection;
 use Illuminate\Support\Facades\Cache;
@@ -545,10 +546,13 @@ class NntmuxPrometheusMetrics
         try {
             $decision = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
                 ->get(WorkerControlStateStore::DECISION_KEY);
-            $backfillYieldHistory = (new WorkerControlStateStore)->backfillYieldHistory();
+            $stateStore = new WorkerControlStateStore;
+            $backfillYieldHistory = $stateStore->backfillYieldHistory();
+            $targetIneffectivePermits = $stateStore->loadState()->ineffectiveBackfillPermitsByTarget;
         } catch (Throwable) {
             $decision = null;
             $backfillYieldHistory = [];
+            $targetIneffectivePermits = [];
         }
         if (is_array($decision) && $mode !== 'failsafe') {
             $mode = (string) ($decision['mode'] ?? $mode);
@@ -608,6 +612,19 @@ class NntmuxPrometheusMetrics
         foreach ($backfillYieldHistory as $group => $entry) {
             $lines[] = $this->metric('nntmux_orchestrator_backfill_yield_nzbs_per_10k', $entry['ewma_nzbs_per_10k'], ['group' => $group]);
             $lines[] = $this->metric('nntmux_orchestrator_backfill_yield_attempts', $entry['attempts'], ['group' => $group]);
+        }
+        $lines[] = '# HELP nntmux_orchestrator_backfill_target_ineffective_permits Consecutive input-bearing permits without attributed output by target group.';
+        $lines[] = '# TYPE nntmux_orchestrator_backfill_target_ineffective_permits gauge';
+        $lines[] = '# HELP nntmux_orchestrator_backfill_target_locked Whether a target group reached its bounded ineffective-permit limit.';
+        $lines[] = '# TYPE nntmux_orchestrator_backfill_target_locked gauge';
+        ksort($targetIneffectivePermits);
+        foreach ($targetIneffectivePermits as $group => $count) {
+            $lines[] = $this->metric('nntmux_orchestrator_backfill_target_ineffective_permits', $count, ['group' => $group]);
+            $lines[] = $this->metric(
+                'nntmux_orchestrator_backfill_target_locked',
+                $count >= WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT ? 1 : 0,
+                ['group' => $group],
+            );
         }
         $lines[] = '# HELP nntmux_orchestrator_stage_backlog Current bounded pipeline stage backlog or capacity level.';
         $lines[] = '# TYPE nntmux_orchestrator_stage_backlog gauge';

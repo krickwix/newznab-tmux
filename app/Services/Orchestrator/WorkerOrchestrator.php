@@ -74,6 +74,7 @@ class WorkerOrchestrator
                     effective: $permitClaimed && $cursorMoved && $produced,
                     claimed: $permitClaimed,
                     inputMoved: $cursorMoved,
+                    group: $observedGroup,
                 );
                 $this->store->clearPermitObservation();
             }

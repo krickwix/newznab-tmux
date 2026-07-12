@@ -35,6 +35,7 @@ final class WorkerControlStateStoreTest extends TestCase
             cooldownUntil: 2_000,
             consecutiveIneffectiveBackfillPermits: 1,
             backfillLocked: true,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 2, 'alt.b' => 1],
         );
 
         $store->storeState($state);

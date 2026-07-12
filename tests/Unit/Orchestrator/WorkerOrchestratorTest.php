@@ -124,7 +124,7 @@ final class WorkerOrchestratorTest extends TestCase
             4,
             5,
             eligibleBackfillSupply: true,
-            backfillGroup: 'alt.test',
+            backfillGroup: 'alt.current',
             backfillCursor: 100,
         );
         $state = new ControlState(profile: ControlProfile::Balanced);
@@ -145,7 +145,9 @@ final class WorkerOrchestratorTest extends TestCase
         $store->shouldReceive('clearPermitObservation')->once();
         $store->shouldReceive('loadState')->once()->andReturn($state);
         $store->shouldReceive('storeState')->once()->with(Mockery::on(
-            static fn (ControlState $next): bool => $next->consecutiveIneffectiveBackfillPermits === 1,
+            static fn (ControlState $next): bool => $next->consecutiveIneffectiveBackfillPermits === 1
+                && ($next->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0) === 1
+                && ! isset($next->ineffectiveBackfillPermitsByTarget['alt.current']),
         ));
         $store->shouldReceive('storeSnapshot')->once();
         $store->shouldReceive('storeDecision')->once();

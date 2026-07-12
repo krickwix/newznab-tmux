@@ -202,13 +202,15 @@ final class WorkerControlPolicyTest extends TestCase
         yield 'no eligible supply' => [['eligibleBackfillSupply' => false]];
     }
 
-    public function test_two_completed_ineffective_backfill_permits_lock_backfill_out(): void
+    public function test_target_ineffective_permits_do_not_globally_lock_other_targets(): void
     {
         $policy = new WorkerControlPolicy;
         $state = new ControlState(profile: ControlProfile::Balanced, lastTransitionAt: 9_900);
         $ineffective = $this->greenBackfillSnapshot(
             backfillPermitCompleted: true,
             backfillPermitEffective: false,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
         );
 
         $first = $policy->decide($ineffective, $state, 10_000);
@@ -216,9 +218,64 @@ final class WorkerControlPolicyTest extends TestCase
 
         $second = $policy->decide($ineffective, $first->nextState, 10_060);
 
-        self::assertTrue($second->nextState->backfillLocked);
-        self::assertFalse($second->backfillPermitted);
-        self::assertContains('backfill_locked', $second->reasons);
+        self::assertSame(2, $second->nextState->ineffectiveBackfillPermitsByTarget['alt.a']);
+        self::assertFalse($second->nextState->backfillLocked);
+        self::assertTrue($second->backfillPermitted);
+        self::assertContains('backfill_target_locked_after_ineffective_permits', $second->reasons);
+    }
+
+    public function test_a_legacy_global_lock_remains_fail_closed(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            consecutiveIneffectiveBackfillPermits: 2,
+            backfillLocked: true,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($this->greenBackfillSnapshot(), $state, 10_000);
+
+        self::assertTrue($decision->nextState->backfillLocked);
+        self::assertFalse($decision->backfillPermitted);
+    }
+
+    public function test_a_no_input_permit_preserves_only_its_target_strike(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 1, 'alt.b' => 1],
+        );
+        $noInput = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: true,
+            backfillPermitInputMoved: false,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($noInput, $state, 10_000);
+
+        self::assertSame(['alt.a' => 1, 'alt.b' => 1], $decision->nextState->ineffectiveBackfillPermitsByTarget);
+        self::assertTrue($decision->backfillPermitted);
+    }
+
+    public function test_an_effective_permit_resets_only_its_target_strike(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 1, 'alt.b' => 1],
+        );
+        $effective = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: true,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($effective, $state, 10_000);
+
+        self::assertSame(['alt.b' => 1], $decision->nextState->ineffectiveBackfillPermitsByTarget);
+        self::assertTrue($decision->backfillPermitted);
     }
 
     public function test_a_claimed_no_input_probe_rotates_without_consuming_an_output_strike(): void

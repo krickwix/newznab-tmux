@@ -8,6 +8,7 @@ use App\Models\Category;
 use App\Services\Distributed\DistributedJobCatalog;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Metrics\NntmuxPrometheusMetrics;
+use App\Services\Orchestrator\ControlState;
 use App\Services\Orchestrator\WorkerControlStateStore;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Support\Facades\Cache;
@@ -495,7 +496,9 @@ class NntmuxPrometheusMetricsTest extends TestCase
             'oldest_age_seconds' => ['binaries' => 11, 'collections' => 12, 'releases' => 13, 'nzbs' => 14],
             'backfill_target' => ['group' => 'alt.test', 'cursor' => 12345],
         ]);
-        (new WorkerControlStateStore)->recordBackfillYield('alt.test', 10_000, 5, time());
+        $store = new WorkerControlStateStore;
+        $store->recordBackfillYield('alt.test', 10_000, 5, time());
+        $store->storeState(new ControlState(ineffectiveBackfillPermitsByTarget: ['alt.test' => 1]));
 
         $metrics = new NntmuxPrometheusMetrics;
         $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
@@ -511,6 +514,8 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_backfill_target_info{group="alt.test"} 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_yield_nzbs_per_10k{group="alt.test"} 5', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_yield_attempts{group="alt.test"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_target_ineffective_permits{group="alt.test"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_target_locked{group="alt.test"} 0', $output);
     }
 
     public function test_persisted_fail_safe_overrides_a_stale_redis_decision(): void

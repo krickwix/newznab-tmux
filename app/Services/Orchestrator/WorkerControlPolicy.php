@@ -18,7 +18,7 @@ final class WorkerControlPolicy
 
     public function decide(PipelineSnapshot $snapshot, ControlState $state, int $now): ControlDecision
     {
-        [$ineffectivePermits, $backfillLocked, $effectivenessReasons] = $this->applyPermitOutcome($snapshot, $state);
+        [$ineffectivePermits, $backfillLocked, $targetIneffectivePermits, $effectivenessReasons] = $this->applyPermitOutcome($snapshot, $state);
 
         if (! $snapshot->telemetryIsValid() || ! $snapshot->hardSafetyPassed()) {
             $transitioned = $state->profile !== ControlProfile::FailSafe;
@@ -28,6 +28,7 @@ final class WorkerControlPolicy
                 cooldownUntil: $transitioned ? $now + self::TRANSITION_COOLDOWN_SECONDS : $state->cooldownUntil,
                 consecutiveIneffectiveBackfillPermits: $ineffectivePermits,
                 backfillLocked: $backfillLocked,
+                ineffectiveBackfillPermitsByTarget: $targetIneffectivePermits,
             );
 
             return new ControlDecision(
@@ -73,14 +74,18 @@ final class WorkerControlPolicy
             cooldownUntil: $transitioned ? $now + self::TRANSITION_COOLDOWN_SECONDS : $state->cooldownUntil,
             consecutiveIneffectiveBackfillPermits: $ineffectivePermits,
             backfillLocked: $backfillLocked,
+            ineffectiveBackfillPermitsByTarget: $targetIneffectivePermits,
         );
         $workerProfile = WorkerControlProfile::for($profile);
+        $targetLocked = $snapshot->backfillGroup !== ''
+            && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= self::INEFFECTIVE_BACKFILL_LIMIT;
         $backfillPermitted = $workerProfile->backfillEnabled
             && ! $backfillLocked
+            && ! $targetLocked
             && $snapshot->backfillGatesPassed();
 
         if (! $backfillPermitted) {
-            $reasons[] = $this->backfillDenialReason($workerProfile, $snapshot, $backfillLocked);
+            $reasons[] = $this->backfillDenialReason($workerProfile, $snapshot, $backfillLocked, $targetLocked);
         }
 
         return new ControlDecision(
@@ -93,22 +98,62 @@ final class WorkerControlPolicy
     }
 
     /**
-     * @return array{int, bool, list<string>}
+     * @return array{int, bool, array<string, int>, list<string>}
      */
     private function applyPermitOutcome(PipelineSnapshot $snapshot, ControlState $state): array
     {
         if (! $snapshot->backfillPermitCompleted) {
-            return [$state->consecutiveIneffectiveBackfillPermits, $state->backfillLocked, []];
+            return [
+                $state->consecutiveIneffectiveBackfillPermits,
+                $state->backfillLocked,
+                $state->ineffectiveBackfillPermitsByTarget,
+                [],
+            ];
+        }
+
+        $target = $snapshot->backfillPermitGroup;
+        $targetCounts = $state->ineffectiveBackfillPermitsByTarget;
+        if ($target !== '') {
+            if ($snapshot->backfillPermitEffective) {
+                unset($targetCounts[$target]);
+
+                return [0, $state->backfillLocked, $targetCounts, ['backfill_permit_effective']];
+            }
+
+            if ($snapshot->backfillPermitClaimed && ! $snapshot->backfillPermitInputMoved) {
+                return [
+                    $state->consecutiveIneffectiveBackfillPermits,
+                    $state->backfillLocked,
+                    $targetCounts,
+                    ['backfill_permit_no_input'],
+                ];
+            }
+
+            $targetCounts[$target] = min(
+                self::INEFFECTIVE_BACKFILL_LIMIT,
+                (int) ($targetCounts[$target] ?? 0) + 1,
+            );
+            $count = min(self::INEFFECTIVE_BACKFILL_LIMIT, $state->consecutiveIneffectiveBackfillPermits + 1);
+
+            return [
+                $count,
+                $state->backfillLocked,
+                $targetCounts,
+                [$targetCounts[$target] >= self::INEFFECTIVE_BACKFILL_LIMIT
+                    ? 'backfill_target_locked_after_ineffective_permits'
+                    : 'backfill_permit_ineffective'],
+            ];
         }
 
         if ($snapshot->backfillPermitEffective) {
-            return [0, $state->backfillLocked, ['backfill_permit_effective']];
+            return [0, $state->backfillLocked, $targetCounts, ['backfill_permit_effective']];
         }
 
         if ($snapshot->backfillPermitClaimed && ! $snapshot->backfillPermitInputMoved) {
             return [
                 $state->consecutiveIneffectiveBackfillPermits,
                 $state->backfillLocked,
+                $targetCounts,
                 ['backfill_permit_no_input'],
             ];
         }
@@ -116,7 +161,7 @@ final class WorkerControlPolicy
         $count = min(self::INEFFECTIVE_BACKFILL_LIMIT, $state->consecutiveIneffectiveBackfillPermits + 1);
         $locked = $state->backfillLocked || $count >= self::INEFFECTIVE_BACKFILL_LIMIT;
 
-        return [$count, $locked, [$locked ? 'backfill_locked_after_ineffective_permits' : 'backfill_permit_ineffective']];
+        return [$count, $locked, $targetCounts, [$locked ? 'backfill_locked_after_ineffective_permits' : 'backfill_permit_ineffective']];
     }
 
     /**
@@ -182,12 +227,16 @@ final class WorkerControlPolicy
         WorkerControlProfile $profile,
         PipelineSnapshot $snapshot,
         bool $backfillLocked,
+        bool $targetLocked,
     ): string {
         if (! $profile->backfillEnabled) {
             return 'backfill_disabled_by_profile';
         }
         if ($backfillLocked) {
             return 'backfill_locked';
+        }
+        if ($targetLocked) {
+            return 'backfill_target_locked';
         }
         if (! $snapshot->providerAvailable) {
             return 'backfill_provider_unavailable';
