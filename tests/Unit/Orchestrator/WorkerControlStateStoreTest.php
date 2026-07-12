@@ -81,9 +81,10 @@ final class WorkerControlStateStoreTest extends TestCase
             backfillCursor: 12345,
         ), generation: 8, now: 9, outcome: [
             'cursor' => 12345,
+            'cursor_postdate' => '2026-01-02 03:04:05',
             'ready_collections' => 66,
             'releases' => 77,
-            'nzb_created' => 88,
+            'release_high_watermark' => 88,
         ]);
 
         self::assertSame([
@@ -93,9 +94,10 @@ final class WorkerControlStateStoreTest extends TestCase
             'binaries' => 22,
             'ready_collections' => 66,
             'release_total' => 77,
-            'nzb_created' => 88,
+            'release_high_watermark' => 88,
             'backfill_group' => 'alt.test',
             'backfill_cursor' => 12345,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
         ], $store->permitObservation());
 
         $store->clearPermitObservation();

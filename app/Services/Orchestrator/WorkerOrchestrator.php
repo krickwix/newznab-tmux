@@ -47,17 +47,25 @@ class WorkerOrchestrator
                 }
                 $observedGroup = (string) ($permitObservation['backfill_group'] ?? '');
                 $outcome = $observedGroup === ''
-                    ? ['cursor' => 0, 'ready_collections' => 0, 'releases' => 0]
+                    ? ['cursor' => 0, 'cursor_postdate' => '', 'ready_collections' => 0, 'releases' => 0, 'release_high_watermark' => 0]
                     : $this->snapshots->backfillOutcomeForGroup($observedGroup);
                 $cursorMoved = $outcome['cursor'] > 0
                     && $outcome['cursor'] < (int) ($permitObservation['backfill_cursor'] ?? 0);
                 $produced = $outcome['ready_collections'] > (int) ($permitObservation['ready_collections'] ?? 0)
                     || $outcome['releases'] > (int) ($permitObservation['release_total'] ?? 0);
-                if ($permitClaimed && array_key_exists('nzb_created', $permitObservation)) {
+                if ($permitClaimed
+                    && array_key_exists('release_high_watermark', $permitObservation)
+                    && array_key_exists('backfill_cursor_postdate', $permitObservation)
+                ) {
                     $this->store->recordBackfillYield(
                         $observedGroup,
                         cursorDelta: max(0, (int) $permitObservation['backfill_cursor'] - $outcome['cursor']),
-                        nzbCreatedDelta: max(0, $outcome['nzb_created'] - (int) $permitObservation['nzb_created']),
+                        nzbCreatedDelta: $this->snapshots->backfillCreatedNzbsForCohort(
+                            $observedGroup,
+                            (int) $permitObservation['release_high_watermark'],
+                            (string) $permitObservation['backfill_cursor_postdate'],
+                            $outcome['cursor_postdate'],
+                        ),
                         now: time(),
                     );
                 }

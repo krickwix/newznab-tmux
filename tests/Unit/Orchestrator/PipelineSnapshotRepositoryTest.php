@@ -54,16 +54,17 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             ->once()
             ->withArgs(function (string $sql, array $bindings): bool {
                 self::assertStringContainsString('AS backfill_cursor', $sql);
-                self::assertStringNotContainsString(' AS cursor', $sql);
+                self::assertDoesNotMatchRegularExpression('/\bAS cursor(?:\s|,|$)/i', $sql);
                 self::assertSame(['alt.test'], $bindings);
 
                 return true;
             })
             ->andReturn((object) [
                 'backfill_cursor' => 12345,
+                'cursor_postdate' => '2026-01-02 03:04:05',
                 'ready_collections' => 6,
                 'releases' => 7,
-                'nzb_created' => 8,
+                'release_high_watermark' => 8,
             ]);
 
         $repository = new PipelineSnapshotRepository(
@@ -73,9 +74,44 @@ final class PipelineSnapshotRepositoryTest extends TestCase
 
         self::assertSame([
             'cursor' => 12345,
+            'cursor_postdate' => '2026-01-02 03:04:05',
             'ready_collections' => 6,
             'releases' => 7,
-            'nzb_created' => 8,
+            'release_high_watermark' => 8,
         ], $repository->backfillOutcomeForGroup('alt.test'));
+    }
+
+    public function test_group_cohort_nzb_count_is_bounded_by_release_id_and_consumed_postdate_range(): void
+    {
+        DB::shouldReceive('scalar')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('r.id > ?', $sql);
+                self::assertStringContainsString('r.nzbstatus = 1', $sql);
+                self::assertStringContainsString('r.postdate BETWEEN LEAST(?, ?) AND GREATEST(?, ?)', $sql);
+                self::assertSame([
+                    'alt.test',
+                    123,
+                    '2026-01-02 03:04:05',
+                    '2026-01-01 03:04:05',
+                    '2026-01-02 03:04:05',
+                    '2026-01-01 03:04:05',
+                ], $bindings);
+
+                return true;
+            })
+            ->andReturn(3);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame(3, $repository->backfillCreatedNzbsForCohort(
+            'alt.test',
+            123,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        ));
     }
 }

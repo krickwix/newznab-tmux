@@ -292,19 +292,26 @@ final class WorkerOrchestratorTest extends TestCase
         $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
         $store->beginPermitObservation($baseline, generation: 7, now: time() - 1201, outcome: [
             'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
             'ready_collections' => 0,
             'releases' => 0,
-            'nzb_created' => 0,
+            'release_high_watermark' => 100,
         ]);
         $current = new PipelineSnapshot(1, 2, 3, 4, 5, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillCursor: 10_000);
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->once()->andReturn($current);
         $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
             'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
             'ready_collections' => 1,
             'releases' => 1,
-            'nzb_created' => 3,
         ]);
+        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->with(
+            'alt.test',
+            100,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        )->andReturn(3);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
         $applier->shouldReceive('apply')->once()->andReturn(8);
@@ -352,10 +359,12 @@ final class WorkerOrchestratorTest extends TestCase
         $snapshots->shouldReceive('capture')->once()->andReturn($current);
         $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
             'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
             'ready_collections' => 1,
             'releases' => 1,
-            'nzb_created' => 3,
+            'release_high_watermark' => 101,
         ]);
+        $snapshots->shouldNotReceive('backfillCreatedNzbsForCohort');
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
         $applier->shouldReceive('apply')->once()->andReturn(8);

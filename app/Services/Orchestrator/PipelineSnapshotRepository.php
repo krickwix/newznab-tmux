@@ -119,22 +119,46 @@ class PipelineSnapshotRepository
         );
     }
 
-    /** @return array{cursor: int, ready_collections: int, releases: int, nzb_created: int} */
+    /** @return array{cursor: int, cursor_postdate: string, ready_collections: int, releases: int, release_high_watermark: int} */
     public function backfillOutcomeForGroup(string $group): array
     {
         $row = DB::selectOne('SELECT
             CAST(g.first_record AS SIGNED) AS backfill_cursor,
+            CAST(g.first_record_postdate AS CHAR) AS cursor_postdate,
             (SELECT COUNT(*) FROM collections c WHERE c.groups_id = g.id AND c.filecheck = 3) AS ready_collections,
             (SELECT COUNT(*) FROM releases r WHERE r.groups_id = g.id) AS releases,
-            (SELECT COUNT(*) FROM releases r WHERE r.groups_id = g.id AND r.nzbstatus = 1) AS nzb_created
+            (SELECT COALESCE(MAX(r.id), 0) FROM releases r WHERE r.groups_id = g.id) AS release_high_watermark
             FROM usenet_groups g WHERE g.name = ? LIMIT 1', [$group]);
 
         return [
             'cursor' => (int) ($row->backfill_cursor ?? 0),
+            'cursor_postdate' => (string) ($row->cursor_postdate ?? ''),
             'ready_collections' => (int) ($row->ready_collections ?? 0),
             'releases' => (int) ($row->releases ?? 0),
-            'nzb_created' => (int) ($row->nzb_created ?? 0),
+            'release_high_watermark' => (int) ($row->release_high_watermark ?? 0),
         ];
+    }
+
+    public function backfillCreatedNzbsForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): int {
+        return (int) DB::scalar('SELECT COUNT(*)
+            FROM releases r
+            INNER JOIN usenet_groups g ON g.id = r.groups_id
+            WHERE g.name = ?
+            AND r.id > ?
+            AND r.nzbstatus = 1
+            AND r.postdate BETWEEN LEAST(?, ?) AND GREATEST(?, ?)', [
+            $group,
+            max(0, $releaseHighWatermark),
+            $startPostdate,
+            $endPostdate,
+            $startPostdate,
+            $endPostdate,
+        ]);
     }
 
     /**
@@ -169,7 +193,11 @@ class PipelineSnapshotRepository
         ], $rows);
     }
 
-    /** @param array<string, int> $now @param array<string, int> $ages @param array<string, float> $ewma */
+    /**
+     * @param  array<string, int>  $now
+     * @param  array<string, int>  $ages
+     * @param  array<string, float>  $ewma
+     */
     private function isHigh(array $now, array $ages, array $ewma): bool
     {
         foreach ($now as $stage => $value) {
@@ -190,7 +218,10 @@ class PipelineSnapshotRepository
         return false;
     }
 
-    /** @param array<string, int> $now @param array<string, float> $ewma */
+    /**
+     * @param  array<string, int>  $now
+     * @param  array<string, float>  $ewma
+     */
     private function isLow(array $now, array $ewma): bool
     {
         // Parts and binaries are capacity signals: they must remain below their
@@ -214,7 +245,11 @@ class PipelineSnapshotRepository
         return true;
     }
 
-    /** @param array<string, int> $now @param array<string, int|float>|null $previous @return array{array<string, float>, array<string, float>} */
+    /**
+     * @param  array<string, int>  $now
+     * @param  array<string, int|float>|null  $previous
+     * @return array{array<string, float>, array<string, float>}
+     */
     private function rates(array $now, ?array $previous): array
     {
         $rates = [];
