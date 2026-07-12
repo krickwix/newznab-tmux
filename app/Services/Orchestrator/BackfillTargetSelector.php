@@ -54,22 +54,6 @@ final readonly class BackfillTargetSelector
         foreach ($candidates as $candidate) {
             $byName[$candidate['name']] = $candidate;
         }
-        foreach ($this->probeGroups as $group) {
-            $entry = $history[$group] ?? null;
-            $isRecent = is_array($entry)
-                && $now - (int) ($entry['last_attempt_at'] ?? 0) < $this->historyTtlSeconds;
-            if (isset($byName[$group]) && ! $isRecent) {
-                return $byName[$group];
-            }
-            if (isset($byName[$group])
-                && $isRecent
-                && (int) ($entry['attempts'] ?? 0) === 1
-                && (int) ($entry['last_cursor_delta'] ?? 0) > 0
-                && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) <= 0.0
-            ) {
-                return $byName[$group];
-            }
-        }
 
         $positive = array_values(array_filter(
             $candidates,
@@ -90,6 +74,23 @@ final readonly class BackfillTargetSelector
             });
 
             return $positive[0];
+        }
+
+        foreach ($this->probeGroups as $group) {
+            $entry = $history[$group] ?? null;
+            $isRecent = is_array($entry)
+                && $now - (int) ($entry['last_attempt_at'] ?? 0) < $this->historyTtlSeconds;
+            if (isset($byName[$group]) && ! $isRecent) {
+                return $byName[$group];
+            }
+            if (isset($byName[$group])
+                && $isRecent
+                && (int) ($entry['attempts'] ?? 0) === 1
+                && (int) ($entry['last_cursor_delta'] ?? 0) > 0
+                && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) <= 0.0
+            ) {
+                return $byName[$group];
+            }
         }
 
         $untried = array_values(array_filter(

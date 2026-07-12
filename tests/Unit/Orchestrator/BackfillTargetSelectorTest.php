@@ -102,6 +102,30 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertSame('alt.probe.metal', $target['name'] ?? null);
     }
 
+    public function test_a_positive_target_stops_lower_confidence_probe_exploration(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.probe.criterion', 'alt.probe.freak'],
+            historyTtlSeconds: 86_400,
+        );
+        $history = [
+            'alt.probe.criterion' => [
+                'attempts' => 2,
+                'ewma_nzbs_per_10k' => 0.5,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_999_000,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.probe.criterion', '2009-05-15 06:49:20'),
+            $this->candidate('alt.probe.freak', '2016-08-27 18:02:03'),
+        ], $history, now: 2_000_000_000);
+
+        self::assertSame('alt.probe.criterion', $target['name'] ?? null);
+    }
+
     public function test_it_excludes_invalid_dates_and_ranges_below_the_safe_probe_floor(): void
     {
         $selector = new BackfillTargetSelector(
