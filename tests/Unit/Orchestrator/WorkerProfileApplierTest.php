@@ -103,11 +103,11 @@ final class WorkerProfileApplierTest extends TestCase
 
         self::assertSame(200_000, Settings::settingValue('orchestrator_bf_qty'));
         self::assertSame('alt.proven', Settings::settingValue('orchestrator_bf_group'));
-        self::assertSame('alt.proven', Settings::settingValue('orchestrator_bf_group'));
 
         $applier->apply($this->decision(ControlProfile::Fill, true), 1_001, false, 'alt.probe');
 
         self::assertSame(200_000, Settings::settingValue('orchestrator_bf_qty'));
+        self::assertSame('alt.proven', Settings::settingValue('orchestrator_bf_group'));
     }
 
     public function test_it_revokes_the_permit_when_the_policy_closes_the_backfill_gate(): void
