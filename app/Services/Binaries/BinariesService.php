@@ -610,52 +610,53 @@ class BinariesService
         $this->partRepairDeferredBodyNumbers = [];
         $this->partRepairBodyProbeStartedAt = microtime(true);
         $this->partRepairBodyProbesRemaining = $this->config->bodyPreambleDeobfuscateLimit;
-        $missingParts = $this->missedPartHandler->getMissingParts($groupArr['id']);
-        $missingCount = \count($missingParts);
+        try {
+            $missingParts = $this->missedPartHandler->getMissingParts($groupArr['id']);
+            $missingCount = \count($missingParts);
 
-        if ($missingCount === 0) {
-            $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
-            $this->partRepairBodyProbeStartedAt = null;
-            $this->partRepairBodyProbesRemaining = null;
+            if ($missingCount === 0) {
+                $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
 
-            return;
-        }
-
-        if ($this->config->echoCli) {
-            cli()->primary('Attempting to repair '.number_format($missingCount).' parts.');
-        }
-
-        // Group into continuous ranges
-        $ranges = $this->groupMissingPartsIntoRanges($missingParts);
-
-        // Download missing parts in ranges
-        foreach ($ranges as $range) {
-            if ($this->config->echoCli) {
-                echo \chr(random_int(45, 46)).PHP_EOL;
+                return;
             }
 
-            $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+            if ($this->config->echoCli) {
+                cli()->primary('Attempting to repair '.number_format($missingCount).' parts.');
+            }
+
+            // Group into continuous ranges
+            $ranges = $this->groupMissingPartsIntoRanges($missingParts);
+
+            // Download missing parts in ranges
+            foreach ($ranges as $range) {
+                if ($this->config->echoCli) {
+                    echo \chr(random_int(45, 46)).PHP_EOL;
+                }
+
+                $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+            }
+
+            // Calculate parts repaired
+            $lastPartNumber = $missingParts[$missingCount - 1]->numberid;
+            $remainingCount = $this->missedPartHandler->getCount($groupArr['id'], $lastPartNumber);
+            $partsRepaired = $missingCount - $remainingCount;
+
+            // Update attempts on remaining parts
+            if (isset($missingParts[$missingCount - 1]->id)) {
+                $this->missedPartHandler->incrementAttempts($groupArr['id'], $lastPartNumber);
+                $this->missedPartHandler->decrementAttempts(array_keys($this->partRepairDeferredBodyNumbers), $groupArr['id']);
+            }
+
+            if ($this->config->echoCli) {
+                cli()->primary(PHP_EOL.number_format($partsRepaired).' parts repaired.');
+            }
+
+            // Remove articles that exceeded max tries
+            $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
+        } finally {
+            $this->partRepairBodyProbeStartedAt = null;
+            $this->partRepairBodyProbesRemaining = null;
         }
-
-        // Calculate parts repaired
-        $lastPartNumber = $missingParts[$missingCount - 1]->numberid;
-        $remainingCount = $this->missedPartHandler->getCount($groupArr['id'], $lastPartNumber);
-        $partsRepaired = $missingCount - $remainingCount;
-
-        // Update attempts on remaining parts
-        if (isset($missingParts[$missingCount - 1]->id)) {
-            $this->missedPartHandler->incrementAttempts($groupArr['id'], $lastPartNumber);
-            $this->missedPartHandler->decrementAttempts(array_keys($this->partRepairDeferredBodyNumbers), $groupArr['id']);
-        }
-
-        if ($this->config->echoCli) {
-            cli()->primary(PHP_EOL.number_format($partsRepaired).' parts repaired.');
-        }
-
-        // Remove articles that exceeded max tries
-        $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
-        $this->partRepairBodyProbeStartedAt = null;
-        $this->partRepairBodyProbesRemaining = null;
     }
 
     /**

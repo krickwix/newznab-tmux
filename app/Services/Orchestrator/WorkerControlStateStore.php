@@ -211,25 +211,26 @@ class WorkerControlStateStore
         $global = $history['global'] ?? null;
         if (is_array($global)
             && (int) ($global['samples'] ?? 0) >= 2
-            && time() - (int) ($global['updated_at'] ?? 0) < $ttl
         ) {
-            $candidates[] = $global['growth'] ?? null;
+            $candidates[] = $global;
         }
         $target = $history['targets'][$group] ?? null;
         if (is_array($target)
             && (int) ($target['samples'] ?? 0) >= 2
-            && time() - (int) ($target['updated_at'] ?? 0) < $ttl
         ) {
-            $candidates[] = $target['growth'] ?? null;
+            $candidates[] = $target;
         }
         foreach ($candidates as $candidate) {
             if (! is_array($candidate)) {
                 continue;
             }
             foreach (array_keys($growth) as $stage) {
+                if (time() - (int) ($candidate['observed_at'][$stage] ?? 0) >= $ttl) {
+                    continue;
+                }
                 $growth[$stage] = max(
                     $growth[$stage],
-                    (int) ceil(max(0, (int) ($candidate[$stage] ?? 0)) * 1.25),
+                    (int) ceil(max(0, (int) ($candidate['growth'][$stage] ?? 0)) * 1.25),
                 );
             }
         }
@@ -271,13 +272,17 @@ class WorkerControlStateStore
         $global = $history['global'] ?? ['samples' => 0, 'growth' => []];
         $target = $history['targets'][$group] ?? ['samples' => 0, 'growth' => []];
         foreach (array_keys($sample) as $stage) {
-            $global['growth'][$stage] = max((int) ($global['growth'][$stage] ?? 0), $sample[$stage]);
-            $target['growth'][$stage] = max((int) ($target['growth'][$stage] ?? 0), $sample[$stage]);
+            if ($sample[$stage] >= (int) ($global['growth'][$stage] ?? 0)) {
+                $global['growth'][$stage] = $sample[$stage];
+                $global['observed_at'][$stage] = time();
+            }
+            if ($sample[$stage] >= (int) ($target['growth'][$stage] ?? 0)) {
+                $target['growth'][$stage] = $sample[$stage];
+                $target['observed_at'][$stage] = time();
+            }
         }
         $global['samples'] = max(0, (int) ($global['samples'] ?? 0)) + 1;
-        $global['updated_at'] = time();
         $target['samples'] = max(0, (int) ($target['samples'] ?? 0)) + 1;
-        $target['updated_at'] = time();
         $history['global'] = $global;
         $history['targets'][$group] = $target;
         $cache->forever(self::BACKFILL_GROWTH_KEY, $history);
