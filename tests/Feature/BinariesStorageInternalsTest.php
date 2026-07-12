@@ -426,19 +426,75 @@ class BinariesStorageInternalsTest extends TestCase
             ->once()
             ->with(
                 Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FORCE INDEX (PRIMARY)')
+                    && str_contains($sql, 'SELECT id, xref')
                     && str_contains($sql, 'ORDER BY id FOR UPDATE')),
                 [1, 2],
             )
-            ->andReturn([(object) ['id' => 1], (object) ['id' => 2]]);
+            ->andReturn([(object) ['id' => 1, 'xref' => ''], (object) ['id' => 2, 'xref' => '']]);
 
         DB::shouldReceive('statement')
             ->once()
-            ->with(Mockery::on(static fn (string $sql): bool => str_contains($sql, 'u.id = c.id')), [1, 'xref-a', 2, 'xref-b', "\n"])
+            ->with(Mockery::on(static fn (string $sql): bool => str_contains($sql, 'u.id = c.id')), [1, 'alt.binaries.a:1', 2, 'alt.binaries.b:2', "\n"])
             ->andReturn(true);
 
         $method->invoke($handler, [], ['aaa' => true, 'bbb' => true], [
-            'second' => ['collectionhash' => 'bbb', 'xref_append' => 'xref-b'],
-            'first' => ['collectionhash' => 'aaa', 'xref_append' => 'xref-a'],
+            'second' => ['collectionhash' => 'bbb', 'xref_append' => 'alt.binaries.b:2'],
+            'first' => ['collectionhash' => 'aaa', 'xref_append' => 'alt.binaries.a:1'],
+        ]);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_collection_xref_update_revalidates_missing_group_after_lock(): void
+    {
+        $handler = $this->deterministicCollectionHandler();
+        $method = new \ReflectionMethod($handler, 'bulkInsertCollectionsMysql');
+        $ids = new \ReflectionProperty($handler, 'existingIdsByHash');
+        $ids->setValue($handler, ['aaa' => 1]);
+
+        DB::shouldReceive('select')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FORCE INDEX (PRIMARY)')
+                    && str_contains($sql, 'ORDER BY id FOR UPDATE')),
+                [1],
+            )
+            ->andReturn([(object) ['id' => 1, 'xref' => 'alt.binaries.foo:100']]);
+
+        DB::shouldReceive('statement')->never();
+
+        $method->invoke($handler, [], ['aaa' => true], [
+            'first' => ['collectionhash' => 'aaa', 'xref_append' => 'alt.binaries.foo:900'],
+        ]);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_collection_xref_update_keeps_only_groups_still_missing_after_lock(): void
+    {
+        $handler = $this->deterministicCollectionHandler();
+        $method = new \ReflectionMethod($handler, 'bulkInsertCollectionsMysql');
+        $ids = new \ReflectionProperty($handler, 'existingIdsByHash');
+        $ids->setValue($handler, ['aaa' => 1]);
+
+        DB::shouldReceive('select')
+            ->once()
+            ->with(Mockery::type('string'), [1])
+            ->andReturn([(object) ['id' => 1, 'xref' => 'alt.binaries.foo:100']]);
+
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'u.id = c.id')),
+                [1, 'alt.binaries.bar:200', "\n"],
+            )
+            ->andReturn(true);
+
+        $method->invoke($handler, [], ['aaa' => true], [
+            'first' => [
+                'collectionhash' => 'aaa',
+                'xref_append' => 'alt.binaries.foo:900 alt.binaries.bar:200',
+            ],
         ]);
 
         $this->addToAssertionCount(1);

@@ -382,7 +382,7 @@ final class CollectionHandler
     private function bulkInsertCollectionsMysql(array $rowsByCollectionKey, array $existingHashes, ?array $xrefRowsByCollectionKey = null): void
     {
         $xrefUpdates = $this->prepareXrefUpdates($xrefRowsByCollectionKey ?? $rowsByCollectionKey, $existingHashes);
-        $this->prelockXrefUpdates($xrefUpdates);
+        $xrefUpdates = $this->prelockXrefUpdates($xrefUpdates);
 
         $insertRows = array_values($rowsByCollectionKey);
         usort(
@@ -450,17 +450,44 @@ final class CollectionHandler
 
     /**
      * @param  list<array{id:int,xref_append:string}>  $updates
+     * @return list<array{id:int,xref_append:string}>
      */
-    private function prelockXrefUpdates(array $updates): void
+    private function prelockXrefUpdates(array $updates): array
     {
+        $validated = [];
         foreach (array_chunk($updates, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
             $ids = array_column($chunk, 'id');
             $idPlaceholders = implode(',', array_fill(0, count($ids), '?'));
-            DB::select(
-                "SELECT id FROM collections FORCE INDEX (PRIMARY) WHERE id IN ({$idPlaceholders}) ORDER BY id FOR UPDATE",
+            $lockedRows = DB::select(
+                "SELECT id, xref FROM collections FORCE INDEX (PRIMARY) WHERE id IN ({$idPlaceholders}) ORDER BY id FOR UPDATE",
                 $ids,
             );
+            $lockedXrefs = [];
+            foreach ($lockedRows as $row) {
+                $lockedXrefs[(int) $row->id] = (string) ($row->xref ?? '');
+            }
+
+            foreach ($chunk as $update) {
+                if (! array_key_exists($update['id'], $lockedXrefs)) {
+                    continue;
+                }
+
+                $newTokens = $this->xrefService->diffNewTokens(
+                    $lockedXrefs[$update['id']],
+                    $update['xref_append'],
+                );
+                if ($newTokens === []) {
+                    continue;
+                }
+
+                $validated[] = [
+                    'id' => $update['id'],
+                    'xref_append' => implode(' ', $newTokens),
+                ];
+            }
         }
+
+        return $validated;
     }
 
     /**
