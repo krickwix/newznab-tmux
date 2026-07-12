@@ -408,8 +408,11 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts']);
     }
 
-    public function test_a_claimed_permit_closes_early_on_exact_cohort_nzb_success(): void
-    {
+    #[DataProvider('actionableFrontierCases')]
+    public function test_a_claimed_permit_closes_only_after_exact_cohort_nzb_frontier_drains(
+        int $eligibleNzbs,
+        bool $closes,
+    ): void {
         config([
             'nntmux.orchestrator.auto_backfill' => true,
             'nntmux.orchestrator.permit_observation_seconds' => 1200,
@@ -438,7 +441,17 @@ final class WorkerOrchestratorTest extends TestCase
             'releases' => 0,
             'release_high_watermark' => 100,
         ]);
-        $current = new PipelineSnapshot(1, 2, 3, 4, 5, eligibleBackfillSupply: true, backfillGroup: 'alt.next', backfillCursor: 30_000);
+        $current = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            4,
+            5,
+            eligibleBackfillSupply: true,
+            eligibleNzbs: $eligibleNzbs,
+            backfillGroup: 'alt.next',
+            backfillCursor: 30_000,
+        );
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->once()->andReturn($current);
         $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
@@ -449,15 +462,26 @@ final class WorkerOrchestratorTest extends TestCase
         ]);
         $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(2);
         $applier = Mockery::mock(WorkerProfileApplier::class);
-        $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldReceive('revokePermit')->times($closes ? 1 : 0);
         $applier->shouldReceive('apply')->once()->andReturn(8);
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
 
-        self::assertContains('backfill_permit_effective', $result['reasons']);
+        $closes
+            ? self::assertContains('backfill_permit_effective', $result['reasons'])
+            : self::assertNotContains('backfill_permit_effective', $result['reasons']);
         self::assertFalse($result['permit_granted']);
-        self::assertNull($store->permitObservation());
-        self::assertSame(2.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
+        self::assertSame($closes, $store->permitObservation() === null);
+        self::assertSame($closes ? 2.0 : null, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
+    }
+
+    /** @return array<string, array{int, bool}> */
+    public static function actionableFrontierCases(): array
+    {
+        return [
+            'drained' => [0, true],
+            'still actionable' => [2, false],
+        ];
     }
 
     public function test_aggregate_group_progress_does_not_close_a_current_observation_without_exact_nzbs(): void

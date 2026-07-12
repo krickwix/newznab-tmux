@@ -69,7 +69,7 @@ class WorkerOrchestrator
                     );
                 }
                 $closeObservation = $observationExpired
-                    || ($permitCompleted && $cursorMoved && $cohortNzbs > 0)
+                    || ($permitCompleted && $cursorMoved && $cohortNzbs > 0 && $snapshot->eligibleNzbs === 0)
                     || ($permitCompleted && ! $cursorMoved);
                 if ($observationExpired && $permitClaimed && $hasCohortBaseline && ! $permitCompleted) {
                     $closeObservation = false;
