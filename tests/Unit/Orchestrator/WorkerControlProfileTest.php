@@ -95,4 +95,12 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(40, WorkerControlProfile::for(ControlProfile::Balanced)->nzbBatchSize);
         self::assertSame(40, WorkerControlProfile::for(ControlProfile::Fill)->nzbBatchSize);
     }
+
+    public function test_fail_safe_keeps_binary_repair_drain_active_while_backfill_is_disabled(): void
+    {
+        $profile = WorkerControlProfile::for(ControlProfile::FailSafe);
+
+        self::assertSame(60, $profile->binariesSleepSeconds);
+        self::assertFalse($profile->backfillEnabled);
+    }
 }

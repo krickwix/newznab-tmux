@@ -39,7 +39,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
         $workers = [];
         $backfill = null;
+        $bodyRecovery = null;
         foreach ($manifest['items'] as $deployment) {
+            if (is_array($deployment)
+                && ($deployment['kind'] ?? null) === 'CronJob'
+                && ($deployment['metadata']['name'] ?? null) === 'nntmux-body-recovery'
+            ) {
+                $bodyRecovery = $deployment;
+            }
             if (! is_array($deployment) || ($deployment['kind'] ?? null) !== 'Deployment') {
                 continue;
             }
@@ -55,14 +62,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-backfill'
-                ? ':microservices-pods-20260712-worker-orchestrator-v56'
+                ? ':microservices-pods-20260712-worker-orchestrator-v57'
                 : (in_array($name, [
                     'nntmux-worker-binaries',
                     'nntmux-worker-releases',
                     'nntmux-worker-nzb-backlog',
                 ], true)
                 ? ($name === 'nntmux-worker-binaries'
-                    ? ':microservices-pods-20260712-worker-orchestrator-v56'
+                    ? ':microservices-pods-20260712-worker-orchestrator-v57'
                     : ':microservices-pods-20260711-worker-orchestrator-v22')
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
@@ -86,6 +93,13 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertNotEmpty($workers);
         self::assertIsArray($backfill);
         self::assertSame(1, $backfill['spec']['replicas'] ?? null);
+        self::assertIsArray($bodyRecovery);
+        self::assertSame('*/5 * * * *', $bodyRecovery['spec']['schedule'] ?? null);
+        self::assertSame('Forbid', $bodyRecovery['spec']['concurrencyPolicy'] ?? null);
+        self::assertStringEndsWith(
+            ':microservices-pods-20260712-worker-orchestrator-v57',
+            (string) ($bodyRecovery['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
+        );
     }
 
     public function test_web_uses_lock_safe_overlay_without_changing_scheduler_or_legacy_worker(): void
@@ -169,7 +183,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringContainsString('max without(instance, pod)', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringContainsString('[20m:1m]', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-worker-orchestrator-v56',
+            ':microservices-pods-20260712-worker-orchestrator-v57',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
@@ -189,7 +203,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $backlogEnvironment = $environment($deployments['nntmux-worker-nzb-backlog'] ?? []);
         $metricsEnvironment = $environment($metrics);
         self::assertSame('microservices-pods-20260711-worker-orchestrator-v22', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
-        self::assertSame('microservices-pods-20260712-worker-orchestrator-v56', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260712-worker-orchestrator-v57', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
         ksort($expected);
@@ -204,11 +218,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-worker-orchestrator-v56',
+            ':microservices-pods-20260712-worker-orchestrator-v57',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260712-worker-orchestrator-v56',
+            'microservices-pods-20260712-worker-orchestrator-v57',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
@@ -265,7 +279,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_COLLECTIONS_PER_10K'] ?? null,
         );
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-worker-orchestrator-v56',
+            ':microservices-pods-20260712-worker-orchestrator-v57',
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);

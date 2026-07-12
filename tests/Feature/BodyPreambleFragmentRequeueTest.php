@@ -269,6 +269,40 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
         self::assertTrue(DB::table('collections')->where('id', 1)->exists());
     }
 
+    public function test_recovery_cycle_prunes_proven_sources_then_replenishes_a_bounded_queue(): void
+    {
+        $this->seedFragments();
+        DB::table('collections')->where('id', 1)->update([
+            'subject' => '[PRiVATE] \\opaque\\::payload::/opaque/ [newzNZB] [2/41] - yEnc',
+        ]);
+        DB::table('parts')->insert(['binaries_id' => 101, 'number' => 7304209420]);
+        DB::table('collections')->insert([
+            'id' => 7,
+            'subject' => '"Recovered.Movie.part01.rar"',
+            'xref' => 'alt.binaries.blu-ray:7304209420',
+            'groups_id' => 5,
+            'totalfiles' => 10,
+            'collection_regexes_id' => 88,
+            'filecheck' => 0,
+            'dateadded' => '2026-06-15 00:00:00',
+        ]);
+        DB::table('binaries')->insert(['id' => 70, 'collections_id' => 7, 'totalparts' => 64, 'currentparts' => 1, 'filenumber' => 1]);
+        DB::table('parts')->insert(['binaries_id' => 70, 'number' => 7304209420]);
+
+        self::assertSame(0, Artisan::call('nntmux:body-preamble-recovery-cycle', [
+            'group' => 'alt.binaries.blu-ray',
+            '--regex' => ['88', '-10'],
+            '--limit' => 10,
+            '--cutoff-hours' => 2,
+            '--json' => true,
+        ]));
+        $output = json_decode(Artisan::output(), true);
+
+        self::assertSame(1, $output['prune']['deleted']);
+        self::assertFalse(DB::table('collections')->where('id', 1)->exists());
+        self::assertGreaterThanOrEqual(1, $output['requeue']['inserted']);
+    }
+
     public function test_update_requires_regex_selector(): void
     {
         $this->seedFragments();
