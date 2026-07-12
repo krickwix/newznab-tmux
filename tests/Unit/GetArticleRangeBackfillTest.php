@@ -110,6 +110,37 @@ final class GetArticleRangeBackfillTest extends TestCase
         $this->assertSame(1, (int) $group->backfill);
     }
 
+    public function test_backfill_range_advances_without_fabricating_a_date_when_every_header_date_is_invalid(): void
+    {
+        $this->updateGroupRecords('backfill', [
+            'id' => 1,
+            'name' => 'a.b.multimedia.vintage-film',
+            'first_record' => 3,
+        ], [
+            'firstArticleNumber' => 2,
+        ], 2);
+
+        $group = DB::table('usenet_groups')->where('id', 1)->first();
+
+        $this->assertSame(2, (int) $group->first_record);
+        $this->assertSame('2025-09-20 16:56:29', $group->first_record_postdate);
+    }
+
+    public function test_binary_range_advances_without_fabricating_a_date_when_every_header_date_is_invalid(): void
+    {
+        $this->updateGroupRecords('binaries', [
+            'id' => 1,
+            'last_record' => 39602,
+        ], [
+            'lastArticleNumber' => 40000,
+        ], 39603);
+
+        $group = DB::table('usenet_groups')->where('id', 1)->first();
+
+        $this->assertSame(40000, (int) $group->last_record);
+        $this->assertSame('2026-02-12 23:32:04', $group->last_record_postdate);
+    }
+
     /**
      * @param  array<string, mixed>  $group
      * @param  array<string, mixed>  $return

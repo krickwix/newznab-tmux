@@ -7,6 +7,7 @@ namespace App\Console\Commands;
 use App\Models\Settings;
 use App\Models\UsenetGroup;
 use App\Services\Binaries\BinariesService;
+use App\Services\NNTP\NntpArticleDate;
 use App\Services\NNTP\NNTPService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -100,34 +101,36 @@ class GetArticleRange extends Command
                 if ($return['lastArticleNumber'] <= $groupMySQL['last_record']) {
                     return;
                 }
-                $unixTime = is_numeric($return['lastArticleDate'])
-                    ? $return['lastArticleDate']
-                    : strtotime($return['lastArticleDate']);
+                $unixTime = NntpArticleDate::timestamp($return['lastArticleDate'] ?? null);
+                $updates = [
+                    'last_record' => $return['lastArticleNumber'],
+                    'last_updated' => now()->toDateTimeString(),
+                ];
+                if ($unixTime !== null) {
+                    $updates['last_record_postdate'] = date('Y-m-d H:i:s', $unixTime);
+                }
                 DB::table('usenet_groups')
                     ->where('id', $groupMySQL['id'])
                     ->where('last_record', '<', $return['lastArticleNumber'])
-                    ->update([
-                        'last_record_postdate' => date('Y-m-d H:i:s', (int) $unixTime),
-                        'last_record' => $return['lastArticleNumber'],
-                        'last_updated' => now()->toDateTimeString(),
-                    ]);
+                    ->update($updates);
                 break;
 
             case 'backfill':
                 if ($return['firstArticleNumber'] >= $groupMySQL['first_record']) {
                     return;
                 }
-                $unixTime = is_numeric($return['firstArticleDate'])
-                    ? $return['firstArticleDate']
-                    : strtotime($return['firstArticleDate']);
+                $unixTime = NntpArticleDate::timestamp($return['firstArticleDate'] ?? null);
+                $updates = [
+                    'first_record' => $return['firstArticleNumber'],
+                    'last_updated' => now()->toDateTimeString(),
+                ];
+                if ($unixTime !== null) {
+                    $updates['first_record_postdate'] = date('Y-m-d H:i:s', $unixTime);
+                }
                 $updated = DB::table('usenet_groups')
                     ->where('id', $groupMySQL['id'])
                     ->where('first_record', '>', $return['firstArticleNumber'])
-                    ->update([
-                        'first_record_postdate' => date('Y-m-d H:i:s', (int) $unixTime),
-                        'first_record' => $return['firstArticleNumber'],
-                        'last_updated' => now()->toDateTimeString(),
-                    ]);
+                    ->update($updates);
 
                 if ($updated > 0) {
                     $this->disableBackfillIfProviderFloorReached($groupMySQL, (int) $return['firstArticleNumber']);
