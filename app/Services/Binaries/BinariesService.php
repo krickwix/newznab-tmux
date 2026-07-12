@@ -6,6 +6,7 @@ namespace App\Services\Binaries;
 
 use App\Models\Settings;
 use App\Models\UsenetGroup;
+use App\Services\NNTP\NntpArticleDate;
 use App\Services\NNTP\NNTPService;
 use DariusIII\NetNntp\Error;
 use Illuminate\Support\Carbon;
@@ -62,6 +63,8 @@ class BinariesService
     private int $notYEnc = 0;
 
     private int $headersBlackListed = 0;
+
+    private int $invalidDate = 0;
 
     /**
      * @var array<string, mixed>
@@ -304,7 +307,7 @@ class BinariesService
         $this->groupMySQL = $groupMySQL;
         $this->last = $last;
         $this->first = $first;
-        $this->notYEnc = $this->headersBlackListed = 0;
+        $this->notYEnc = $this->headersBlackListed = $this->invalidDate = 0;
         $this->headersReceived = [];
         $this->bodyPreambleStats = [];
 
@@ -341,6 +344,7 @@ class BinariesService
         $this->headersReceived = $parseResult['received'] ?? [];
         $this->notYEnc = $parseResult['notYEnc'];
         $this->headersBlackListed = $parseResult['blacklisted'];
+        $this->invalidDate = $parseResult['invalidDate'];
 
         // Update blacklist last_activity
         $this->headerParser->flushBlacklistUpdates();
@@ -584,10 +588,23 @@ class BinariesService
      */
     public function postdate(int|string $post, array $groupData): int
     {
+        return $this->postdateOrNull($post, $groupData) ?? time();
+    }
+
+    /**
+     * Return a sane provider-backed timestamp, or null when bounded lookup finds no evidence.
+     *
+     * @param  int|string  $post  The article number to get the time from.
+     * @param  array<string, mixed>  $groupData  Usenet group info from NNTP selectGroup method.
+     *
+     * @throws \Exception
+     */
+    public function postdateOrNull(int|string $post, array $groupData): ?int
+    {
         $nntp = $this->getNntp();
         $currentPost = (int) $post;
         $attempts = 0;
-        $date = 0;
+        $timestamp = null;
 
         do {
             // Try to get the article date locally first.
@@ -611,15 +628,19 @@ class BinariesService
             );
 
             if (! empty($local)) {
-                $date = $local[0]->date;
-                break;
+                $timestamp = NntpArticleDate::timestamp($local[0]->date);
+                if ($timestamp !== null) {
+                    break;
+                }
             }
 
             // Try usenet
             $header = $nntp->getXOVER((string) $currentPost);
-            if (! NNTPService::isError($header) && isset($header[0]['Date']) && $header[0]['Date'] !== '') {
-                $date = $header[0]['Date'];
-                break;
+            if (! NNTPService::isError($header)) {
+                $timestamp = NntpArticleDate::timestamp($header[0]['Date'] ?? null);
+                if ($timestamp !== null) {
+                    break;
+                }
             }
 
             // Try a different article number
@@ -629,13 +650,7 @@ class BinariesService
             }
         } while ($attempts++ <= 20);
 
-        if (! $date) {
-            return time();
-        }
-
-        $timestamp = strtotime($date);
-
-        return $timestamp !== false ? $timestamp : time();
+        return $timestamp;
     }
 
     /**
@@ -838,10 +853,9 @@ class BinariesService
             // New group - update first record
             if ($groupMySQL['first_record_postdate'] === null && (int) $groupMySQL['first_record'] === 0) {
                 $groupMySQL['first_record'] = $scanSummary['firstArticleNumber'];
-                $firstArticleTimestamp = isset($scanSummary['firstArticleDate'])
-                    ? strtotime($scanSummary['firstArticleDate'])
-                    : $this->postdate($groupMySQL['first_record'], $groupNNTP);
-                $groupMySQL['first_record_postdate'] = $firstArticleTimestamp !== false ? $firstArticleTimestamp : time();
+                $firstArticleTimestamp = NntpArticleDate::timestamp($scanSummary['firstArticleDate'] ?? null)
+                    ?? $this->postdate($groupMySQL['first_record'], $groupNNTP);
+                $groupMySQL['first_record_postdate'] = $firstArticleTimestamp;
 
                 UsenetGroup::query()->where('id', $groupMySQL['id'])->update([
                     'first_record' => $scanSummary['firstArticleNumber'],
@@ -849,10 +863,8 @@ class BinariesService
                 ]);
             }
 
-            $lastArticleTimestamp = isset($scanSummary['lastArticleDate'])
-                ? strtotime($scanSummary['lastArticleDate'])
-                : $this->postdate($scanSummary['lastArticleNumber'], $groupNNTP);
-            $lastArticleDate = $lastArticleTimestamp !== false ? $lastArticleTimestamp : time();
+            $lastArticleDate = NntpArticleDate::timestamp($scanSummary['lastArticleDate'] ?? null)
+                ?? $this->postdate($scanSummary['lastArticleNumber'], $groupNNTP);
 
             UsenetGroup::query()
                 ->where('id', $groupMySQL['id'])
@@ -971,6 +983,7 @@ class BinariesService
                 ' received='.\count($this->headersReceived).
                 ' not_yenc='.$this->notYEnc.
                 ' blacklisted='.$this->headersBlackListed.
+                ' invalid_date='.$this->invalidDate.
                 ' sample='.implode(',', $sample),
                 __FUNCTION__,
                 'warning'
@@ -1162,7 +1175,8 @@ class BinariesService
         cli()->primary(
             'Received '.\count($this->headersReceived).
             ' articles of '.number_format($this->last - $this->first + 1).' requested, '.
-            $this->headersBlackListed.' blacklisted, '.$this->notYEnc.' not yEnc.'
+            $this->headersBlackListed.' blacklisted, '.$this->notYEnc.' not yEnc, '.
+            $this->invalidDate.' invalid date.'
         );
 
         if ($this->bodyPreambleStats !== []) {
