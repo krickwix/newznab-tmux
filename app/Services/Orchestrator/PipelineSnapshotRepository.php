@@ -15,14 +15,18 @@ class PipelineSnapshotRepository
 
     private readonly WorkerControlStateStore $state;
 
+    private readonly PipelinePressureClassifier $pressure;
+
     public function __construct(
         private readonly PrometheusSafetySignalProvider $safety,
         private readonly NzbBacklogCreationService $nzbBacklog,
         ?BackfillTargetSelector $targets = null,
         ?WorkerControlStateStore $state = null,
+        ?PipelinePressureClassifier $pressure = null,
     ) {
         $this->targets = $targets ?? new BackfillTargetSelector;
         $this->state = $state ?? new WorkerControlStateStore;
+        $this->pressure = $pressure ?? new PipelinePressureClassifier;
     }
 
     /** @param array<string, int|float>|null $previous */
@@ -84,8 +88,8 @@ class PipelineSnapshotRepository
             $ages['nzbs'] = 0;
         }
         [$rates, $ewma] = $this->rates($backlogs, $previous);
-        $high = $this->isHigh($backlogs, $ages, $ewma);
-        $low = $this->isLow($backlogs, $ewma);
+        $high = $this->pressure->isHigh($backlogs, $ages, $ewma);
+        $low = $this->pressure->isLow($backlogs, $ewma);
         $deadlocks = $status['Innodb_deadlocks'] ?? 0;
         $waits = $status['Innodb_row_lock_current_waits'] ?? 0;
         $deadlockDelta = $previous !== null && isset($previous['database_deadlocks']) && $deadlocks > $previous['database_deadlocks'];
@@ -217,58 +221,6 @@ class PipelineSnapshotRepository
             'cursor_postdate' => (string) $row->cursor_postdate,
             'remaining_articles' => (int) $row->remaining_articles,
         ], $rows);
-    }
-
-    /**
-     * @param  array<string, int>  $now
-     * @param  array<string, int>  $ages
-     * @param  array<string, float>  $ewma
-     */
-    private function isHigh(array $now, array $ages, array $ewma): bool
-    {
-        foreach ($now as $stage => $value) {
-            $limit = (int) config('nntmux.orchestrator.high_watermarks.'.$stage, PHP_INT_MAX);
-            $growthLimit = max(1.0, $limit * 0.001);
-            if ($value >= $limit || ($ewma[$stage] ?? 0.0) > $growthLimit) {
-                return true;
-            }
-        }
-
-        foreach ($ages as $stage => $age) {
-            $low = (int) floor((int) config('nntmux.orchestrator.high_watermarks.'.$stage, 0) * 0.6);
-            if (($now[$stage] ?? 0) > $low && $age >= (int) config('nntmux.orchestrator.age_slo_seconds.'.$stage, PHP_INT_MAX)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * @param  array<string, int>  $now
-     * @param  array<string, float>  $ewma
-     */
-    private function isLow(array $now, array $ewma): bool
-    {
-        // Parts and binaries are capacity signals: they must remain below their
-        // hard watermarks and must not grow, but they need not drain to 60%.
-        foreach (['parts', 'binaries'] as $stage) {
-            $value = $now[$stage];
-            $high = (int) config('nntmux.orchestrator.high_watermarks.'.$stage, 0);
-            if ($value >= $high || ($ewma[$stage] ?? 0.0) > max(1.0, $high * 0.0005)) {
-                return false;
-            }
-        }
-
-        foreach (['collections', 'releases', 'nzbs'] as $stage) {
-            $value = $now[$stage];
-            $low = (int) floor((int) config('nntmux.orchestrator.high_watermarks.'.$stage, 0) * 0.6);
-            if ($value > $low || ($ewma[$stage] ?? 0.0) > max(1.0, $low * 0.0005)) {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     /**

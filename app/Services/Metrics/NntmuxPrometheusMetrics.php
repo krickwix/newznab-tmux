@@ -639,8 +639,16 @@ class NntmuxPrometheusMetrics
         $lines[] = '# TYPE nntmux_orchestrator_stage_rate_per_minute gauge';
         $lines[] = '# HELP nntmux_orchestrator_stage_oldest_age_seconds Oldest actionable item age by stage.';
         $lines[] = '# TYPE nntmux_orchestrator_stage_oldest_age_seconds gauge';
+        $lines[] = '# HELP nntmux_orchestrator_stage_projected_runway_minutes Minutes until the stage high watermark at its current positive EWMA; -1 means stable, draining, or invalid rate telemetry.';
+        $lines[] = '# TYPE nntmux_orchestrator_stage_projected_runway_minutes gauge';
         foreach (['parts', 'binaries', 'collections', 'releases', 'nzbs'] as $stage) {
             $lines[] = $this->metric('nntmux_orchestrator_stage_backlog', (float) ($decision['backlogs'][$stage] ?? 0), ['stage' => $stage]);
+            $rate = (float) ($decision['ewma_per_minute'][$stage] ?? 0.0);
+            $limit = (int) config('nntmux.orchestrator.high_watermarks.'.$stage, 0);
+            $runway = is_finite($rate) && $rate > 0.0
+                ? max(0.0, ($limit - (int) ($decision['backlogs'][$stage] ?? 0)) / $rate)
+                : -1.0;
+            $lines[] = $this->metric('nntmux_orchestrator_stage_projected_runway_minutes', $runway, ['stage' => $stage]);
             foreach (['rates_per_minute' => 'instant', 'ewma_per_minute' => 'ewma'] as $key => $estimator) {
                 $lines[] = $this->metric('nntmux_orchestrator_stage_rate_per_minute', (float) ($decision[$key][$stage] ?? 0), [
                     'stage' => $stage,

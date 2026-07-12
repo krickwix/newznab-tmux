@@ -53,6 +53,7 @@ return [
         'prometheus_url' => env('NNTMUX_ORCHESTRATOR_PROMETHEUS_URL', 'http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090'),
         'database_memory_limit_bytes' => (int) env('NNTMUX_ORCHESTRATOR_DB_MEMORY_LIMIT_BYTES', 4456448000),
         'database_cpu_limit_cores' => (float) env('NNTMUX_ORCHESTRATOR_DB_CPU_LIMIT_CORES', 3),
+        'pressure_projection_horizon_minutes' => max(1, (int) env('NNTMUX_ORCHESTRATOR_PRESSURE_HORIZON_MINUTES', 120)),
         'storage_floor_bytes' => (int) env('NNTMUX_ORCHESTRATOR_STORAGE_FLOOR_BYTES', 18500000000),
         'high_watermarks' => [
             'parts' => (int) env('NNTMUX_ORCHESTRATOR_PARTS_HIGH', 300000000),

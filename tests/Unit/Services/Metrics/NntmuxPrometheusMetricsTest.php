@@ -481,7 +481,10 @@ class NntmuxPrometheusMetricsTest extends TestCase
 
     public function test_orchestrator_metrics_export_the_zero_write_shadow_snapshot(): void
     {
-        config(['nntmux.orchestrator.state_store' => 'array']);
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.high_watermarks.parts' => 1_000,
+        ]);
         DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
         DB::table('settings')->insert(['name' => 'orchestrator_bf_qty', 'value' => '200000']);
         Cache::store('array')->flush();
@@ -510,6 +513,7 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_profile_info{profile="balanced"} 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_stage_backlog{stage="parts"} 100', $output);
         $this->assertStringContainsString('nntmux_orchestrator_stage_rate_per_minute{stage="parts",estimator="ewma"} 0.5', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_projected_runway_minutes{stage="parts"} 1800', $output);
         $this->assertStringContainsString('nntmux_orchestrator_stage_oldest_age_seconds{stage="nzbs"} 14', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_policy_permitted 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_permit_quantity 200000', $output);
