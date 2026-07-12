@@ -197,11 +197,11 @@ class MissedPartHandlerTest extends TestCase
             ],
         ]);
 
-        $claimed = $handler->claimBodyRecoveryParts(9, 'new-token', 'worker-1', 2, now()->addMinutes(2));
+        $claimed = $handler->claimBodyRecoveryParts(9, 'new-token', 'worker-1', 3, now()->addMinutes(2));
 
-        $this->assertSame([100, 250], array_map(static fn (object $part): int => (int) $part->numberid, $claimed));
-        $this->assertSame(['new-token', 'new-token'], array_map(static fn (object $part): string => $part->claim_token, $claimed));
-        $this->assertSame(2, DB::table('missed_parts')->where('claim_token', 'new-token')->count());
+        $this->assertSame([100, 250, 400], array_map(static fn (object $part): int => (int) $part->numberid, $claimed));
+        $this->assertSame(['new-token', 'new-token', 'new-token'], array_map(static fn (object $part): string => $part->claim_token, $claimed));
+        $this->assertSame(3, DB::table('missed_parts')->where('claim_token', 'new-token')->count());
         $this->assertSame('worker-1', DB::table('missed_parts')->where('numberid', 250)->value('claim_owner'));
         $this->assertSame('active-token', DB::table('missed_parts')->where('numberid', 150)->value('claim_token'));
     }
@@ -273,6 +273,30 @@ class MissedPartHandlerTest extends TestCase
         $reclaimed = $handler->claimBodyRecoveryParts(9, 'token-b', 'worker-b', 1, now()->addMinute());
         $this->assertCount(1, $reclaimed);
         $this->assertSame('token-b', $reclaimed[0]->claim_token);
+    }
+
+    public function test_fresh_body_recovery_rows_are_claimed_before_expired_deferred_rows(): void
+    {
+        $handler = new MissedPartHandler(partRepairLimit: 10, partRepairMaxTries: 3);
+        DB::table('missed_parts')->insert([
+            'numberid' => 100,
+            'groups_id' => 9,
+            'attempts' => 0,
+            'recovery_kind' => 'body_preamble',
+        ]);
+        $deferred = $handler->claimBodyRecoveryParts(9, 'token-a', 'worker-a', 1, now()->addMinute());
+        $deferredId = (int) $deferred[0]->id;
+        $this->assertSame(1, $handler->deferClaimedParts([$deferredId], 'token-a', now()->subSecond()));
+
+        DB::table('missed_parts')->insert([
+            ['numberid' => 200, 'groups_id' => 9, 'attempts' => 0, 'recovery_kind' => 'body_preamble'],
+            ['numberid' => 300, 'groups_id' => 9, 'attempts' => 0, 'recovery_kind' => 'body_preamble'],
+        ]);
+
+        $claimed = $handler->claimBodyRecoveryParts(9, 'token-b', 'worker-b', 2, now()->addMinute());
+
+        $this->assertSame([200, 300], array_map(static fn (object $part): int => (int) $part->numberid, $claimed));
+        $this->assertNull(DB::table('missed_parts')->where('id', $deferredId)->value('claim_token'));
     }
 
     public function test_claim_migration_is_additive_and_reversible_on_sqlite(): void

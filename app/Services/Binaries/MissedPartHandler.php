@@ -193,8 +193,17 @@ final class MissedPartHandler
                 ->where('attempts', '<', $this->partRepairMaxTries);
             $this->whereClaimAvailable($query);
 
-            $query->orderBy('numberid')->limit($limit);
+            // Prefer never-attempted queue entries before revisiting cooled
+            // rows. Otherwise a low article number that repeatedly defers can
+            // become eligible every few seconds and permanently starve the
+            // rest of the recovery queue. These columns also match the
+            // recovery-claim index used by MariaDB.
+            $query->orderBy('attempts')
+                ->orderBy('claim_expires_at')
+                ->orderBy('id')
+                ->limit($limit);
             if (DB::getDriverName() !== 'sqlite') {
+                $query->forceIndex('ix_missed_parts_recovery_claim');
                 $query->lock('FOR UPDATE SKIP LOCKED');
             }
 
