@@ -31,6 +31,9 @@ class WorkerOrchestrator
             $previous = $this->store->previousSnapshot();
             $snapshot = $this->snapshots->capture($previous);
             $permitObservation = $this->store->permitObservation();
+            if ((int) ($permitObservation['schema_version'] ?? 0) === 2) {
+                $permitObservation = $this->store->updatePermitObservationPeaks($snapshot);
+            }
             if ($grantPermit && $permitObservation !== null) {
                 return [
                     'leader' => true,
@@ -81,12 +84,21 @@ class WorkerOrchestrator
                     $this->applier->revokePermit();
                 }
                 if ($closeObservation && $permitClaimed && $hasCohortBaseline) {
+                    $cursorDelta = max(0, (int) $permitObservation['backfill_cursor'] - $outcome['cursor']);
                     $this->store->recordBackfillYield(
                         $observedGroup,
-                        cursorDelta: max(0, (int) $permitObservation['backfill_cursor'] - $outcome['cursor']),
+                        cursorDelta: $cursorDelta,
                         nzbCreatedDelta: $cohortNzbs,
                         now: time(),
                     );
+                    if ($permitCompleted) {
+                        $this->store->recordBackfillGrowth(
+                            $observedGroup,
+                            $permitObservation,
+                            $cursorDelta,
+                            (int) ($permitObservation['backfill_quantity'] ?? 0),
+                        );
+                    }
                 }
                 if ($closeObservation) {
                     $snapshot = $snapshot->withPermitOutcome(

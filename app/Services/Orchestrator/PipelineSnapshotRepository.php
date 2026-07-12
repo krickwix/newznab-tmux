@@ -135,21 +135,21 @@ class PipelineSnapshotRepository
             backfillHistoryRecent: $historyIsRecent,
             backfillTargetIneffectivePermits: (int) ($controlState->ineffectiveBackfillPermitsByTarget[$backfillGroup] ?? 0),
             backfillRemainingArticles: (int) ($backfillTarget['remaining_articles'] ?? 0),
-            backfillSafeQuantity: $this->safeBackfillQuantity($backlogs),
+            backfillSafeQuantity: $this->safeBackfillQuantity($backlogs, $backfillGroup),
         );
     }
 
     /** @param array{parts: int, binaries: int, collections: int, releases: int, nzbs: int} $backlogs */
-    private function safeBackfillQuantity(array $backlogs): int
+    private function safeBackfillQuantity(array $backlogs, string $backfillGroup = ''): int
     {
         $fraction = (float) config('nntmux.orchestrator.backfill_headroom_fraction', 0.10);
         $high = (array) config('nntmux.orchestrator.high_watermarks', []);
-        $growth = (array) config('nntmux.orchestrator.backfill_growth_per_10k', []);
+        $growth = $this->state->backfillGrowthFor($backfillGroup);
         $quantities = [];
         foreach (['parts', 'binaries', 'collections'] as $stage) {
             $headroom = max(0, (int) ($high[$stage] ?? 0) - $backlogs[$stage]);
             $permits = (int) floor(($headroom * $fraction) / max(1, (int) ($growth[$stage] ?? 1)));
-            $quantities[] = max(10000, $permits * 10000);
+            $quantities[] = $permits * 10000;
         }
 
         return min($quantities);

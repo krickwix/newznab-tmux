@@ -106,10 +106,13 @@ final class WorkerControlStateStoreTest extends TestCase
         ]);
 
         self::assertSame([
+            'schema_version' => 2,
             'generation' => 8,
             'issued_at' => 9,
             'parts' => 11,
             'binaries' => 22,
+            'baseline_backlogs' => ['parts' => 11, 'binaries' => 22, 'collections' => 33],
+            'peak_backlogs' => ['parts' => 11, 'binaries' => 22, 'collections' => 33],
             'ready_collections' => 66,
             'release_total' => 77,
             'release_high_watermark' => 88,
@@ -122,6 +125,81 @@ final class WorkerControlStateStoreTest extends TestCase
         $store->clearPermitObservation();
 
         self::assertNull($store->permitObservation());
+    }
+
+    public function test_permit_observation_retains_peak_backlogs_after_later_drain(): void
+    {
+        $store = new WorkerControlStateStore;
+        $store->beginPermitObservation(new PipelineSnapshot(
+            partsBacklog: 11,
+            binariesBacklog: 22,
+            collectionsBacklog: 33,
+            releasesBacklog: 44,
+            nzbsBacklog: 55,
+            backfillGroup: 'alt.test',
+        ), generation: 8, now: 9, outcome: [
+            'cursor' => 12345,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 66,
+            'releases' => 77,
+            'release_high_watermark' => 88,
+        ]);
+
+        $store->updatePermitObservationPeaks(new PipelineSnapshot(15, 20, 50, 44, 55));
+        $observation = $store->updatePermitObservationPeaks(new PipelineSnapshot(12, 30, 40, 44, 55));
+
+        self::assertSame([
+            'parts' => 11,
+            'binaries' => 22,
+            'collections' => 33,
+        ], $observation['baseline_backlogs'] ?? null);
+        self::assertSame([
+            'parts' => 15,
+            'binaries' => 30,
+            'collections' => 50,
+        ], $observation['peak_backlogs'] ?? null);
+    }
+
+    public function test_exact_completed_permits_learn_conservative_backlog_growth_without_lowering_static_priors(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_growth_per_10k', [
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ]);
+        $store = new WorkerControlStateStore;
+        $observation = [
+            'schema_version' => 2,
+            'baseline_backlogs' => ['parts' => 100, 'binaries' => 200, 'collections' => 300],
+            'peak_backlogs' => ['parts' => 20_100, 'binaries' => 1_400, 'collections' => 2_100],
+        ];
+
+        self::assertTrue($store->recordBackfillGrowth('alt.test', $observation, 20_000, 20_000));
+        self::assertSame([
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ], $store->backfillGrowthFor('alt.other'));
+
+        self::assertTrue($store->recordBackfillGrowth('alt.test', $observation, 20_000, 20_000));
+        self::assertSame([
+            'parts' => 12_500,
+            'binaries' => 750,
+            'collections' => 1_125,
+        ], $store->backfillGrowthFor('alt.test'));
+    }
+
+    public function test_growth_learning_rejects_partial_or_legacy_observations(): void
+    {
+        $store = new WorkerControlStateStore;
+        $observation = [
+            'schema_version' => 2,
+            'baseline_backlogs' => ['parts' => 100, 'binaries' => 200, 'collections' => 300],
+            'peak_backlogs' => ['parts' => 20_100, 'binaries' => 1_400, 'collections' => 2_100],
+        ];
+
+        self::assertFalse($store->recordBackfillGrowth('alt.test', $observation, 10_000, 20_000));
+        self::assertFalse($store->recordBackfillGrowth('alt.test', ['schema_version' => 1], 20_000, 20_000));
     }
 
     public function test_missing_state_uses_the_conservative_initial_profile(): void

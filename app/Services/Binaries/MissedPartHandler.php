@@ -152,6 +152,20 @@ final class MissedPartHandler
             ->increment('attempts');
     }
 
+    /** @param list<int> $numbers */
+    public function decrementAttempts(array $numbers, int $groupId): void
+    {
+        if ($numbers === []) {
+            return;
+        }
+
+        DB::table('missed_parts')
+            ->where('groups_id', $groupId)
+            ->whereIn('numberid', $numbers)
+            ->where('attempts', '>', 0)
+            ->decrement('attempts');
+    }
+
     /**
      * Increment attempts for specific article range (part repair NNTP failures).
      */

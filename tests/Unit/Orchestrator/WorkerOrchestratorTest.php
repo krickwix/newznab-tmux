@@ -177,7 +177,7 @@ final class WorkerOrchestratorTest extends TestCase
             42,
             Mockery::type('int'),
             $outcome,
-            50_000,
+            20_000,
         );
         $store->shouldReceive('storeState')->once()->with(Mockery::type(ControlState::class));
         $store->shouldReceive('storeSnapshot')->once()->with($snapshot);
@@ -192,13 +192,13 @@ final class WorkerOrchestratorTest extends TestCase
             true,
             'alt.multipart',
             false,
-            50_000,
+            20_000,
         )->andReturn(42);
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
 
         self::assertTrue($result['permit_granted']);
-        self::assertSame(50_000, $result['backfill_target']['quantity']);
+        self::assertSame(20_000, $result['backfill_target']['quantity']);
     }
 
     public function test_redis_failure_before_lock_acquisition_persists_fail_closed_state(): void

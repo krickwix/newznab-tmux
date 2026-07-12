@@ -76,6 +76,22 @@ class BinariesService
      */
     private array $bodyPreambleStats = [];
 
+    /** @var array<string, true> */
+    private array $bodyPreambleProbeRequired = [];
+
+    /** @var array<string, true> */
+    private array $bodyPreambleApplied = [];
+
+    /** @var array<string, true> */
+    private array $bodyPreambleProbed = [];
+
+    /** @var array<int, true> */
+    private array $partRepairDeferredBodyNumbers = [];
+
+    private ?float $partRepairBodyProbeStartedAt = null;
+
+    private ?int $partRepairBodyProbesRemaining = null;
+
     public function __construct(
         ?BinariesConfig $config = null,
         ?HeaderParser $headerParser = null,
@@ -310,6 +326,9 @@ class BinariesService
         $this->notYEnc = $this->headersBlackListed = $this->invalidDate = 0;
         $this->headersReceived = [];
         $this->bodyPreambleStats = [];
+        $this->bodyPreambleProbeRequired = [];
+        $this->bodyPreambleApplied = [];
+        $this->bodyPreambleProbed = [];
 
         $returnArray = [];
         $partRepair = ($type === 'partrepair');
@@ -335,7 +354,11 @@ class BinariesService
 
         // Extract article range info
         $returnArray = $this->headerParser->getArticleRange($headers);
-        $headers = $this->deobfuscateBodyPreambleHeaders($headers, $groupMySQL['name']);
+        $headers = $this->deobfuscateBodyPreambleHeaders(
+            $headers,
+            $groupMySQL['name'],
+            $partRepair ? $missingParts : null,
+        );
 
         // Parse and filter headers
         $this->headerParser->reset();
@@ -360,10 +383,20 @@ class BinariesService
         $this->timeCleaning = $this->startUpdate->diffInSeconds($this->startCleaning, true);
 
         $headersNotInserted = [];
+        $storageSucceeded = true;
         if (! empty($parseResult['headers'])) {
             try {
-                $headersNotInserted = $this->headerStorage->store($parseResult['headers'], $groupMySQL, $addToPartRepair);
+                $headersNotInserted = $this->headerStorage->store(
+                    $parseResult['headers'],
+                    $groupMySQL,
+                    $addToPartRepair || $partRepair,
+                );
             } catch (\Throwable $e) {
+                $storageSucceeded = false;
+                $headersNotInserted = array_values(array_filter(array_map(
+                    static fn (array $header): mixed => $header['Number'] ?? null,
+                    $parseResult['headers'],
+                )));
                 $this->logError('storeHeaders failed: '.$e->getMessage());
             }
         }
@@ -372,8 +405,16 @@ class BinariesService
         $this->timeInsert = $this->startPR->diffInSeconds($this->startUpdate, true);
 
         // Handle repaired parts
-        if ($partRepair && ! empty($parseResult['repaired'])) {
-            $this->missedPartHandler->removeRepairedParts($parseResult['repaired'], $groupMySQL['id']);
+        if ($partRepair && $storageSucceeded && ! empty($parseResult['repaired'])) {
+            $successfullyRepaired = array_values(array_diff($parseResult['repaired'], $headersNotInserted));
+            $successfullyRepaired = array_values(array_filter(
+                $successfullyRepaired,
+                fn (mixed $number): bool => ! isset($this->bodyPreambleProbeRequired[(string) $number])
+                    || isset($this->bodyPreambleApplied[(string) $number]),
+            ));
+            if ($successfullyRepaired !== []) {
+                $this->missedPartHandler->removeRepairedParts($successfullyRepaired, $groupMySQL['id']);
+            }
         }
 
         // Handle part repair tracking
@@ -383,14 +424,21 @@ class BinariesService
 
         $this->outputHeaderDuration();
 
+        if ($partRepair) {
+            foreach (array_diff_key($this->bodyPreambleProbeRequired, $this->bodyPreambleProbed) as $number => $_value) {
+                $this->partRepairDeferredBodyNumbers[(int) $number] = true;
+            }
+        }
+
         return $returnArray;
     }
 
     /**
      * @param  array<int, array<string, mixed>>  $headers
+     * @param  array<int, int|string>|null  $missingParts
      * @return array<int, array<string, mixed>>
      */
-    private function deobfuscateBodyPreambleHeaders(array $headers, string $groupName): array
+    private function deobfuscateBodyPreambleHeaders(array $headers, string $groupName, ?array $missingParts = null): array
     {
         if ($this->config->bodyPreambleDeobfuscateLimit <= 0 || ! $this->shouldDeobfuscateBodyPreambleGroup($groupName)) {
             return $headers;
@@ -408,23 +456,42 @@ class BinariesService
             'average_ms' => 0.0,
         ];
 
+        $missingPartLookup = $missingParts === null
+            ? null
+            : array_fill_keys(array_map(static fn (mixed $number): string => (string) $number, $missingParts), true);
+        foreach ($headers as $header) {
+            $number = (string) ($header['Number'] ?? '');
+            if (($missingPartLookup !== null && ! isset($missingPartLookup[$number]))
+                || ! $this->shouldProbeBodyPreamble($header)
+            ) {
+                continue;
+            }
+            $this->bodyPreambleProbeRequired[$number] = true;
+            $this->bodyPreambleStats['eligible']++;
+        }
+
         $probed = 0;
-        $startedAt = microtime(true);
+        $probeLimit = $this->partRepairBodyProbesRemaining ?? $this->config->bodyPreambleDeobfuscateLimit;
+        $startedAt = $this->partRepairBodyProbeStartedAt ?? microtime(true);
         foreach ($headers as $index => $header) {
-            if ($probed >= $this->config->bodyPreambleDeobfuscateLimit) {
+            if ($probed >= $probeLimit || $this->bodyPreambleMaxSecondsReached($startedAt)) {
                 break;
             }
-            if (! $this->shouldProbeBodyPreamble($header)) {
+            $number = (string) ($header['Number'] ?? '');
+            if (! isset($this->bodyPreambleProbeRequired[$number])) {
                 continue;
             }
 
-            $this->bodyPreambleStats['eligible']++;
             $lines = $this->getNntp()->getYencBodyPreambleLines(
                 $groupName,
                 $header['Number'],
                 $this->config->bodyPreambleLineLimit
             );
             $probed++;
+            if ($this->partRepairBodyProbesRemaining !== null) {
+                $this->partRepairBodyProbesRemaining = max(0, $this->partRepairBodyProbesRemaining - 1);
+            }
+            $this->bodyPreambleProbed[$number] = true;
             $this->bodyPreambleStats['probed']++;
             $maxProbeSecondsReached = $this->bodyPreambleMaxSecondsReached($startedAt);
             if (NNTPService::isError($lines) || ! \is_array($lines)) {
@@ -458,6 +525,8 @@ class BinariesService
             $headers[$index]['Subject'] = $metadata->toSyntheticSubject();
             $headers[$index]['collection_file_number'] = $metadata->collectionFileNumber();
             $headers[$index]['collection_total_files'] = $metadata->collectionTotalFiles();
+            $headers[$index]['body_preamble_applied'] = true;
+            $this->bodyPreambleApplied[$number] = true;
             $this->bodyPreambleStats['applied']++;
 
             if ($maxProbeSecondsReached) {
@@ -510,6 +579,10 @@ class BinariesService
             return true;
         }
 
+        if (preg_match('/^\[PRiVATE\]\s+\S{8,512}\s+\[newzNZB\]\s+\[\d{1,5}\s*\/\s*\d{1,5}\]\s+-\s+yEnc$/i', $subject) === 1) {
+            return true;
+        }
+
         if (preg_match('/^\[\s*\d{1,5}\s*\/\s*\d{1,5}\s*\]\s*(?:-\s*)?"([^"]{8,255})"(?:\s+-\s*\d+(?:[.,]\d+)?\s*[kmg]b)?\s+yEnc(?:\s+\(\s*\d{1,5}\s*\/\s*\d{1,5}\s*\))?$/i', $subject, $match) !== 1) {
             return false;
         }
@@ -534,11 +607,16 @@ class BinariesService
      */
     public function partRepair(array $groupArr): void
     {
+        $this->partRepairDeferredBodyNumbers = [];
+        $this->partRepairBodyProbeStartedAt = microtime(true);
+        $this->partRepairBodyProbesRemaining = $this->config->bodyPreambleDeobfuscateLimit;
         $missingParts = $this->missedPartHandler->getMissingParts($groupArr['id']);
         $missingCount = \count($missingParts);
 
         if ($missingCount === 0) {
             $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
+            $this->partRepairBodyProbeStartedAt = null;
+            $this->partRepairBodyProbesRemaining = null;
 
             return;
         }
@@ -567,6 +645,7 @@ class BinariesService
         // Update attempts on remaining parts
         if (isset($missingParts[$missingCount - 1]->id)) {
             $this->missedPartHandler->incrementAttempts($groupArr['id'], $lastPartNumber);
+            $this->missedPartHandler->decrementAttempts(array_keys($this->partRepairDeferredBodyNumbers), $groupArr['id']);
         }
 
         if ($this->config->echoCli) {
@@ -575,6 +654,8 @@ class BinariesService
 
         // Remove articles that exceeded max tries
         $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
+        $this->partRepairBodyProbeStartedAt = null;
+        $this->partRepairBodyProbesRemaining = null;
     }
 
     /**

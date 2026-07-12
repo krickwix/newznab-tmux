@@ -75,6 +75,9 @@ class MissedPartHandlerTest extends TestCase
         $this->assertSame(3, (int) DB::table('missed_parts')->where(['groups_id' => 1, 'numberid' => 30])->value('attempts'));
         $this->assertSame(2, $handler->getCount(1, 30));
 
+        $handler->decrementAttempts([10, 999], 1);
+        $this->assertSame(1, (int) DB::table('missed_parts')->where(['groups_id' => 1, 'numberid' => 10])->value('attempts'));
+
         $handler->cleanupExhaustedParts(1);
         $this->assertSame([10], DB::table('missed_parts')->where('groups_id', 1)->pluck('numberid')->all());
     }

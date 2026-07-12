@@ -136,7 +136,8 @@ final readonly class PipelineSnapshot
         return $this->providerAvailable
             && $this->cursorAvailable
             && $this->currentGroupsAvailable
-            && $this->eligibleBackfillSupply;
+            && $this->eligibleBackfillSupply
+            && $this->backfillSafeQuantity >= 10_000;
     }
 
     private function hasNegativeBacklog(): bool

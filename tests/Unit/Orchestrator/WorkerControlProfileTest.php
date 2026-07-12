@@ -51,7 +51,7 @@ final class WorkerControlProfileTest extends TestCase
         $fill = WorkerControlProfile::for(ControlProfile::Fill);
 
         self::assertSame(10_000, $balanced->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
-        self::assertSame(50_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
+        self::assertSame(20_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
         self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 0, 0, 0, true, 1));
         self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 0, 0, true, 1));
         self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 1, true, 1));
@@ -64,12 +64,35 @@ final class WorkerControlProfileTest extends TestCase
     {
         $profile = WorkerControlProfile::for(ControlProfile::Fill);
 
-        self::assertSame(40_000, $profile->quantityForYield(0.0, 1_000_000, 40_000, 1, 10_000, 0, true, 1));
+        self::assertSame(20_000, $profile->quantityForYield(0.0, 1_000_000, 40_000, 1, 10_000, 0, true, 1));
         self::assertSame(20_000, $profile->quantityForYield(0.0, 30_000, 150_000, 1, 10_000, 0, true, 1));
         self::assertSame(10_000, $profile->quantityForYield(0.0, 20_000, 150_000, 1, 10_000, 0, true, 1));
 
         config(['nntmux.orchestrator.backfill_context_retry_quantity' => 100_000]);
         config(['nntmux.orchestrator.backfill_max_quantity' => 30_000]);
-        self::assertSame(30_000, $profile->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
+        self::assertSame(20_000, $profile->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
+    }
+
+    public function test_proven_target_quantity_ramps_by_at_most_twice_the_last_exact_cohort(): void
+    {
+        $profile = WorkerControlProfile::for(ControlProfile::Fill);
+
+        self::assertSame(40_000, $profile->quantityForYield(3.0, 1_000_000, 600_000, 2, 20_000, time(), true));
+        self::assertSame(200_000, $profile->quantityForYield(3.0, 1_000_000, 600_000, 2, 100_000, time(), true));
+    }
+
+    public function test_no_quantity_is_returned_when_live_headroom_cannot_fit_one_quantum(): void
+    {
+        $profile = WorkerControlProfile::for(ControlProfile::Fill);
+
+        self::assertSame(0, $profile->quantityForYield(3.0, 1_000_000, 0));
+        self::assertSame(0, $profile->quantityForYield(0.0, 1_000_000, 0, 1, 10_000, 0, true, 1));
+    }
+
+    public function test_active_profiles_keep_nzb_capacity_above_the_doubled_rate_target(): void
+    {
+        self::assertSame(40, WorkerControlProfile::for(ControlProfile::Drain)->nzbBatchSize);
+        self::assertSame(40, WorkerControlProfile::for(ControlProfile::Balanced)->nzbBatchSize);
+        self::assertSame(40, WorkerControlProfile::for(ControlProfile::Fill)->nzbBatchSize);
     }
 }

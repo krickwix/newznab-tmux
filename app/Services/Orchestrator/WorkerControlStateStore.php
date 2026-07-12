@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Orchestrator;
 
 use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Support\Facades\Cache;
 
 class WorkerControlStateStore
@@ -17,12 +18,16 @@ class WorkerControlStateStore
 
     private const string BACKFILL_YIELD_KEY = 'nntmux:orchestrator:backfill-yield';
 
+    private const string BACKFILL_GROWTH_KEY = 'nntmux:orchestrator:backfill-growth';
+
     public const string DECISION_KEY = 'nntmux:orchestrator:last-decision';
 
     public function leaderLock(): Lock
     {
-        return Cache::store((string) config('nntmux.orchestrator.lock_store', 'redis'))
-            ->lock('nntmux:worker-orchestrator:leader', 600);
+        /** @var LockProvider $cache */
+        $cache = Cache::store((string) config('nntmux.orchestrator.lock_store', 'redis'));
+
+        return $cache->lock('nntmux:worker-orchestrator:leader', 600);
     }
 
     public function loadState(): ControlState
@@ -128,10 +133,21 @@ class WorkerControlStateStore
     public function beginPermitObservation(PipelineSnapshot $snapshot, int $generation, int $now, array $outcome, int $quantity = 10000): void
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forever(self::PERMIT_OBSERVATION_KEY, [
+            'schema_version' => 2,
             'generation' => $generation,
             'issued_at' => $now,
             'parts' => $snapshot->partsBacklog,
             'binaries' => $snapshot->binariesBacklog,
+            'baseline_backlogs' => [
+                'parts' => $snapshot->partsBacklog,
+                'binaries' => $snapshot->binariesBacklog,
+                'collections' => $snapshot->collectionsBacklog,
+            ],
+            'peak_backlogs' => [
+                'parts' => $snapshot->partsBacklog,
+                'binaries' => $snapshot->binariesBacklog,
+                'collections' => $snapshot->collectionsBacklog,
+            ],
             'ready_collections' => $outcome['ready_collections'],
             'release_total' => $outcome['releases'],
             'release_high_watermark' => $outcome['release_high_watermark'],
@@ -142,9 +158,131 @@ class WorkerControlStateStore
         ]);
     }
 
+    /** @return array<string, mixed>|null */
+    public function updatePermitObservationPeaks(PipelineSnapshot $snapshot): ?array
+    {
+        $observation = $this->permitObservation();
+        if ($observation === null
+            || (int) ($observation['schema_version'] ?? 0) !== 2
+            || ! is_array($observation['baseline_backlogs'] ?? null)
+            || ! is_array($observation['peak_backlogs'] ?? null)
+        ) {
+            return $observation;
+        }
+
+        foreach (['parts', 'binaries', 'collections'] as $stage) {
+            $observation['peak_backlogs'][$stage] = max(
+                (int) ($observation['peak_backlogs'][$stage] ?? 0),
+                match ($stage) {
+                    'parts' => $snapshot->partsBacklog,
+                    'binaries' => $snapshot->binariesBacklog,
+                    'collections' => $snapshot->collectionsBacklog,
+                },
+            );
+        }
+        Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+            ->forever(self::PERMIT_OBSERVATION_KEY, $observation);
+
+        return $observation;
+    }
+
     public function clearPermitObservation(): void
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forget(self::PERMIT_OBSERVATION_KEY);
+    }
+
+    /** @return array{parts: int, binaries: int, collections: int} */
+    public function backfillGrowthFor(string $group): array
+    {
+        $configured = (array) config('nntmux.orchestrator.backfill_growth_per_10k', []);
+        $growth = [
+            'parts' => max(1, (int) ($configured['parts'] ?? 1)),
+            'binaries' => max(1, (int) ($configured['binaries'] ?? 1)),
+            'collections' => max(1, (int) ($configured['collections'] ?? 1)),
+        ];
+        $history = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+            ->get(self::BACKFILL_GROWTH_KEY);
+        if (! is_array($history)) {
+            return $growth;
+        }
+
+        $ttl = (int) config('nntmux.orchestrator.backfill_yield_ttl_seconds', 86_400);
+        $candidates = [];
+        $global = $history['global'] ?? null;
+        if (is_array($global)
+            && (int) ($global['samples'] ?? 0) >= 2
+            && time() - (int) ($global['updated_at'] ?? 0) < $ttl
+        ) {
+            $candidates[] = $global['growth'] ?? null;
+        }
+        $target = $history['targets'][$group] ?? null;
+        if (is_array($target)
+            && (int) ($target['samples'] ?? 0) >= 2
+            && time() - (int) ($target['updated_at'] ?? 0) < $ttl
+        ) {
+            $candidates[] = $target['growth'] ?? null;
+        }
+        foreach ($candidates as $candidate) {
+            if (! is_array($candidate)) {
+                continue;
+            }
+            foreach (array_keys($growth) as $stage) {
+                $growth[$stage] = max(
+                    $growth[$stage],
+                    (int) ceil(max(0, (int) ($candidate[$stage] ?? 0)) * 1.25),
+                );
+            }
+        }
+
+        return $growth;
+    }
+
+    /** @param array<string, mixed> $observation */
+    public function recordBackfillGrowth(
+        string $group,
+        array $observation,
+        int $cursorDelta,
+        int $requestedQuantity,
+    ): bool {
+        $baseline = $observation['baseline_backlogs'] ?? null;
+        $peak = $observation['peak_backlogs'] ?? null;
+        if ($group === ''
+            || (int) ($observation['schema_version'] ?? 0) !== 2
+            || ! is_array($baseline)
+            || ! is_array($peak)
+            || $cursorDelta < 10_000
+            || $cursorDelta !== $requestedQuantity
+        ) {
+            return false;
+        }
+
+        $configured = (array) config('nntmux.orchestrator.backfill_growth_per_10k', []);
+        $sample = [];
+        foreach (['parts', 'binaries', 'collections'] as $stage) {
+            $delta = max(0, (int) ($peak[$stage] ?? 0) - (int) ($baseline[$stage] ?? 0));
+            $measured = (int) ceil($delta * 10_000 / $cursorDelta);
+            $sample[$stage] = min(max(1, (int) ($configured[$stage] ?? 1)) * 4, $measured);
+        }
+        $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+        $history = $cache->get(self::BACKFILL_GROWTH_KEY);
+        if (! is_array($history)) {
+            $history = ['global' => ['samples' => 0, 'growth' => []], 'targets' => []];
+        }
+        $global = $history['global'] ?? ['samples' => 0, 'growth' => []];
+        $target = $history['targets'][$group] ?? ['samples' => 0, 'growth' => []];
+        foreach (array_keys($sample) as $stage) {
+            $global['growth'][$stage] = max((int) ($global['growth'][$stage] ?? 0), $sample[$stage]);
+            $target['growth'][$stage] = max((int) ($target['growth'][$stage] ?? 0), $sample[$stage]);
+        }
+        $global['samples'] = max(0, (int) ($global['samples'] ?? 0)) + 1;
+        $global['updated_at'] = time();
+        $target['samples'] = max(0, (int) ($target['samples'] ?? 0)) + 1;
+        $target['updated_at'] = time();
+        $history['global'] = $global;
+        $history['targets'][$group] = $target;
+        $cache->forever(self::BACKFILL_GROWTH_KEY, $history);
+
+        return true;
     }
 
     /** @return array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}> */

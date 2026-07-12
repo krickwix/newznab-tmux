@@ -7,11 +7,51 @@ namespace Tests\Unit\Orchestrator;
 use App\Services\Nzb\NzbBacklogCreationService;
 use App\Services\Orchestrator\PipelineSnapshotRepository;
 use App\Services\Orchestrator\PrometheusSafetySignalProvider;
+use App\Services\Orchestrator\WorkerControlStateStore;
 use Illuminate\Support\Facades\DB;
+use Mockery;
+use ReflectionMethod;
 use Tests\TestCase;
 
 final class PipelineSnapshotRepositoryTest extends TestCase
 {
+    public function test_safe_backfill_quantity_is_zero_when_any_stage_lacks_one_quantum_of_headroom(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_headroom_fraction', 0.10);
+        config()->set('nntmux.orchestrator.high_watermarks', [
+            'parts' => 300_000_000,
+            'binaries' => 1_000_000,
+            'collections' => 100_000,
+        ]);
+        config()->set('nntmux.orchestrator.backfill_growth_per_10k', [
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ]);
+        $state = Mockery::mock(WorkerControlStateStore::class);
+        $state->shouldReceive('backfillGrowthFor')->once()->with('')->andReturn([
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'safeBackfillQuantity');
+
+        $quantity = $method->invoke($repository, [
+            'parts' => 186_000_000,
+            'binaries' => 95_000,
+            'collections' => 99_500,
+            'releases' => 0,
+            'nzbs' => 0,
+        ]);
+
+        self::assertSame(0, $quantity);
+    }
+
     public function test_backfill_candidates_are_bounded_to_fresh_current_valid_ranges(): void
     {
         DB::shouldReceive('select')

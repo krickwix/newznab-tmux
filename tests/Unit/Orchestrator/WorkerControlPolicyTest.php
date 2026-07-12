@@ -393,6 +393,7 @@ final class WorkerControlPolicyTest extends TestCase
         yield 'cursor exhausted' => [['cursorAvailable' => false]];
         yield 'no current groups' => [['currentGroupsAvailable' => false]];
         yield 'no eligible supply' => [['eligibleBackfillSupply' => false]];
+        yield 'no safe capacity' => [['backfillSafeQuantity' => 0]];
     }
 
     public function test_target_ineffective_permits_do_not_globally_lock_other_targets(): void

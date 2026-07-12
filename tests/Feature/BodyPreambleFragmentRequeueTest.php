@@ -116,7 +116,7 @@ final class BodyPreambleFragmentRequeueTest extends TestCase
             DB::table('missed_parts')->orderBy('numberid')->pluck('numberid')->all()
         );
         $this->assertSame(
-            1,
+            0,
             (int) DB::table('missed_parts')->where(['groups_id' => 5, 'numberid' => 7304209420])->value('attempts')
         );
     }

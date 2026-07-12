@@ -23,9 +23,9 @@ final readonly class WorkerControlProfile
     {
         return match ($profile) {
             ControlProfile::FailSafe => new self($profile, 300, 1800, 180, 180, 5, false, 0, 0, 0),
-            ControlProfile::Drain => new self($profile, 160, 1800, 45, 55, 20, false, 0, 0, 0),
-            ControlProfile::Balanced => new self($profile, 40, 900, 60, 55, 20, true, 1, 1, 10000),
-            ControlProfile::Fill => new self($profile, 20, 600, 90, 55, 20, true, 1, 1, 10000),
+            ControlProfile::Drain => new self($profile, 160, 1800, 45, 55, 40, false, 0, 0, 0),
+            ControlProfile::Balanced => new self($profile, 40, 900, 60, 55, 40, true, 1, 1, 10000),
+            ControlProfile::Fill => new self($profile, 20, 600, 90, 55, 40, true, 1, 1, 10000),
         };
     }
 
@@ -39,7 +39,15 @@ final readonly class WorkerControlProfile
         bool $historyRecent = false,
         int $targetIneffectivePermits = 0,
     ): int {
+        if ($safeQuantity < $this->backfillQuantity) {
+            return 0;
+        }
+
         $minimumYield = (float) config('nntmux.orchestrator.backfill_scale_min_yield', 1.0);
+        $maxQuantity = (int) config('nntmux.orchestrator.backfill_max_quantity', 200000);
+        $rampLimit = $historyRecent && $lastCursorDelta >= $this->backfillQuantity
+            ? min($maxQuantity, $lastCursorDelta * 2)
+            : $maxQuantity;
         if ($this->profile !== ControlProfile::Fill || ! is_finite($nzbsPer10k) || $nzbsPer10k < $minimumYield) {
             if ($this->profile === ControlProfile::Fill
                 && $yieldAttempts === 1
@@ -51,20 +59,18 @@ final readonly class WorkerControlProfile
                 && $nzbsPer10k === 0.0
             ) {
                 $retryQuantity = (int) config('nntmux.orchestrator.backfill_context_retry_quantity', 50000);
-                $maxQuantity = (int) config('nntmux.orchestrator.backfill_max_quantity', 200000);
                 $availableQuantity = max(
                     $this->backfillQuantity,
                     intdiv(max(0, $remainingArticles - 10000), 10000) * 10000,
                 );
 
-                return max($this->backfillQuantity, min($retryQuantity, $maxQuantity, $availableQuantity, $safeQuantity));
+                return max($this->backfillQuantity, min($retryQuantity, $rampLimit, $availableQuantity, $safeQuantity));
             }
 
             return $this->backfillQuantity;
         }
 
         $targetNzbs = (int) config('nntmux.orchestrator.backfill_target_nzbs_per_permit', 60);
-        $maxQuantity = (int) config('nntmux.orchestrator.backfill_max_quantity', 200000);
         $quantity = (int) ceil($targetNzbs / $nzbsPer10k) * 10000;
 
         $availableQuantity = max(
@@ -72,6 +78,6 @@ final readonly class WorkerControlProfile
             intdiv(max(0, $remainingArticles - 10000), 10000) * 10000,
         );
 
-        return max($this->backfillQuantity, min($maxQuantity, $availableQuantity, $safeQuantity, $quantity));
+        return max($this->backfillQuantity, min($rampLimit, $availableQuantity, $safeQuantity, $quantity));
     }
 }

@@ -228,7 +228,7 @@ final class BodyPreambleFragmentRequeueService
             $rows[$article] = [
                 'numberid' => $article,
                 'groups_id' => $groupId,
-                'attempts' => 1,
+                'attempts' => 0,
                 'created_at' => $now,
                 'updated_at' => $now,
             ];

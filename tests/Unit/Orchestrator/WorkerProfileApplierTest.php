@@ -60,7 +60,7 @@ final class WorkerProfileApplierTest extends TestCase
             'orchestrator_back_timer' => 900,
             'orchestrator_rel_timer' => 60,
             'orchestrator_nzb_timer' => 55,
-            'orchestrator_nzb_limit' => 20,
+            'orchestrator_nzb_limit' => 40,
             'orchestrator_bf_paused' => 0,
             'orchestrator_bf_group' => 'alt.test',
             'orchestrator_bf_qty' => 10_000,

@@ -363,6 +363,9 @@ final class WorkerControlPolicy
         if (! $snapshot->currentGroupsAvailable) {
             return 'backfill_no_current_groups';
         }
+        if ($snapshot->backfillSafeQuantity < 10_000) {
+            return 'backfill_no_safe_capacity';
+        }
 
         return 'backfill_no_eligible_supply';
     }
