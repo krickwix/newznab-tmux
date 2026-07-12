@@ -69,7 +69,12 @@ class WorkerOrchestrator
                         now: time(),
                     );
                 }
-                $snapshot = $snapshot->withPermitOutcome(true, $permitClaimed && $cursorMoved && $produced);
+                $snapshot = $snapshot->withPermitOutcome(
+                    completed: true,
+                    effective: $permitClaimed && $cursorMoved && $produced,
+                    claimed: $permitClaimed,
+                    inputMoved: $cursorMoved,
+                );
                 $this->store->clearPermitObservation();
             }
             $state = $this->store->loadState();

@@ -221,6 +221,26 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('backfill_locked', $second->reasons);
     }
 
+    public function test_a_claimed_no_input_probe_rotates_without_consuming_an_output_strike(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            consecutiveIneffectiveBackfillPermits: 1,
+        );
+        $noInput = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: true,
+            backfillPermitInputMoved: false,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($noInput, $state, 10_000);
+
+        self::assertSame(1, $decision->nextState->consecutiveIneffectiveBackfillPermits);
+        self::assertFalse($decision->nextState->backfillLocked);
+        self::assertContains('backfill_permit_no_input', $decision->reasons);
+    }
+
     private function greenBackfillSnapshot(...$override): PipelineSnapshot
     {
         return $this->snapshot(...array_replace([

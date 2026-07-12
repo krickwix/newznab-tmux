@@ -105,6 +105,14 @@ final class WorkerControlPolicy
             return [0, $state->backfillLocked, ['backfill_permit_effective']];
         }
 
+        if ($snapshot->backfillPermitClaimed && ! $snapshot->backfillPermitInputMoved) {
+            return [
+                $state->consecutiveIneffectiveBackfillPermits,
+                $state->backfillLocked,
+                ['backfill_permit_no_input'],
+            ];
+        }
+
         $count = min(self::INEFFECTIVE_BACKFILL_LIMIT, $state->consecutiveIneffectiveBackfillPermits + 1);
         $locked = $state->backfillLocked || $count >= self::INEFFECTIVE_BACKFILL_LIMIT;
 

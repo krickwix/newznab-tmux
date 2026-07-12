@@ -27,6 +27,8 @@ final readonly class PipelineSnapshot
         public bool $eligibleBackfillSupply = false,
         public bool $backfillPermitCompleted = false,
         public bool $backfillPermitEffective = false,
+        public bool $backfillPermitClaimed = true,
+        public bool $backfillPermitInputMoved = true,
         public int $databaseDeadlocks = 0,
         public int $databaseCurrentWaits = 0,
         public int $storageAvailableBytes = 0,
@@ -46,8 +48,12 @@ final readonly class PipelineSnapshot
         public int $backfillCursor = 0,
     ) {}
 
-    public function withPermitOutcome(bool $completed, bool $effective): self
-    {
+    public function withPermitOutcome(
+        bool $completed,
+        bool $effective,
+        bool $claimed = true,
+        bool $inputMoved = true,
+    ): self {
         return new self(
             partsBacklog: $this->partsBacklog,
             binariesBacklog: $this->binariesBacklog,
@@ -69,6 +75,8 @@ final readonly class PipelineSnapshot
             eligibleBackfillSupply: $this->eligibleBackfillSupply,
             backfillPermitCompleted: $completed,
             backfillPermitEffective: $effective,
+            backfillPermitClaimed: $claimed,
+            backfillPermitInputMoved: $inputMoved,
             databaseDeadlocks: $this->databaseDeadlocks,
             databaseCurrentWaits: $this->databaseCurrentWaits,
             storageAvailableBytes: $this->storageAvailableBytes,
