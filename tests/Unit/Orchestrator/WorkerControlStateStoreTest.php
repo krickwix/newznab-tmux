@@ -135,6 +135,30 @@ final class WorkerControlStateStoreTest extends TestCase
         self::assertNull($store->permitObservation());
     }
 
+    public function test_permit_completion_observation_is_generation_fenced_and_idempotent(): void
+    {
+        $store = new WorkerControlStateStore;
+        $store->beginPermitObservation(new PipelineSnapshot(
+            partsBacklog: 1,
+            binariesBacklog: 2,
+            collectionsBacklog: 3,
+            releasesBacklog: 0,
+            nzbsBacklog: 0,
+            backfillGroup: 'alt.test',
+            backfillCursor: 20_000,
+        ), generation: 7, now: 100, outcome: [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 10,
+        ]);
+
+        self::assertArrayNotHasKey('completed_observed_at', $store->observePermitCompletion(8, 1_000) ?? []);
+        self::assertSame(1_000, $store->observePermitCompletion(7, 1_000)['completed_observed_at'] ?? null);
+        self::assertSame(1_000, $store->observePermitCompletion(7, 2_000)['completed_observed_at'] ?? null);
+    }
+
     public function test_permit_observation_retains_peak_backlogs_after_later_drain(): void
     {
         $store = new WorkerControlStateStore;

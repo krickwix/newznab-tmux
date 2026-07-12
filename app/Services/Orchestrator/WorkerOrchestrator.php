@@ -53,6 +53,12 @@ class WorkerOrchestrator
             $permitCompleted = $permitClaimed
                 && $hasCohortBaseline
                 && (int) Settings::settingValue('orchestrator_bf_completed') === (int) $permitObservation['generation'];
+            if ($permitCompleted && ! isset($permitObservation['completed_observed_at'])) {
+                $permitObservation = $this->store->observePermitCompletion(
+                    (int) $permitObservation['generation'],
+                    time(),
+                ) ?? $permitObservation;
+            }
             if ($permitObservation !== null && ($observationExpired || ($permitClaimed && $hasCohortBaseline))) {
                 $observedGroup = (string) ($permitObservation['backfill_group'] ?? '');
                 $outcome = $observedGroup === ''
@@ -71,9 +77,21 @@ class WorkerOrchestrator
                         (string) ($outcome['cursor_postdate'] ?? ''),
                     );
                 }
+                $cursorDelta = max(0, (int) ($permitObservation['backfill_cursor'] ?? 0) - (int) $outcome['cursor']);
+                $zeroOutputContextReady = $this->zeroOutputContextReady(
+                    $permitObservation,
+                    $outcome,
+                    $snapshot,
+                    $permitClaimed,
+                    $permitCompleted,
+                    $cursorDelta,
+                    $cohortNzbs,
+                    time(),
+                );
                 $closeObservation = $observationExpired
                     || ($permitCompleted && $cursorMoved && $cohortNzbs > 0 && $snapshot->eligibleNzbs === 0)
-                    || ($permitCompleted && ! $cursorMoved);
+                    || ($permitCompleted && ! $cursorMoved)
+                    || $zeroOutputContextReady;
                 if ($observationExpired && $permitClaimed && $hasCohortBaseline && ! $permitCompleted) {
                     $closeObservation = false;
                     if (! $shadow) {
@@ -84,7 +102,6 @@ class WorkerOrchestrator
                     $this->applier->revokePermit();
                 }
                 if ($closeObservation && $permitClaimed && $hasCohortBaseline) {
-                    $cursorDelta = max(0, (int) $permitObservation['backfill_cursor'] - $outcome['cursor']);
                     $this->store->recordBackfillYield(
                         $observedGroup,
                         cursorDelta: $cursorDelta,
@@ -242,5 +259,40 @@ class WorkerOrchestrator
                 }
             }
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $observation
+     * @param  array<string, mixed>  $outcome
+     */
+    private function zeroOutputContextReady(
+        array $observation,
+        array $outcome,
+        PipelineSnapshot $snapshot,
+        bool $permitClaimed,
+        bool $permitCompleted,
+        int $cursorDelta,
+        int $cohortNzbs,
+        int $now,
+    ): bool {
+        $completedAt = (int) ($observation['completed_observed_at'] ?? 0);
+        $graceSeconds = (int) config('nntmux.orchestrator.backfill_zero_output_grace_seconds', 300);
+        $quantity = (int) ($observation['backfill_quantity'] ?? 0);
+
+        return $permitClaimed
+            && $permitCompleted
+            && $completedAt > 0
+            && $now - $completedAt >= $graceSeconds
+            && $quantity >= 10_000
+            && $cursorDelta === $quantity
+            && $cohortNzbs === 0
+            && (int) ($outcome['ready_collections'] ?? 0) <= (int) ($observation['ready_collections'] ?? 0)
+            && (int) ($outcome['releases'] ?? 0) <= (int) ($observation['release_total'] ?? 0)
+            && (int) ($outcome['release_high_watermark'] ?? 0) <= (int) ($observation['release_high_watermark'] ?? 0)
+            && $snapshot->eligibleNzbs === 0
+            && $snapshot->telemetryIsValid()
+            && $snapshot->hardSafetyPassed()
+            && ! $snapshot->highPressure
+            && $snapshot->backfillGatesPassed();
     }
 }

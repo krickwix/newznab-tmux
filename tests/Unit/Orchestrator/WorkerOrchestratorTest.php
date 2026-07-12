@@ -20,11 +20,160 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Mockery;
 use PHPUnit\Framework\Attributes\DataProvider;
+use ReflectionMethod;
 use RuntimeException;
 use Tests\TestCase;
 
 final class WorkerOrchestratorTest extends TestCase
 {
+    public function test_zero_output_context_retry_grace_is_bounded_to_five_minutes_minimum(): void
+    {
+        $key = 'NNTMUX_ORCHESTRATOR_BACKFILL_ZERO_OUTPUT_GRACE_SECONDS';
+        $previous = getenv($key);
+        putenv($key.'=299');
+        $_ENV[$key] = '299';
+        $_SERVER[$key] = '299';
+
+        try {
+            $configuration = require base_path('config/nntmux.php');
+
+            self::assertSame(300, $configuration['orchestrator']['backfill_zero_output_grace_seconds']);
+        } finally {
+            if ($previous === false) {
+                putenv($key);
+                unset($_ENV[$key], $_SERVER[$key]);
+            } else {
+                putenv($key.'='.$previous);
+                $_ENV[$key] = $previous;
+                $_SERVER[$key] = $previous;
+            }
+        }
+    }
+
+    public function test_zero_output_context_retry_requires_exact_completed_input_and_unambiguous_safety(): void
+    {
+        config(['nntmux.orchestrator.backfill_zero_output_grace_seconds' => 300]);
+        $orchestrator = new WorkerOrchestrator(
+            Mockery::mock(PipelineSnapshotRepository::class),
+            new WorkerControlPolicy,
+            Mockery::mock(WorkerControlStateStore::class),
+            Mockery::mock(WorkerProfileApplier::class),
+        );
+        $method = new ReflectionMethod($orchestrator, 'zeroOutputContextReady');
+        $observation = [
+            'completed_observed_at' => 700,
+            'backfill_quantity' => 10_000,
+            'ready_collections' => 0,
+            'release_total' => 4_210,
+            'release_high_watermark' => 560_366,
+        ];
+        $outcome = [
+            'ready_collections' => 0,
+            'releases' => 4_210,
+            'release_high_watermark' => 560_366,
+        ];
+        $snapshot = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            0,
+            0,
+            eligibleBackfillSupply: true,
+            backfillGroup: 'alt.test',
+            backfillCursor: 10_000,
+            backfillSafeQuantity: 50_000,
+        );
+
+        self::assertFalse($method->invoke($orchestrator, $observation, $outcome, $snapshot, true, true, 10_000, 0, 999));
+        self::assertTrue($method->invoke($orchestrator, $observation, $outcome, $snapshot, true, true, 10_000, 0, 1_000));
+
+        foreach ([
+            'unclaimed' => [$observation, $outcome, $snapshot, false, true, 10_000, 0],
+            'incomplete' => [$observation, $outcome, $snapshot, true, false, 10_000, 0],
+            'partial cursor' => [$observation, $outcome, $snapshot, true, true, 9_999, 0],
+            'oversized cursor' => [$observation, $outcome, $snapshot, true, true, 10_001, 0],
+            'cohort nzb' => [$observation, $outcome, $snapshot, true, true, 10_000, 1],
+            'ready collection' => [$observation, [...$outcome, 'ready_collections' => 1], $snapshot, true, true, 10_000, 0],
+            'release count' => [$observation, [...$outcome, 'releases' => 4_211], $snapshot, true, true, 10_000, 0],
+            'release high watermark' => [$observation, [...$outcome, 'release_high_watermark' => 560_367], $snapshot, true, true, 10_000, 0],
+            'eligible nzb' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, eligibleBackfillSupply: true, eligibleNzbs: 1, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0],
+            'database busy' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, databaseCurrentWaits: 1, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0],
+            'high pressure' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, highPressure: true, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0],
+            'no safe quantity' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 0), true, true, 10_000, 0],
+        ] as $label => $arguments) {
+            self::assertFalse($method->invoke($orchestrator, ...[...$arguments, 1_000]), $label);
+        }
+    }
+
+    public function test_completed_zero_output_permit_closes_after_grace_and_records_one_target_strike(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.permit_observation_seconds' => 1200,
+            'nntmux.orchestrator.backfill_zero_output_grace_seconds' => 300,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '7'],
+        ]);
+
+        $store = new WorkerControlStateStore;
+        $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, generation: 7, now: time() - 600, outcome: [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 4_210,
+            'release_high_watermark' => 560_366,
+        ], quantity: 10_000);
+        $store->observePermitCompletion(7, time() - 301);
+
+        $current = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            0,
+            0,
+            lowPressure: true,
+            eligibleBackfillSupply: true,
+            backfillGroup: 'alt.test',
+            backfillCursor: 10_000,
+            backfillSafeQuantity: 50_000,
+        );
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($current);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 4_210,
+            'release_high_watermark' => 560_366,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertContains('backfill_permit_ineffective', $result['reasons']);
+        self::assertNull($store->permitObservation());
+        self::assertSame(1, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
+        self::assertSame(10_000, $store->backfillYieldHistory()['alt.test']['last_cursor_delta'] ?? null);
+        self::assertFalse($result['permit_granted']);
+    }
+
     public function test_configuration_clamps_the_observation_window_to_five_minutes(): void
     {
         $key = 'NNTMUX_ORCHESTRATOR_PERMIT_OBSERVATION_SECONDS';

@@ -194,6 +194,23 @@ class WorkerControlStateStore
         return $observation;
     }
 
+    /** @return array<string, mixed>|null */
+    public function observePermitCompletion(int $generation, int $now): ?array
+    {
+        $observation = $this->permitObservation();
+        if ($observation === null || (int) ($observation['generation'] ?? 0) !== $generation) {
+            return $observation;
+        }
+
+        if (! isset($observation['completed_observed_at'])) {
+            $observation['completed_observed_at'] = $now;
+            Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+                ->forever(self::PERMIT_OBSERVATION_KEY, $observation);
+        }
+
+        return $observation;
+    }
+
     public function clearPermitObservation(): void
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forget(self::PERMIT_OBSERVATION_KEY);
