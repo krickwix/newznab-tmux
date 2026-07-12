@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\DB;
 
 class WorkerProfileApplier
 {
-    private const int SAFE_HIGH_PRESSURE_RECOVERY_TIMER_SECONDS = 150;
+    private const int SAFE_HIGH_PRESSURE_RECOVERY_TIMER_SECONDS = 115;
 
     public function apply(
         ControlDecision $decision,

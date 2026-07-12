@@ -107,7 +107,7 @@ final class WorkerProfileApplierTest extends TestCase
         );
 
         self::assertSame(1, Settings::settingValue('orchestrator_recovery_ok'));
-        self::assertSame(150, Settings::settingValue('orchestrator_bins_timer'));
+        self::assertSame(115, Settings::settingValue('orchestrator_bins_timer'));
     }
 
     public function test_hard_or_unknown_fail_safe_cannot_use_the_fast_recovery_lane(): void
