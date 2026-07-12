@@ -236,7 +236,7 @@ final class WorkerControlPolicyTest extends TestCase
 
         $decision = (new WorkerControlPolicy)->decide($noInput, $state, 10_000);
 
-        self::assertSame(0, $decision->nextState->consecutiveIneffectiveBackfillPermits);
+        self::assertSame(1, $decision->nextState->consecutiveIneffectiveBackfillPermits);
         self::assertFalse($decision->nextState->backfillLocked);
         self::assertContains('backfill_permit_no_input', $decision->reasons);
     }
