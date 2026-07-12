@@ -241,7 +241,10 @@ final class WorkerControlPolicy
         foreach (['releases', 'nzbs'] as $stage) {
             $instant = $snapshot->backlogRatesPerMinute[$stage] ?? NAN;
             $ewma = $snapshot->backlogEwmaPerMinute[$stage] ?? NAN;
-            if (! is_finite($instant) || ! is_finite($ewma) || $instant > 0.0 || $ewma > 0.0) {
+            $ineligibleNzbBacklog = $stage === 'nzbs' && $snapshot->eligibleNzbs === 0;
+            if (! is_finite($instant) || ! is_finite($ewma)
+                || $instant > 0.0
+                || (! $ineligibleNzbBacklog && $ewma > 0.0)) {
                 return false;
             }
         }

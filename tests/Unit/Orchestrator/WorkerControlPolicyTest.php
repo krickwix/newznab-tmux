@@ -291,6 +291,42 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertSame(0, $invalid->nextState->recoveryDrainSamples);
     }
 
+    public function test_stable_ineligible_nzb_backlog_does_not_permanently_block_recovery_drain(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        );
+        $rates = ['parts' => 0.0, 'binaries' => 0.0, 'collections' => 0.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $ewma = ['parts' => -5.0, 'binaries' => -6.0, 'collections' => -7.0, 'releases' => 0.0, 'nzbs' => 0.5];
+
+        foreach ([130, 190, 250] as $observedAt) {
+            $decision = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: $observedAt,
+                eligibleNzbs: 0,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $ewma,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $state, 10_000);
+            $state = $decision->nextState;
+        }
+        self::assertContains('core_pipeline_draining', $decision->reasons);
+
+        $actionable = $policy->decide($this->snapshot(
+            highPressure: true,
+            observedAt: 310,
+            eligibleNzbs: 1,
+            backlogRatesPerMinute: $rates,
+            backlogEwmaPerMinute: $ewma,
+            bodyRecoveryQueueBacklog: 1_000,
+        ), $state, 10_000);
+        self::assertNotContains('core_pipeline_draining', $actionable->reasons);
+        self::assertSame(0, $actionable->nextState->recoveryDrainSamples);
+    }
+
     public function test_hard_or_legacy_fail_safe_requires_five_safe_samples_and_the_latest_cooldown(): void
     {
         $policy = new WorkerControlPolicy;
