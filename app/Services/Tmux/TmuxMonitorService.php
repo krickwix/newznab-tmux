@@ -15,6 +15,15 @@ use Illuminate\Support\Facades\DB;
  */
 class TmuxMonitorService
 {
+    /** @var array<string, string> */
+    private const array BACKFILL_CONTROL_SETTINGS = [
+        'orchestrator_mode' => 'orchestrator_mode',
+        'orchestrator_lease_until' => 'orchestrator_lease_until',
+        'orchestrator_back_timer' => 'orchestrator_back_timer',
+        'orchestrator_bf_paused' => 'orchestrator_bf_paused',
+        'orchestrator_bf_permit' => 'orchestrator_bf_permit',
+    ];
+
     protected Tmux $tmux;
 
     /**
@@ -137,6 +146,31 @@ class TmuxMonitorService
 
         // Set killswitches
         $this->setKillswitches();
+
+        return $this->runVar;
+    }
+
+    /**
+     * Refresh only the settings that make a one-shot backfill permit visible.
+     *
+     * The full monitor snapshot may be cached for up to a minute, while the
+     * adaptive worker loops every 20 seconds. Keeping this query narrow lets a
+     * worker observe a new permit on its next loop without repeatedly loading
+     * the expensive category and backlog statistics.
+     *
+     * @return array<string, mixed>
+     */
+    public function refreshBackfillControlSettings(): array
+    {
+        $settings = Settings::query()
+            ->whereIn('name', array_keys(self::BACKFILL_CONTROL_SETTINGS))
+            ->get()
+            ->mapWithKeys(static fn (Settings $setting): array => [
+                self::BACKFILL_CONTROL_SETTINGS[$setting->name] => Settings::convertValue($setting->getRawOriginal('value')),
+            ])
+            ->toArray();
+
+        $this->runVar['settings'] = array_replace($this->runVar['settings'] ?? [], $settings);
 
         return $this->runVar;
     }

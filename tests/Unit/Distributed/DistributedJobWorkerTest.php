@@ -97,4 +97,53 @@ class DistributedJobWorkerTest extends TestCase
 
         self::assertSame(0, $exitCode);
     }
+
+    public function test_backfill_refreshes_control_settings_before_resolving_each_plan(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'array']);
+        Cache::store('array')->flush();
+        Artisan::shouldReceive('call')->once()->with(
+            'multiprocessing:safe',
+            ['type' => 'backfill'],
+            Mockery::type(BufferedOutput::class),
+        )->andReturn(0);
+
+        $staleRunVar = [
+            'constants' => ['sequential' => 0],
+            'settings' => [
+                'backfill' => 1,
+                'back_timer' => 20,
+                'orchestrator_mode' => 'active',
+                'orchestrator_lease_until' => time() + 600,
+                'orchestrator_bf_paused' => 1,
+                'orchestrator_bf_permit' => 0,
+            ],
+            'counts' => ['now' => ['backfill_groups_days' => 1, 'collections_table' => 0]],
+            'killswitch' => [],
+        ];
+        $freshRunVar = $staleRunVar;
+        $freshRunVar['settings']['orchestrator_bf_paused'] = 0;
+        $freshRunVar['settings']['orchestrator_bf_permit'] = 17;
+
+        $monitor = Mockery::mock(TmuxMonitorService::class);
+        $monitor->shouldReceive('initializeMonitor')->once();
+        $monitor->shouldReceive('collectStatistics')->once()->andReturn($staleRunVar);
+        $monitor->shouldReceive('refreshBackfillControlSettings')->once()->andReturn($freshRunVar);
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('startRun')->once()->with('backfill')->andReturn(100.0);
+        $telemetry->shouldReceive('finishRun')->once()->with('backfill', 'success', 100.0);
+        $gate = Mockery::mock(BackfillPermitGate::class);
+        $gate->shouldReceive('claimGeneration')->once()->andReturn(17);
+        $gate->shouldReceive('complete')->once()->with(17)->andReturnTrue();
+
+        $exitCode = (new DistributedJobWorker(
+            new DistributedJobCatalog,
+            $monitor,
+            $telemetry,
+            $gate,
+        ))->run('backfill', true, null, 60, new BufferedOutput);
+
+        self::assertSame(0, $exitCode);
+    }
 }

@@ -7,6 +7,7 @@ namespace App\Services\Distributed;
 use App\Models\Settings;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Tmux\TmuxMonitorService;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -33,6 +34,9 @@ class DistributedJobWorker
 
         do {
             $runVar = $this->monitorService->collectStatistics();
+            if ($job === 'backfill') {
+                $runVar = $this->monitorService->refreshBackfillControlSettings();
+            }
             $plan = $this->catalog->resolve($job, $runVar);
             $sleep = $sleepOverride ?? (int) $plan['sleep'];
 
@@ -83,7 +87,19 @@ class DistributedJobWorker
     {
         $lockName = 'nntmux:distributed-worker:'.$plan['name'];
         $lockStore = (string) config('nntmux.distributed_lock_store', 'redis');
-        $lock = Cache::store($lockStore)->lock($lockName, $lockSeconds);
+        $cacheStore = Cache::store($lockStore)->getStore();
+        if (! $cacheStore instanceof LockProvider) {
+            $this->workerTelemetry->recordRunOutcome($plan['name'], 'lock_error');
+            $output->writeln(sprintf(
+                '[%s] skipped %s: %s cache store does not support distributed locks',
+                now()->toDateTimeString(),
+                $plan['name'],
+                $lockStore,
+            ));
+
+            return 1;
+        }
+        $lock = $cacheStore->lock($lockName, $lockSeconds);
 
         try {
             $acquired = $lock->get();

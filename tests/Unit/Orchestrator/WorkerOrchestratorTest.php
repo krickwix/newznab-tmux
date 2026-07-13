@@ -1736,8 +1736,12 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame([], $store->backfillYieldHistory());
     }
 
-    public function test_a_soft_supply_gate_preserves_an_unclaimed_permit_during_claim_grace(): void
-    {
+    #[DataProvider('softSupplyClaimGraceCases')]
+    public function test_a_soft_supply_gate_preserves_an_unclaimed_permit_during_claim_grace(
+        bool $providerAvailable,
+        bool $eligibleBackfillSupply,
+        string $expectedReason,
+    ): void {
         config([
             'nntmux.orchestrator.auto_backfill' => true,
             'nntmux.orchestrator.permit_claim_grace_seconds' => 120,
@@ -1756,7 +1760,8 @@ final class WorkerOrchestratorTest extends TestCase
             3,
             4,
             5,
-            eligibleBackfillSupply: false,
+            providerAvailable: $providerAvailable,
+            eligibleBackfillSupply: $eligibleBackfillSupply,
             backfillGroup: 'alt.test',
             backfillCursor: 100,
         );
@@ -1792,14 +1797,30 @@ final class WorkerOrchestratorTest extends TestCase
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
 
+        self::assertContains($expectedReason, $result['reasons']);
         self::assertContains('backfill_permit_claim_grace', $result['reasons']);
         self::assertFalse($result['permit_granted']);
+    }
+
+    /** @return array<string, array{bool, bool, string}> */
+    public static function softSupplyClaimGraceCases(): array
+    {
+        return [
+            'no eligible supply' => [true, false, 'backfill_no_eligible_supply'],
+            'provider unavailable after issue' => [false, false, 'backfill_provider_unavailable'],
+        ];
     }
 
     #[DataProvider('claimGraceRevocationCases')]
     public function test_claim_grace_never_overrides_hard_safety_or_the_exact_expiry(
         int $ageSeconds,
         bool $databaseMemorySafe,
+        bool $providerAvailable = true,
+        bool $cursorAvailable = true,
+        bool $currentGroupsAvailable = true,
+        int $backfillSafeQuantity = 10_000,
+        bool $highPressure = false,
+        int $databaseCurrentWaits = 0,
     ): void {
         config([
             'nntmux.orchestrator.auto_backfill' => true,
@@ -1820,9 +1841,15 @@ final class WorkerOrchestratorTest extends TestCase
             4,
             5,
             databaseMemorySafe: $databaseMemorySafe,
+            highPressure: $highPressure,
+            providerAvailable: $providerAvailable,
+            cursorAvailable: $cursorAvailable,
+            currentGroupsAvailable: $currentGroupsAvailable,
             eligibleBackfillSupply: false,
+            databaseCurrentWaits: $databaseCurrentWaits,
             backfillGroup: 'alt.test',
             backfillCursor: 100,
+            backfillSafeQuantity: $backfillSafeQuantity,
         );
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
@@ -1859,12 +1886,17 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertNotContains('backfill_permit_claim_grace', $result['reasons']);
     }
 
-    /** @return array<string, array{int, bool}> */
+    /** @return array<string, array{int, bool, bool?, bool?, bool?, int?, bool?, int?}> */
     public static function claimGraceRevocationCases(): array
     {
         return [
             'hard database safety failure during grace' => [60, false],
             'soft denial at exact grace expiry' => [120, true],
+            'provider unavailable cannot mask an exhausted cursor' => [60, true, false, false],
+            'provider unavailable cannot mask missing current groups' => [60, true, false, true, false],
+            'provider unavailable cannot mask insufficient safe capacity' => [60, true, false, true, true, 9_999],
+            'provider unavailable cannot mask high pressure' => [60, true, false, true, true, 10_000, true],
+            'provider unavailable cannot mask current database waits' => [60, true, false, true, true, 10_000, false, 1],
         ];
     }
 }

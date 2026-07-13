@@ -10,6 +10,12 @@ use Throwable;
 
 class WorkerOrchestrator
 {
+    /** @var list<string> */
+    private const array CLAIM_GRACE_SUPPLY_REASONS = [
+        'backfill_no_eligible_supply',
+        'backfill_provider_unavailable',
+    ];
+
     public function __construct(
         private readonly PipelineSnapshotRepository $snapshots,
         private readonly WorkerControlPolicy $policy,
@@ -245,7 +251,7 @@ class WorkerOrchestrator
                 && $permitObservation !== null
                 && time() - (int) $permitObservation['issued_at'] < (int) config('nntmux.orchestrator.permit_claim_grace_seconds', 120)
                 && (int) Settings::settingValue('orchestrator_bf_permit') === (int) $permitObservation['generation']
-                && in_array('backfill_no_eligible_supply', $decision->reasons, true);
+                && $this->safeToFinishPermitHandoff($snapshot, $decision);
             if (! $shadow) {
                 $generation = $issuePermit
                     ? $this->applier->apply(
@@ -358,6 +364,19 @@ class WorkerOrchestrator
                 }
             }
         }
+    }
+
+    private function safeToFinishPermitHandoff(PipelineSnapshot $snapshot, ControlDecision $decision): bool
+    {
+        return $snapshot->telemetryIsValid()
+            && $snapshot->hardSafetyPassed()
+            && $decision->profile->backfillEnabled
+            && ! $snapshot->highPressure
+            && $snapshot->databaseCurrentWaits === 0
+            && $snapshot->cursorAvailable
+            && $snapshot->currentGroupsAvailable
+            && $snapshot->backfillSafeQuantity >= 10_000
+            && array_intersect(self::CLAIM_GRACE_SUPPLY_REASONS, $decision->reasons) !== [];
     }
 
     /** @param array<string, mixed> $observation */
