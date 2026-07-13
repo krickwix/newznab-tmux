@@ -284,11 +284,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-delayed-attribution-orchestrator-v117',
+            ':microservices-pods-20260713-terminal-positive-orchestrator-v118',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-delayed-attribution-orchestrator-v117',
+            'microservices-pods-20260713-terminal-positive-orchestrator-v118',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
