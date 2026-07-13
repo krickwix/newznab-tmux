@@ -508,6 +508,22 @@ final class WorkerControlStateStoreTest extends TestCase
         self::assertSame(0, $store->backfillYieldHistory()['alt.test']['last_cursor_delta']);
     }
 
+    public function test_marking_a_retry_attempt_consumes_its_cooldown_without_incrementing_outcomes(): void
+    {
+        $store = new WorkerControlStateStore;
+        $store->recordBackfillYield('alt.test', cursorDelta: 10_000, nzbCreatedDelta: 0, now: 1_000);
+
+        $store->markBackfillTargetAttempted('alt.test', 2_000);
+
+        self::assertSame([
+            'attempts' => 1,
+            'ewma_nzbs_per_10k' => 0.0,
+            'last_attempt_at' => 2_000,
+            'last_effective_at' => 0,
+            'last_cursor_delta' => 10_000,
+        ], $store->backfillYieldHistory()['alt.test']);
+    }
+
     public function test_yield_history_is_bounded_to_the_sixteen_most_recent_groups(): void
     {
         $store = new WorkerControlStateStore;

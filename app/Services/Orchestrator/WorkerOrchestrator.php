@@ -210,6 +210,9 @@ class WorkerOrchestrator
                         $this->snapshots->backfillOutcomeForGroup($snapshot->backfillGroup),
                         $backfillQuantity,
                     );
+                    if ($snapshot->backfillTargetLockRetryDue) {
+                        $this->store->markBackfillTargetAttempted($snapshot->backfillGroup, time());
+                    }
                 }
             }
             $this->store->storeState($decision->nextState);

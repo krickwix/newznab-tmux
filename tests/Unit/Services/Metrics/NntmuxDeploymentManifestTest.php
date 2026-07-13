@@ -260,11 +260,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-lock-retry-v94',
+            ':microservices-pods-20260713-lock-retry-v95',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-lock-retry-v94',
+            'microservices-pods-20260713-lock-retry-v95',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
@@ -283,6 +283,10 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '120',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PERMIT_CLAIM_GRACE_SECONDS'] ?? null,
+        );
+        self::assertSame(
+            '21600',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_TARGET_LOCK_RETRY_SECONDS'] ?? null,
         );
         self::assertSame(
             '120',

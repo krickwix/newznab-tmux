@@ -92,6 +92,16 @@ final readonly class BackfillTargetSelector
             return null;
         }
 
+        $candidates = array_map(function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget): array {
+            $entry = $history[$candidate['name']] ?? null;
+            $candidate['lock_retry_due'] = is_array($entry)
+                && (int) ($entry['last_attempt_at'] ?? 0) > 0
+                && $now - (int) $entry['last_attempt_at'] >= $this->lockRetrySeconds
+                && (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) >= WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT;
+
+            return $candidate;
+        }, $candidates);
+
         $byName = [];
         foreach ($candidates as $candidate) {
             $byName[$candidate['name']] = $candidate;

@@ -617,6 +617,7 @@ final class BackfillTargetSelectorTest extends TestCase
         ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: ['alt.probe.criterion' => 2]);
 
         self::assertSame('alt.probe.criterion', $target['name'] ?? null);
+        self::assertTrue($target['lock_retry_due'] ?? false);
     }
 
     public function test_it_keeps_a_locked_target_excluded_during_the_cooldown(): void

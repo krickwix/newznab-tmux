@@ -142,6 +142,7 @@ class PipelineSnapshotRepository
             backfillLastEffectiveAt: is_array($targetHistory) ? (int) ($targetHistory['last_effective_at'] ?? 0) : 0,
             backfillHistoryRecent: $historyIsRecent,
             backfillTargetIneffectivePermits: (int) ($controlState->ineffectiveBackfillPermitsByTarget[$backfillGroup] ?? 0),
+            backfillTargetLockRetryDue: (bool) ($backfillTarget['lock_retry_due'] ?? false),
             backfillRemainingArticles: (int) ($backfillTarget['remaining_articles'] ?? 0),
             backfillSafeQuantity: (int) ($backfillTarget['safe_quantity'] ?? 0),
             bodyRecoveryQueueBacklog: $this->bodyRecoveryQueueBacklog(),

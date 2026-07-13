@@ -782,6 +782,25 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('backfill_target_lock_overridden_by_proven_yield', $decision->reasons);
     }
 
+    public function test_a_due_bounded_retry_overrides_only_the_selected_target_lock(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            lastTransitionAt: 9_900,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 2],
+        );
+        $snapshot = $this->greenBackfillSnapshot(
+            backfillGroup: 'alt.a',
+            backfillTargetLockRetryDue: true,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($snapshot, $state, 10_000);
+
+        self::assertTrue($decision->backfillPermitted);
+        self::assertContains('backfill_target_lock_retry_due', $decision->reasons);
+        self::assertSame(2, $decision->nextState->ineffectiveBackfillPermitsByTarget['alt.a']);
+    }
+
     #[DataProvider('nonProvenTargetLockProvider')]
     public function test_expired_or_below_threshold_history_remains_target_locked(float $yield, bool $recent): void
     {

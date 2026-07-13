@@ -564,6 +564,28 @@ class WorkerControlStateStore
             ->forever(self::BACKFILL_YIELD_KEY, $history);
     }
 
+    public function markBackfillTargetAttempted(string $group, int $now): void
+    {
+        if ($group === '') {
+            return;
+        }
+
+        $history = $this->backfillYieldHistory();
+        $entry = $history[$group] ?? [
+            'attempts' => 0,
+            'ewma_nzbs_per_10k' => 0.0,
+            'last_attempt_at' => 0,
+            'last_effective_at' => 0,
+            'last_cursor_delta' => 0,
+        ];
+        $entry['last_attempt_at'] = max(0, $now);
+        $history[$group] = $entry;
+        uasort($history, static fn (array $left, array $right): int => $right['last_attempt_at'] <=> $left['last_attempt_at']);
+
+        Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+            ->forever(self::BACKFILL_YIELD_KEY, array_slice($history, 0, 16, preserve_keys: true));
+    }
+
     /** @param array<string, mixed> $decision */
     public function storeDecision(array $decision): void
     {

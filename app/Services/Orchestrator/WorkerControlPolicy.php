@@ -145,7 +145,11 @@ final class WorkerControlPolicy
             && $snapshot->backfillYieldNzbsPer10k >= $this->provenYieldOverrideThreshold;
         $targetLocked = $snapshot->backfillGroup !== ''
             && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= self::INEFFECTIVE_BACKFILL_LIMIT
-            && ! $targetLockOverridden;
+            && ! $targetLockOverridden
+            && ! $snapshot->backfillTargetLockRetryDue;
+        if ($snapshot->backfillTargetLockRetryDue) {
+            $reasons[] = 'backfill_target_lock_retry_due';
+        }
         if ($targetLockOverridden
             && $snapshot->backfillGroup !== ''
             && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= self::INEFFECTIVE_BACKFILL_LIMIT
