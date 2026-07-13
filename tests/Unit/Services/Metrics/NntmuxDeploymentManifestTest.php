@@ -41,8 +41,15 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $backfill = null;
         $bodyRecovery = null;
         $bodyRecoveryWorker = null;
+        $providerRangeRefresh = null;
         $orchestrator = null;
         foreach ($manifest['items'] as $deployment) {
+            if (is_array($deployment)
+                && ($deployment['kind'] ?? null) === 'CronJob'
+                && ($deployment['metadata']['name'] ?? null) === 'nntmux-provider-range-refresh'
+            ) {
+                $providerRangeRefresh = $deployment;
+            }
             if (is_array($deployment)
                 && ($deployment['kind'] ?? null) === 'CronJob'
                 && ($deployment['metadata']['name'] ?? null) === 'nntmux-body-recovery'
@@ -100,6 +107,17 @@ final class NntmuxDeploymentManifestTest extends TestCase
         }
 
         self::assertNotEmpty($workers);
+        self::assertIsArray($providerRangeRefresh);
+        self::assertSame('*/5 * * * *', $providerRangeRefresh['spec']['schedule'] ?? null);
+        self::assertSame('Forbid', $providerRangeRefresh['spec']['concurrencyPolicy'] ?? null);
+        self::assertSame(
+            ['php', 'artisan', 'groups:update'],
+            $providerRangeRefresh['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['args'] ?? null,
+        );
+        self::assertStringEndsWith(
+            ':microservices-pods-20260713-provider-range-v93',
+            (string) ($providerRangeRefresh['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
+        );
         self::assertIsArray($backfill);
         self::assertSame(1, $backfill['spec']['replicas'] ?? null);
         self::assertIsArray($orchestrator);
