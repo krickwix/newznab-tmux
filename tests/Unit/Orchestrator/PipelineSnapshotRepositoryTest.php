@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Orchestrator;
 
+use App\Models\Settings;
 use App\Services\Nzb\NzbBacklogCreationService;
 use App\Services\Orchestrator\BodyRecoverySourceCriteria;
 use App\Services\Orchestrator\ControlState;
@@ -11,8 +12,10 @@ use App\Services\Orchestrator\PipelineSnapshot;
 use App\Services\Orchestrator\PipelineSnapshotRepository;
 use App\Services\Orchestrator\PrometheusSafetySignalProvider;
 use App\Services\Orchestrator\WorkerControlStateStore;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Mockery;
 use ReflectionMethod;
 use Tests\TestCase;
@@ -439,6 +442,78 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         );
 
         self::assertSame([], $repository->backfillCandidates());
+    }
+
+    public function test_pending_cohort_query_matches_collection_and_binary_completion_gates(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 14_400);
+        Schema::dropIfExists('settings');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        Settings::query()->updateOrCreate(['name' => 'completionpercent'], ['value' => '94']);
+        DB::shouldReceive('scalar')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('c.filecheck IN (0, 1, 2, 3, 10, 15, 16)', $sql);
+                self::assertStringContainsString('GROUP BY c.id, c.totalfiles, c.filecheck, c.dateadded', $sql);
+                self::assertStringContainsString('COALESCE(NULLIF(c.totalfiles, 0), MAX(NULLIF(b.filenumber, 0)), 0) > 0', $sql);
+                self::assertStringContainsString('COUNT(DISTINCT CASE WHEN b.filenumber > 0 THEN b.filenumber ELSE b.id END)', $sql);
+                self::assertStringContainsString('WHEN b.totalparts > 0 AND b.currentparts >= CEIL(b.totalparts * ? / 100) THEN 1', $sql);
+                self::assertStringContainsString('END) >= GREATEST(1, CEIL(COALESCE(NULLIF(c.totalfiles, 0), MAX(NULLIF(b.filenumber, 0)), 0) * ? / 100))', $sql);
+                self::assertStringContainsString('c.filecheck IN (0, 1, 10)', $sql);
+                self::assertStringContainsString('c.dateadded < DATE_SUB(NOW(), INTERVAL ? HOUR)', $sql);
+                self::assertStringContainsString('END) = COUNT(b.id)', $sql);
+                self::assertStringContainsString('c.filecheck = 3', $sql);
+                self::assertSame([
+                    'alt.test',
+                    '2026-07-13 04:13:35',
+                    '2026-07-13 04:12:34',
+                    14_400,
+                    '2026-07-13 04:13:35',
+                    '2026-07-13 04:12:34',
+                    14_400,
+                    94,
+                    94,
+                    94,
+                    2,
+                    94,
+                ], $bindings);
+
+                return true;
+            })
+            ->andReturn(0);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame(0, $repository->backfillPendingCollectionsForCohort(
+            'alt.test',
+            '2026-07-13 04:13:35',
+            '2026-07-13 04:12:34',
+        ));
+    }
+
+    public function test_pending_cohort_completion_uses_the_release_pipeline_zero_fallback(): void
+    {
+        Schema::dropIfExists('settings');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'backfillCompletionPercent');
+
+        Settings::query()->updateOrCreate(['name' => 'completionpercent'], ['value' => '0']);
+        self::assertSame(100, $method->invoke($repository));
+
+        Settings::query()->updateOrCreate(['name' => 'completionpercent'], ['value' => '94']);
+        self::assertSame(94, $method->invoke($repository));
     }
 
     public function test_group_outcome_uses_a_mariadb_safe_cursor_alias(): void

@@ -508,22 +508,39 @@ class PipelineSnapshotRepository
         string $endPostdate,
     ): int {
         $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
-        $completion = min(100, max(0, (int) (Settings::settingValue('completionpercent') ?? 94)));
+        $completion = $this->backfillCompletionPercent();
+        $collectionDelayHours = (int) (Settings::settingValue('delaytime') ?? 2);
 
-        return (int) DB::scalar('SELECT COUNT(DISTINCT c.id)
+        return (int) DB::scalar('SELECT COUNT(*) FROM (
+            SELECT c.id
             FROM collections c
             INNER JOIN usenet_groups g ON g.id = c.groups_id
-            INNER JOIN binaries existing ON existing.collections_id = c.id
-            LEFT JOIN binaries incomplete ON incomplete.collections_id = c.id
-                AND (incomplete.currentparts < CEIL(incomplete.totalparts * ? / 100)
-                    OR incomplete.totalparts <= 0)
+            INNER JOIN binaries b ON b.collections_id = c.id
             WHERE g.name = ?
-            AND incomplete.id IS NULL
             AND c.releases_id IS NULL
-            AND c.filecheck IN (0, 1, 2, 15, 16)
+            AND c.filecheck IN (0, 1, 2, 3, 10, 15, 16)
             AND c.date BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)
-                AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', [
-            $completion,
+                AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)
+            GROUP BY c.id, c.totalfiles, c.filecheck, c.dateadded
+            HAVING (
+                COALESCE(NULLIF(c.totalfiles, 0), MAX(NULLIF(b.filenumber, 0)), 0) > 0
+                AND COUNT(DISTINCT CASE WHEN b.filenumber > 0 THEN b.filenumber ELSE b.id END)
+                    >= GREATEST(1, CEIL(COALESCE(NULLIF(c.totalfiles, 0), MAX(NULLIF(b.filenumber, 0)), 0) * ? / 100))
+                AND SUM(CASE
+                    WHEN b.totalparts > 0 AND b.currentparts >= CEIL(b.totalparts * ? / 100) THEN 1
+                    ELSE 0
+                END) >= GREATEST(1, CEIL(COALESCE(NULLIF(c.totalfiles, 0), MAX(NULLIF(b.filenumber, 0)), 0) * ? / 100))
+            ) OR (
+                c.filecheck IN (0, 1, 10)
+                AND c.dateadded < DATE_SUB(NOW(), INTERVAL ? HOUR)
+                AND SUM(CASE
+                    WHEN b.totalparts > 0 AND b.currentparts >= CEIL(b.totalparts * ? / 100) THEN 1
+                    ELSE 0
+                END) = COUNT(b.id)
+            ) OR (
+                c.filecheck = 3
+            )
+        ) releasable_collections', [
             $group,
             $startPostdate,
             $endPostdate,
@@ -531,7 +548,19 @@ class PipelineSnapshotRepository
             $startPostdate,
             $endPostdate,
             $postdateToleranceSeconds,
+            $completion,
+            $completion,
+            $completion,
+            $collectionDelayHours,
+            $completion,
         ]);
+    }
+
+    private function backfillCompletionPercent(): int
+    {
+        $completion = (int) (Settings::settingValue('completionpercent') ?? 94);
+
+        return $completion <= 0 ? 100 : min(100, $completion);
     }
 
     public function backfillCreatedReleasesForCohort(
