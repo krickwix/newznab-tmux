@@ -260,11 +260,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-growth-learning-v90',
+            ':microservices-pods-20260713-safety-retry-v91',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-growth-learning-v90',
+            'microservices-pods-20260713-safety-retry-v91',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
@@ -287,6 +287,10 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '120',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PRESSURE_HORIZON_MINUTES'] ?? null,
+        );
+        self::assertSame(
+            '3',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PROMETHEUS_RETRY_ATTEMPTS'] ?? null,
         );
         self::assertSame(
             'alt.binaries.lossless,alt.binaries.sounds.lossless.metal,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
