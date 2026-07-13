@@ -1003,6 +1003,27 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertNotContains('database_wait_or_deadlock', $decision->reasons);
     }
 
+    public function test_a_delayed_permit_generation_mutates_strikes_only_once(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $outcome = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: true,
+            backfillPermitInputMoved: true,
+            backfillPermitGroup: 'alt.test',
+            backfillPermitGeneration: 7,
+        );
+
+        $first = $policy->decide($outcome, new ControlState(profile: ControlProfile::Balanced), 10_000);
+        $replayed = $policy->decide($outcome, $first->nextState, 10_030);
+
+        self::assertSame(1, $first->nextState->ineffectiveBackfillPermitsByTarget['alt.test'] ?? null);
+        self::assertSame([7], $first->nextState->processedBackfillPermitGenerations);
+        self::assertSame(1, $replayed->nextState->ineffectiveBackfillPermitsByTarget['alt.test'] ?? null);
+        self::assertContains('backfill_permit_outcome_already_applied', $replayed->reasons);
+    }
+
     public function test_database_busy_reason_is_visible_under_every_other_denial_state(): void
     {
         $cases = [

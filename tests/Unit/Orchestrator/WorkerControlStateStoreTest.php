@@ -66,6 +66,7 @@ final class WorkerControlStateStoreTest extends TestCase
             failSafeLastObservedAt: 999,
             recoveryDrainSamples: 2,
             recoveryDrainHoldSamples: 1,
+            processedBackfillPermitGenerations: [7, 8],
         );
 
         $store->storeState($state);
@@ -271,6 +272,72 @@ final class WorkerControlStateStoreTest extends TestCase
         ]);
 
         self::assertArrayNotHasKey('prior_release_cohort', $store->permitObservation() ?? []);
+    }
+
+    public function test_delayed_attribution_is_generation_idempotent_bounded_and_non_destructive(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_delayed_attribution_seconds', 9_000);
+        $store = new WorkerControlStateStore;
+        $observation = [
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ];
+        $outcome = ['cursor_postdate' => '2026-01-01 03:04:05'];
+
+        self::assertTrue($store->queueBackfillDelayedAttribution($observation, $outcome, 10_000, 1_000));
+        self::assertTrue($store->queueBackfillDelayedAttribution($observation, $outcome, 10_000, 2_000));
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
+        self::assertNull($store->matureBackfillDelayedAttribution(9_999));
+        self::assertSame([
+            'schema_version' => 1,
+            'generation' => 7,
+            'group' => 'alt.test',
+            'queued_at' => 1_000,
+            'settle_after' => 10_000,
+            'release_high_watermark' => 100,
+            'cursor_start_postdate' => '2026-01-02 03:04:05',
+            'cursor_end_postdate' => '2026-01-01 03:04:05',
+            'cursor_delta' => 10_000,
+        ], $store->matureBackfillDelayedAttribution(10_000));
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
+        self::assertTrue($store->completeBackfillDelayedAttribution(7));
+        self::assertFalse($store->completeBackfillDelayedAttribution(7));
+        self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
+    }
+
+    public function test_delayed_attribution_rejects_partial_or_malformed_input(): void
+    {
+        $store = new WorkerControlStateStore;
+        $valid = [
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ];
+        $outcome = ['cursor_postdate' => '2026-01-01 03:04:05'];
+
+        self::assertFalse($store->queueBackfillDelayedAttribution($valid, $outcome, 9_999, 1_000));
+        self::assertFalse($store->queueBackfillDelayedAttribution([...$valid, 'generation' => 0], $outcome, 10_000, 1_000));
+        self::assertFalse($store->queueBackfillDelayedAttribution([...$valid, 'backfill_group' => ''], $outcome, 10_000, 1_000));
+        self::assertFalse($store->queueBackfillDelayedAttribution($valid, ['cursor_postdate' => 'invalid'], 10_000, 1_000));
+        self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
+    }
+
+    public function test_delayed_yield_is_generation_idempotent(): void
+    {
+        $store = new WorkerControlStateStore;
+
+        $store->recordBackfillYield('alt.test', 10_000, 3, 1_000, generation: 7);
+        $store->markBackfillTargetAttempted('alt.other', 1_500);
+        $store->recordBackfillYield('alt.test', 10_000, 3, 2_000, generation: 7);
+
+        self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts'] ?? null);
+        self::assertSame(3.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
+        self::assertSame(1_000, $store->backfillYieldHistory()['alt.test']['last_attempt_at'] ?? null);
     }
 
     public function test_permit_observation_retains_peak_backlogs_after_later_drain(): void

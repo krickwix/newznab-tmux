@@ -237,6 +237,37 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame(10_000, $target['safe_quantity'] ?? null);
     }
 
+    public function test_repository_excludes_a_group_with_pending_delayed_attribution(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.backfill_probe_groups' => ['alt.pending', 'alt.safe'],
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+        ]);
+        Cache::store('array')->flush();
+        $state = new WorkerControlStateStore;
+        self::assertTrue($state->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.pending',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, 1_000));
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'selectBackfillTarget');
+
+        $target = $method->invoke($repository, [
+            ['name' => 'alt.pending', 'cursor' => 40_000, 'cursor_postdate' => '2026-01-03 00:00:00', 'remaining_articles' => 40_000, 'safe_quantity' => 40_000],
+            ['name' => 'alt.safe', 'cursor' => 30_000, 'cursor_postdate' => '2026-01-02 00:00:00', 'remaining_articles' => 30_000, 'safe_quantity' => 30_000],
+        ], [], ControlState::initial(), 2_000_000_000);
+
+        self::assertSame('alt.safe', $target['name'] ?? null);
+    }
+
     public function test_legacy_snapshot_resets_new_collection_split_rates_without_a_fake_drain(): void
     {
         $repository = new PipelineSnapshotRepository(
@@ -450,6 +481,8 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('r.id > ?', $sql);
                 self::assertStringContainsString('r.id <= ?', $sql);
                 self::assertStringContainsString('c.root_categories_id NOT IN (1, 2000, 5000)', $sql);
+                self::assertStringContainsString('c.id NOT IN (2999, 5999)', $sql);
+                self::assertStringContainsString('c.id IN (2999, 5999)', $sql);
                 self::assertSame(['alt.test', 100, 103, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600], $bindings);
 
                 return true;
@@ -527,6 +560,8 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('c.root_categories_id IN (2000, 5000)', $sql);
                 self::assertStringContainsString('c.root_categories_id NOT IN (1, 2000, 5000)', $sql);
                 self::assertStringContainsString('c.root_categories_id = 1', $sql);
+                self::assertStringContainsString('c.id NOT IN (2999, 5999)', $sql);
+                self::assertStringContainsString('c.id IN (2999, 5999)', $sql);
                 self::assertStringContainsString('r.id > ?', $sql);
                 self::assertStringContainsString('r.nzbstatus = 1', $sql);
                 self::assertSame([

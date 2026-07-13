@@ -32,7 +32,26 @@ final class WorkerControlPolicy
 
     public function decide(PipelineSnapshot $snapshot, ControlState $state, int $now): ControlDecision
     {
+        $permitOutcomeAlreadyApplied = $snapshot->backfillPermitCompleted
+            && $snapshot->backfillPermitGeneration > 0
+            && in_array($snapshot->backfillPermitGeneration, $state->processedBackfillPermitGenerations, true);
         [$ineffectivePermits, $backfillLocked, $targetIneffectivePermits, $effectivenessReasons] = $this->applyPermitOutcome($snapshot, $state);
+        if ($permitOutcomeAlreadyApplied) {
+            $ineffectivePermits = $state->consecutiveIneffectiveBackfillPermits;
+            $backfillLocked = $state->backfillLocked;
+            $targetIneffectivePermits = $state->ineffectiveBackfillPermitsByTarget;
+            $effectivenessReasons = ['backfill_permit_outcome_already_applied'];
+        }
+        $processedPermitGenerations = $state->processedBackfillPermitGenerations;
+        if ($snapshot->backfillPermitCompleted
+            && $snapshot->backfillPermitGeneration > 0
+            && ! $permitOutcomeAlreadyApplied
+        ) {
+            $processedPermitGenerations = array_slice([
+                ...$processedPermitGenerations,
+                $snapshot->backfillPermitGeneration,
+            ], -64);
+        }
 
         if (! $snapshot->telemetryIsValid() || ! $snapshot->hardSafetyPassed()) {
             $transitioned = $state->profile !== ControlProfile::FailSafe;
@@ -58,6 +77,7 @@ final class WorkerControlPolicy
                 ineffectiveBackfillPermitsByTarget: $targetIneffectivePermits,
                 failSafeCause: $cause,
                 failSafeLastObservedAt: max($state->failSafeLastObservedAt, $snapshot->observedAt),
+                processedBackfillPermitGenerations: $processedPermitGenerations,
             );
 
             return new ControlDecision(
@@ -88,6 +108,7 @@ final class WorkerControlPolicy
                 $targetIneffectivePermits,
                 $effectivenessReasons,
                 $pressureReason,
+                $processedPermitGenerations,
             );
         }
 
@@ -123,6 +144,7 @@ final class WorkerControlPolicy
             ineffectiveBackfillPermitsByTarget: $targetIneffectivePermits,
             failSafeCause: $profile === ControlProfile::FailSafe ? FailSafeCause::Telemetry : null,
             failSafeLastObservedAt: $profile === ControlProfile::FailSafe ? $snapshot->observedAt : 0,
+            processedBackfillPermitGenerations: $processedPermitGenerations,
         );
         $workerProfile = WorkerControlProfile::for($profile);
         $targetLocked = $snapshot->backfillGroup !== ''
@@ -163,6 +185,7 @@ final class WorkerControlPolicy
         array $targetIneffectivePermits,
         array $effectivenessReasons,
         string $pressureReason,
+        array $processedPermitGenerations,
     ): ControlDecision {
         $cause = $state->failSafeCause ?? FailSafeCause::Unknown;
         $distinctSample = $snapshot->observedAt - $state->failSafeLastObservedAt >= self::RECOVERY_SAMPLE_MIN_SPACING_SECONDS;
@@ -214,6 +237,7 @@ final class WorkerControlPolicy
             failSafeLastObservedAt: $distinctSample ? $snapshot->observedAt : $state->failSafeLastObservedAt,
             recoveryDrainSamples: $recoveryDrainSamples,
             recoveryDrainHoldSamples: $recoveryDrainHoldSamples,
+            processedBackfillPermitGenerations: $processedPermitGenerations,
         );
 
         return new ControlDecision(

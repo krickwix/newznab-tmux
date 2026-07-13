@@ -21,6 +21,8 @@ final readonly class ControlState
         public int $failSafeLastObservedAt = 0,
         public int $recoveryDrainSamples = 0,
         public int $recoveryDrainHoldSamples = 0,
+        /** @var list<int> */
+        public array $processedBackfillPermitGenerations = [],
     ) {
         if ($consecutiveHigh < 0 || $consecutiveLow < 0 || $consecutiveIneffectiveBackfillPermits < 0 || $failSafeRecoverySamples < 0 || $failSafeLastObservedAt < 0 || $recoveryDrainSamples < 0 || $recoveryDrainHoldSamples < 0) {
             throw new \InvalidArgumentException('Control state counters cannot be negative.');
@@ -28,6 +30,11 @@ final readonly class ControlState
         foreach ($ineffectiveBackfillPermitsByTarget as $group => $count) {
             if (! is_string($group) || $group === '' || $count < 0 || $count > WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT) {
                 throw new \InvalidArgumentException('Target ineffective permit counters must use a group name and remain bounded.');
+            }
+        }
+        foreach ($processedBackfillPermitGenerations as $generation) {
+            if (! is_int($generation) || $generation <= 0) {
+                throw new \InvalidArgumentException('Processed permit generations must be positive integers.');
             }
         }
     }

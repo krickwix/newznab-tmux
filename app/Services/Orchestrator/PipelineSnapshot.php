@@ -62,6 +62,7 @@ final readonly class PipelineSnapshot
         public int $collectionsTotalBacklog = 0,
         public int $bodyRecoverySourceBacklog = 0,
         public int $oldestBodyRecoverySourceAgeSeconds = 0,
+        public int $backfillPermitGeneration = 0,
     ) {}
 
     public function withPermitOutcome(
@@ -72,6 +73,7 @@ final readonly class PipelineSnapshot
         bool $contextProgress = false,
         string $group = '',
         string $qualityFailure = '',
+        int $generation = 0,
     ): self {
         return new self(
             partsBacklog: $this->partsBacklog,
@@ -127,6 +129,7 @@ final readonly class PipelineSnapshot
             collectionsTotalBacklog: $this->collectionsTotalBacklog,
             bodyRecoverySourceBacklog: $this->bodyRecoverySourceBacklog,
             oldestBodyRecoverySourceAgeSeconds: $this->oldestBodyRecoverySourceAgeSeconds,
+            backfillPermitGeneration: max(0, $generation),
         );
     }
 

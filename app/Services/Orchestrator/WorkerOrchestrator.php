@@ -32,6 +32,8 @@ class WorkerOrchestrator
         $acquired = false;
         $shadowQualityFailure = null;
         $abandonedPermit = false;
+        $delayedAttributionQueued = false;
+        $delayedAttributionSettled = null;
         try {
             $lock = $this->store->leaderLock();
             if (! $lock->get()) {
@@ -41,6 +43,9 @@ class WorkerOrchestrator
             $previous = $this->store->previousSnapshot();
             $snapshot = $this->snapshots->capture($previous);
             $permitObservation = $this->store->permitObservation();
+            if (! $shadow && $permitObservation === null) {
+                [$snapshot, $delayedAttributionSettled] = $this->settleMatureDelayedAttribution($snapshot, time());
+            }
             if ((int) ($permitObservation['schema_version'] ?? 0) === 2) {
                 $permitObservation = $this->store->updatePermitObservationPeaks($snapshot);
             }
@@ -143,13 +148,32 @@ class WorkerOrchestrator
                     $cohortNzbs,
                     time(),
                 );
+                $deferAttribution = $permitClaimed
+                    && $permitCompleted
+                    && $cursorMoved
+                    && $requestedQuantity >= 10_000
+                    && $cursorDelta === $requestedQuantity
+                    && $cohortQuality['productive'] === 0
+                    && $cohortQuality['failure'] === null;
+                if ($deferAttribution && ! $shadow) {
+                    $delayedAttributionQueued = $this->store->queueBackfillDelayedAttribution(
+                        $permitObservation,
+                        $outcome,
+                        $cursorDelta,
+                        time(),
+                    );
+                }
                 $closeObservation = $cohortQuality['failure'] !== null
                     || (! $cohortQuality['hold'] && (
                         $observationExpired
                         || ($permitCompleted && $cursorMoved && $cohortQuality['productive'] > 0 && $snapshot->eligibleNzbs === 0)
                         || ($permitCompleted && ! $cursorMoved)
                         || $zeroOutputContextReady
-                    ));
+                    ))
+                    || ($deferAttribution && $delayedAttributionQueued);
+                if ($deferAttribution && ($shadow || ! $delayedAttributionQueued)) {
+                    $closeObservation = false;
+                }
                 if ($shadow && $cohortQuality['failure'] !== null) {
                     $shadowQualityFailure = $cohortQuality['failure'];
                     $closeObservation = false;
@@ -173,7 +197,7 @@ class WorkerOrchestrator
                         ? $this->applier->revokePermit()
                         : $this->applier->qualityLockBackfillTarget($observedGroup, $cohortQuality['failure']);
                 }
-                if ($closeObservation && ! $shadow && ! $abandonedPermit && $permitClaimed && $hasCohortBaseline) {
+                if ($closeObservation && ! $shadow && ! $abandonedPermit && ! $delayedAttributionQueued && $permitClaimed && $hasCohortBaseline) {
                     if ($this->shouldRememberIncompleteReleaseCohort(
                         $permitObservation,
                         $permitCompleted,
@@ -220,7 +244,7 @@ class WorkerOrchestrator
                         $this->store->markBackfillContextRepeat($observedGroup, time());
                     }
                 }
-                if ($closeObservation && ! $shadow && ! $abandonedPermit) {
+                if ($closeObservation && ! $shadow && ! $abandonedPermit && ! $delayedAttributionQueued) {
                     $snapshot = $snapshot->withPermitOutcome(
                         completed: true,
                         effective: $permitClaimed && $cursorMoved && ($hasCohortBaseline ? $cohortQuality['productive'] > 0 : $produced),
@@ -229,6 +253,7 @@ class WorkerOrchestrator
                         contextProgress: $contextProgress,
                         group: $observedGroup,
                         qualityFailure: $cohortQuality['failure'] ?? '',
+                        generation: (int) ($permitObservation['generation'] ?? 0),
                     );
                 }
                 if ($closeObservation && ! $shadow) {
@@ -242,6 +267,7 @@ class WorkerOrchestrator
                 && (bool) config('nntmux.orchestrator.auto_backfill', false)
                 && $decision->backfillPermitted
                 && $permitObservation === null
+                && $delayedAttributionSettled === null
                 && (int) Settings::settingValue('orchestrator_bf_permit') === 0;
             $issuePermit = $grantPermit || $autoGrant;
             $backfillQuantity = $decision->profile->quantityForYield(
@@ -291,6 +317,9 @@ class WorkerOrchestrator
                 }
             }
             $this->store->storeState($decision->nextState);
+            if ($delayedAttributionSettled !== null) {
+                $this->store->completeBackfillDelayedAttribution((int) $delayedAttributionSettled['generation']);
+            }
             $this->store->storeSnapshot($snapshot);
 
             $result = [
@@ -305,6 +334,8 @@ class WorkerOrchestrator
                     ...$decision->reasons,
                     ...($preserveUnclaimedPermit ? ['backfill_permit_claim_grace'] : []),
                     ...($abandonedPermit ? ['backfill_permit_abandoned_after_worker_exit'] : []),
+                    ...($delayedAttributionQueued ? ['backfill_delayed_attribution_queued'] : []),
+                    ...($delayedAttributionSettled === null ? [] : ['backfill_delayed_attribution_settled']),
                     ...($shadowQualityFailure === null ? [] : [$shadowQualityFailure, 'backfill_quality_shadow_observation']),
                 ],
                 'backlogs' => [
@@ -342,6 +373,12 @@ class WorkerOrchestrator
                     'quantity' => $issuePermit && $decision->backfillPermitted ? $backfillQuantity : 0,
                     'safe_quantity' => $snapshot->backfillSafeQuantity,
                 ],
+                'delayed_attribution' => [
+                    'pending_groups' => $this->store->pendingBackfillDelayedAttributionGroups(),
+                    'settled_generation' => $delayedAttributionSettled['generation'] ?? null,
+                    'settled_group' => $delayedAttributionSettled['group'] ?? null,
+                    'settled_result' => $delayedAttributionSettled['result'] ?? null,
+                ],
             ];
             $this->store->storeDecision($result);
             Log::info('NNTmux worker orchestrator decision', $result);
@@ -373,6 +410,74 @@ class WorkerOrchestrator
                 }
             }
         }
+    }
+
+    /** @return array{PipelineSnapshot, array{generation: int, group: string, result: string}|null} */
+    private function settleMatureDelayedAttribution(PipelineSnapshot $snapshot, int $now): array
+    {
+        $entry = $this->store->matureBackfillDelayedAttribution($now);
+        if ($entry === null
+            || ! $snapshot->telemetryIsValid()
+            || ! $snapshot->hardSafetyPassed()
+            || $snapshot->highPressure
+            || $snapshot->databaseCurrentWaits > 0
+            || $snapshot->eligibleNzbs > 0
+        ) {
+            return [$snapshot, null];
+        }
+
+        $group = trim((string) ($entry['group'] ?? ''));
+        $generation = (int) ($entry['generation'] ?? 0);
+        $cursorDelta = (int) ($entry['cursor_delta'] ?? 0);
+        if ($group === '' || $generation <= 0 || $cursorDelta < 10_000) {
+            return [$snapshot, null];
+        }
+        $counts = $this->snapshots->backfillCreatedNzbCategoryCountsForCohort(
+            $group,
+            (int) ($entry['release_high_watermark'] ?? 0),
+            (string) ($entry['cursor_start_postdate'] ?? ''),
+            (string) ($entry['cursor_end_postdate'] ?? ''),
+        );
+        if ($this->snapshots->backfillPendingCollectionsForCohort(
+            $group,
+            (string) ($entry['cursor_start_postdate'] ?? ''),
+            (string) ($entry['cursor_end_postdate'] ?? ''),
+        ) > 0) {
+            return [$snapshot, null];
+        }
+        $qualityFailure = match (true) {
+            $counts['non_target'] > 0 => 'backfill_permit_wrong_category',
+            $counts['uncategorized'] > 0 => 'backfill_permit_uncategorized_after_grace',
+            default => '',
+        };
+        $productive = $qualityFailure === '' ? max(0, (int) $counts['target']) : 0;
+        if ($qualityFailure !== '') {
+            $this->applier->qualityLockBackfillTarget($group, $qualityFailure);
+        }
+        $this->store->recordBackfillYield(
+            $group,
+            cursorDelta: $cursorDelta,
+            nzbCreatedDelta: $productive,
+            now: $now,
+            generation: $generation,
+        );
+
+        return [
+            $snapshot->withPermitOutcome(
+                completed: true,
+                effective: $productive > 0,
+                claimed: true,
+                inputMoved: true,
+                group: $group,
+                qualityFailure: $qualityFailure,
+                generation: $generation,
+            ),
+            [
+                'generation' => $generation,
+                'group' => $group,
+                'result' => $qualityFailure !== '' ? $qualityFailure : ($productive > 0 ? 'productive' : 'zero_output'),
+            ],
+        ];
     }
 
     /** @param array<string, mixed> $permitObservation */

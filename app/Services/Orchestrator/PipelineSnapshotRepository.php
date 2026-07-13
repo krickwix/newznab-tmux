@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Orchestrator;
 
+use App\Models\Settings;
 use App\Services\Nzb\NzbBacklogCreationService;
 use Illuminate\Support\Facades\DB;
 
@@ -302,6 +303,12 @@ class PipelineSnapshotRepository
      */
     private function selectBackfillTarget(array $candidates, array $history, ControlState $state, int $now): ?array
     {
+        $pendingGroups = $this->state->pendingBackfillDelayedAttributionGroups();
+        $candidates = array_values(array_filter(
+            $candidates,
+            static fn (array $candidate): bool => ! in_array($candidate['name'], $pendingGroups, true),
+        ));
+
         return $this->targets->select(
             $candidates,
             $history,
@@ -469,12 +476,15 @@ class PipelineSnapshotRepository
             $postdateToleranceSeconds,
         );
         $row = DB::selectOne('SELECT
-            COALESCE(SUM(CASE WHEN c.root_categories_id IN (2000, 5000) THEN 1 ELSE 0 END), 0) AS target,
+            COALESCE(SUM(CASE WHEN c.root_categories_id IN (2000, 5000)
+                AND c.id NOT IN (2999, 5999) THEN 1 ELSE 0 END), 0) AS target,
             COALESCE(SUM(CASE WHEN c.root_categories_id IS NOT NULL
-                AND c.root_categories_id NOT IN (1, 2000, 5000) THEN 1 ELSE 0 END), 0) AS non_target,
+                AND c.root_categories_id NOT IN (1, 2000, 5000)
+                AND c.id NOT IN (2999, 5999) THEN 1 ELSE 0 END), 0) AS non_target,
             COALESCE(SUM(CASE WHEN c.id IS NULL
                 OR c.root_categories_id IS NULL
-                OR c.root_categories_id = 1 THEN 1 ELSE 0 END), 0) AS uncategorized
+                OR c.root_categories_id = 1
+                OR c.id IN (2999, 5999) THEN 1 ELSE 0 END), 0) AS uncategorized
             FROM releases r
             INNER JOIN usenet_groups g ON g.id = r.groups_id
             LEFT JOIN categories c ON c.id = r.categories_id
@@ -490,6 +500,38 @@ class PipelineSnapshotRepository
             'non_target' => max(0, (int) ($row->non_target ?? 0)),
             'uncategorized' => max(0, (int) ($row->uncategorized ?? 0)),
         ];
+    }
+
+    public function backfillPendingCollectionsForCohort(
+        string $group,
+        string $startPostdate,
+        string $endPostdate,
+    ): int {
+        $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+        $completion = min(100, max(0, (int) (Settings::settingValue('completionpercent') ?? 94)));
+
+        return (int) DB::scalar('SELECT COUNT(DISTINCT c.id)
+            FROM collections c
+            INNER JOIN usenet_groups g ON g.id = c.groups_id
+            INNER JOIN binaries existing ON existing.collections_id = c.id
+            LEFT JOIN binaries incomplete ON incomplete.collections_id = c.id
+                AND (incomplete.currentparts < CEIL(incomplete.totalparts * ? / 100)
+                    OR incomplete.totalparts <= 0)
+            WHERE g.name = ?
+            AND incomplete.id IS NULL
+            AND c.releases_id IS NULL
+            AND c.filecheck IN (0, 1, 2, 15, 16)
+            AND c.date BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)
+                AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', [
+            $completion,
+            $group,
+            $startPostdate,
+            $endPostdate,
+            $postdateToleranceSeconds,
+            $startPostdate,
+            $endPostdate,
+            $postdateToleranceSeconds,
+        ]);
     }
 
     public function backfillCreatedReleasesForCohort(

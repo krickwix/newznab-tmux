@@ -24,6 +24,10 @@ class WorkerControlStateStore
 
     private const string BACKFILL_CONTEXT_REPEAT_KEY = 'nntmux:orchestrator:backfill-context-repeat';
 
+    private const string BACKFILL_DELAYED_ATTRIBUTION_KEY = 'nntmux:orchestrator:backfill-delayed-attribution';
+
+    private const int BACKFILL_DELAYED_ATTRIBUTION_LIMIT = 16;
+
     public const string DECISION_KEY = 'nntmux:orchestrator:last-decision';
 
     public function leaderLock(): Lock
@@ -58,6 +62,7 @@ class WorkerControlStateStore
             failSafeLastObservedAt: max(0, (int) ($data['fail_safe_last_observed_at'] ?? 0)),
             recoveryDrainSamples: max(0, (int) ($data['recovery_drain_samples'] ?? 0)),
             recoveryDrainHoldSamples: max(0, (int) ($data['recovery_drain_hold_samples'] ?? 0)),
+            processedBackfillPermitGenerations: $this->processedPermitGenerations($data['processed_permit_generations'] ?? []),
         );
     }
 
@@ -77,7 +82,21 @@ class WorkerControlStateStore
             'fail_safe_last_observed_at' => $state->failSafeLastObservedAt,
             'recovery_drain_samples' => $state->recoveryDrainSamples,
             'recovery_drain_hold_samples' => $state->recoveryDrainHoldSamples,
+            'processed_permit_generations' => array_slice($state->processedBackfillPermitGenerations, -64),
         ]);
+    }
+
+    /** @return list<int> */
+    private function processedPermitGenerations(mixed $value): array
+    {
+        if (! is_array($value)) {
+            return [];
+        }
+
+        return array_slice(array_values(array_unique(array_filter(
+            array_map('intval', $value),
+            static fn (int $generation): bool => $generation > 0,
+        ))), -64);
     }
 
     /** @param array<string, mixed> $data */
@@ -285,6 +304,127 @@ class WorkerControlStateStore
     public function clearPermitObservation(): void
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forget(self::PERMIT_OBSERVATION_KEY);
+    }
+
+    /**
+     * @param  array<string, mixed>  $observation
+     * @param  array<string, mixed>  $outcome
+     */
+    public function queueBackfillDelayedAttribution(
+        array $observation,
+        array $outcome,
+        int $cursorDelta,
+        int $now,
+    ): bool {
+        $generation = (int) ($observation['generation'] ?? 0);
+        $group = trim((string) ($observation['backfill_group'] ?? ''));
+        $quantity = (int) ($observation['backfill_quantity'] ?? 0);
+        $startPostdate = (string) ($observation['backfill_cursor_postdate'] ?? '');
+        $endPostdate = (string) ($outcome['cursor_postdate'] ?? '');
+        if ($generation <= 0
+            || $group === ''
+            || $now <= 0
+            || $quantity < 10_000
+            || $cursorDelta !== $quantity
+            || strtotime($startPostdate) === false
+            || strtotime($endPostdate) === false
+        ) {
+            return false;
+        }
+
+        $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+        $ledger = $cache->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
+        if (! is_array($ledger)) {
+            $ledger = [];
+        }
+        $key = (string) $generation;
+        if (isset($ledger[$key]) && is_array($ledger[$key])) {
+            return true;
+        }
+        foreach ($ledger as $entry) {
+            if (is_array($entry) && trim((string) ($entry['group'] ?? '')) === $group) {
+                return false;
+            }
+        }
+        if (count($ledger) >= self::BACKFILL_DELAYED_ATTRIBUTION_LIMIT) {
+            return false;
+        }
+
+        $ledger[$key] = [
+            'schema_version' => 1,
+            'generation' => $generation,
+            'group' => $group,
+            'queued_at' => $now,
+            'settle_after' => $now + (int) config('nntmux.orchestrator.backfill_delayed_attribution_seconds', 9_000),
+            'release_high_watermark' => max(0, (int) ($observation['release_high_watermark'] ?? 0)),
+            'cursor_start_postdate' => $startPostdate,
+            'cursor_end_postdate' => $endPostdate,
+            'cursor_delta' => $cursorDelta,
+        ];
+        $cache->forever(self::BACKFILL_DELAYED_ATTRIBUTION_KEY, $ledger);
+
+        return true;
+    }
+
+    /** @return list<string> */
+    public function pendingBackfillDelayedAttributionGroups(): array
+    {
+        $ledger = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+            ->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
+        if (! is_array($ledger)) {
+            return [];
+        }
+
+        $groups = [];
+        foreach ($ledger as $entry) {
+            if (is_array($entry)
+                && (int) ($entry['schema_version'] ?? 0) === 1
+                && (int) ($entry['generation'] ?? 0) > 0
+                && trim((string) ($entry['group'] ?? '')) !== ''
+            ) {
+                $groups[] = trim((string) $entry['group']);
+            }
+        }
+
+        return array_values(array_unique($groups));
+    }
+
+    /** @return array<string, int|string>|null */
+    public function matureBackfillDelayedAttribution(int $now): ?array
+    {
+        $ledger = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+            ->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
+        if (! is_array($ledger)) {
+            return null;
+        }
+
+        $mature = array_values(array_filter($ledger, static fn (mixed $entry): bool => is_array($entry)
+            && (int) ($entry['schema_version'] ?? 0) === 1
+            && (int) ($entry['generation'] ?? 0) > 0
+            && (int) ($entry['settle_after'] ?? 0) > 0
+            && (int) $entry['settle_after'] <= $now));
+        usort($mature, static fn (array $left, array $right): int => (int) $left['settle_after'] <=> (int) $right['settle_after']);
+
+        return $mature[0] ?? null;
+    }
+
+    public function completeBackfillDelayedAttribution(int $generation): bool
+    {
+        if ($generation <= 0) {
+            return false;
+        }
+        $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+        $ledger = $cache->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
+        $key = (string) $generation;
+        if (! is_array($ledger) || ! isset($ledger[$key])) {
+            return false;
+        }
+        unset($ledger[$key]);
+        $ledger === []
+            ? $cache->forget(self::BACKFILL_DELAYED_ATTRIBUTION_KEY)
+            : $cache->forever(self::BACKFILL_DELAYED_ATTRIBUTION_KEY, $ledger);
+
+        return true;
     }
 
     public function markBackfillContextRepeat(string $group, int $now): void
@@ -568,7 +708,7 @@ class WorkerControlStateStore
 
         $history = [];
         foreach ($value as $group => $entry) {
-            if (! is_string($group) || ! is_array($entry)) {
+            if (! is_string($group) || str_starts_with($group, '_') || ! is_array($entry)) {
                 continue;
             }
             $history[$group] = [
@@ -583,8 +723,21 @@ class WorkerControlStateStore
         return $history;
     }
 
-    public function recordBackfillYield(string $group, int $cursorDelta, int $nzbCreatedDelta, int $now): void
-    {
+    public function recordBackfillYield(
+        string $group,
+        int $cursorDelta,
+        int $nzbCreatedDelta,
+        int $now,
+        int $generation = 0,
+    ): void {
+        $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+        $raw = $cache->get(self::BACKFILL_YIELD_KEY);
+        $settledGenerations = is_array($raw) && is_array($raw['_settled_generations'] ?? null)
+            ? $this->processedPermitGenerations($raw['_settled_generations'])
+            : [];
+        if ($generation > 0 && in_array($generation, $settledGenerations, true)) {
+            return;
+        }
         $history = $this->backfillYieldHistory();
         $existing = $history[$group] ?? [
             'attempts' => 0,
@@ -610,9 +763,13 @@ class WorkerControlStateStore
         ];
         uasort($history, static fn (array $left, array $right): int => $right['last_attempt_at'] <=> $left['last_attempt_at']);
         $history = array_slice($history, 0, 16, preserve_keys: true);
+        if ($generation > 0) {
+            $history['_settled_generations'] = array_slice([...$settledGenerations, $generation], -64);
+        } elseif ($settledGenerations !== []) {
+            $history['_settled_generations'] = $settledGenerations;
+        }
 
-        Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
-            ->forever(self::BACKFILL_YIELD_KEY, $history);
+        $cache->forever(self::BACKFILL_YIELD_KEY, $history);
     }
 
     public function markBackfillTargetAttempted(string $group, int $now): void
@@ -621,6 +778,11 @@ class WorkerControlStateStore
             return;
         }
 
+        $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+        $raw = $cache->get(self::BACKFILL_YIELD_KEY);
+        $settledGenerations = is_array($raw) && is_array($raw['_settled_generations'] ?? null)
+            ? $this->processedPermitGenerations($raw['_settled_generations'])
+            : [];
         $history = $this->backfillYieldHistory();
         $entry = $history[$group] ?? [
             'attempts' => 0,
@@ -633,8 +795,11 @@ class WorkerControlStateStore
         $history[$group] = $entry;
         uasort($history, static fn (array $left, array $right): int => $right['last_attempt_at'] <=> $left['last_attempt_at']);
 
-        Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
-            ->forever(self::BACKFILL_YIELD_KEY, array_slice($history, 0, 16, preserve_keys: true));
+        $history = array_slice($history, 0, 16, preserve_keys: true);
+        if ($settledGenerations !== []) {
+            $history['_settled_generations'] = $settledGenerations;
+        }
+        $cache->forever(self::BACKFILL_YIELD_KEY, $history);
     }
 
     /** @param array<string, mixed> $decision */

@@ -282,11 +282,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-claimed-orphan-orchestrator-v116',
+            ':microservices-pods-20260713-delayed-attribution-orchestrator-v117',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-claimed-orphan-orchestrator-v116',
+            'microservices-pods-20260713-delayed-attribution-orchestrator-v117',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
@@ -351,6 +351,10 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '600',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_INCOMPLETE_RELEASE_GRACE_SECONDS'] ?? null,
+        );
+        self::assertSame(
+            '9000',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_DELAYED_ATTRIBUTION_SECONDS'] ?? null,
         );
         self::assertSame(
             '0.20',

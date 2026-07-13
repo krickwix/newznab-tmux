@@ -593,11 +593,12 @@ final class WorkerOrchestratorTest extends TestCase
 
         $finalized = $orchestrator->runOnce(false);
 
-        self::assertContains('backfill_permit_ineffective', $finalized['reasons']);
+        self::assertContains('backfill_delayed_attribution_queued', $finalized['reasons']);
         self::assertFalse($finalized['permit_granted'], 'a finalized observation must not grant replacement supply in the same cycle');
         self::assertNull($store->permitObservation());
-        self::assertSame(1, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.exhausted'] ?? 0);
-        self::assertNull($store->backfillContextRepeat(time()));
+        self::assertSame(0, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.exhausted'] ?? 0);
+        self::assertSame(['alt.exhausted'], $store->pendingBackfillDelayedAttributionGroups());
+        self::assertSame('alt.exhausted', $store->backfillContextRepeat(time())['group'] ?? null);
 
         $selected = $orchestrator->runOnce(false);
 
@@ -675,11 +676,65 @@ final class WorkerOrchestratorTest extends TestCase
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
 
-        self::assertContains('backfill_permit_ineffective', $result['reasons']);
+        self::assertContains('backfill_delayed_attribution_queued', $result['reasons']);
         self::assertNull($store->permitObservation());
-        self::assertSame(1, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
-        self::assertSame(10_000, $store->backfillYieldHistory()['alt.test']['last_cursor_delta'] ?? null);
+        self::assertSame(0, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
+        self::assertSame([], $store->backfillYieldHistory());
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
         self::assertFalse($result['permit_granted']);
+    }
+
+    public function test_mature_delayed_attribution_settles_productive_yield_exactly_once(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 7_200,
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        $store->storeState(new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.test' => 2, 'alt.other' => 1],
+        ));
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time() - 7_201));
+
+        $snapshot = new PipelineSnapshot(1, 2, 3, 0, 0);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->twice()->andReturn($snapshot);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->with(
+            'alt.test',
+            100,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        )->andReturn(['target' => 3, 'non_target' => 0, 'uncategorized' => 0]);
+        $snapshots->shouldReceive('backfillPendingCollectionsForCohort')->once()->with(
+            'alt.test',
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        )->andReturn(0);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->twice()->andReturn(8, 9);
+        $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
+
+        $settled = $orchestrator->runOnce(false);
+        $again = $orchestrator->runOnce(false);
+
+        self::assertContains('backfill_delayed_attribution_settled', $settled['reasons']);
+        self::assertSame('productive', $settled['delayed_attribution']['settled_result']);
+        self::assertFalse($settled['permit_granted']);
+        self::assertNotContains('backfill_delayed_attribution_settled', $again['reasons']);
+        self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts'] ?? null);
+        self::assertSame(3.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
+        self::assertSame(['alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
+        self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
     }
 
     public function test_completed_inactive_backfill_permit_attributes_collection_context_progress(): void
@@ -769,13 +824,13 @@ final class WorkerOrchestratorTest extends TestCase
 
         $result = $orchestrator->runOnce(false);
 
-        self::assertContains('backfill_permit_context_progress', $result['reasons']);
+        self::assertContains('backfill_delayed_attribution_queued', $result['reasons']);
         self::assertNotContains('backfill_permit_effective', $result['reasons']);
         self::assertNotContains('backfill_permit_ineffective', $result['reasons']);
-        self::assertSame(['alt.test' => 1, 'alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
-        self::assertSame(0.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
+        self::assertSame(['alt.test' => 2, 'alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
+        self::assertSame([], $store->backfillYieldHistory());
         self::assertNull($store->permitObservation());
-        self::assertNull($store->backfillContextRepeat(time()));
+        self::assertSame('alt.test', $store->backfillContextRepeat(time())['group'] ?? null);
         self::assertFalse($result['permit_granted']);
     }
 
@@ -859,15 +914,16 @@ final class WorkerOrchestratorTest extends TestCase
         ]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->twice()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
-        $applier->shouldReceive('revokePermit')->twice();
+        $applier->shouldReceive('revokePermit')->once();
         $applier->shouldReceive('apply')->twice()->andReturn(8, 9);
         $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
 
         $first = $orchestrator->runOnce(false);
 
-        self::assertContains('backfill_permit_context_progress', $first['reasons']);
-        self::assertSame(1, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
-        self::assertSame('alt.test', $store->backfillContextRepeat(time())['group'] ?? null);
+        self::assertContains('backfill_delayed_attribution_queued', $first['reasons']);
+        self::assertSame(2, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
+        self::assertNull($store->backfillContextRepeat(time()));
 
         DB::table('settings')->where('name', 'orchestrator_bf_claimed')->update(['value' => '8']);
         DB::table('settings')->where('name', 'orchestrator_bf_completed')->update(['value' => '8']);
@@ -887,10 +943,11 @@ final class WorkerOrchestratorTest extends TestCase
 
         $result = $orchestrator->runOnce(false);
 
-        self::assertContains('backfill_target_locked_after_ineffective_permits', $result['reasons']);
+        self::assertContains('backfill_target_locked', $result['reasons']);
         self::assertNotContains('backfill_permit_context_progress', $result['reasons']);
         self::assertSame(2, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
         self::assertNull($store->backfillContextRepeat(time()));
+        self::assertNotNull($store->permitObservation());
         self::assertFalse($result['permit_granted']);
     }
 
@@ -961,7 +1018,7 @@ final class WorkerOrchestratorTest extends TestCase
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
         $lock->shouldReceive('release')->once();
-        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
         $store->shouldReceive('leaderLock')->once()->andReturn($lock);
         $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
         $store->shouldReceive('permitObservation')->once()->andReturnNull();
@@ -1035,7 +1092,7 @@ final class WorkerOrchestratorTest extends TestCase
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
         $lock->shouldReceive('release')->once();
-        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
         $store->shouldReceive('leaderLock')->once()->andReturn($lock);
         $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
         $store->shouldReceive('permitObservation')->once()->andReturnNull();
@@ -1117,7 +1174,7 @@ final class WorkerOrchestratorTest extends TestCase
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
         $lock->shouldReceive('release')->once();
-        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
         $store->shouldReceive('leaderLock')->once()->andReturn($lock);
         $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
         $store->shouldReceive('permitObservation')->once()->andReturnNull();
@@ -1158,7 +1215,7 @@ final class WorkerOrchestratorTest extends TestCase
 
     public function test_redis_failure_before_lock_acquisition_persists_fail_closed_state(): void
     {
-        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
         $store->shouldReceive('leaderLock')->once()->andThrow(new RuntimeException('redis unavailable'));
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('failClosed')->once();
@@ -1203,7 +1260,7 @@ final class WorkerOrchestratorTest extends TestCase
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
         $lock->shouldReceive('release')->once();
-        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
         $store->shouldReceive('leaderLock')->once()->andReturn($lock);
         $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
         $store->shouldReceive('permitObservation')->once()->andReturn([
@@ -1260,7 +1317,7 @@ final class WorkerOrchestratorTest extends TestCase
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
         $lock->shouldReceive('release')->once();
-        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
         $store->shouldReceive('leaderLock')->once()->andReturn($lock);
         $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
         $store->shouldReceive('permitObservation')->once()->andReturn([
@@ -1309,7 +1366,7 @@ final class WorkerOrchestratorTest extends TestCase
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
         $lock->shouldReceive('release')->once();
-        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
         $store->shouldReceive('leaderLock')->once()->andReturn($lock);
         $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
         $store->shouldReceive('permitObservation')->once()->andReturn([
@@ -1950,7 +2007,7 @@ final class WorkerOrchestratorTest extends TestCase
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
         $lock->shouldReceive('release')->once();
-        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
         $store->shouldReceive('leaderLock')->once()->andReturn($lock);
         $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
         $store->shouldReceive('permitObservation')->once()->andReturn([
@@ -2036,7 +2093,7 @@ final class WorkerOrchestratorTest extends TestCase
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
         $lock->shouldReceive('release')->once();
-        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
         $store->shouldReceive('leaderLock')->once()->andReturn($lock);
         $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
         $store->shouldReceive('permitObservation')->once()->andReturn([
