@@ -304,9 +304,16 @@ class PipelineSnapshotRepository
     private function selectBackfillTarget(array $candidates, array $history, ControlState $state, int $now): ?array
     {
         $pendingGroups = $this->state->pendingBackfillDelayedAttributionGroups();
+        $contextRepeat = $this->state->backfillContextRepeat($now);
+        $continuationGroup = trim((string) ($contextRepeat['group'] ?? ''));
+        if (! $this->state->backfillDelayedAttributionCanContinue($continuationGroup, $now)) {
+            $continuationGroup = '';
+            $contextRepeat = null;
+        }
         $candidates = array_values(array_filter(
             $candidates,
-            static fn (array $candidate): bool => ! in_array($candidate['name'], $pendingGroups, true),
+            static fn (array $candidate): bool => ! in_array($candidate['name'], $pendingGroups, true)
+                || $candidate['name'] === $continuationGroup,
         ));
 
         return $this->targets->select(
@@ -314,7 +321,7 @@ class PipelineSnapshotRepository
             $history,
             $now,
             $state->ineffectiveBackfillPermitsByTarget,
-            $this->state->backfillContextRepeat($now),
+            $contextRepeat,
         );
     }
 

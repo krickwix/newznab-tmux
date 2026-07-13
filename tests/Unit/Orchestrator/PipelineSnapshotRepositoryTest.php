@@ -7,6 +7,7 @@ namespace Tests\Unit\Orchestrator;
 use App\Models\Settings;
 use App\Services\Nzb\NzbBacklogCreationService;
 use App\Services\Orchestrator\BodyRecoverySourceCriteria;
+use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlState;
 use App\Services\Orchestrator\PipelineSnapshot;
 use App\Services\Orchestrator\PipelineSnapshotRepository;
@@ -219,10 +220,18 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         config([
             'nntmux.orchestrator.state_store' => 'array',
             'nntmux.orchestrator.backfill_probe_groups' => ['alt.untried', 'alt.repeat'],
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
             'nntmux.orchestrator.backfill_yield_ttl_seconds' => 600,
         ]);
         Cache::store('array')->flush();
         $state = new WorkerControlStateStore;
+        self::assertTrue($state->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.repeat',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2009-01-03 00:00:00',
+        ], ['cursor_postdate' => '2009-01-02 00:00:00'], 10_000, 1_999_999_800));
         $state->markBackfillContextRepeat('alt.repeat', 1_999_999_900);
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
@@ -269,6 +278,64 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         ], [], ControlState::initial(), 2_000_000_000);
 
         self::assertSame('alt.safe', $target['name'] ?? null);
+    }
+
+    public function test_repository_allows_only_the_marked_pending_chain_with_one_remaining_range(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.backfill_probe_groups' => ['alt.pending', 'alt.safe'],
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_yield_ttl_seconds' => 600,
+        ]);
+        Cache::store('array')->flush();
+        $state = new WorkerControlStateStore;
+        self::assertTrue($state->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.pending',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2009-01-03 03:04:05',
+        ], ['cursor_postdate' => '2009-01-02 03:04:05'], 10_000, 1_999_999_800));
+        $state->markBackfillContextRepeat('alt.pending', 1_999_999_900);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'selectBackfillTarget');
+        $candidates = [
+            ['name' => 'alt.pending', 'cursor' => 40_000, 'cursor_postdate' => '2009-01-02 03:04:05', 'remaining_articles' => 40_000, 'safe_quantity' => 40_000],
+            ['name' => 'alt.safe', 'cursor' => 30_000, 'cursor_postdate' => '2009-01-01 03:04:05', 'remaining_articles' => 30_000, 'safe_quantity' => 30_000],
+        ];
+        $controlState = new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.pending' => 1],
+        );
+
+        $continuation = $method->invoke($repository, $candidates, [], $controlState, 2_000_000_000);
+
+        self::assertSame('alt.pending', $continuation['name'] ?? null);
+        self::assertSame(10_000, $continuation['safe_quantity'] ?? null);
+
+        self::assertTrue($state->queueBackfillDelayedAttribution([
+            'generation' => 8,
+            'backfill_group' => 'alt.pending',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 101,
+            'backfill_cursor_postdate' => '2009-01-02 03:04:05',
+        ], ['cursor_postdate' => '2009-01-01 03:04:05'], 10_000, 2_000_000_001, contextContinuation: true));
+
+        $afterMerge = $method->invoke($repository, $candidates, [], $controlState, 2_000_000_002);
+
+        self::assertSame('alt.safe', $afterMerge['name'] ?? null);
+
+        self::assertTrue($state->completeBackfillDelayedAttribution(7));
+        $state->markBackfillContextRepeat('alt.pending', 2_000_000_003);
+
+        $afterSettlementCrash = $method->invoke($repository, $candidates, [], $controlState, 2_000_000_004);
+
+        self::assertSame('alt.safe', $afterSettlementCrash['name'] ?? null);
     }
 
     public function test_repository_excludes_an_otherwise_eligible_terminal_group_with_pending_attribution(): void

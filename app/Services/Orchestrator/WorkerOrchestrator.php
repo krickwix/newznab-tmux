@@ -125,7 +125,17 @@ class WorkerOrchestrator
                     ? $this->store->backfillContextRepeat(time())
                     : null;
                 $sameGroupContextRepeat = (string) ($contextRepeat['group'] ?? '') === $observedGroup;
-                $rawContextProgress = ! $sameGroupContextRepeat
+                $attributionGenerationRole = ! $shadow && $permitClaimed && $permitCompleted
+                    ? $this->store->backfillDelayedAttributionGenerationRole(
+                        $observedGroup,
+                        (int) ($permitObservation['generation'] ?? 0),
+                    )
+                    : null;
+                $rootAttributionReplay = $attributionGenerationRole === 'root';
+                $continuationAttributionReplay = $attributionGenerationRole === 'continuation';
+                $consumingContextRepeat = $sameGroupContextRepeat && $attributionGenerationRole !== 'root';
+                $rawContextProgress = $attributionGenerationRole === null
+                    && ! $consumingContextRepeat
                     && $this->hasRawBackfillOnlyContextProgress(
                         $permitObservation,
                         $outcome,
@@ -149,22 +159,50 @@ class WorkerOrchestrator
                     $cohortNzbs,
                     time(),
                 );
-                $deferAttribution = $permitClaimed
+                $exactCompletedCohort = $permitClaimed
                     && $permitCompleted
                     && $cursorMoved
                     && $requestedQuantity >= 10_000
                     && $expectedCursorDelta > 0
-                    && $cursorDelta === $expectedCursorDelta
-                    && $cohortQuality['productive'] === 0
-                    && $cohortQuality['failure'] === null;
+                    && $cursorDelta === $expectedCursorDelta;
+                $pendingContextContinuation = ! $shadow
+                    && $attributionGenerationRole === null
+                    && $consumingContextRepeat
+                    && $this->store->backfillDelayedAttributionCanContinue($observedGroup, time());
+                $deferAttribution = $exactCompletedCohort
+                    && ($pendingContextContinuation
+                        || $rootAttributionReplay
+                        || $continuationAttributionReplay
+                        || ($cohortQuality['productive'] === 0 && $cohortQuality['failure'] === null));
                 if ($deferAttribution && ! $shadow) {
                     $delayedAttributionQueued = $this->store->queueBackfillDelayedAttribution(
                         $permitObservation,
                         $outcome,
                         $cursorDelta,
                         time(),
+                        contextContinuation: $pendingContextContinuation || $continuationAttributionReplay,
                     );
                 }
+                $queuedContextProgress = $delayedAttributionQueued
+                    && ! $rootAttributionReplay
+                    && ! $consumingContextRepeat
+                    && ! $continuationAttributionReplay
+                    && $contextProgress
+                    && $cohortReleases === 0
+                    && $cohortNzbs === 0
+                    && $requestedQuantity >= 10_000
+                    && $cursorDelta === $requestedQuantity;
+                if (! $shadow && $queuedContextProgress) {
+                    $this->store->markBackfillContextRepeat($observedGroup, time());
+                } elseif (! $shadow
+                    && $delayedAttributionQueued
+                    && ($consumingContextRepeat || $continuationAttributionReplay)
+                ) {
+                    $this->store->clearBackfillContextRepeat($observedGroup);
+                }
+                $queuedContextQualityFailure = $delayedAttributionQueued
+                    && ($pendingContextContinuation || $rootAttributionReplay || $continuationAttributionReplay)
+                    && $cohortQuality['failure'] !== null;
                 $closeObservation = $cohortQuality['failure'] !== null
                     || (! $cohortQuality['hold'] && (
                         $observationExpired
@@ -231,7 +269,7 @@ class WorkerOrchestrator
                     }
                     $isInputBearingClose = $cursorMoved && $cursorDelta > 0;
                     $isExistingContextRepeat = $isInputBearingClose
-                        && $sameGroupContextRepeat;
+                        && $consumingContextRepeat;
                     if ($isExistingContextRepeat) {
                         $this->store->clearBackfillContextRepeat($observedGroup);
                     } elseif ($contextProgress
@@ -246,7 +284,11 @@ class WorkerOrchestrator
                         $this->store->markBackfillContextRepeat($observedGroup, time());
                     }
                 }
-                if ($closeObservation && ! $shadow && ! $abandonedPermit && ! $delayedAttributionQueued) {
+                if ($closeObservation
+                    && ! $shadow
+                    && ! $abandonedPermit
+                    && (! $delayedAttributionQueued || $queuedContextProgress || $queuedContextQualityFailure)
+                ) {
                     $snapshot = $snapshot->withPermitOutcome(
                         completed: true,
                         effective: $permitClaimed && $cursorMoved && ($hasCohortBaseline ? $cohortQuality['productive'] > 0 : $produced),

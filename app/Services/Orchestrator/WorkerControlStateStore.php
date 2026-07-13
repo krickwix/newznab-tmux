@@ -320,6 +320,7 @@ class WorkerControlStateStore
         array $outcome,
         int $cursorDelta,
         int $now,
+        bool $contextContinuation = false,
     ): bool {
         $generation = (int) ($observation['generation'] ?? 0);
         $group = trim((string) ($observation['backfill_group'] ?? ''));
@@ -340,6 +341,11 @@ class WorkerControlStateStore
         ) {
             return false;
         }
+        if ($contextContinuation
+            && ($quantity !== 10_000 || $expectedCursorDelta !== 10_000 || $cursorDelta !== 10_000)
+        ) {
+            return false;
+        }
 
         $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
         $ledger = $cache->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
@@ -350,10 +356,51 @@ class WorkerControlStateStore
         if (isset($ledger[$key]) && is_array($ledger[$key])) {
             return true;
         }
-        foreach ($ledger as $entry) {
-            if (is_array($entry) && trim((string) ($entry['group'] ?? '')) === $group) {
+        foreach ($ledger as $entryKey => $entry) {
+            if (! is_array($entry) || trim((string) ($entry['group'] ?? '')) !== $group) {
+                continue;
+            }
+
+            $continuationGeneration = (int) ($entry['continuation_generation'] ?? 0);
+            if ($continuationGeneration === $generation) {
+                $samePayload = (int) ($entry['chain_count'] ?? 1) === 2
+                    && strtotime((string) ($entry['continuation_start_postdate'] ?? '')) === strtotime($startPostdate)
+                    && strtotime((string) ($entry['cursor_end_postdate'] ?? '')) === strtotime($endPostdate)
+                    && (int) ($entry['continuation_cursor_delta'] ?? 0) === $cursorDelta;
+                if ($samePayload) {
+                    $this->clearBackfillContextRepeat($group);
+                }
+
+                return $samePayload;
+            }
+            $marker = $contextContinuation ? $this->backfillContextRepeat($now) : null;
+            $chainCount = (int) ($entry['chain_count'] ?? 1);
+            if ((string) ($marker['group'] ?? '') !== $group
+                || $chainCount !== 1
+                || $continuationGeneration !== 0
+                || strtotime((string) ($entry['cursor_end_postdate'] ?? '')) !== strtotime($startPostdate)
+            ) {
                 return false;
             }
+
+            $ledger[$entryKey] = [
+                ...$entry,
+                'schema_version' => 1,
+                'settle_after' => max(
+                    (int) ($entry['settle_after'] ?? 0),
+                    $now + (int) config('nntmux.orchestrator.backfill_delayed_attribution_seconds', 9_000),
+                ),
+                'cursor_end_postdate' => $endPostdate,
+                'cursor_delta' => (int) ($entry['cursor_delta'] ?? 0) + $cursorDelta,
+                'chain_count' => 2,
+                'continuation_generation' => $generation,
+                'continuation_start_postdate' => $startPostdate,
+                'continuation_cursor_delta' => $cursorDelta,
+            ];
+            $cache->forever(self::BACKFILL_DELAYED_ATTRIBUTION_KEY, $ledger);
+            $this->clearBackfillContextRepeat($group);
+
+            return true;
         }
         if (count($ledger) >= self::BACKFILL_DELAYED_ATTRIBUTION_LIMIT) {
             return false;
@@ -387,7 +434,7 @@ class WorkerControlStateStore
         $groups = [];
         foreach ($ledger as $entry) {
             if (is_array($entry)
-                && (int) ($entry['schema_version'] ?? 0) === 1
+                && in_array((int) ($entry['schema_version'] ?? 0), [1, 2], true)
                 && (int) ($entry['generation'] ?? 0) > 0
                 && trim((string) ($entry['group'] ?? '')) !== ''
             ) {
@@ -396,6 +443,69 @@ class WorkerControlStateStore
         }
 
         return array_values(array_unique($groups));
+    }
+
+    public function backfillDelayedAttributionGenerationRole(string $group, int $generation): ?string
+    {
+        $group = trim($group);
+        if ($group === '' || $generation <= 0) {
+            return null;
+        }
+        $ledger = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+            ->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
+        if (! is_array($ledger)) {
+            return null;
+        }
+
+        foreach ($ledger as $entry) {
+            if (! is_array($entry)
+                || ! in_array((int) ($entry['schema_version'] ?? 0), [1, 2], true)
+                || trim((string) ($entry['group'] ?? '')) !== $group
+            ) {
+                continue;
+            }
+            if ((int) ($entry['generation'] ?? 0) === $generation) {
+                return 'root';
+            }
+            if ((int) ($entry['continuation_generation'] ?? 0) === $generation) {
+                return 'continuation';
+            }
+        }
+
+        return null;
+    }
+
+    public function backfillDelayedAttributionCanContinue(string $group, int $now): bool
+    {
+        $group = trim($group);
+        $marker = $this->backfillContextRepeat($now);
+        if ($group === '' || (string) ($marker['group'] ?? '') !== $group) {
+            return false;
+        }
+
+        $ledger = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+            ->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
+        if (! is_array($ledger)) {
+            return false;
+        }
+
+        foreach ($ledger as $entry) {
+            if (! is_array($entry)
+                || ! in_array((int) ($entry['schema_version'] ?? 0), [1, 2], true)
+                || trim((string) ($entry['group'] ?? '')) !== $group
+                || (int) ($entry['generation'] ?? 0) <= 0
+                || (int) ($entry['chain_count'] ?? 1) !== 1
+                || (int) ($entry['continuation_generation'] ?? 0) !== 0
+                || (int) ($entry['settle_after'] ?? 0) <= $now
+                || (int) ($marker['marked_at'] ?? 0) < (int) ($entry['queued_at'] ?? 0)
+            ) {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     /** @return array<string, int|string>|null */
@@ -408,7 +518,7 @@ class WorkerControlStateStore
         }
 
         $mature = array_values(array_filter($ledger, static fn (mixed $entry): bool => is_array($entry)
-            && (int) ($entry['schema_version'] ?? 0) === 1
+            && in_array((int) ($entry['schema_version'] ?? 0), [1, 2], true)
             && (int) ($entry['generation'] ?? 0) > 0
             && (int) ($entry['settle_after'] ?? 0) > 0
             && (int) $entry['settle_after'] <= $now));
@@ -428,10 +538,15 @@ class WorkerControlStateStore
         if (! is_array($ledger) || ! isset($ledger[$key])) {
             return false;
         }
+        $completedEntry = $ledger[$key];
+        $group = is_array($completedEntry) ? trim((string) ($completedEntry['group'] ?? '')) : '';
         unset($ledger[$key]);
         $ledger === []
             ? $cache->forget(self::BACKFILL_DELAYED_ATTRIBUTION_KEY)
             : $cache->forever(self::BACKFILL_DELAYED_ATTRIBUTION_KEY, $ledger);
+        if ($group !== '') {
+            $this->clearBackfillContextRepeat($group);
+        }
 
         return true;
     }
