@@ -165,6 +165,7 @@ final class WorkerControlStateStoreTest extends TestCase
             'backfill_cursor' => 12345,
             'backfill_cursor_postdate' => '2026-01-02 03:04:05',
             'backfill_quantity' => 10000,
+            'backfill_expected_cursor_delta' => 10000,
         ], $store->permitObservation());
 
         $store->clearPermitObservation();
@@ -325,6 +326,43 @@ final class WorkerControlStateStoreTest extends TestCase
         self::assertFalse($store->queueBackfillDelayedAttribution([...$valid, 'backfill_group' => ''], $outcome, 10_000, 1_000));
         self::assertFalse($store->queueBackfillDelayedAttribution($valid, ['cursor_postdate' => 'invalid'], 10_000, 1_000));
         self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
+    }
+
+    public function test_terminal_observation_queues_the_exact_fringe_above_the_provider_reserve(): void
+    {
+        $store = new WorkerControlStateStore;
+        $store->beginPermitObservation(new PipelineSnapshot(
+            partsBacklog: 1,
+            binariesBacklog: 2,
+            collectionsBacklog: 3,
+            releasesBacklog: 0,
+            nzbsBacklog: 0,
+            backfillGroup: 'alt.terminal',
+            backfillCursor: 16_389,
+            backfillRemainingArticles: 16_387,
+        ), generation: 8, now: 1_000, outcome: [
+            'cursor' => 16_389,
+            'cursor_postdate' => '2008-10-24 01:12:31',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ], quantity: 10_000);
+        $observation = $store->permitObservation();
+
+        self::assertSame(6_387, $observation['backfill_expected_cursor_delta'] ?? null);
+        self::assertFalse($store->queueBackfillDelayedAttribution(
+            $observation ?? [],
+            ['cursor_postdate' => '2008-10-18 20:34:25'],
+            10_000,
+            1_100,
+        ));
+        self::assertTrue($store->queueBackfillDelayedAttribution(
+            $observation ?? [],
+            ['cursor_postdate' => '2008-10-18 20:34:25'],
+            6_387,
+            1_100,
+        ));
+        self::assertSame(6_387, $store->matureBackfillDelayedAttribution(10_100)['cursor_delta'] ?? null);
     }
 
     public function test_delayed_yield_is_generation_idempotent(): void

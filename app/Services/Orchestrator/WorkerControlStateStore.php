@@ -167,6 +167,10 @@ class WorkerControlStateStore
     public function beginPermitObservation(PipelineSnapshot $snapshot, int $generation, int $now, array $outcome, int $quantity = 10000): void
     {
         $priorReleaseCohort = $this->takeIncompleteReleaseCohort($snapshot->backfillGroup, $now);
+        $requestedQuantity = max(10_000, $quantity);
+        $expectedCursorDelta = $snapshot->backfillRemainingArticles > 0
+            ? min($requestedQuantity, max(0, $snapshot->backfillRemainingArticles - 10_000))
+            : $requestedQuantity;
         $observation = [
             'schema_version' => 2,
             'generation' => $generation,
@@ -196,7 +200,8 @@ class WorkerControlStateStore
             'backfill_group' => $snapshot->backfillGroup,
             'backfill_cursor' => $outcome['cursor'],
             'backfill_cursor_postdate' => $outcome['cursor_postdate'],
-            'backfill_quantity' => max(10000, $quantity),
+            'backfill_quantity' => $requestedQuantity,
+            'backfill_expected_cursor_delta' => $expectedCursorDelta,
         ];
         if ($priorReleaseCohort !== null) {
             $observation['prior_release_cohort'] = $priorReleaseCohort;
@@ -319,13 +324,17 @@ class WorkerControlStateStore
         $generation = (int) ($observation['generation'] ?? 0);
         $group = trim((string) ($observation['backfill_group'] ?? ''));
         $quantity = (int) ($observation['backfill_quantity'] ?? 0);
+        $expectedCursorDelta = array_key_exists('backfill_expected_cursor_delta', $observation)
+            ? (int) $observation['backfill_expected_cursor_delta']
+            : $quantity;
         $startPostdate = (string) ($observation['backfill_cursor_postdate'] ?? '');
         $endPostdate = (string) ($outcome['cursor_postdate'] ?? '');
         if ($generation <= 0
             || $group === ''
             || $now <= 0
             || $quantity < 10_000
-            || $cursorDelta !== $quantity
+            || $expectedCursorDelta <= 0
+            || $cursorDelta !== $expectedCursorDelta
             || strtotime($startPostdate) === false
             || strtotime($endPostdate) === false
         ) {

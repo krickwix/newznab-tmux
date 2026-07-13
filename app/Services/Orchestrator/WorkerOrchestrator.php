@@ -120,6 +120,7 @@ class WorkerOrchestrator
                 $cohortQuality = $this->classifyCohortNzbQuality($cohortNzbCategories, $permitObservation, time());
                 $cursorDelta = max(0, (int) ($permitObservation['backfill_cursor'] ?? 0) - (int) $outcome['cursor']);
                 $requestedQuantity = max(0, (int) ($permitObservation['backfill_quantity'] ?? 0));
+                $expectedCursorDelta = $this->expectedCursorDelta($permitObservation);
                 $contextRepeat = ! $shadow && $permitClaimed && $permitCompleted && $cursorMoved
                     ? $this->store->backfillContextRepeat(time())
                     : null;
@@ -152,7 +153,8 @@ class WorkerOrchestrator
                     && $permitCompleted
                     && $cursorMoved
                     && $requestedQuantity >= 10_000
-                    && $cursorDelta === $requestedQuantity
+                    && $expectedCursorDelta > 0
+                    && $cursorDelta === $expectedCursorDelta
                     && $cohortQuality['productive'] === 0
                     && $cohortQuality['failure'] === null;
                 if ($deferAttribution && ! $shadow) {
@@ -429,7 +431,7 @@ class WorkerOrchestrator
         $group = trim((string) ($entry['group'] ?? ''));
         $generation = (int) ($entry['generation'] ?? 0);
         $cursorDelta = (int) ($entry['cursor_delta'] ?? 0);
-        if ($group === '' || $generation <= 0 || $cursorDelta < 10_000) {
+        if ($group === '' || $generation <= 0 || $cursorDelta <= 0) {
             return [$snapshot, null];
         }
         $counts = $this->snapshots->backfillCreatedNzbCategoryCountsForCohort(
@@ -527,11 +529,13 @@ class WorkerOrchestrator
         int $cohortNzbs,
     ): bool {
         $quantity = (int) ($observation['backfill_quantity'] ?? 0);
+        $expectedCursorDelta = $this->expectedCursorDelta($observation);
 
         return $permitCompleted
             && $cursorMoved
             && $quantity >= 10_000
-            && $cursorDelta === $quantity
+            && $expectedCursorDelta > 0
+            && $cursorDelta === $expectedCursorDelta
             && $cohortReleases > 0
             && $cohortNzbs === 0;
     }
@@ -590,13 +594,15 @@ class WorkerOrchestrator
             ? (int) config('nntmux.orchestrator.backfill_incomplete_release_grace_seconds', 600)
             : (int) config('nntmux.orchestrator.backfill_zero_output_grace_seconds', 300);
         $quantity = (int) ($observation['backfill_quantity'] ?? 0);
+        $expectedCursorDelta = $this->expectedCursorDelta($observation);
 
         return $permitClaimed
             && $permitCompleted
             && $completedAt > 0
             && $now - $completedAt >= $graceSeconds
             && $quantity >= 10_000
-            && $cursorDelta === $quantity
+            && $expectedCursorDelta > 0
+            && $cursorDelta === $expectedCursorDelta
             && $cohortNzbs === 0
             && (int) ($outcome['ready_collections'] ?? 0) <= (int) ($observation['ready_collections'] ?? 0)
             && $snapshot->eligibleNzbs === 0
@@ -604,6 +610,14 @@ class WorkerOrchestrator
             && $snapshot->hardSafetyPassed()
             && ! $snapshot->highPressure
             && $snapshot->databaseCurrentWaits === 0;
+    }
+
+    /** @param array<string, mixed> $observation */
+    private function expectedCursorDelta(array $observation): int
+    {
+        return max(0, array_key_exists('backfill_expected_cursor_delta', $observation)
+            ? (int) $observation['backfill_expected_cursor_delta']
+            : (int) ($observation['backfill_quantity'] ?? 0));
     }
 
     /**

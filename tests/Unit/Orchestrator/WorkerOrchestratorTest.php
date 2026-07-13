@@ -609,7 +609,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame(9, $nextObservation['generation']);
     }
 
-    public function test_completed_zero_output_permit_ignores_an_unrelated_delayed_release_after_grace(): void
+    public function test_completed_terminal_fringe_queues_delayed_attribution_without_an_early_strike(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => false,
@@ -633,9 +633,18 @@ final class WorkerOrchestratorTest extends TestCase
         ]);
 
         $store = new WorkerControlStateStore;
-        $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $baseline = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            0,
+            0,
+            backfillGroup: 'alt.test',
+            backfillCursor: 16_389,
+            backfillRemainingArticles: 16_387,
+        );
         $store->beginPermitObservation($baseline, generation: 7, now: time() - 600, outcome: [
-            'cursor' => 20_000,
+            'cursor' => 16_389,
             'cursor_postdate' => '2026-01-02 03:04:05',
             'ready_collections' => 0,
             'releases' => 4_210,
@@ -652,13 +661,13 @@ final class WorkerOrchestratorTest extends TestCase
             lowPressure: true,
             eligibleBackfillSupply: true,
             backfillGroup: 'alt.test',
-            backfillCursor: 10_000,
+            backfillCursor: 10_002,
             backfillSafeQuantity: 50_000,
         );
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->once()->andReturn($current);
         $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
-            'cursor' => 10_000,
+            'cursor' => 10_002,
             'cursor_postdate' => '2026-01-01 03:04:05',
             'ready_collections' => 0,
             'releases' => 4_211,
@@ -702,9 +711,10 @@ final class WorkerOrchestratorTest extends TestCase
             'generation' => 7,
             'backfill_group' => 'alt.test',
             'backfill_quantity' => 10_000,
+            'backfill_expected_cursor_delta' => 6_387,
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-02 03:04:05',
-        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time() - 7_201));
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 6_387, time() - 7_201));
 
         $snapshot = new PipelineSnapshot(1, 2, 3, 0, 0);
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
@@ -732,7 +742,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertFalse($settled['permit_granted']);
         self::assertNotContains('backfill_delayed_attribution_settled', $again['reasons']);
         self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts'] ?? null);
-        self::assertSame(3.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
+        self::assertSame(4.697041, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
         self::assertSame(['alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
         self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
     }
