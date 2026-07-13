@@ -1259,7 +1259,6 @@ final class ReleaseProcessingService
 
         return DB::table('collections')
             ->select('collections.id')
-            ->distinct()
             ->join('binaries as existing', 'existing.collections_id', '=', 'collections.id')
             ->leftJoin('binaries as incomplete', static function ($join) use ($completion): void {
                 $join->on('incomplete.collections_id', '=', 'collections.id')
@@ -1270,6 +1269,11 @@ final class ReleaseProcessingService
             })
             ->whereIn('collections.id', $candidateIds)
             ->whereNull('incomplete.id')
+            ->groupBy(['collections.id', 'collections.totalfiles'])
+            ->havingRaw(
+                'COUNT(DISTINCT CASE WHEN existing.filenumber > 0 THEN existing.filenumber ELSE existing.id END) >= GREATEST(1, CEIL(GREATEST(GREATEST(COALESCE(NULLIF(collections.totalfiles, 0), 0), COALESCE(MAX(NULLIF(existing.filenumber, 0)), 0)), COUNT(DISTINCT existing.id)) * ? / 100))',
+                [$completion],
+            )
             ->orderBy('collections.id')
             ->pluck('collections.id')
             ->map(static fn ($id): int => (int) $id)

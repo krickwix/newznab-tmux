@@ -119,6 +119,31 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
         $this->assertSame(2, (int) $collection->totalfiles);
     }
 
+    public function test_delayed_stage6_rejects_complete_fragments_with_sparse_collection_file_coverage(): void
+    {
+        DB::table('settings')->where('name', 'completionpercent')->update(['value' => '94']);
+
+        $dateAdded = now()->subHours(13)->format('Y-m-d H:i:s');
+        $this->seedCollection(9, 'two-complete-fragments-from-sixty-five-files', 2, $dateAdded, 10);
+        $this->seedBinary(9001, 9, 64, currentParts: 100, totalParts: 100);
+        $this->seedBinary(9002, 9, 65, currentParts: 100, totalParts: 100);
+
+        $this->seedCollection(10, 'dense-sixty-two-of-sixty-five-files', 65, $dateAdded, 10);
+        for ($fileNumber = 1; $fileNumber <= 62; $fileNumber++) {
+            $this->seedBinary(10000 + $fileNumber, 10, $fileNumber, currentParts: 100, totalParts: 100);
+        }
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        $service->processIncompleteCollections(null);
+
+        $this->assertSame(10, (int) DB::table('collections')->where('id', 9)->value('filecheck'));
+        $this->assertSame(
+            CollectionFileCheckStatus::CompleteParts->value,
+            (int) DB::table('collections')->where('id', 10)->value('filecheck')
+        );
+    }
+
     public function test_totalfiles_collection_uses_completion_threshold_before_promotion(): void
     {
         DB::table('settings')->where('name', 'completionpercent')->update(['value' => '75']);

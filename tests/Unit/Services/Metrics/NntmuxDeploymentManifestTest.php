@@ -9,6 +9,32 @@ use Symfony\Component\Yaml\Parser;
 
 final class NntmuxDeploymentManifestTest extends TestCase
 {
+    public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/worker-orchestrator.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'COPY app/Console/Commands/ActivateBackfillSource.php /app/app/Console/Commands/ActivateBackfillSource.php',
+            $dockerfile,
+        );
+    }
+
+    public function test_release_overlay_packages_the_stage6_coverage_predicate(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/release-stage6-coverage.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260713-raw-context-v112@sha256:1b6b8f67ccf8069de9352a49e794f5c3f7acddcda90418b69ebf7ebc98338c84',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/ReleaseProcessingService.php /app/app/Services/ReleaseProcessingService.php',
+            $dockerfile,
+        );
+    }
+
     public function test_lossless_body_preamble_repair_is_explicitly_enabled(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/infra.yaml';
@@ -89,7 +115,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 ? ($name === 'nntmux-worker-binaries'
                     ? ':microservices-pods-20260713-provider-range-v93'
                     : ($name === 'nntmux-worker-releases'
-                        ? ':microservices-pods-20260713-raw-context-v112'
+                        ? ':microservices-pods-20260713-stage6-coverage-v126'
                         : ':microservices-pods-20260711-worker-orchestrator-v22'))
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
@@ -284,11 +310,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-adaptive-worker-orchestrator-v124',
+            ':microservices-pods-20260713-tv-source-canary-v125',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-adaptive-worker-orchestrator-v124',
+            'microservices-pods-20260713-tv-source-canary-v125',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
@@ -311,6 +337,10 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '120',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PERMIT_CLAIM_GRACE_SECONDS'] ?? null,
+        );
+        self::assertSame(
+            '104857600',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_MIN_PAYLOAD_BYTES'] ?? null,
         );
         self::assertSame(
             '3600',
@@ -346,7 +376,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         $probeGroupsValue = $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null;
         self::assertSame(
-            'alt.binaries.movies.x264,alt.binaries.hdtv.tv-episodes,alt.binaries.dvd.movies,alt.binaries.movie,alt.binaries.teevee,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.dvd.classic.movies,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
+            'alt.binaries.tv,alt.binaries.movies.x264,alt.binaries.hdtv.tv-episodes,alt.binaries.dvd.movies,alt.binaries.movie,alt.binaries.teevee,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.dvd.classic.movies,alt.binaries.sounds.lossless,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
             $probeGroupsValue,
         );
         $probeGroups = explode(',', (string) $probeGroupsValue);

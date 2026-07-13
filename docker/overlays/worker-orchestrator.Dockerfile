@@ -5,6 +5,7 @@ LABEL org.opencontainers.image.revision="$SOURCE_REVISION"
 LABEL org.opencontainers.image.base.name="docker.io/krickwix/nntmux:microservices-pods-20260711-nzb-selector-wide-v15"
 
 COPY app/Console/Commands/NntmuxWorkerOrchestrator.php /app/app/Console/Commands/NntmuxWorkerOrchestrator.php
+COPY app/Console/Commands/ActivateBackfillSource.php /app/app/Console/Commands/ActivateBackfillSource.php
 COPY app/Services/Distributed/BackfillPermitGate.php /app/app/Services/Distributed/BackfillPermitGate.php
 COPY app/Services/Distributed/DistributedJobCatalog.php /app/app/Services/Distributed/DistributedJobCatalog.php
 COPY app/Services/Distributed/DistributedJobWorker.php /app/app/Services/Distributed/DistributedJobWorker.php

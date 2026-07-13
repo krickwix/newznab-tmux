@@ -97,6 +97,21 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
             $filterSource,
             'Stage 6 should not regress to MariaDB materialized NOT EXISTS scans.'
         );
+        self::assertStringContainsString(
+            'COUNT(DISTINCT CASE WHEN existing.filenumber > 0 THEN existing.filenumber ELSE existing.id END)',
+            $filterSource,
+            'Stage 6 must count observed collection files instead of accepting a few complete fragments.'
+        );
+        self::assertStringContainsString(
+            'GREATEST(GREATEST(COALESCE(NULLIF(collections.totalfiles, 0), 0), COALESCE(MAX(NULLIF(existing.filenumber, 0)), 0)), COUNT(DISTINCT existing.id))',
+            $filterSource,
+            'Stage 6 must use the largest advertised or inferred collection file count as its denominator.'
+        );
+        self::assertStringContainsString(
+            '->havingRaw(',
+            $filterSource,
+            'Stage 6 must enforce collection-level coverage after excluding incomplete binaries.'
+        );
     }
 
     public function test_stage6_selection_index_is_declared(): void

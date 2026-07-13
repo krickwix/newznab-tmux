@@ -43,13 +43,13 @@ class PipelineSnapshotRepository
         $pipeline = DB::selectOne('SELECT
             (SELECT COUNT(*) FROM collections WHERE filecheck IN (0, 1, 2, 15, 16)) AS collections_backlog,
             (SELECT COUNT(*) FROM binaries WHERE partcheck = 0) AS binaries_backlog,
-            (SELECT COUNT(*) FROM collections WHERE filecheck = 3) AS ready_collections,
-            (SELECT COUNT(*) FROM collections WHERE filecheck = 3) AS releases_backlog,
+            (SELECT COUNT(*) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS ready_collections,
+            (SELECT COUNT(*) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS releases_backlog,
             (SELECT COUNT(*) FROM releases) AS release_total,
             (SELECT COUNT(*) FROM releases WHERE nzbstatus = 0) AS nzbs_backlog,
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM binaries b INNER JOIN collections c ON c.id = b.collections_id WHERE b.partcheck = 0) AS oldest_binary_age,
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(dateadded), NOW()), 0) FROM collections WHERE filecheck IN (0, 1, 2, 15, 16)) AS oldest_collection_age,
-            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(dateadded), NOW()), 0) FROM collections WHERE filecheck = 3) AS oldest_release_age,
+            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS oldest_release_age,
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(adddate), NOW()), 0) FROM releases WHERE nzbstatus = 0) AS oldest_nzb_age,
             NOT EXISTS(SELECT 1 FROM usenet_groups g LEFT JOIN short_groups s ON s.name = g.name
                 WHERE g.active = 1 AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > 10000)) AS current_groups');
@@ -474,8 +474,9 @@ class PipelineSnapshotRepository
         string $endPostdate,
     ): array {
         $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+        $minPayloadBytes = max(1, (int) config('nntmux.orchestrator.backfill_min_payload_bytes', 104_857_600));
         $upperBound = $releaseIdHighInclusive === null ? '' : 'AND r.id <= ?';
-        $bindings = [$group, $releaseIdLowExclusive];
+        $bindings = [$minPayloadBytes, $minPayloadBytes, $group, $releaseIdLowExclusive];
         if ($releaseIdHighInclusive !== null) {
             $bindings[] = $releaseIdHighInclusive;
         }
@@ -490,14 +491,16 @@ class PipelineSnapshotRepository
         );
         $row = DB::selectOne('SELECT
             COALESCE(SUM(CASE WHEN c.root_categories_id IN (2000, 5000)
-                AND c.id NOT IN (2999, 5999) THEN 1 ELSE 0 END), 0) AS target,
+                AND c.id NOT IN (2999, 5999)
+                AND r.size >= ? THEN 1 ELSE 0 END), 0) AS target,
             COALESCE(SUM(CASE WHEN c.root_categories_id IS NOT NULL
                 AND c.root_categories_id NOT IN (1, 2000, 5000)
                 AND c.id NOT IN (2999, 5999) THEN 1 ELSE 0 END), 0) AS non_target,
-            COALESCE(SUM(CASE WHEN c.id IS NULL
+            COALESCE(SUM(CASE WHEN (c.id IS NULL
                 OR c.root_categories_id IS NULL
                 OR c.root_categories_id = 1
-                OR c.id IN (2999, 5999) THEN 1 ELSE 0 END), 0) AS uncategorized
+                OR c.id IN (2999, 5999))
+                AND r.size >= ? THEN 1 ELSE 0 END), 0) AS uncategorized
             FROM releases r
             INNER JOIN usenet_groups g ON g.id = r.groups_id
             LEFT JOIN categories c ON c.id = r.categories_id

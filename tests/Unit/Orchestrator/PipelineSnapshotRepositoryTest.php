@@ -725,6 +725,8 @@ final class PipelineSnapshotRepositoryTest extends TestCase
 
     public function test_carried_cohort_category_counts_keep_the_release_id_upper_bound(): void
     {
+        config()->set('nntmux.orchestrator.backfill_min_payload_bytes', 104857600);
+
         DB::shouldReceive('selectOne')
             ->once()
             ->withArgs(function (string $sql, array $bindings): bool {
@@ -733,7 +735,8 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('c.root_categories_id NOT IN (1, 2000, 5000)', $sql);
                 self::assertStringContainsString('c.id NOT IN (2999, 5999)', $sql);
                 self::assertStringContainsString('c.id IN (2999, 5999)', $sql);
-                self::assertSame(['alt.test', 100, 103, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600], $bindings);
+                self::assertSame(2, substr_count($sql, 'r.size >= ?'));
+                self::assertSame([104857600, 104857600, 'alt.test', 100, 103, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600], $bindings);
 
                 return true;
             })
@@ -799,6 +802,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
     public function test_group_cohort_completed_nzbs_are_split_into_target_wrong_and_uncategorized_roots(): void
     {
         config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+        config()->set('nntmux.orchestrator.backfill_min_payload_bytes', 104857600);
 
         DB::shouldReceive('selectOne')
             ->once()
@@ -814,7 +818,10 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('c.id IN (2999, 5999)', $sql);
                 self::assertStringContainsString('r.id > ?', $sql);
                 self::assertStringContainsString('r.nzbstatus = 1', $sql);
+                self::assertSame(2, substr_count($sql, 'r.size >= ?'));
                 self::assertSame([
+                    104857600,
+                    104857600,
                     'alt.test',
                     123,
                     '2026-01-02 03:04:05',
@@ -844,6 +851,21 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             '2026-01-02 03:04:05',
             '2026-01-01 03:04:05',
         ));
+    }
+
+    public function test_release_backlog_only_counts_collections_from_processable_groups(): void
+    {
+        $source = file_get_contents(__DIR__.'/../../../app/Services/Orchestrator/PipelineSnapshotRepository.php');
+
+        self::assertIsString($source);
+        self::assertStringContainsString(
+            '(SELECT COUNT(*) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS releases_backlog',
+            $source,
+        );
+        self::assertStringNotContainsString(
+            '(SELECT COUNT(*) FROM collections WHERE filecheck = 3) AS releases_backlog',
+            $source,
+        );
     }
 
     public function test_group_cohort_release_count_uses_the_same_exact_attribution_window_without_requiring_an_nzb(): void
