@@ -79,11 +79,13 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-backfill'
                 ? ':microservices-pods-20260713-provider-range-v93'
-                : (in_array($name, [
-                    'nntmux-worker-binaries',
-                    'nntmux-worker-releases',
-                    'nntmux-worker-nzb-backlog',
-                ], true)
+                : ($name === 'nntmux-worker-hashed-fixnames'
+                    ? ':microservices-pods-20260713-fresh-hashed-retry-v114'
+                    : (in_array($name, [
+                        'nntmux-worker-binaries',
+                        'nntmux-worker-releases',
+                        'nntmux-worker-nzb-backlog',
+                    ], true)
                 ? ($name === 'nntmux-worker-binaries'
                     ? ':microservices-pods-20260713-provider-range-v93'
                     : ($name === 'nntmux-worker-releases'
@@ -94,7 +96,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                     'nntmux-worker-per-group',
                 ], true)
                 ? ':microservices-pods-20260711-nzb-cleanup-lock-v9'
-                : ':microservices-pods-20260710-nzb-query-v8'));
+                : ':microservices-pods-20260710-nzb-query-v8')));
             self::assertStringEndsWith(
                 $expectedImage,
                 (string) ($container['image'] ?? ''),

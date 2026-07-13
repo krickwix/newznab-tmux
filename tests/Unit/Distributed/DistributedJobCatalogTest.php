@@ -192,10 +192,13 @@ class DistributedJobCatalogTest extends TestCase
 
         $this->assertTrue($plan['enabled']);
         $this->assertSame(
-            ['4', '6', '21', '18', '10', '14', '16', '20', '12', '8'],
+            ['22', '4', '6', '21', '18', '10', '14', '16', '20', '12', '8'],
             $this->argumentValues($plan, 'method'),
         );
-
+        $this->assertSame(100, $plan['commands'][0]['arguments']['--limit']);
+        foreach (array_slice($plan['commands'], 1) as $command) {
+            $this->assertArrayNotHasKey('--limit', $command['arguments']);
+        }
         foreach ($plan['commands'] as $command) {
             $this->assertSame('releases:fix-names', $command['command']);
             $this->assertSame('hashed', $command['arguments']['--category']);

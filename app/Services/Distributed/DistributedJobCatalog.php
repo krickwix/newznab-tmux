@@ -448,6 +448,17 @@ class DistributedJobCatalog
         }
 
         $commands = [];
+        $commands[] = [
+            'command' => 'releases:fix-names',
+            'arguments' => [
+                'method' => '22',
+                '--update' => true,
+                '--category' => 'hashed',
+                '--set-status' => true,
+                '--limit' => 100,
+                '--show' => true,
+            ],
+        ];
         foreach ([4, 6, 21, 18, 10, 14, 16, 20, 12, 8] as $method) {
             $commands[] = [
                 'command' => 'releases:fix-names',

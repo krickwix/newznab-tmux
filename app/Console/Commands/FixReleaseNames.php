@@ -16,7 +16,7 @@ class FixReleaseNames extends Command
      * @var string
      */
     protected $signature = 'releases:fix-names
-                                 {method : The method number (3-21) to use for fixing names}
+                                 {method : The method number (3-22) to use for fixing names}
                                  {--update : Actually update the names, otherwise just display results}
                                  {--category=other : Category to process: "other", "hashed", "movies", "all", or "predb_id"}
                                  {--set-status : Set releases as checked after processing}
@@ -130,6 +130,14 @@ class FixReleaseNames extends Command
             case '21':
                 $nameFixingService->fixNamesWithSubjects(2, $update, $other, $setStatus, $show, $limit);
                 break;
+            case '22':
+                if ($other !== 5) {
+                    $this->error('Method 22 is restricted to --category=hashed.');
+
+                    return 1;
+                }
+                $nameFixingService->retryFreshHashedFiles($update, $setStatus, $show, $limit);
+                break;
             default:
                 $this->showHelp();
 
@@ -166,6 +174,7 @@ class FixReleaseNames extends Command
         $this->info('php artisan releases:fix-names 19 : Fix release names using CRC32 in the past 6 hours.');
         $this->info('php artisan releases:fix-names 20 : Fix release names using CRC32.');
         $this->info('php artisan releases:fix-names 21 : Fix release names using release subjects.');
+        $this->info('php artisan releases:fix-names 22 --category=hashed : Retry fresh hashed releases after new file evidence arrives.');
         $this->info('');
         $this->info('Options:');
         $this->info('  --update           Actually update the names (default: only display potential changes)');

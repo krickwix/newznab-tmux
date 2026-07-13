@@ -47,4 +47,26 @@ class FixReleaseNamesCommandTest extends TestCase
             '--category' => 'hashed',
         ])->assertExitCode(0);
     }
+
+    public function test_method_22_is_a_hashed_only_fresh_file_retry(): void
+    {
+        $nameFixingService = Mockery::mock(NameFixingService::class);
+        $nameFixingService->shouldReceive('retryFreshHashedFiles')->once()->with(true, true, false, 100);
+        $this->app->instance(NameFixingService::class, $nameFixingService);
+
+        $this->artisan('releases:fix-names', [
+            'method' => '22',
+            '--category' => 'hashed',
+            '--update' => true,
+            '--set-status' => true,
+            '--limit' => 100,
+        ])->assertSuccessful();
+    }
+
+    public function test_method_22_rejects_non_hashed_scope(): void
+    {
+        $this->artisan('releases:fix-names', ['method' => '22'])
+            ->expectsOutputToContain('restricted to --category=hashed')
+            ->assertFailed();
+    }
 }

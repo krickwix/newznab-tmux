@@ -49,6 +49,10 @@ use Illuminate\Support\Facades\DB;
  * @property float|null $diff_percent Computed column (difference percentage)
  * @property int|null $releases_id From raw query alias
  * @property int|null $_totalcount From subquery count
+ * @property int|string|null $evidence_size Release-file size from the name-fixing query
+ * @property string|null $evidence_crc32 Release-file CRC32 from the name-fixing query
+ * @property list<int> $allowed_categories Temporary name-fixing category allowlist
+ * @property array<string, int|string|null> $fresh_hashed_retry_guard Guarded retry identity snapshot
  */
 class Release extends Model
 {
