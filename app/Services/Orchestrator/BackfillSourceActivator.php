@@ -13,6 +13,8 @@ final readonly class BackfillSourceActivator
 {
     private const int SAMPLE_SIZE = 10_000;
 
+    private const int ORCHESTRATED_BACKFILL_TARGET_DAYS = 9_999;
+
     private const float MINIMUM_HEADER_COVERAGE = 0.9;
 
     private const float MINIMUM_YENC_RATIO = 0.5;
@@ -190,6 +192,7 @@ final readonly class BackfillSourceActivator
             DB::table('usenet_groups')->where('id', $group->id)->update([
                 'active' => 0,
                 'backfill' => 1,
+                'backfill_target' => self::ORCHESTRATED_BACKFILL_TARGET_DAYS,
                 'first_record' => $inspection['cursor'],
                 'first_record_postdate' => $inspection['cursor_postdate'],
                 'last_record' => $inspection['provider_last'],

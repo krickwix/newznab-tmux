@@ -72,6 +72,7 @@ final class ActivateBackfillSourceCommandTest extends TestCase
             'name' => 'alt.binaries.movie',
             'active' => 0,
             'backfill' => 0,
+            'backfill_target' => 1,
             'first_record' => 0,
             'last_record' => 0,
         ]);
@@ -91,6 +92,7 @@ final class ActivateBackfillSourceCommandTest extends TestCase
             'name' => 'alt.binaries.movie',
             'active' => 0,
             'backfill' => 1,
+            'backfill_target' => 9999,
             'first_record' => 100_000_001,
             'last_record' => 100_000_000,
             'first_record_postdate' => '2026-07-13 05:22:57',
@@ -106,6 +108,7 @@ final class ActivateBackfillSourceCommandTest extends TestCase
 
         $this->artisan('orchestrator:activate-backfill-source alt.binaries.movie --apply')->assertSuccessful();
         DB::table('usenet_groups')->where('name', 'alt.binaries.movie')->update([
+            'backfill_target' => 365,
             'first_record' => 99_950_000,
             'first_record_postdate' => '2026-07-12 05:22:57',
         ]);
@@ -119,6 +122,7 @@ final class ActivateBackfillSourceCommandTest extends TestCase
             'name' => 'alt.binaries.movie',
             'active' => 0,
             'backfill' => 1,
+            'backfill_target' => 365,
             'first_record' => 99_950_000,
             'first_record_postdate' => '2026-07-12 05:22:57',
             'last_record' => 100_000_000,
