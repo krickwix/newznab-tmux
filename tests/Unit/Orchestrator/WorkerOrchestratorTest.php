@@ -14,11 +14,13 @@ use App\Services\Orchestrator\WorkerControlStateStore;
 use App\Services\Orchestrator\WorkerOrchestrator;
 use App\Services\Orchestrator\WorkerProfileApplier;
 use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Mockery;
+use PDO;
 use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionMethod;
 use RuntimeException;
@@ -26,6 +28,68 @@ use Tests\TestCase;
 
 final class WorkerOrchestratorTest extends TestCase
 {
+    private string $databasePath;
+
+    /** @var array<string, string|false> */
+    private array $originalEnvironment = [];
+
+    public function createApplication()
+    {
+        $this->databasePath = sys_get_temp_dir().'/nntmux-worker-orchestrator-test.sqlite';
+        $this->originalEnvironment = [
+            'APP_ENV' => getenv('APP_ENV'),
+            'DB_CONNECTION' => getenv('DB_CONNECTION'),
+            'DB_DATABASE' => getenv('DB_DATABASE'),
+        ];
+
+        if (file_exists($this->databasePath)) {
+            unlink($this->databasePath);
+        }
+
+        $pdo = new PDO('sqlite:'.$this->databasePath);
+        $pdo->exec('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        $pdo->exec("INSERT INTO settings (name, value) VALUES
+            ('categorizeforeign', '0'),
+            ('catwebdl', '0'),
+            ('innerfileblacklist', '')");
+
+        $this->setEnvironmentValue('APP_ENV', 'testing');
+        $this->setEnvironmentValue('DB_CONNECTION', 'sqlite');
+        $this->setEnvironmentValue('DB_DATABASE', $this->databasePath);
+
+        $app = require __DIR__.'/../../../bootstrap/app.php';
+        $app->make(Kernel::class)->bootstrap();
+
+        return $app;
+    }
+
+    protected function tearDown(): void
+    {
+        if ($this->databasePath !== '' && file_exists($this->databasePath)) {
+            unlink($this->databasePath);
+        }
+
+        parent::tearDown();
+
+        foreach ($this->originalEnvironment as $key => $value) {
+            $this->setEnvironmentValue($key, $value === false ? null : $value);
+        }
+    }
+
+    private function setEnvironmentValue(string $key, ?string $value): void
+    {
+        if ($value === null) {
+            putenv($key);
+            unset($_ENV[$key], $_SERVER[$key]);
+
+            return;
+        }
+
+        putenv($key.'='.$value);
+        $_ENV[$key] = $value;
+        $_SERVER[$key] = $value;
+    }
+
     public function test_context_progress_is_attributed_only_to_an_inactive_backfill_group(): void
     {
         $orchestrator = new WorkerOrchestrator(
@@ -169,6 +233,29 @@ final class WorkerOrchestratorTest extends TestCase
             'releases' => 4_211,
             'release_high_watermark' => 560_367,
         ], $snapshot, true, true, 10_000, 0, 0, 1_000), 'an unrelated delayed release must not serialize the next exact cohort');
+        foreach ([
+            'provider unavailable' => new PipelineSnapshot(1, 2, 3, 0, 0, providerAvailable: false),
+            'cursor unavailable' => new PipelineSnapshot(1, 2, 3, 0, 0, cursorAvailable: false),
+            'current groups unavailable' => new PipelineSnapshot(1, 2, 3, 0, 0, currentGroupsAvailable: false),
+            'no eligible backfill supply' => new PipelineSnapshot(1, 2, 3, 0, 0, eligibleBackfillSupply: false),
+            'no safe quantity' => new PipelineSnapshot(1, 2, 3, 0, 0, backfillSafeQuantity: 0),
+        ] as $label => $nextSupplyBlockedSnapshot) {
+            self::assertTrue(
+                $method->invoke(
+                    $orchestrator,
+                    $observation,
+                    $outcome,
+                    $nextSupplyBlockedSnapshot,
+                    true,
+                    true,
+                    10_000,
+                    0,
+                    0,
+                    1_000,
+                ),
+                $label,
+            );
+        }
         self::assertFalse($method->invoke($orchestrator, $observation, $outcome, $snapshot, true, true, 10_000, 1, 0, 1_299));
         self::assertTrue($method->invoke($orchestrator, $observation, $outcome, $snapshot, true, true, 10_000, 1, 0, 1_300));
 
@@ -183,10 +270,114 @@ final class WorkerOrchestratorTest extends TestCase
             'eligible nzb' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, eligibleBackfillSupply: true, eligibleNzbs: 1, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0, 0],
             'database busy' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, databaseCurrentWaits: 1, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0, 0],
             'high pressure' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, highPressure: true, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 50_000), true, true, 10_000, 0, 0],
-            'no safe quantity' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillSafeQuantity: 0), true, true, 10_000, 0, 0],
+            'invalid telemetry' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, telemetryFresh: false), true, true, 10_000, 0, 0],
+            'hard safety failure' => [$observation, $outcome, new PipelineSnapshot(1, 2, 3, 0, 0, storageSafe: false), true, true, 10_000, 0, 0],
         ] as $label => $arguments) {
             self::assertFalse($method->invoke($orchestrator, ...[...$arguments, 1_000]), $label);
         }
+    }
+
+    public function test_zero_output_finalization_records_one_strike_and_defers_next_supply_until_the_next_cycle(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => true,
+            'nntmux.orchestrator.permit_observation_seconds' => 1200,
+            'nntmux.orchestrator.backfill_zero_output_grace_seconds' => 300,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '7'],
+        ]);
+
+        $store = new WorkerControlStateStore;
+        $store->storeState(new ControlState(profile: ControlProfile::Fill));
+        $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.exhausted', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, generation: 7, now: time() - 600, outcome: [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ], quantity: 10_000);
+        $store->observePermitCompletion(7, time() - 301);
+
+        $eligibleReplacement = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            0,
+            0,
+            lowPressure: true,
+            eligibleBackfillSupply: true,
+            backfillGroup: 'alt.next',
+            backfillCursor: 30_000,
+            backfillRemainingArticles: 30_000,
+            backfillSafeQuantity: 10_000,
+        );
+        $completedOutcome = [
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ];
+        $nextOutcome = [
+            'cursor' => 30_000,
+            'cursor_postdate' => '2026-01-03 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ];
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->twice()->andReturn($eligibleReplacement, $eligibleReplacement);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.exhausted')->andReturn($completedOutcome);
+        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.next')->andReturn($nextOutcome);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldReceive('apply')->once()->with(
+            Mockery::on(static fn (ControlDecision $decision): bool => $decision->backfillPermitted),
+            Mockery::type('int'),
+            false,
+            'alt.next',
+            false,
+        )->andReturn(8);
+        $applier->shouldReceive('apply')->once()->with(
+            Mockery::on(static fn (ControlDecision $decision): bool => $decision->backfillPermitted),
+            Mockery::type('int'),
+            true,
+            'alt.next',
+            false,
+            10_000,
+        )->andReturn(9);
+        $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
+
+        $finalized = $orchestrator->runOnce(false);
+
+        self::assertContains('backfill_permit_ineffective', $finalized['reasons']);
+        self::assertFalse($finalized['permit_granted'], 'a finalized observation must not grant replacement supply in the same cycle');
+        self::assertNull($store->permitObservation());
+        self::assertSame(1, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.exhausted'] ?? 0);
+
+        $selected = $orchestrator->runOnce(false);
+
+        self::assertTrue($selected['permit_granted']);
+        self::assertSame('alt.next', $selected['backfill_target']['group']);
+        $nextObservation = $store->permitObservation();
+        self::assertNotNull($nextObservation);
+        self::assertSame(9, $nextObservation['generation']);
     }
 
     public function test_completed_zero_output_permit_ignores_an_unrelated_delayed_release_after_grace(): void

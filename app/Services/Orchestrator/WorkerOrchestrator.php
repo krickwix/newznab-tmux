@@ -353,7 +353,7 @@ class WorkerOrchestrator
             && $snapshot->telemetryIsValid()
             && $snapshot->hardSafetyPassed()
             && ! $snapshot->highPressure
-            && $snapshot->backfillGatesPassed();
+            && $snapshot->databaseCurrentWaits === 0;
     }
 
     /**
