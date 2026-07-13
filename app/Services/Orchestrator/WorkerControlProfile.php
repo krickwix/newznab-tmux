@@ -65,24 +65,6 @@ final readonly class WorkerControlProfile
             ? min($maxQuantity, $lastCursorDelta * 2)
             : $maxQuantity;
         if ($this->profile !== ControlProfile::Fill || ! is_finite($nzbsPer10k) || $nzbsPer10k < $minimumYield) {
-            if ($this->profile === ControlProfile::Fill
-                && $yieldAttempts === 1
-                && $lastCursorDelta > 0
-                && $lastEffectiveAt === 0
-                && $historyRecent
-                && $targetIneffectivePermits === 1
-                && is_finite($nzbsPer10k)
-                && $nzbsPer10k === 0.0
-            ) {
-                $retryQuantity = (int) config('nntmux.orchestrator.backfill_context_retry_quantity', 50000);
-                $availableQuantity = max(
-                    $this->backfillQuantity,
-                    intdiv(max(0, $remainingArticles - 10000), 10000) * 10000,
-                );
-
-                return max($this->backfillQuantity, min($retryQuantity, $rampLimit, $availableQuantity, $safeQuantity));
-            }
-
             return $this->backfillQuantity;
         }
 

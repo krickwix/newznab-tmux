@@ -321,7 +321,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertFalse($result['permit_granted']);
     }
 
-    public function test_fill_atomically_issues_one_bounded_context_retry_for_the_selected_target(): void
+    public function test_fill_atomically_keeps_a_zero_yield_retry_at_probe_quantity(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => true,
@@ -379,7 +379,7 @@ final class WorkerOrchestratorTest extends TestCase
             42,
             Mockery::type('int'),
             $outcome,
-            20_000,
+            10_000,
         );
         $store->shouldReceive('storeState')->once()->with(Mockery::type(ControlState::class));
         $store->shouldReceive('storeSnapshot')->once()->with($snapshot);
@@ -394,13 +394,13 @@ final class WorkerOrchestratorTest extends TestCase
             true,
             'alt.multipart',
             false,
-            20_000,
+            10_000,
         )->andReturn(42);
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
 
         self::assertTrue($result['permit_granted']);
-        self::assertSame(20_000, $result['backfill_target']['quantity']);
+        self::assertSame(10_000, $result['backfill_target']['quantity']);
     }
 
     public function test_cooldown_due_target_issues_and_consumes_one_headroom_capped_context_retry(): void

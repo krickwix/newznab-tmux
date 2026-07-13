@@ -45,13 +45,13 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(10_000, $profile->quantityForYield(10.0, 20_000));
     }
 
-    public function test_one_input_bearing_zero_yield_probe_gets_one_bounded_context_retry(): void
+    public function test_one_input_bearing_zero_yield_probe_remains_at_probe_quantity(): void
     {
         $balanced = WorkerControlProfile::for(ControlProfile::Balanced);
         $fill = WorkerControlProfile::for(ControlProfile::Fill);
 
         self::assertSame(10_000, $balanced->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
-        self::assertSame(20_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
+        self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
         self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 0, 0, 0, true, 1));
         self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 0, 0, true, 1));
         self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 1, true, 1));
@@ -60,17 +60,17 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 2, 10_000, 0, true, 1));
     }
 
-    public function test_context_retry_is_capped_by_live_headroom_and_source_reserve(): void
+    public function test_zero_yield_retry_does_not_consume_extra_headroom_or_source_reserve(): void
     {
         $profile = WorkerControlProfile::for(ControlProfile::Fill);
 
-        self::assertSame(20_000, $profile->quantityForYield(0.0, 1_000_000, 40_000, 1, 10_000, 0, true, 1));
-        self::assertSame(20_000, $profile->quantityForYield(0.0, 30_000, 150_000, 1, 10_000, 0, true, 1));
+        self::assertSame(10_000, $profile->quantityForYield(0.0, 1_000_000, 40_000, 1, 10_000, 0, true, 1));
+        self::assertSame(10_000, $profile->quantityForYield(0.0, 30_000, 150_000, 1, 10_000, 0, true, 1));
         self::assertSame(10_000, $profile->quantityForYield(0.0, 20_000, 150_000, 1, 10_000, 0, true, 1));
 
         config(['nntmux.orchestrator.backfill_context_retry_quantity' => 100_000]);
         config(['nntmux.orchestrator.backfill_max_quantity' => 30_000]);
-        self::assertSame(20_000, $profile->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
+        self::assertSame(10_000, $profile->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
     }
 
     public function test_cooldown_due_target_gets_one_context_sized_retry_with_all_caps(): void
@@ -81,7 +81,7 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(50_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 2, 10_000, 0, true, 2, true));
         self::assertSame(40_000, $fill->quantityForYield(0.0, 1_000_000, 40_000, 2, 10_000, 0, true, 2, true));
         self::assertSame(20_000, $fill->quantityForYield(0.0, 30_000, 150_000, 2, 10_000, 0, true, 2, true));
-        self::assertSame(20_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1, true));
+        self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1, true));
         self::assertSame(10_000, $balanced->quantityForYield(0.0, 1_000_000, 150_000, 2, 10_000, 0, true, 2, true));
 
         config(['nntmux.orchestrator.backfill_max_quantity' => 30_000]);
