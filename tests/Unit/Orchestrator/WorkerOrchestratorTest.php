@@ -224,6 +224,7 @@ final class WorkerOrchestratorTest extends TestCase
 
         $store = new WorkerControlStateStore;
         $store->storeState(new ControlState(profile: ControlProfile::Fill));
+        $store->markBackfillContextRepeat('alt.console', time() - 30);
         $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.console', backfillCursor: 20_000);
         $store->beginPermitObservation($baseline, generation: 7, now: time() - 60, outcome: [
             'cursor' => 20_000,
@@ -282,6 +283,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertNotNull($store->permitObservation());
         self::assertSame([], $store->backfillYieldHistory());
         self::assertSame([], $store->loadState()->ineffectiveBackfillPermitsByTarget);
+        self::assertSame('alt.console', $store->backfillContextRepeat(time())['group'] ?? null);
 
         $locked = $orchestrator->runOnce(false);
         $stillLocked = $orchestrator->runOnce(false);
@@ -293,6 +295,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertFalse($stillLocked['permit_granted']);
         self::assertSame(WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.console']);
         self::assertSame(0.0, $store->backfillYieldHistory()['alt.console']['ewma_nzbs_per_10k']);
+        self::assertNull($store->backfillContextRepeat(time()));
     }
 
     public function test_zero_output_context_retry_grace_is_bounded_to_five_minutes_minimum(): void
@@ -456,6 +459,7 @@ final class WorkerOrchestratorTest extends TestCase
 
         $store = new WorkerControlStateStore;
         $store->storeState(new ControlState(profile: ControlProfile::Fill));
+        $store->markBackfillContextRepeat('alt.exhausted', time() - 30);
         $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.exhausted', backfillCursor: 20_000);
         $store->beginPermitObservation($baseline, generation: 7, now: time() - 600, outcome: [
             'cursor' => 20_000,
@@ -528,6 +532,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertFalse($finalized['permit_granted'], 'a finalized observation must not grant replacement supply in the same cycle');
         self::assertNull($store->permitObservation());
         self::assertSame(1, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.exhausted'] ?? 0);
+        self::assertNull($store->backfillContextRepeat(time()));
 
         $selected = $orchestrator->runOnce(false);
 
@@ -615,7 +620,7 @@ final class WorkerOrchestratorTest extends TestCase
     public function test_completed_inactive_backfill_permit_attributes_collection_context_progress(): void
     {
         config([
-            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.auto_backfill' => true,
             'nntmux.orchestrator.permit_observation_seconds' => 1200,
             'nntmux.orchestrator.backfill_zero_output_grace_seconds' => 300,
             'nntmux.orchestrator.state_store' => 'array',
@@ -640,6 +645,7 @@ final class WorkerOrchestratorTest extends TestCase
             profile: ControlProfile::Balanced,
             ineffectiveBackfillPermitsByTarget: ['alt.test' => 2, 'alt.other' => 1],
         ));
+        $store->markBackfillContextRepeat('alt.other', time() - 30);
         $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.test', backfillCursor: 20_000);
         $store->beginPermitObservation($baseline, generation: 7, now: time() - 600, outcome: [
             'cursor' => 20_000,
@@ -666,8 +672,8 @@ final class WorkerOrchestratorTest extends TestCase
             backfillSafeQuantity: 50_000,
         );
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
-        $snapshots->shouldReceive('capture')->once()->andReturn($current);
-        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
+        $snapshots->shouldReceive('capture')->twice()->andReturn($current, $current);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->twice()->with('alt.test')->andReturn([
             'cursor' => 10_000,
             'cursor_postdate' => '2026-01-01 03:04:05',
             'ready_collections' => 0,
@@ -677,17 +683,26 @@ final class WorkerOrchestratorTest extends TestCase
             'partial_collections' => 3,
             'complete_binaries' => 24,
         ]);
-        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->twice()->andReturn([
             'target' => 0,
             'non_target' => 0,
             'uncategorized' => 0,
         ]);
-        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->twice()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
         $applier->shouldReceive('apply')->once()->andReturn(8);
 
-        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+        $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
+        $shadow = $orchestrator->runOnce(true);
+
+        self::assertNotContains('backfill_permit_context_progress', $shadow['reasons']);
+        self::assertNotNull($store->permitObservation());
+        self::assertSame([], $store->backfillYieldHistory());
+        self::assertSame(['alt.test' => 2, 'alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
+        self::assertSame('alt.other', $store->backfillContextRepeat(time())['group'] ?? null);
+
+        $result = $orchestrator->runOnce(false);
 
         self::assertContains('backfill_permit_context_progress', $result['reasons']);
         self::assertNotContains('backfill_permit_effective', $result['reasons']);
@@ -695,6 +710,8 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame(['alt.test' => 1, 'alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
         self::assertSame(0.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
         self::assertNull($store->permitObservation());
+        self::assertSame('alt.test', $store->backfillContextRepeat(time())['group'] ?? null);
+        self::assertFalse($result['permit_granted']);
     }
 
     public function test_configuration_clamps_the_observation_window_to_five_minutes(): void
@@ -1261,6 +1278,9 @@ final class WorkerOrchestratorTest extends TestCase
             ['name' => 'orchestrator_bf_completed', 'value' => '7'],
         ]);
         $store = new WorkerControlStateStore;
+        if ($closes) {
+            $store->markBackfillContextRepeat('alt.test', time() - 30);
+        }
         $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
         $store->beginPermitObservation($baseline, generation: 7, now: time() - 61, outcome: [
             'cursor' => 20_000,
@@ -1287,6 +1307,7 @@ final class WorkerOrchestratorTest extends TestCase
             'cursor_postdate' => '2026-01-01 03:04:05',
             'ready_collections' => 0,
             'releases' => 0,
+            'partial_collections' => 1,
         ]);
         $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
             'target' => 2,
@@ -1306,6 +1327,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertFalse($result['permit_granted']);
         self::assertSame($closes, $store->permitObservation() === null);
         self::assertSame($closes ? 2.0 : null, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
+        self::assertNull($store->backfillContextRepeat(time()));
     }
 
     /** @return array<string, array{int, bool}> */
@@ -1449,6 +1471,7 @@ final class WorkerOrchestratorTest extends TestCase
             ['name' => 'orchestrator_bf_completed', 'value' => '7'],
         ]);
         $store = new WorkerControlStateStore;
+        $store->markBackfillContextRepeat('alt.test', time() - 30);
         $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
         $store->beginPermitObservation($baseline, generation: 7, now: time() - 61, outcome: [
             'cursor' => 20_000,
@@ -1478,6 +1501,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts']);
         self::assertSame(0, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
         self::assertFalse($result['permit_granted']);
+        self::assertSame('alt.test', $store->backfillContextRepeat(time())['group'] ?? null);
     }
 
     public function test_a_claimed_legacy_observation_closes_without_recording_yield(): void

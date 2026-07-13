@@ -167,6 +167,31 @@ final class WorkerControlStateStoreTest extends TestCase
         self::assertNull($store->permitObservation());
     }
 
+    public function test_context_repeat_marker_round_trips_and_only_the_matching_group_can_clear_it(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_yield_ttl_seconds', 600);
+        $store = new WorkerControlStateStore;
+
+        $store->markBackfillContextRepeat(' alt.test ', 1_000);
+
+        self::assertSame(['group' => 'alt.test', 'marked_at' => 1_000], $store->backfillContextRepeat(1_001));
+        self::assertFalse($store->clearBackfillContextRepeat('alt.other'));
+        self::assertSame(['group' => 'alt.test', 'marked_at' => 1_000], $store->backfillContextRepeat(1_002));
+        self::assertTrue($store->clearBackfillContextRepeat('alt.test'));
+        self::assertNull($store->backfillContextRepeat(1_003));
+    }
+
+    public function test_context_repeat_marker_expires_at_the_yield_history_ttl(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_yield_ttl_seconds', 600);
+        $store = new WorkerControlStateStore;
+        $store->markBackfillContextRepeat('alt.test', 1_000);
+
+        self::assertSame('alt.test', $store->backfillContextRepeat(1_599)['group'] ?? null);
+        self::assertNull($store->backfillContextRepeat(1_600));
+        self::assertFalse($store->clearBackfillContextRepeat('alt.test'));
+    }
+
     public function test_permit_completion_observation_is_generation_fenced_and_idempotent(): void
     {
         $store = new WorkerControlStateStore;

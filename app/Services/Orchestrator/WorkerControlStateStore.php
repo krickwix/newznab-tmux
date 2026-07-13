@@ -22,6 +22,8 @@ class WorkerControlStateStore
 
     private const string INCOMPLETE_RELEASE_COHORT_KEY = 'nntmux:orchestrator:incomplete-release-cohort';
 
+    private const string BACKFILL_CONTEXT_REPEAT_KEY = 'nntmux:orchestrator:backfill-context-repeat';
+
     public const string DECISION_KEY = 'nntmux:orchestrator:last-decision';
 
     public function leaderLock(): Lock
@@ -281,6 +283,50 @@ class WorkerControlStateStore
     public function clearPermitObservation(): void
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forget(self::PERMIT_OBSERVATION_KEY);
+    }
+
+    public function markBackfillContextRepeat(string $group, int $now): void
+    {
+        $group = trim($group);
+        if ($group === '' || $now <= 0) {
+            return;
+        }
+
+        Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+            ->forever(self::BACKFILL_CONTEXT_REPEAT_KEY, [
+                'group' => $group,
+                'marked_at' => $now,
+            ]);
+    }
+
+    /** @return array{group: string, marked_at: int}|null */
+    public function backfillContextRepeat(int $now): ?array
+    {
+        $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+        $marker = $cache->get(self::BACKFILL_CONTEXT_REPEAT_KEY);
+        $group = is_array($marker) ? trim((string) ($marker['group'] ?? '')) : '';
+        $markedAt = is_array($marker) ? (int) ($marker['marked_at'] ?? 0) : 0;
+        $ttl = max(1, (int) config('nntmux.orchestrator.backfill_yield_ttl_seconds', 86_400));
+        if ($group === '' || $markedAt <= 0 || $markedAt > $now || $now - $markedAt >= $ttl) {
+            if ($marker !== null) {
+                $cache->forget(self::BACKFILL_CONTEXT_REPEAT_KEY);
+            }
+
+            return null;
+        }
+
+        return ['group' => $group, 'marked_at' => $markedAt];
+    }
+
+    public function clearBackfillContextRepeat(string $group): bool
+    {
+        $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+        $marker = $cache->get(self::BACKFILL_CONTEXT_REPEAT_KEY);
+        if (! is_array($marker) || trim((string) ($marker['group'] ?? '')) !== trim($group)) {
+            return false;
+        }
+
+        return $cache->forget(self::BACKFILL_CONTEXT_REPEAT_KEY);
     }
 
     /** @return array{parts: int, binaries: int, collections: int} */

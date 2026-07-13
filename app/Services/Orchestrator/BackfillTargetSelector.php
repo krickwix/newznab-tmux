@@ -61,10 +61,16 @@ final readonly class BackfillTargetSelector
      * @param  list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $candidates
      * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
      * @param  array<string, int>  $ineffectivePermitsByTarget
-     * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
+     * @param  array{group: string, marked_at: int}|null  $contextRepeat
+     * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity?: int}|null
      */
-    public function select(array $candidates, array $history, int $now, array $ineffectivePermitsByTarget = []): ?array
-    {
+    public function select(
+        array $candidates,
+        array $history,
+        int $now,
+        array $ineffectivePermitsByTarget = [],
+        ?array $contextRepeat = null,
+    ): ?array {
         $candidates = array_values(array_filter(
             $candidates,
             function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget): bool {
@@ -76,6 +82,7 @@ final readonly class BackfillTargetSelector
 
                 return $candidate['cursor'] > 0
                     && $candidate['remaining_articles'] >= 20_000
+                    && (int) ($candidate['safe_quantity'] ?? 10_000) >= 10_000
                     && $timestamp !== false
                     && (int) substr($candidate['cursor_postdate'], 0, 4) >= 2000
                     && $timestamp <= $now
@@ -100,6 +107,17 @@ final readonly class BackfillTargetSelector
         $byName = [];
         foreach ($candidates as $candidate) {
             $byName[$candidate['name']] = $candidate;
+        }
+
+        $repeatGroup = trim((string) ($contextRepeat['group'] ?? ''));
+        $repeatMarkedAt = (int) ($contextRepeat['marked_at'] ?? 0);
+        if ($repeatGroup !== ''
+            && $repeatMarkedAt > 0
+            && $repeatMarkedAt <= $now
+            && $now - $repeatMarkedAt < $this->historyTtlSeconds
+            && isset($byName[$repeatGroup])
+        ) {
+            return [...$byName[$repeatGroup], 'safe_quantity' => 10_000];
         }
 
         $positive = array_values(array_filter(
@@ -207,6 +225,7 @@ final readonly class BackfillTargetSelector
     /**
      * @param  list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $candidates
      * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
+     * @param  array<string, int>  $ineffectivePermitsByTarget
      * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
      */
     private function selectUntried(
@@ -279,6 +298,7 @@ final readonly class BackfillTargetSelector
     /**
      * @param  array<string, array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $byName
      * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
+     * @param  array<string, int>  $ineffectivePermitsByTarget
      * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
      */
     private function selectConfiguredProbe(
@@ -310,6 +330,7 @@ final readonly class BackfillTargetSelector
     /**
      * @param  array<string, array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $byName
      * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
+     * @param  array<string, int>  $ineffectivePermitsByTarget
      * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
      */
     private function selectConfiguredUntried(

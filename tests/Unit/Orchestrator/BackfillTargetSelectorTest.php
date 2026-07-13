@@ -5,10 +5,92 @@ declare(strict_types=1);
 namespace Tests\Unit\Orchestrator;
 
 use App\Services\Orchestrator\BackfillTargetSelector;
+use App\Services\Orchestrator\WorkerControlPolicy;
 use PHPUnit\Framework\TestCase;
 
 final class BackfillTargetSelectorTest extends TestCase
 {
+    public function test_fresh_context_repeat_has_priority_over_every_lane_and_is_probe_clamped(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.untried', 'alt.repeat', 'alt.positive'],
+            historyTtlSeconds: 86_400,
+        );
+        $repeat = [...$this->candidate('alt.repeat', '2026-01-02 00:00:00'), 'safe_quantity' => 80_000];
+
+        $target = $selector->select([
+            $this->candidate('alt.untried', '2026-01-03 00:00:00'),
+            $repeat,
+            $this->candidate('alt.positive', '2026-01-01 00:00:00'),
+        ], [
+            'alt.repeat' => $this->history(attempts: 1, yield: 0.0),
+            'alt.positive' => $this->history(attempts: 4, yield: 5.0),
+        ], now: 2_000_000_000, contextRepeat: [
+            'group' => 'alt.repeat',
+            'marked_at' => 1_999_999_900,
+        ]);
+
+        self::assertSame('alt.repeat', $target['name'] ?? null);
+        self::assertSame(10_000, $target['safe_quantity'] ?? null);
+    }
+
+    public function test_context_repeat_never_bypasses_candidate_safety_or_exact_strike_gates(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.repeat', 'alt.safe'],
+            historyTtlSeconds: 86_400,
+        );
+        $unsafe = [...$this->candidate('alt.repeat', '2026-01-02 00:00:00'), 'safe_quantity' => 0];
+
+        $safetyGated = $selector->select([
+            $unsafe,
+            $this->candidate('alt.safe', '2026-01-01 00:00:00'),
+        ], [
+            'alt.repeat' => $this->history(attempts: 1, yield: 0.0),
+        ], now: 2_000_000_000, contextRepeat: [
+            'group' => 'alt.repeat',
+            'marked_at' => 1_999_999_900,
+        ]);
+        $strikeGated = $selector->select([
+            $this->candidate('alt.repeat', '2026-01-02 00:00:00'),
+            $this->candidate('alt.safe', '2026-01-01 00:00:00'),
+        ], [
+            'alt.repeat' => $this->history(attempts: 1, yield: 0.0),
+        ], now: 2_000_000_000, ineffectivePermitsByTarget: [
+            'alt.repeat' => WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT,
+        ], contextRepeat: [
+            'group' => 'alt.repeat',
+            'marked_at' => 1_999_999_900,
+        ]);
+
+        self::assertSame('alt.safe', $safetyGated['name'] ?? null);
+        self::assertSame('alt.safe', $strikeGated['name'] ?? null);
+    }
+
+    public function test_stale_or_wrong_group_context_repeat_does_not_change_normal_selection(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.untried', 'alt.repeat'],
+            historyTtlSeconds: 600,
+        );
+        $candidates = [
+            $this->candidate('alt.untried', '2026-01-03 00:00:00'),
+            $this->candidate('alt.repeat', '2026-01-02 00:00:00'),
+        ];
+
+        $stale = $selector->select($candidates, [], 2_000_000_000, contextRepeat: [
+            'group' => 'alt.repeat',
+            'marked_at' => 1_999_999_400,
+        ]);
+        $wrong = $selector->select($candidates, [], 2_000_000_000, contextRepeat: [
+            'group' => 'alt.missing',
+            'marked_at' => 1_999_999_999,
+        ]);
+
+        self::assertSame('alt.untried', $stale['name'] ?? null);
+        self::assertSame('alt.untried', $wrong['name'] ?? null);
+    }
+
     public function test_it_selects_the_first_configured_untried_probe(): void
     {
         $selector = new BackfillTargetSelector(
@@ -846,6 +928,18 @@ final class BackfillTargetSelectorTest extends TestCase
             'cursor' => 100_000,
             'cursor_postdate' => $postdate,
             'remaining_articles' => 90_000,
+        ];
+    }
+
+    /** @return array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int} */
+    private function history(int $attempts, float $yield): array
+    {
+        return [
+            'attempts' => $attempts,
+            'ewma_nzbs_per_10k' => $yield,
+            'last_attempt_at' => 1_999_999_000,
+            'last_effective_at' => $yield > 0 ? 1_999_999_000 : 0,
+            'last_cursor_delta' => 10_000,
         ];
     }
 }

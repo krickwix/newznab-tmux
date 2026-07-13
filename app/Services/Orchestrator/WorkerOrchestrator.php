@@ -143,7 +143,7 @@ class WorkerOrchestrator
                         ? $this->applier->revokePermit()
                         : $this->applier->qualityLockBackfillTarget($observedGroup, $cohortQuality['failure']);
                 }
-                if ($closeObservation && $permitClaimed && $hasCohortBaseline) {
+                if ($closeObservation && ! $shadow && $permitClaimed && $hasCohortBaseline) {
                     if ($this->shouldRememberIncompleteReleaseCohort(
                         $permitObservation,
                         $permitCompleted,
@@ -173,8 +173,28 @@ class WorkerOrchestrator
                             (int) ($permitObservation['backfill_quantity'] ?? 0),
                         );
                     }
+                    $requestedQuantity = max(0, (int) ($permitObservation['backfill_quantity'] ?? 0));
+                    $isInputBearingClose = $cursorMoved && $cursorDelta > 0;
+                    $contextRepeat = $isInputBearingClose
+                        ? $this->store->backfillContextRepeat(time())
+                        : null;
+                    $isExistingContextRepeat = $isInputBearingClose
+                        && (string) ($contextRepeat['group'] ?? '') === $observedGroup;
+                    if ($isExistingContextRepeat) {
+                        $this->store->clearBackfillContextRepeat($observedGroup);
+                    } elseif ($contextProgress
+                        && $isInputBearingClose
+                        && $cohortReleases === 0
+                        && $cohortNzbs === 0
+                        && $cohortQuality['productive'] === 0
+                        && $cohortQuality['failure'] === null
+                        && $requestedQuantity >= 10_000
+                        && $cursorDelta === $requestedQuantity
+                    ) {
+                        $this->store->markBackfillContextRepeat($observedGroup, time());
+                    }
                 }
-                if ($closeObservation) {
+                if ($closeObservation && ! $shadow) {
                     $snapshot = $snapshot->withPermitOutcome(
                         completed: true,
                         effective: $permitClaimed && $cursorMoved && ($hasCohortBaseline ? $cohortQuality['productive'] > 0 : $produced),

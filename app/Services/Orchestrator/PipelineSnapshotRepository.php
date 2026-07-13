@@ -75,11 +75,11 @@ class PipelineSnapshotRepository
             'releases' => (int) ($pipeline->releases_backlog ?? 0),
             'nzbs' => (int) ($pipeline->nzbs_backlog ?? 0),
         ];
-        $backfillTarget = $this->targets->select(
+        $backfillTarget = $this->selectBackfillTarget(
             $this->safeBackfillCandidates($this->backfillCandidates(), $backlogs),
             $yieldHistory,
+            $controlState,
             time(),
-            $controlState->ineffectiveBackfillPermitsByTarget,
         );
         $backfillGroup = (string) ($backfillTarget['name'] ?? '');
         $targetHistory = $yieldHistory[$backfillGroup] ?? null;
@@ -293,6 +293,22 @@ class PipelineSnapshotRepository
         }
 
         return $safe;
+    }
+
+    /**
+     * @param  list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity: int}>  $candidates
+     * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
+     * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity: int}|null
+     */
+    private function selectBackfillTarget(array $candidates, array $history, ControlState $state, int $now): ?array
+    {
+        return $this->targets->select(
+            $candidates,
+            $history,
+            $now,
+            $state->ineffectiveBackfillPermitsByTarget,
+            $this->state->backfillContextRepeat($now),
+        );
     }
 
     /** @return array{cursor: int, cursor_postdate: string, ready_collections: int, releases: int, release_high_watermark: int, group_active: int, partial_collections: int, complete_binaries: int} */

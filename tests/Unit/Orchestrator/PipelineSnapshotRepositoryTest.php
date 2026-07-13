@@ -6,10 +6,12 @@ namespace Tests\Unit\Orchestrator;
 
 use App\Services\Nzb\NzbBacklogCreationService;
 use App\Services\Orchestrator\BodyRecoverySourceCriteria;
+use App\Services\Orchestrator\ControlState;
 use App\Services\Orchestrator\PipelineSnapshot;
 use App\Services\Orchestrator\PipelineSnapshotRepository;
 use App\Services\Orchestrator\PrometheusSafetySignalProvider;
 use App\Services\Orchestrator\WorkerControlStateStore;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Mockery;
 use ReflectionMethod;
@@ -207,6 +209,32 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             'releases' => 12,
             'nzbs' => 6_794,
         ]));
+    }
+
+    public function test_repository_wires_the_durable_context_repeat_into_target_selection(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.backfill_probe_groups' => ['alt.untried', 'alt.repeat'],
+            'nntmux.orchestrator.backfill_yield_ttl_seconds' => 600,
+        ]);
+        Cache::store('array')->flush();
+        $state = new WorkerControlStateStore;
+        $state->markBackfillContextRepeat('alt.repeat', 1_999_999_900);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'selectBackfillTarget');
+
+        $target = $method->invoke($repository, [
+            ['name' => 'alt.untried', 'cursor' => 30_000, 'cursor_postdate' => '2009-01-03 00:00:00', 'remaining_articles' => 30_000, 'safe_quantity' => 30_000],
+            ['name' => 'alt.repeat', 'cursor' => 40_000, 'cursor_postdate' => '2009-01-02 00:00:00', 'remaining_articles' => 40_000, 'safe_quantity' => 40_000],
+        ], [], ControlState::initial(), 2_000_000_000);
+
+        self::assertSame('alt.repeat', $target['name'] ?? null);
+        self::assertSame(10_000, $target['safe_quantity'] ?? null);
     }
 
     public function test_legacy_snapshot_resets_new_collection_split_rates_without_a_fake_drain(): void
