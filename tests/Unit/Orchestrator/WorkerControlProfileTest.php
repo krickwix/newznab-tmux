@@ -108,6 +108,14 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(40, WorkerControlProfile::for(ControlProfile::Fill)->nzbBatchSize);
     }
 
+    public function test_fill_accelerates_release_feedback_without_changing_pressure_profiles(): void
+    {
+        self::assertSame(20, WorkerControlProfile::for(ControlProfile::Fill)->releasesSleepSeconds);
+        self::assertSame(60, WorkerControlProfile::for(ControlProfile::Balanced)->releasesSleepSeconds);
+        self::assertSame(45, WorkerControlProfile::for(ControlProfile::Drain)->releasesSleepSeconds);
+        self::assertSame(180, WorkerControlProfile::for(ControlProfile::FailSafe)->releasesSleepSeconds);
+    }
+
     public function test_fail_safe_keeps_all_input_conservative_while_backfill_is_disabled(): void
     {
         $profile = WorkerControlProfile::for(ControlProfile::FailSafe);
