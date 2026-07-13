@@ -42,7 +42,11 @@ class PrometheusSafetySignalProvider
         }
 
         $response = Http::timeout(5)
-            ->retry(1, 100)
+            ->retry(
+                (int) config('nntmux.orchestrator.prometheus_retry_attempts', 3),
+                100,
+                throw: false,
+            )
             ->get(rtrim((string) config('nntmux.orchestrator.prometheus_url'), '/').'/api/v1/query', ['query' => $query]);
         if (! $response->successful() || $response->json('status') !== 'success') {
             return null;

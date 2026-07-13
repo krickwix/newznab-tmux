@@ -23,6 +23,7 @@ final class PrometheusSafetySignalProviderTest extends TestCase
             'nntmux.orchestrator.storage_floor_bytes' => 18_500,
             'nntmux.orchestrator.database_memory_limit_bytes' => 4_250,
             'nntmux.orchestrator.database_cpu_limit_cores' => 3,
+            'nntmux.orchestrator.prometheus_retry_attempts' => 3,
         ]);
     }
 
@@ -55,6 +56,8 @@ final class PrometheusSafetySignalProviderTest extends TestCase
     {
         Http::fakeSequence()
             ->pushStatus(503)
+            ->pushStatus(503)
+            ->pushStatus(503)
             ->push($this->prometheusResult('4000'))
             ->push($this->prometheusResult('2.5'));
 
@@ -65,6 +68,23 @@ final class PrometheusSafetySignalProviderTest extends TestCase
         self::assertTrue($signals['cpu_safe']);
         self::assertFalse($signals['storage_safe']);
         self::assertSame(0, $signals['storage_available_bytes']);
+    }
+
+    public function test_a_single_transient_http_failure_is_retried_without_weakening_the_gate(): void
+    {
+        Http::fakeSequence()
+            ->pushStatus(503)
+            ->push($this->prometheusResult('20000'))
+            ->push($this->prometheusResult('4000'))
+            ->push($this->prometheusResult('2.5'));
+
+        $signals = (new PrometheusSafetySignalProvider)->signals();
+
+        self::assertTrue($signals['fresh']);
+        self::assertTrue($signals['memory_safe']);
+        self::assertTrue($signals['cpu_safe']);
+        self::assertTrue($signals['storage_safe']);
+        Http::assertSentCount(4);
     }
 
     public function test_multiple_series_are_rejected_as_ambiguous_cardinality(): void
