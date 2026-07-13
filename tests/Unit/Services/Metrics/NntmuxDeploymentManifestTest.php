@@ -326,7 +326,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         $probeGroupsValue = $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null;
         self::assertSame(
-            'alt.binaries.movies.x264,alt.binaries.hdtv.tv-episodes,alt.binaries.dvd.movies,alt.binaries.movie,alt.binaries.lossless,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.dvd.classic.movies,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
+            'alt.binaries.movies.x264,alt.binaries.hdtv.tv-episodes,alt.binaries.dvd.movies,alt.binaries.movie,alt.binaries.teevee,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.dvd.classic.movies,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
             $probeGroupsValue,
         );
         $probeGroups = explode(',', (string) $probeGroupsValue);
