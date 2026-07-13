@@ -343,6 +343,34 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringNotContainsString('alt.binaries.inactive', $output);
     }
 
+    public function test_group_metrics_include_backfill_only_sources_without_counting_them_as_active(): void
+    {
+        DB::statement('CREATE TABLE usenet_groups (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            active INTEGER DEFAULT 0,
+            backfill INTEGER DEFAULT 0,
+            first_record INTEGER DEFAULT 0,
+            first_record_postdate DATETIME NULL
+        )');
+        DB::table('usenet_groups')->insert([
+            ['id' => 1, 'name' => 'alt.active', 'active' => 1, 'backfill' => 1, 'first_record' => 100, 'first_record_postdate' => '2026-07-01 00:00:00'],
+            ['id' => 2, 'name' => 'alt.backfill-only', 'active' => 0, 'backfill' => 1, 'first_record' => 200, 'first_record_postdate' => '2026-07-02 00:00:00'],
+            ['id' => 3, 'name' => 'alt.disabled', 'active' => 0, 'backfill' => 0, 'first_record' => 300, 'first_record_postdate' => '2026-07-03 00:00:00'],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('groupMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_groups_total{state="active"} 1', $output);
+        $this->assertStringContainsString('nntmux_groups_total{state="active_backfill"} 1', $output);
+        $this->assertStringContainsString('nntmux_groups_total{state="backfill"} 2', $output);
+        $this->assertStringContainsString('nntmux_group_first_record{group="alt.backfill-only"} 200', $output);
+        $this->assertStringNotContainsString('alt.disabled', $output);
+    }
+
     public function test_collection_lifecycle_metrics_are_aggregate_and_zero_safe(): void
     {
         DB::statement('CREATE TABLE collections (

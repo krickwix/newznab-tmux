@@ -244,8 +244,8 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         DB::shouldReceive('select')
             ->once()
             ->withArgs(function (string $sql, array $bindings): bool {
-                self::assertStringContainsString('g.active = 1', $sql);
                 self::assertStringContainsString('g.backfill = 1', $sql);
+                self::assertStringNotContainsString('g.active = 1', $sql);
                 self::assertStringContainsString('s.updated >= NOW() - INTERVAL 10 MINUTE', $sql);
                 self::assertStringContainsString('CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000', $sql);
                 self::assertStringContainsString('CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= 20000', $sql);

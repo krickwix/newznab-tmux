@@ -243,7 +243,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringContainsString('max without(instance, pod)', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringContainsString('[20m:1m]', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-recovery-fairness-v76',
+            ':microservices-pods-20260713-backfill-source-v97',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
@@ -263,7 +263,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $backlogEnvironment = $environment($deployments['nntmux-worker-nzb-backlog'] ?? []);
         $metricsEnvironment = $environment($metrics);
         self::assertSame('microservices-pods-20260711-worker-orchestrator-v22', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
-        self::assertSame('microservices-pods-20260712-recovery-fairness-v76', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260713-backfill-source-v97', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
         ksort($expected);
@@ -278,11 +278,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-context-retry-v96',
+            ':microservices-pods-20260713-backfill-source-v97',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-context-retry-v96',
+            'microservices-pods-20260713-backfill-source-v97',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
@@ -315,7 +315,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PROMETHEUS_RETRY_ATTEMPTS'] ?? null,
         );
         self::assertSame(
-            'alt.binaries.lossless,alt.binaries.sounds.lossless.metal,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
+            'alt.binaries.movie,alt.binaries.lossless,alt.binaries.sounds.lossless.metal,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null,
         );
         self::assertSame(

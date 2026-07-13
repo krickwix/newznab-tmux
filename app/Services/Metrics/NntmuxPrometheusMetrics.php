@@ -242,9 +242,9 @@ class NntmuxPrometheusMetrics
     private function groupMetrics(): array
     {
         $active = (int) DB::table('usenet_groups')->where('active', 1)->count();
-        $backfill = (int) DB::table('usenet_groups')->where('active', 1)->where('backfill', 1)->count();
+        $activeBackfill = (int) DB::table('usenet_groups')->where('active', 1)->where('backfill', 1)->count();
+        $backfill = (int) DB::table('usenet_groups')->where('backfill', 1)->count();
         $oldest = DB::table('usenet_groups')
-            ->where('active', 1)
             ->where('backfill', 1)
             ->whereNotNull('first_record_postdate')
             ->min('first_record_postdate');
@@ -253,19 +253,19 @@ class NntmuxPrometheusMetrics
             '# HELP nntmux_groups_total Usenet group count by state.',
             '# TYPE nntmux_groups_total gauge',
             $this->metric('nntmux_groups_total', $active, ['state' => 'active']),
-            $this->metric('nntmux_groups_total', $backfill, ['state' => 'active_backfill']),
-            '# HELP nntmux_backfill_oldest_cursor_age_seconds Age of the oldest active backfill first-record cursor.',
+            $this->metric('nntmux_groups_total', $activeBackfill, ['state' => 'active_backfill']),
+            $this->metric('nntmux_groups_total', $backfill, ['state' => 'backfill']),
+            '# HELP nntmux_backfill_oldest_cursor_age_seconds Age of the oldest backfill first-record cursor.',
             '# TYPE nntmux_backfill_oldest_cursor_age_seconds gauge',
             $this->metric('nntmux_backfill_oldest_cursor_age_seconds', $oldest === null ? 0 : max(0, time() - strtotime((string) $oldest))),
-            '# HELP nntmux_group_first_record_postdate_timestamp First-record postdate timestamp for active backfill groups.',
+            '# HELP nntmux_group_first_record_postdate_timestamp First-record postdate timestamp for backfill groups.',
             '# TYPE nntmux_group_first_record_postdate_timestamp gauge',
-            '# HELP nntmux_group_first_record Current first article number for active backfill groups.',
+            '# HELP nntmux_group_first_record Current first article number for backfill groups.',
             '# TYPE nntmux_group_first_record gauge',
         ];
 
         $groups = DB::table('usenet_groups')
             ->select(['name', 'first_record', 'first_record_postdate'])
-            ->where('active', 1)
             ->where('backfill', 1)
             ->orderByDesc('first_record_postdate')
             ->limit(50)

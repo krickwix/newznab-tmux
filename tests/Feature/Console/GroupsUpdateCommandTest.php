@@ -37,10 +37,18 @@ final class GroupsUpdateCommandTest extends TestCase
         )');
 
         DB::table('usenet_groups')->insert([
-            'id' => 1,
-            'name' => 'alt.binaries.dvd.classics',
-            'active' => 1,
-            'backfill' => 1,
+            [
+                'id' => 1,
+                'name' => 'alt.binaries.dvd.classics',
+                'active' => 0,
+                'backfill' => 1,
+            ],
+            [
+                'id' => 2,
+                'name' => 'alt.binaries.disabled',
+                'active' => 0,
+                'backfill' => 0,
+            ],
         ]);
         DB::table('short_groups')->insert([
             'name' => 'stale.group',
@@ -49,12 +57,15 @@ final class GroupsUpdateCommandTest extends TestCase
         ]);
     }
 
-    public function test_snapshot_uses_group_range_from_the_configured_provider(): void
+    public function test_snapshot_uses_the_configured_provider_for_a_backfill_only_group(): void
     {
         $nntp = new class extends NNTPService
         {
             /** @var list<array{compression: bool, alternate: bool}> */
             public array $connections = [];
+
+            /** @var list<string> */
+            public array $selectedGroups = [];
 
             public function __construct() {}
 
@@ -69,15 +80,24 @@ final class GroupsUpdateCommandTest extends TestCase
 
             public function getGroups(mixed $wildMat = null): mixed
             {
-                return [[
-                    'group' => 'alt.binaries.dvd.classics',
-                    'first' => 2,
-                    'last' => 56925589,
-                ]];
+                return [
+                    [
+                        'group' => 'alt.binaries.dvd.classics',
+                        'first' => 2,
+                        'last' => 56925589,
+                    ],
+                    [
+                        'group' => 'alt.binaries.disabled',
+                        'first' => 2,
+                        'last' => 100000,
+                    ],
+                ];
             }
 
             public function selectGroup(string $group, mixed $articles = false, bool $force = false): mixed
             {
+                $this->selectedGroups[] = $group;
+
                 return [
                     'group' => $group,
                     'first' => 96727,
@@ -94,11 +114,18 @@ final class GroupsUpdateCommandTest extends TestCase
         $this->assertSame([
             ['compression' => false, 'alternate' => true],
         ], $nntp->connections);
+        $this->assertSame(['alt.binaries.dvd.classics'], $nntp->selectedGroups);
         $this->assertDatabaseMissing('short_groups', ['name' => 'stale.group']);
         $this->assertDatabaseHas('short_groups', [
             'name' => 'alt.binaries.dvd.classics',
             'first_record' => 96727,
             'last_record' => 56925589,
+        ]);
+        $this->assertDatabaseMissing('short_groups', ['name' => 'alt.binaries.disabled']);
+        $this->assertDatabaseHas('usenet_groups', [
+            'name' => 'alt.binaries.dvd.classics',
+            'active' => 0,
+            'backfill' => 1,
         ]);
     }
 

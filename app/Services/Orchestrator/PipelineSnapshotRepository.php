@@ -413,8 +413,7 @@ class PipelineSnapshotRepository
             CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) AS remaining_articles
             FROM usenet_groups g
             INNER JOIN short_groups s ON s.name = g.name
-            WHERE g.active = 1
-            AND g.backfill = 1
+            WHERE g.backfill = 1
             AND g.first_record IS NOT NULL
             AND g.first_record_postdate >= \'2000-01-01\'
             AND s.updated >= NOW() - INTERVAL 10 MINUTE
