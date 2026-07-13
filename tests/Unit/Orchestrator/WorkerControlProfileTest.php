@@ -116,6 +116,14 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(180, WorkerControlProfile::for(ControlProfile::FailSafe)->releasesSleepSeconds);
     }
 
+    public function test_fill_polls_for_immutable_backfill_permits_without_changing_pressure_profiles(): void
+    {
+        self::assertSame(20, WorkerControlProfile::for(ControlProfile::Fill)->backfillSleepSeconds);
+        self::assertSame(900, WorkerControlProfile::for(ControlProfile::Balanced)->backfillSleepSeconds);
+        self::assertSame(1800, WorkerControlProfile::for(ControlProfile::Drain)->backfillSleepSeconds);
+        self::assertSame(1800, WorkerControlProfile::for(ControlProfile::FailSafe)->backfillSleepSeconds);
+    }
+
     public function test_fail_safe_keeps_all_input_conservative_while_backfill_is_disabled(): void
     {
         $profile = WorkerControlProfile::for(ControlProfile::FailSafe);

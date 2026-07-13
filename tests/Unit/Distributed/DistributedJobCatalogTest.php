@@ -389,20 +389,21 @@ class DistributedJobCatalogTest extends TestCase
             'backfill' => 4,
             'orchestrator_mode' => 'active',
             'orchestrator_lease_until' => time() + 300,
+            'orchestrator_back_timer' => 20,
             'orchestrator_bf_paused' => 0,
         ];
 
         $denied = $catalog->resolve('backfill', $this->runVar($base, ['backfill_groups_days' => 1]));
         self::assertFalse($denied['enabled']);
         self::assertStringContainsString('permit', (string) $denied['disabled_reason']);
-        self::assertSame(60, $denied['sleep']);
+        self::assertSame(20, $denied['sleep']);
 
         $allowed = $catalog->resolve('backfill', $this->runVar(
-            $base + ['orchestrator_bf_permit' => 9, 'orchestrator_back_timer' => 600],
+            $base + ['orchestrator_bf_permit' => 9],
             ['backfill_groups_days' => 1],
         ));
         self::assertTrue($allowed['enabled']);
-        self::assertSame(60, $allowed['sleep']);
+        self::assertSame(20, $allowed['sleep']);
     }
 
     public function test_unmanaged_backfill_preserves_its_static_sleep(): void
