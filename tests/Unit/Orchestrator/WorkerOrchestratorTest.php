@@ -749,6 +749,257 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
     }
 
+    public function test_immature_productive_attribution_settles_when_the_cohort_is_fully_drained(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_incomplete_release_grace_seconds' => 600,
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        $store->storeState(new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.test' => 2, 'alt.other' => 1],
+        ));
+        $now = time();
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-04 03:04:05',
+        ], ['cursor_postdate' => '2026-01-03 03:04:05'], 10_000, $now - 801));
+        $store->markBackfillContextRepeat('alt.test', $now - 702, 7);
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 8,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-03 03:04:05',
+        ], ['cursor_postdate' => '2026-01-02 03:04:05'], 10_000, $now - 701, contextContinuation: true));
+        $store->markBackfillContextRepeat('alt.test', $now - 602, 8);
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 9,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, $now - 601, contextContinuation: true));
+
+        $snapshot = new PipelineSnapshot(1, 2, 3, 0, 0, lowPressure: true);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($snapshot);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->with(
+            'alt.test',
+            100,
+            '2026-01-04 03:04:05',
+            '2026-01-01 03:04:05',
+        )->andReturn(['target' => 2, 'non_target' => 0, 'uncategorized' => 0]);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->with(
+            'alt.test',
+            100,
+            '2026-01-04 03:04:05',
+            '2026-01-01 03:04:05',
+        )->andReturn(2);
+        $snapshots->shouldReceive('backfillPendingCollectionsForCohort')->once()->with(
+            'alt.test',
+            '2026-01-04 03:04:05',
+            '2026-01-01 03:04:05',
+        )->andReturn(0);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $settled = (new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy,
+            $store,
+            $applier,
+        ))->runOnce(false);
+
+        self::assertContains('backfill_delayed_attribution_settled', $settled['reasons']);
+        self::assertNotContains('backfill_delayed_attribution_early_quality_lock', $settled['reasons']);
+        self::assertSame('productive', $settled['delayed_attribution']['settled_result']);
+        self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts'] ?? null);
+        self::assertSame(0.666667, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
+        self::assertSame(['alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
+        self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
+        foreach ([7, 8, 9] as $settledGeneration) {
+            self::assertFalse($store->queueBackfillDelayedAttribution([
+                'generation' => $settledGeneration,
+                'backfill_group' => 'alt.test',
+                'backfill_quantity' => 10_000,
+                'release_high_watermark' => 100,
+                'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+            ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, $now));
+        }
+        self::assertFalse($settled['permit_granted']);
+    }
+
+    public function test_immature_productive_attribution_waits_while_collections_remain(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time() - 601));
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn(new PipelineSnapshot(
+            1, 2, 3, 0, 0,
+            lowPressure: true,
+        ));
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 1, 'non_target' => 0, 'uncategorized' => 0,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(1);
+        $snapshots->shouldReceive('backfillPendingCollectionsForCohort')->once()->andReturn(1);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy,
+            $store,
+            $applier,
+        ))->runOnce(false);
+
+        self::assertNotContains('backfill_delayed_attribution_settled', $result['reasons']);
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
+        self::assertSame([], $store->backfillYieldHistory());
+    }
+
+    public function test_immature_productive_attribution_waits_until_every_release_has_an_nzb(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time() - 601));
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn(new PipelineSnapshot(
+            1, 2, 3, 0, 0,
+            lowPressure: true,
+        ));
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 1, 'non_target' => 0, 'uncategorized' => 0,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(2);
+        $snapshots->shouldNotReceive('backfillPendingCollectionsForCohort');
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy,
+            $store,
+            $applier,
+        ))->runOnce(false);
+
+        self::assertNotContains('backfill_delayed_attribution_settled', $result['reasons']);
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
+        self::assertSame([], $store->backfillYieldHistory());
+    }
+
+    public function test_immature_productive_attribution_waits_for_the_drain_grace(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'nntmux.orchestrator.backfill_incomplete_release_grace_seconds' => 600,
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time()));
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn(new PipelineSnapshot(
+            1, 2, 3, 0, 0,
+            lowPressure: true,
+        ));
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 1, 'non_target' => 0, 'uncategorized' => 0,
+        ]);
+        $snapshots->shouldNotReceive('backfillCreatedReleasesForCohort');
+        $snapshots->shouldNotReceive('backfillPendingCollectionsForCohort');
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy,
+            $store,
+            $applier,
+        ))->runOnce(false);
+
+        self::assertNotContains('backfill_delayed_attribution_settled', $result['reasons']);
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
+        self::assertSame([], $store->backfillYieldHistory());
+    }
+
+    public function test_immature_productive_attribution_waits_at_neutral_pressure(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time() - 601));
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn(new PipelineSnapshot(1, 2, 3, 0, 0));
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 1, 'non_target' => 0, 'uncategorized' => 0,
+        ]);
+        $snapshots->shouldNotReceive('backfillCreatedReleasesForCohort');
+        $snapshots->shouldNotReceive('backfillPendingCollectionsForCohort');
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy,
+            $store,
+            $applier,
+        ))->runOnce(false);
+
+        self::assertNotContains('backfill_delayed_attribution_settled', $result['reasons']);
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
+        self::assertSame([], $store->backfillYieldHistory());
+    }
+
     public function test_immature_delayed_attribution_quality_failure_locks_and_settles_on_the_next_cycle(): void
     {
         config([

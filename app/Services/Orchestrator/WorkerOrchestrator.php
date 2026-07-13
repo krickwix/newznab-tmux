@@ -50,7 +50,10 @@ class WorkerOrchestrator
                 && (int) Settings::settingValue('orchestrator_bf_permit') === 0
             ) {
                 [$snapshot, $delayedAttributionSettled] = $this->lockFailedImmatureDelayedAttribution($snapshot, time());
-                $delayedAttributionEarlyQualityLock = $delayedAttributionSettled !== null;
+                $delayedAttributionEarlyQualityLock = str_starts_with(
+                    (string) ($delayedAttributionSettled['result'] ?? ''),
+                    'backfill_permit_',
+                );
                 if ($delayedAttributionSettled === null) {
                     [$snapshot, $delayedAttributionSettled] = $this->settleMatureDelayedAttribution($snapshot, time());
                 }
@@ -499,6 +502,7 @@ class WorkerOrchestrator
                 (string) ($entry['cursor_start_postdate'] ?? ''),
                 (string) ($entry['cursor_end_postdate'] ?? ''),
             );
+            $classifiedNzbs = array_sum($counts);
             $qualityFailure = match (true) {
                 $counts['non_target'] > 0 => 'backfill_permit_wrong_category',
                 $counts['uncategorized'] > 0
@@ -506,15 +510,44 @@ class WorkerOrchestrator
                         >= (int) config('nntmux.orchestrator.backfill_incomplete_release_grace_seconds', 600) => 'backfill_permit_uncategorized_after_grace',
                 default => '',
             };
-            if ($qualityFailure === '') {
+            $productive = 0;
+            if ($qualityFailure === ''
+                && $counts['target'] > 0
+                && $counts['non_target'] === 0
+                && $counts['uncategorized'] === 0
+                && $now - (int) ($entry['quality_grace_started_at'] ?? $entry['queued_at'] ?? $now)
+                    >= (int) config('nntmux.orchestrator.backfill_incomplete_release_grace_seconds', 600)
+                && $snapshot->telemetryIsValid()
+                && $snapshot->hardSafetyPassed()
+                && $snapshot->lowPressure
+                && ! $snapshot->highPressure
+                && $snapshot->databaseCurrentWaits === 0
+                && $snapshot->eligibleNzbs === 0
+                && $this->snapshots->backfillCreatedReleasesForCohort(
+                    $group,
+                    (int) ($entry['release_high_watermark'] ?? 0),
+                    (string) ($entry['cursor_start_postdate'] ?? ''),
+                    (string) ($entry['cursor_end_postdate'] ?? ''),
+                ) === $classifiedNzbs
+                && $this->snapshots->backfillPendingCollectionsForCohort(
+                    $group,
+                    (string) ($entry['cursor_start_postdate'] ?? ''),
+                    (string) ($entry['cursor_end_postdate'] ?? ''),
+                ) === 0
+            ) {
+                $productive = (int) $counts['target'];
+            }
+            if ($qualityFailure === '' && $productive === 0) {
                 continue;
             }
 
-            $this->applier->qualityLockBackfillTarget($group, $qualityFailure);
+            if ($qualityFailure !== '') {
+                $this->applier->qualityLockBackfillTarget($group, $qualityFailure);
+            }
             $this->store->recordBackfillYield(
                 $group,
                 cursorDelta: $cursorDelta,
-                nzbCreatedDelta: 0,
+                nzbCreatedDelta: $productive,
                 now: $now,
                 generation: $generation,
                 relatedGenerations: array_values(array_diff(
@@ -526,7 +559,7 @@ class WorkerOrchestrator
             return [
                 $snapshot->withPermitOutcome(
                     completed: true,
-                    effective: false,
+                    effective: $productive > 0,
                     claimed: true,
                     inputMoved: true,
                     group: $group,
@@ -536,7 +569,7 @@ class WorkerOrchestrator
                 [
                     'generation' => $generation,
                     'group' => $group,
-                    'result' => $qualityFailure,
+                    'result' => $qualityFailure !== '' ? $qualityFailure : 'productive',
                 ],
             ];
         }
