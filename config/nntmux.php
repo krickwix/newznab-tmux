@@ -45,7 +45,6 @@ return [
         'backfill_scale_min_yield' => max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_SCALE_MIN_YIELD', 1.0)),
         'backfill_scale_min_attempts' => max(2, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_SCALE_MIN_ATTEMPTS', 2)),
         'backfill_target_nzbs_per_permit' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_TARGET_NZBS_PER_PERMIT', 60)),
-        'backfill_context_retry_quantity' => max(10000, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_RETRY_QUANTITY', 50000)),
         'backfill_zero_output_grace_seconds' => min(1200, max(300, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_ZERO_OUTPUT_GRACE_SECONDS', 300))),
         'backfill_incomplete_release_grace_seconds' => min(1200, max(600, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_INCOMPLETE_RELEASE_GRACE_SECONDS', 600))),
         'backfill_max_quantity' => max(10000, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_QUANTITY', 200000)),

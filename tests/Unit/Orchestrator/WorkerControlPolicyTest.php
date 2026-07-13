@@ -909,6 +909,33 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertTrue($decision->backfillPermitted);
     }
 
+    public function test_inactive_backfill_context_progress_reopens_only_its_target_at_probe_size(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 2, 'alt.b' => 1],
+        );
+        $progress = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: true,
+            backfillPermitInputMoved: true,
+            backfillPermitContextProgress: true,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.a',
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($progress, $state, 10_000);
+
+        self::assertSame(['alt.a' => 1, 'alt.b' => 1], $decision->nextState->ineffectiveBackfillPermitsByTarget);
+        self::assertSame(0, $decision->nextState->consecutiveIneffectiveBackfillPermits);
+        self::assertContains('backfill_permit_context_progress', $decision->reasons);
+        self::assertNotContains('backfill_permit_effective', $decision->reasons);
+        self::assertNotContains('backfill_permit_ineffective', $decision->reasons);
+        self::assertTrue($decision->backfillPermitted);
+        self::assertSame(10_000, $decision->profile->backfillQuantity);
+    }
+
     public function test_an_effective_permit_resets_only_its_target_strike(): void
     {
         $state = new ControlState(

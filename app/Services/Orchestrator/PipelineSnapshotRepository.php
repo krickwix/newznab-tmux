@@ -295,7 +295,7 @@ class PipelineSnapshotRepository
         return $safe;
     }
 
-    /** @return array{cursor: int, cursor_postdate: string, ready_collections: int, releases: int, release_high_watermark: int} */
+    /** @return array{cursor: int, cursor_postdate: string, ready_collections: int, releases: int, release_high_watermark: int, group_active: int, partial_collections: int, complete_binaries: int} */
     public function backfillOutcomeForGroup(string $group): array
     {
         $row = DB::selectOne('SELECT
@@ -303,7 +303,15 @@ class PipelineSnapshotRepository
             CAST(g.first_record_postdate AS CHAR) AS cursor_postdate,
             (SELECT COUNT(*) FROM collections c WHERE c.groups_id = g.id AND c.filecheck = 3) AS ready_collections,
             (SELECT COUNT(*) FROM releases r WHERE r.groups_id = g.id) AS releases,
-            (SELECT COALESCE(MAX(r.id), 0) FROM releases r WHERE r.groups_id = g.id) AS release_high_watermark
+            (SELECT COALESCE(MAX(r.id), 0) FROM releases r WHERE r.groups_id = g.id) AS release_high_watermark,
+            g.active AS group_active,
+            (SELECT COUNT(*) FROM collections c WHERE c.groups_id = g.id AND c.filecheck = 1) AS partial_collections,
+            (SELECT COUNT(*)
+                FROM collections c
+                INNER JOIN binaries b ON b.collections_id = c.id
+                WHERE c.groups_id = g.id
+                AND c.filecheck IN (0, 1, 2, 15, 16)
+                AND b.partcheck = 1) AS complete_binaries
             FROM usenet_groups g WHERE g.name = ? LIMIT 1', [$group]);
 
         return [
@@ -312,6 +320,9 @@ class PipelineSnapshotRepository
             'ready_collections' => (int) ($row->ready_collections ?? 0),
             'releases' => (int) ($row->releases ?? 0),
             'release_high_watermark' => (int) ($row->release_high_watermark ?? 0),
+            'group_active' => (int) ($row->group_active ?? 1),
+            'partial_collections' => (int) ($row->partial_collections ?? 0),
+            'complete_binaries' => (int) ($row->complete_binaries ?? 0),
         ];
     }
 

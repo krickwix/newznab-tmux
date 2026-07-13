@@ -368,6 +368,20 @@ final class WorkerControlPolicy
                 ];
             }
 
+            if ($snapshot->backfillPermitContextProgress) {
+                $targetCounts[$target] = max(0, (int) ($targetCounts[$target] ?? 0) - 1);
+                if ($targetCounts[$target] === 0) {
+                    unset($targetCounts[$target]);
+                }
+
+                return [
+                    max(0, $state->consecutiveIneffectiveBackfillPermits - 1),
+                    $state->backfillLocked,
+                    $targetCounts,
+                    ['backfill_permit_context_progress'],
+                ];
+            }
+
             $targetCounts[$target] = min(
                 self::INEFFECTIVE_BACKFILL_LIMIT,
                 (int) ($targetCounts[$target] ?? 0) + 1,
@@ -394,6 +408,15 @@ final class WorkerControlPolicy
                 $state->backfillLocked,
                 $targetCounts,
                 ['backfill_permit_no_input'],
+            ];
+        }
+
+        if ($snapshot->backfillPermitContextProgress) {
+            return [
+                max(0, $state->consecutiveIneffectiveBackfillPermits - 1),
+                $state->backfillLocked,
+                $targetCounts,
+                ['backfill_permit_context_progress'],
             ];
         }
 

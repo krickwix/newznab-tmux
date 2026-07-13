@@ -135,6 +135,9 @@ final class WorkerControlStateStoreTest extends TestCase
             'ready_collections' => 66,
             'releases' => 77,
             'release_high_watermark' => 88,
+            'group_active' => 0,
+            'partial_collections' => 3,
+            'complete_binaries' => 24,
         ]);
 
         self::assertSame([
@@ -148,6 +151,9 @@ final class WorkerControlStateStoreTest extends TestCase
             'ready_collections' => 66,
             'release_total' => 77,
             'release_high_watermark' => 88,
+            'backfill_group_active' => 0,
+            'partial_collections' => 3,
+            'complete_binaries' => 24,
             'baseline_deadlocks' => 0,
             'safety_clean' => true,
             'backfill_group' => 'alt.test',

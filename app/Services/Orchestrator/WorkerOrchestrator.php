@@ -62,10 +62,12 @@ class WorkerOrchestrator
             if ($permitObservation !== null && ($observationExpired || ($permitClaimed && $hasCohortBaseline))) {
                 $observedGroup = (string) ($permitObservation['backfill_group'] ?? '');
                 $outcome = $observedGroup === ''
-                    ? ['cursor' => 0, 'cursor_postdate' => '', 'ready_collections' => 0, 'releases' => 0, 'release_high_watermark' => 0]
+                    ? ['cursor' => 0, 'cursor_postdate' => '', 'ready_collections' => 0, 'releases' => 0, 'release_high_watermark' => 0, 'group_active' => 1, 'partial_collections' => 0, 'complete_binaries' => 0]
                     : $this->snapshots->backfillOutcomeForGroup($observedGroup);
                 $cursorMoved = $outcome['cursor'] > 0
                     && $outcome['cursor'] < (int) ($permitObservation['backfill_cursor'] ?? 0);
+                $contextProgress = $permitClaimed
+                    && $this->hasBackfillOnlyContextProgress($permitObservation, $outcome, $cursorMoved);
                 $produced = $outcome['ready_collections'] > (int) ($permitObservation['ready_collections'] ?? 0)
                     || $outcome['releases'] > (int) ($permitObservation['release_total'] ?? 0);
                 $cohortNzbs = 0;
@@ -156,6 +158,7 @@ class WorkerOrchestrator
                         effective: $permitClaimed && $cursorMoved && ($hasCohortBaseline ? $cohortNzbs > 0 : $produced),
                         claimed: $permitClaimed,
                         inputMoved: $cursorMoved,
+                        contextProgress: $contextProgress,
                         group: $observedGroup,
                     );
                     $this->store->clearPermitObservation();
@@ -351,5 +354,23 @@ class WorkerOrchestrator
             && $snapshot->hardSafetyPassed()
             && ! $snapshot->highPressure
             && $snapshot->backfillGatesPassed();
+    }
+
+    /**
+     * @param  array<string, mixed>  $observation
+     * @param  array<string, mixed>  $outcome
+     */
+    private function hasBackfillOnlyContextProgress(array $observation, array $outcome, bool $cursorMoved): bool
+    {
+        if (! $cursorMoved
+            || ! array_key_exists('backfill_group_active', $observation)
+            || (int) $observation['backfill_group_active'] !== 0
+            || (int) ($outcome['group_active'] ?? 1) !== 0
+        ) {
+            return false;
+        }
+
+        return (int) ($outcome['partial_collections'] ?? 0) > (int) ($observation['partial_collections'] ?? 0)
+            || (int) ($outcome['complete_binaries'] ?? 0) > (int) ($observation['complete_binaries'] ?? 0);
     }
 }

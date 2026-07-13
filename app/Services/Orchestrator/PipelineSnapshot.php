@@ -29,6 +29,7 @@ final readonly class PipelineSnapshot
         public bool $backfillPermitEffective = false,
         public bool $backfillPermitClaimed = true,
         public bool $backfillPermitInputMoved = true,
+        public bool $backfillPermitContextProgress = false,
         public string $backfillPermitGroup = '',
         public int $databaseDeadlocks = 0,
         public int $databaseCurrentWaits = 0,
@@ -67,6 +68,7 @@ final readonly class PipelineSnapshot
         bool $effective,
         bool $claimed = true,
         bool $inputMoved = true,
+        bool $contextProgress = false,
         string $group = '',
     ): self {
         return new self(
@@ -92,6 +94,7 @@ final readonly class PipelineSnapshot
             backfillPermitEffective: $effective,
             backfillPermitClaimed: $claimed,
             backfillPermitInputMoved: $inputMoved,
+            backfillPermitContextProgress: $contextProgress,
             backfillPermitGroup: $group,
             databaseDeadlocks: $this->databaseDeadlocks,
             databaseCurrentWaits: $this->databaseCurrentWaits,
