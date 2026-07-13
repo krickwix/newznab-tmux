@@ -70,10 +70,6 @@ final readonly class BackfillTargetSelector
             function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget): bool {
                 $timestamp = strtotime($candidate['cursor_postdate']);
                 $entry = $history[$candidate['name']] ?? null;
-                $provenAboveThreshold = $this->aggressiveExploreBelowYield > 0.0
-                    && is_array($entry)
-                    && $now - (int) ($entry['last_attempt_at'] ?? 0) < $this->historyTtlSeconds
-                    && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) >= $this->aggressiveExploreBelowYield;
                 $lockRetryDue = is_array($entry)
                     && (int) ($entry['last_attempt_at'] ?? 0) > 0
                     && $now - (int) $entry['last_attempt_at'] >= $this->lockRetrySeconds;
@@ -83,8 +79,7 @@ final readonly class BackfillTargetSelector
                     && $timestamp !== false
                     && (int) substr($candidate['cursor_postdate'], 0, 4) >= 2000
                     && $timestamp <= $now
-                    && ($provenAboveThreshold
-                        || $lockRetryDue
+                    && ($lockRetryDue
                         || (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) < WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT);
             },
         ));
@@ -109,12 +104,13 @@ final readonly class BackfillTargetSelector
 
         $positive = array_values(array_filter(
             $candidates,
-            function (array $candidate) use ($history, $now): bool {
+            function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget): bool {
                 $entry = $history[$candidate['name']] ?? null;
 
                 return is_array($entry)
                     && $now - (int) ($entry['last_attempt_at'] ?? 0) < $this->historyTtlSeconds
-                    && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) > 0.0;
+                    && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) > 0.0
+                    && (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) === 0;
             },
         ));
         if ($positive !== []) {
@@ -132,6 +128,15 @@ final readonly class BackfillTargetSelector
                 ? $this->selectRecentPendingRepeat($candidates, $history, $now, $best['name'])
                 : null;
             if ($pendingRepeat !== null) {
+                $untriedProbe = $this->selectConfiguredUntried($byName, $history, $now, $ineffectivePermitsByTarget);
+                if ($untriedProbe !== null) {
+                    return $untriedProbe;
+                }
+                $untried = $this->selectUntried($candidates, $history, $now, $ineffectivePermitsByTarget);
+                if ($untried !== null) {
+                    return $untried;
+                }
+
                 return $pendingRepeat;
             }
             $attempts = (int) ($history[$best['name']]['attempts'] ?? 0);
@@ -143,11 +148,11 @@ final readonly class BackfillTargetSelector
                 && $attempts % $exploreEvery === 0
                 && $this->wasMostRecentlyAttempted($best['name'], $history)
             ) {
-                $probe = $this->selectConfiguredProbe($byName, $history, $now);
+                $probe = $this->selectConfiguredProbe($byName, $history, $now, $ineffectivePermitsByTarget);
                 if ($probe !== null) {
                     return $probe;
                 }
-                $untried = $this->selectUntried($candidates, $history, $now);
+                $untried = $this->selectUntried($candidates, $history, $now, $ineffectivePermitsByTarget);
                 if ($untried !== null) {
                     return $untried;
                 }
@@ -156,14 +161,37 @@ final readonly class BackfillTargetSelector
             return $best;
         }
 
-        $probe = $this->selectConfiguredProbe($byName, $history, $now);
+        $probe = $this->selectConfiguredProbe($byName, $history, $now, $ineffectivePermitsByTarget);
         if ($probe !== null) {
             return $probe;
         }
 
-        $untried = $this->selectUntried($candidates, $history, $now);
+        $untried = $this->selectUntried($candidates, $history, $now, $ineffectivePermitsByTarget);
         if ($untried !== null) {
             return $untried;
+        }
+
+        $dueRetries = array_values(array_filter(
+            $candidates,
+            static fn (array $candidate): bool => (bool) ($candidate['lock_retry_due'] ?? false),
+        ));
+        if ($dueRetries !== []) {
+            usort($dueRetries, static function (array $left, array $right) use ($history): int {
+                $effective = (int) ($history[$right['name']]['last_effective_at'] ?? 0)
+                    <=> (int) ($history[$left['name']]['last_effective_at'] ?? 0);
+                if ($effective !== 0) {
+                    return $effective;
+                }
+                $cursorBand = $right['cursor_postdate'] <=> $left['cursor_postdate'];
+                if ($cursorBand !== 0) {
+                    return $cursorBand;
+                }
+
+                return (int) ($history[$left['name']]['last_attempt_at'] ?? 0)
+                    <=> (int) ($history[$right['name']]['last_attempt_at'] ?? 0);
+            });
+
+            return $dueRetries[0];
         }
 
         usort($candidates, static function (array $left, array $right) use ($history): int {
@@ -181,15 +209,20 @@ final readonly class BackfillTargetSelector
      * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
      * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
      */
-    private function selectUntried(array $candidates, array $history, int $now): ?array
-    {
+    private function selectUntried(
+        array $candidates,
+        array $history,
+        int $now,
+        array $ineffectivePermitsByTarget,
+    ): ?array {
         $untried = array_values(array_filter(
             $candidates,
-            function (array $candidate) use ($history, $now): bool {
+            function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget): bool {
                 $entry = $history[$candidate['name']] ?? null;
 
-                return ! is_array($entry)
-                    || $now - (int) ($entry['last_attempt_at'] ?? 0) >= $this->historyTtlSeconds;
+                return (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) === 0
+                    && (! is_array($entry)
+                        || $now - (int) ($entry['last_attempt_at'] ?? 0) >= $this->historyTtlSeconds);
             },
         ));
         if ($untried !== []) {
@@ -248,20 +281,50 @@ final readonly class BackfillTargetSelector
      * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
      * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
      */
-    private function selectConfiguredProbe(array $byName, array $history, int $now): ?array
-    {
+    private function selectConfiguredProbe(
+        array $byName,
+        array $history,
+        int $now,
+        array $ineffectivePermitsByTarget,
+    ): ?array {
+        $untried = $this->selectConfiguredUntried($byName, $history, $now, $ineffectivePermitsByTarget);
+        if ($untried !== null) {
+            return $untried;
+        }
+
+        foreach ($this->probeGroups as $group) {
+            $entry = $history[$group] ?? null;
+            if (isset($byName[$group])
+                && is_array($entry)
+                && (int) ($entry['attempts'] ?? 0) >= 1
+                && (int) ($entry['last_cursor_delta'] ?? 0) > 0
+                && (int) ($ineffectivePermitsByTarget[$group] ?? 0) === 1
+            ) {
+                return $byName[$group];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<string, array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $byName
+     * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
+     * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}|null
+     */
+    private function selectConfiguredUntried(
+        array $byName,
+        array $history,
+        int $now,
+        array $ineffectivePermitsByTarget,
+    ): ?array {
         foreach ($this->probeGroups as $group) {
             $entry = $history[$group] ?? null;
             $isRecent = is_array($entry)
                 && $now - (int) ($entry['last_attempt_at'] ?? 0) < $this->historyTtlSeconds;
-            if (isset($byName[$group]) && ! $isRecent) {
-                return $byName[$group];
-            }
             if (isset($byName[$group])
-                && $isRecent
-                && (int) ($entry['attempts'] ?? 0) === 1
-                && (int) ($entry['last_cursor_delta'] ?? 0) > 0
-                && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) <= 0.0
+                && ! $isRecent
+                && (int) ($ineffectivePermitsByTarget[$group] ?? 0) === 0
             ) {
                 return $byName[$group];
             }

@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace App\Services\Orchestrator;
 
-use Illuminate\Container\Container;
-
 final class WorkerControlPolicy
 {
     public const int HIGH_SAMPLES_TO_DRAIN = 3;
@@ -31,19 +29,6 @@ final class WorkerControlPolicy
     public const int RECOVERY_DRAIN_MAX_HOLD_SAMPLES = 3;
 
     public const int RECOVERY_DRAIN_HOLD_MAX_SPACING_SECONDS = 90;
-
-    private float $provenYieldOverrideThreshold;
-
-    public function __construct(?float $provenYieldOverrideThreshold = null)
-    {
-        $container = Container::getInstance();
-        $this->provenYieldOverrideThreshold = max(
-            0.0,
-            $provenYieldOverrideThreshold ?? ($container->bound('config')
-                ? (float) config('nntmux.orchestrator.backfill_aggressive_explore_below_yield', 0.0)
-                : 0.0),
-        );
-    }
 
     public function decide(PipelineSnapshot $snapshot, ControlState $state, int $now): ControlDecision
     {
@@ -140,21 +125,11 @@ final class WorkerControlPolicy
             failSafeLastObservedAt: $profile === ControlProfile::FailSafe ? $snapshot->observedAt : 0,
         );
         $workerProfile = WorkerControlProfile::for($profile);
-        $targetLockOverridden = $this->provenYieldOverrideThreshold > 0.0
-            && $snapshot->backfillHistoryRecent
-            && $snapshot->backfillYieldNzbsPer10k >= $this->provenYieldOverrideThreshold;
         $targetLocked = $snapshot->backfillGroup !== ''
             && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= self::INEFFECTIVE_BACKFILL_LIMIT
-            && ! $targetLockOverridden
             && ! $snapshot->backfillTargetLockRetryDue;
         if ($snapshot->backfillTargetLockRetryDue) {
             $reasons[] = 'backfill_target_lock_retry_due';
-        }
-        if ($targetLockOverridden
-            && $snapshot->backfillGroup !== ''
-            && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= self::INEFFECTIVE_BACKFILL_LIMIT
-        ) {
-            $reasons[] = 'backfill_target_lock_overridden_by_proven_yield';
         }
         $backfillPermitted = $workerProfile->backfillEnabled
             && ! $snapshot->highPressure

@@ -763,7 +763,7 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('backfill_target_locked_after_ineffective_permits', $second->reasons);
     }
 
-    public function test_recent_proven_yield_at_threshold_overrides_target_ineffective_lock(): void
+    public function test_recent_proven_yield_cannot_override_exact_target_ineffective_lock(): void
     {
         $state = new ControlState(
             profile: ControlProfile::Balanced,
@@ -776,10 +776,10 @@ final class WorkerControlPolicyTest extends TestCase
             backfillHistoryRecent: true,
         );
 
-        $decision = (new WorkerControlPolicy(provenYieldOverrideThreshold: 0.15))->decide($snapshot, $state, 10_000);
+        $decision = (new WorkerControlPolicy)->decide($snapshot, $state, 10_000);
 
-        self::assertTrue($decision->backfillPermitted);
-        self::assertContains('backfill_target_lock_overridden_by_proven_yield', $decision->reasons);
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_target_locked', $decision->reasons);
     }
 
     public function test_a_due_bounded_retry_overrides_only_the_selected_target_lock(): void
@@ -815,7 +815,7 @@ final class WorkerControlPolicyTest extends TestCase
             backfillHistoryRecent: $recent,
         );
 
-        $decision = (new WorkerControlPolicy(provenYieldOverrideThreshold: 0.15))->decide($snapshot, $state, 10_000);
+        $decision = (new WorkerControlPolicy)->decide($snapshot, $state, 10_000);
 
         self::assertFalse($decision->backfillPermitted);
         self::assertContains('backfill_target_locked', $decision->reasons);

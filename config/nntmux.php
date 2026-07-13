@@ -35,7 +35,7 @@ return [
             'trim',
             explode(',', (string) env(
                 'NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS',
-                'alt.binaries.sounds.lossless.metal,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd'
+                'alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.sounds.lossless.metal,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd'
             ))
         ))),
         'backfill_yield_ttl_seconds' => max(3600, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_YIELD_TTL_SECONDS', 86400)),

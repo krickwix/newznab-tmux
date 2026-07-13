@@ -49,7 +49,7 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertSame('alt.probe.criterion', $target['name'] ?? null);
     }
 
-    public function test_it_repeats_one_input_bearing_probe_before_advancing(): void
+    public function test_it_tries_later_untried_probe_before_confirming_input_bearing_zero_yield(): void
     {
         $selector = new BackfillTargetSelector(
             probeGroups: ['alt.probe.criterion', 'alt.probe.freak'],
@@ -70,7 +70,7 @@ final class BackfillTargetSelectorTest extends TestCase
             $this->candidate('alt.probe.freak', '2016-08-27 18:02:03'),
         ], $history, now: 2_000_000_000);
 
-        self::assertSame('alt.probe.criterion', $target['name'] ?? null);
+        self::assertSame('alt.probe.freak', $target['name'] ?? null);
     }
 
     public function test_it_prefers_the_highest_recent_positive_yield_after_probes(): void
@@ -230,7 +230,7 @@ final class BackfillTargetSelectorTest extends TestCase
         $target = $selector->select([
             $this->candidate('alt.probe.criterion', '2009-05-15 06:49:20'),
             $this->candidate('alt.probe.freak', '2016-08-27 18:02:03'),
-        ], $history, now: 2_000_000_000);
+        ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: ['alt.probe.freak' => 1]);
 
         self::assertSame('alt.probe.freak', $target['name'] ?? null);
     }
@@ -552,7 +552,7 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertSame('alt.probe.freak', $target['name'] ?? null);
     }
 
-    public function test_recent_productive_target_overrides_short_term_ineffective_lock_at_threshold(): void
+    public function test_recent_productive_target_cannot_override_exact_ineffective_lock(): void
     {
         $selector = new BackfillTargetSelector(
             probeGroups: ['alt.probe.criterion', 'alt.probe.freak'],
@@ -574,7 +574,34 @@ final class BackfillTargetSelectorTest extends TestCase
             $this->candidate('alt.probe.freak', '2016-08-27 18:02:03'),
         ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: ['alt.probe.criterion' => 2]);
 
-        self::assertSame('alt.probe.criterion', $target['name'] ?? null);
+        self::assertSame('alt.probe.freak', $target['name'] ?? null);
+    }
+
+    public function test_positive_target_with_one_exact_strike_yields_exploitation_priority_to_untried_source(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.probe.productive', 'alt.probe.untried'],
+            historyTtlSeconds: 86_400,
+            aggressiveExploreBelowYield: 0.15,
+        );
+        $history = [
+            'alt.probe.productive' => [
+                'attempts' => 8,
+                'ewma_nzbs_per_10k' => 1.5,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_998_000,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.probe.productive', '2026-06-01 00:00:00'),
+            $this->candidate('alt.probe.untried', '2026-07-01 00:00:00'),
+        ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: [
+            'alt.probe.productive' => 1,
+        ]);
+
+        self::assertSame('alt.probe.untried', $target['name'] ?? null);
     }
 
     public function test_it_returns_null_when_every_candidate_has_two_ineffective_permits(): void
@@ -668,6 +695,147 @@ final class BackfillTargetSelectorTest extends TestCase
         ], $history, now: 2_000_000_000);
 
         self::assertSame('alt.oldest', $target['name'] ?? null);
+    }
+
+    public function test_due_retries_prefer_recent_effectiveness_then_newer_cursor_band(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: [],
+            historyTtlSeconds: 86_400,
+            lockRetrySeconds: 21_600,
+        );
+        $history = [
+            'alt.old-effective' => [
+                'attempts' => 4,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_970_000,
+                'last_effective_at' => 1_999_000_000,
+                'last_cursor_delta' => 10_000,
+            ],
+            'alt.recent-effective-older-band' => [
+                'attempts' => 4,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_960_000,
+                'last_effective_at' => 1_999_500_000,
+                'last_cursor_delta' => 10_000,
+            ],
+            'alt.recent-effective-newer-band' => [
+                'attempts' => 4,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_970_500,
+                'last_effective_at' => 1_999_500_000,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.old-effective', '2026-06-01 00:00:00'),
+            $this->candidate('alt.recent-effective-older-band', '2026-06-15 00:00:00'),
+            $this->candidate('alt.recent-effective-newer-band', '2026-07-01 00:00:00'),
+        ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: [
+            'alt.old-effective' => 2,
+            'alt.recent-effective-older-band' => 2,
+            'alt.recent-effective-newer-band' => 2,
+        ]);
+
+        self::assertSame('alt.recent-effective-newer-band', $target['name'] ?? null);
+        self::assertTrue($target['lock_retry_due'] ?? false);
+    }
+
+    public function test_due_retry_is_a_distinct_lane_ahead_of_non_due_zero_yield_history(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: [],
+            historyTtlSeconds: 86_400,
+            lockRetrySeconds: 21_600,
+        );
+        $history = [
+            'alt.non-due' => [
+                'attempts' => 2,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_990_000,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 10_000,
+            ],
+            'alt.due' => [
+                'attempts' => 4,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_970_000,
+                'last_effective_at' => 1_999_500_000,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.non-due', '2026-07-01 00:00:00'),
+            $this->candidate('alt.due', '2026-06-01 00:00:00'),
+        ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: [
+            'alt.non-due' => 1,
+            'alt.due' => 2,
+        ]);
+
+        self::assertSame('alt.due', $target['name'] ?? null);
+    }
+
+    public function test_stale_struck_target_is_not_reclassified_as_untried(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.stale-struck', 'alt.never-tried'],
+            historyTtlSeconds: 86_400,
+            lockRetrySeconds: 21_600,
+        );
+        $history = [
+            'alt.stale-struck' => [
+                'attempts' => 5,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_900_000,
+                'last_effective_at' => 1_999_000_000,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.stale-struck', '2026-07-01 00:00:00'),
+            $this->candidate('alt.never-tried', '2026-06-01 00:00:00'),
+        ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: [
+            'alt.stale-struck' => 2,
+        ]);
+
+        self::assertSame('alt.never-tried', $target['name'] ?? null);
+    }
+
+    public function test_stale_one_strike_probe_remains_confirmable_during_forced_exploration(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.stale-one-strike', 'alt.clean-positive'],
+            historyTtlSeconds: 86_400,
+            exploitAttemptsBeforeExplore: 3,
+        );
+        $history = [
+            'alt.stale-one-strike' => [
+                'attempts' => 1,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_900_000,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 10_000,
+            ],
+            'alt.clean-positive' => [
+                'attempts' => 3,
+                'ewma_nzbs_per_10k' => 1.5,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_999_000,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.stale-one-strike', '2026-06-01 00:00:00'),
+            $this->candidate('alt.clean-positive', '2026-07-01 00:00:00'),
+        ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: [
+            'alt.stale-one-strike' => 1,
+        ]);
+
+        self::assertSame('alt.stale-one-strike', $target['name'] ?? null);
     }
 
     /** @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int} */
