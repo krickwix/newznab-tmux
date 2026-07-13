@@ -333,6 +333,17 @@ final class WorkerControlPolicy
             ];
         }
 
+        // Expiry/revocation only proves that the grant was not consumed. It is
+        // not evidence about source yield, so preserve target strike history.
+        if (! $snapshot->backfillPermitClaimed) {
+            return [
+                $state->consecutiveIneffectiveBackfillPermits,
+                $state->backfillLocked,
+                $state->ineffectiveBackfillPermitsByTarget,
+                ['backfill_permit_unclaimed'],
+            ];
+        }
+
         $target = $snapshot->backfillPermitGroup;
         $targetCounts = $state->ineffectiveBackfillPermitsByTarget;
         if ($target !== '') {

@@ -510,7 +510,7 @@ final class WorkerOrchestratorTest extends TestCase
         $orchestrator->runOnce(false);
     }
 
-    public function test_an_expired_unconsumed_permit_is_revoked_and_counted_ineffective(): void
+    public function test_an_expired_unconsumed_permit_is_revoked_without_consuming_a_strike(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => false,
@@ -552,8 +552,8 @@ final class WorkerOrchestratorTest extends TestCase
         $store->shouldReceive('clearPermitObservation')->once();
         $store->shouldReceive('loadState')->once()->andReturn($state);
         $store->shouldReceive('storeState')->once()->with(Mockery::on(
-            static fn (ControlState $next): bool => $next->consecutiveIneffectiveBackfillPermits === 1
-                && ($next->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0) === 1
+            static fn (ControlState $next): bool => $next->consecutiveIneffectiveBackfillPermits === 0
+                && ! isset($next->ineffectiveBackfillPermitsByTarget['alt.test'])
                 && ! isset($next->ineffectiveBackfillPermitsByTarget['alt.current']),
         ));
         $store->shouldReceive('storeSnapshot')->once();
@@ -571,7 +571,8 @@ final class WorkerOrchestratorTest extends TestCase
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
 
-        self::assertContains('backfill_permit_ineffective', $result['reasons']);
+        self::assertContains('backfill_permit_unclaimed', $result['reasons']);
+        self::assertNotContains('backfill_permit_ineffective', $result['reasons']);
         self::assertFalse($result['permit_granted']);
     }
 
@@ -657,7 +658,7 @@ final class WorkerOrchestratorTest extends TestCase
         $store->shouldReceive('clearPermitObservation')->once();
         $store->shouldReceive('loadState')->once()->andReturn(new ControlState(profile: ControlProfile::Balanced));
         $store->shouldReceive('storeState')->once()->with(Mockery::on(
-            static fn (ControlState $next): bool => $next->consecutiveIneffectiveBackfillPermits === 1,
+            static fn (ControlState $next): bool => $next->consecutiveIneffectiveBackfillPermits === 0,
         ));
         $store->shouldReceive('storeSnapshot')->once();
         $store->shouldReceive('storeDecision')->once();
@@ -674,7 +675,8 @@ final class WorkerOrchestratorTest extends TestCase
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
 
-        self::assertContains('backfill_permit_ineffective', $result['reasons']);
+        self::assertContains('backfill_permit_unclaimed', $result['reasons']);
+        self::assertNotContains('backfill_permit_ineffective', $result['reasons']);
     }
 
     public function test_a_claimed_permit_records_target_nzb_yield_after_attribution(): void

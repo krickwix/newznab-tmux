@@ -885,6 +885,30 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertTrue($decision->backfillPermitted);
     }
 
+    public function test_an_unclaimed_permit_does_not_consume_an_output_strike(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 1, 'alt.b' => 1],
+        );
+        $unclaimed = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: false,
+            backfillPermitInputMoved: false,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($unclaimed, $state, 10_000);
+
+        self::assertSame(['alt.a' => 1, 'alt.b' => 1], $decision->nextState->ineffectiveBackfillPermitsByTarget);
+        self::assertSame(0, $decision->nextState->consecutiveIneffectiveBackfillPermits);
+        self::assertContains('backfill_permit_unclaimed', $decision->reasons);
+        self::assertNotContains('backfill_permit_ineffective', $decision->reasons);
+        self::assertTrue($decision->backfillPermitted);
+    }
+
     public function test_an_effective_permit_resets_only_its_target_strike(): void
     {
         $state = new ControlState(
