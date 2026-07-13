@@ -403,6 +403,94 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame(20_000, $result['backfill_target']['quantity']);
     }
 
+    public function test_cooldown_due_target_issues_and_consumes_one_headroom_capped_context_retry(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => true,
+            'nntmux.orchestrator.backfill_context_retry_quantity' => 50_000,
+            'nntmux.orchestrator.backfill_max_quantity' => 200_000,
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert(['name' => 'orchestrator_bf_permit', 'value' => '0']);
+        $snapshot = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            4,
+            5,
+            lowPressure: true,
+            eligibleBackfillSupply: true,
+            backfillGroup: 'alt.cooldown-due',
+            backfillCursor: 1_000_000,
+            backfillYieldNzbsPer10k: 0.0,
+            backfillYieldAttempts: 2,
+            backfillLastCursorDelta: 10_000,
+            backfillLastEffectiveAt: 0,
+            backfillHistoryRecent: true,
+            backfillTargetIneffectivePermits: 2,
+            backfillTargetLockRetryDue: true,
+            backfillRemainingArticles: 1_000_000,
+            backfillSafeQuantity: 40_000,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Fill,
+            ineffectiveBackfillPermitsByTarget: ['alt.cooldown-due' => 2],
+        );
+        $outcome = [
+            'cursor' => 1_000_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ];
+        $lock = Mockery::mock(Lock::class);
+        $lock->shouldReceive('get')->once()->andReturnTrue();
+        $lock->shouldReceive('release')->once();
+        $store = Mockery::mock(WorkerControlStateStore::class);
+        $store->shouldReceive('leaderLock')->once()->andReturn($lock);
+        $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
+        $store->shouldReceive('permitObservation')->once()->andReturnNull();
+        $store->shouldReceive('loadState')->once()->andReturn($state);
+        $store->shouldReceive('beginPermitObservation')->once()->with(
+            $snapshot,
+            42,
+            Mockery::type('int'),
+            $outcome,
+            40_000,
+        );
+        $store->shouldReceive('markBackfillTargetAttempted')->once()->with(
+            'alt.cooldown-due',
+            Mockery::type('int'),
+        );
+        $store->shouldReceive('storeState')->once()->with(Mockery::type(ControlState::class));
+        $store->shouldReceive('storeSnapshot')->once()->with($snapshot);
+        $store->shouldReceive('storeDecision')->once();
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->with(null)->andReturn($snapshot);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.cooldown-due')->andReturn($outcome);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->once()->with(
+            Mockery::on(static fn (ControlDecision $decision): bool => $decision->backfillPermitted),
+            Mockery::type('int'),
+            true,
+            'alt.cooldown-due',
+            false,
+            40_000,
+        )->andReturn(42);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertTrue($result['permit_granted']);
+        self::assertContains('backfill_target_lock_retry_due', $result['reasons']);
+        self::assertSame(40_000, $result['backfill_target']['quantity']);
+    }
+
     public function test_redis_failure_before_lock_acquisition_persists_fail_closed_state(): void
     {
         $store = Mockery::mock(WorkerControlStateStore::class);

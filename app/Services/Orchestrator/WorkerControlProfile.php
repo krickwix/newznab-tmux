@@ -38,6 +38,7 @@ final readonly class WorkerControlProfile
         int $lastEffectiveAt = 0,
         bool $historyRecent = false,
         int $targetIneffectivePermits = 0,
+        bool $targetLockRetryDue = false,
     ): int {
         if ($safeQuantity < $this->backfillQuantity) {
             return 0;
@@ -45,6 +46,21 @@ final readonly class WorkerControlProfile
 
         $minimumYield = (float) config('nntmux.orchestrator.backfill_scale_min_yield', 1.0);
         $maxQuantity = (int) config('nntmux.orchestrator.backfill_max_quantity', 200000);
+        if ($this->profile === ControlProfile::Fill
+            && $targetLockRetryDue
+            && $targetIneffectivePermits >= WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT
+        ) {
+            $contextQuantity = (int) config('nntmux.orchestrator.backfill_context_retry_quantity', 50000);
+            $availableQuantity = max(
+                $this->backfillQuantity,
+                intdiv(max(0, $remainingArticles - 10000), 10000) * 10000,
+            );
+
+            return max(
+                $this->backfillQuantity,
+                min($contextQuantity, $maxQuantity, $availableQuantity, $safeQuantity),
+            );
+        }
         $rampLimit = $historyRecent && $lastCursorDelta >= $this->backfillQuantity
             ? min($maxQuantity, $lastCursorDelta * 2)
             : $maxQuantity;

@@ -179,6 +179,7 @@ class WorkerOrchestrator
                 $snapshot->backfillLastEffectiveAt,
                 $snapshot->backfillHistoryRecent,
                 $snapshot->backfillTargetIneffectivePermits,
+                $snapshot->backfillTargetLockRetryDue,
             );
             $preserveUnclaimedPermit = ! $shadow
                 && $permitObservation !== null
