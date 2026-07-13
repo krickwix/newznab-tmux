@@ -406,6 +406,18 @@ class PipelineSnapshotRepository
      */
     public function backfillCandidates(): array
     {
+        $allowedGroups = array_values(array_unique(array_filter(array_map(
+            static fn (mixed $group): string => trim((string) $group),
+            (array) config('nntmux.orchestrator.backfill_probe_groups', []),
+        ), static fn (string $group): bool => $group !== '')));
+        if ($allowedGroups === []) {
+            return [];
+        }
+        if (count($allowedGroups) > self::BACKFILL_CANDIDATE_LIMIT) {
+            return [];
+        }
+        $placeholders = implode(', ', array_fill(0, count($allowedGroups), '?'));
+
         $rows = DB::select('SELECT
             g.name,
             CAST(g.first_record AS SIGNED) AS backfill_cursor,
@@ -414,15 +426,26 @@ class PipelineSnapshotRepository
             FROM usenet_groups g
             INNER JOIN short_groups s ON s.name = g.name
             WHERE g.backfill = 1
+            AND BINARY g.name IN ('.$placeholders.')
             AND g.first_record IS NOT NULL
             AND g.first_record_postdate >= \'2000-01-01\'
             AND s.updated >= NOW() - INTERVAL 10 MINUTE
             AND CAST(s.first_record AS SIGNED) > 0
             AND CAST(s.last_record AS SIGNED) >= CAST(s.first_record AS SIGNED)
-            AND CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000
+            AND CAST(g.last_record AS SIGNED) BETWEEN CAST(s.first_record AS SIGNED) AND CAST(s.last_record AS SIGNED)
+            AND (
+                (g.active = 1 AND CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000)
+                OR (
+                    g.active = 0
+                    AND g.last_record_postdate >= \'2000-01-01\'
+                    AND CAST(g.last_record AS SIGNED) < 9223372036854775807
+                    AND CAST(g.first_record AS SIGNED) >= CAST(s.first_record AS SIGNED)
+                    AND CAST(g.first_record AS SIGNED) <= CAST(g.last_record AS SIGNED) + 1
+                )
+            )
             AND CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= 20000
             ORDER BY g.first_record_postdate DESC, g.name ASC
-            LIMIT '.self::BACKFILL_CANDIDATE_LIMIT, []);
+            LIMIT '.self::BACKFILL_CANDIDATE_LIMIT, $allowedGroups);
 
         return array_map(static fn (object $row): array => [
             'name' => (string) $row->name,

@@ -109,7 +109,7 @@ final class ActivateBackfillSourceCommandTest extends TestCase
             'first_record' => 99_950_000,
             'first_record_postdate' => '2026-07-12 05:22:57',
         ]);
-        $nntp->last = 100_005_000;
+        $nntp->last = 100_050_000;
 
         $this->artisan('orchestrator:activate-backfill-source alt.binaries.movie --apply')
             ->expectsOutputToContain('is already safely configured; no state was changed.')

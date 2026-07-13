@@ -169,11 +169,11 @@ final readonly class BackfillSourceActivator
                 $existingCursor = (int) $group->first_record;
                 $existingLast = (int) $group->last_record;
                 if (! $initialized
+                    || $existingLast === PHP_INT_MAX
                     || $existingCursor < $inspection['provider_first']
-                    || $existingCursor > $inspection['provider_last'] + 1
+                    || $existingCursor > $existingLast + 1
                     || $existingLast < $inspection['provider_first']
-                    || $existingLast > $inspection['provider_last']
-                    || $inspection['provider_last'] - $existingLast > 10_000) {
+                    || $existingLast > $inspection['provider_last']) {
                     throw new RuntimeException("Existing backfill cursor for {$inspection['group']} is not safe to preserve.");
                 }
 

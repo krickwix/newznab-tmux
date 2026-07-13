@@ -241,17 +241,25 @@ final class PipelineSnapshotRepositoryTest extends TestCase
 
     public function test_backfill_candidates_are_bounded_to_fresh_current_valid_ranges(): void
     {
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['alt.backfill-only', 'alt.active']);
+
         DB::shouldReceive('select')
             ->once()
             ->withArgs(function (string $sql, array $bindings): bool {
                 self::assertStringContainsString('g.backfill = 1', $sql);
-                self::assertStringNotContainsString('g.active = 1', $sql);
+                self::assertStringContainsString('BINARY g.name IN (?, ?)', $sql);
+                self::assertStringContainsString('g.active = 1', $sql);
+                self::assertStringContainsString('g.active = 0', $sql);
                 self::assertStringContainsString('s.updated >= NOW() - INTERVAL 10 MINUTE', $sql);
                 self::assertStringContainsString('CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000', $sql);
+                self::assertStringContainsString('CAST(g.last_record AS SIGNED) BETWEEN CAST(s.first_record AS SIGNED) AND CAST(s.last_record AS SIGNED)', $sql);
+                self::assertStringContainsString('CAST(g.first_record AS SIGNED) <= CAST(g.last_record AS SIGNED) + 1', $sql);
                 self::assertStringContainsString('CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= 20000', $sql);
                 self::assertStringContainsString("g.first_record_postdate >= '2000-01-01'", $sql);
+                self::assertStringContainsString("g.last_record_postdate >= '2000-01-01'", $sql);
+                self::assertStringContainsString('CAST(g.last_record AS SIGNED) < 9223372036854775807', $sql);
                 self::assertStringContainsString('LIMIT 16', $sql);
-                self::assertSame([], $bindings);
+                self::assertSame(['alt.backfill-only', 'alt.active'], $bindings);
 
                 return true;
             })
@@ -273,6 +281,61 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             'cursor_postdate' => '2020-01-01 00:00:00',
             'remaining_articles' => 90_000,
         ]], $repository->backfillCandidates());
+    }
+
+    public function test_backfill_candidates_fail_closed_without_an_explicit_allowlist(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_probe_groups', []);
+        DB::shouldReceive('select')->never();
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([], $repository->backfillCandidates());
+    }
+
+    public function test_backfill_candidates_trim_deduplicate_and_bind_exact_allowlist_values(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_probe_groups', [
+            ' alt.exact ',
+            'alt.exact',
+            "alt.quote'bound",
+            '',
+        ]);
+        DB::shouldReceive('select')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('BINARY g.name IN (?, ?)', $sql);
+                self::assertSame(['alt.exact', "alt.quote'bound"], $bindings);
+
+                return true;
+            })
+            ->andReturn([]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([], $repository->backfillCandidates());
+    }
+
+    public function test_backfill_candidates_fail_closed_when_allowlist_exceeds_retained_history_bound(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_probe_groups', array_map(
+            static fn (int $index): string => 'alt.probe.'.$index,
+            range(1, 17),
+        ));
+        DB::shouldReceive('select')->never();
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([], $repository->backfillCandidates());
     }
 
     public function test_group_outcome_uses_a_mariadb_safe_cursor_alias(): void
