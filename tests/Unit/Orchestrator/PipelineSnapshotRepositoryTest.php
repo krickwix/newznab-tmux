@@ -277,7 +277,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2009-01-03 00:00:00',
         ], ['cursor_postdate' => '2009-01-02 00:00:00'], 10_000, 1_999_999_800));
-        $state->markBackfillContextRepeat('alt.repeat', 1_999_999_900);
+        $state->markBackfillContextRepeat('alt.repeat', 1_999_999_900, 7);
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
             app(NzbBacklogCreationService::class),
@@ -292,6 +292,39 @@ final class PipelineSnapshotRepositoryTest extends TestCase
 
         self::assertSame('alt.repeat', $target['name'] ?? null);
         self::assertSame(10_000, $target['safe_quantity'] ?? null);
+    }
+
+    public function test_repository_rejects_context_continuation_when_candidate_cursor_drifted(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.backfill_probe_groups' => ['alt.repeat', 'alt.safe'],
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_yield_ttl_seconds' => 600,
+        ]);
+        Cache::store('array')->flush();
+        $state = new WorkerControlStateStore;
+        self::assertTrue($state->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.repeat',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2009-01-03 00:00:00',
+        ], ['cursor_postdate' => '2009-01-02 00:00:00'], 10_000, 1_999_999_800));
+        $state->markBackfillContextRepeat('alt.repeat', 1_999_999_900, 7);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'selectBackfillTarget');
+
+        $target = $method->invoke($repository, [
+            ['name' => 'alt.repeat', 'cursor' => 40_000, 'cursor_postdate' => '2009-01-02 00:00:01', 'remaining_articles' => 40_000, 'safe_quantity' => 40_000],
+            ['name' => 'alt.safe', 'cursor' => 30_000, 'cursor_postdate' => '2009-01-01 00:00:00', 'remaining_articles' => 30_000, 'safe_quantity' => 30_000],
+        ], [], ControlState::initial(), 2_000_000_000);
+
+        self::assertSame('alt.safe', $target['name'] ?? null);
     }
 
     public function test_repository_excludes_a_group_with_pending_delayed_attribution(): void
@@ -342,7 +375,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2009-01-03 03:04:05',
         ], ['cursor_postdate' => '2009-01-02 03:04:05'], 10_000, 1_999_999_800));
-        $state->markBackfillContextRepeat('alt.pending', 1_999_999_900);
+        $state->markBackfillContextRepeat('alt.pending', 1_999_999_900, 7);
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
             app(NzbBacklogCreationService::class),

@@ -123,7 +123,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertFalse($method->invoke($orchestrator, [], $progress, true));
     }
 
-    public function test_raw_context_requires_exact_completed_dual_growth_without_output(): void
+    public function test_raw_context_accepts_binary_growth_inside_an_existing_collection(): void
     {
         $orchestrator = new WorkerOrchestrator(
             Mockery::mock(PipelineSnapshotRepository::class),
@@ -171,8 +171,10 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertTrue($invoke());
         self::assertFalse($invoke(current: [...$outcome, 'group_active' => 1]));
         self::assertFalse($invoke(baseline: [...$observation, 'backfill_group_active' => 1]));
-        self::assertFalse($invoke(current: [...$outcome, 'raw_collections' => 10]));
-        self::assertFalse($invoke(current: [...$outcome, 'raw_binaries' => 20]));
+        self::assertTrue($invoke(current: [...$outcome, 'raw_collections' => 10]));
+        self::assertFalse($invoke(current: [...$outcome, 'raw_collections' => 9]));
+        self::assertTrue($invoke(current: [...$outcome, 'raw_binaries' => 20]));
+        self::assertFalse($invoke(current: [...$outcome, 'raw_collections' => 10, 'raw_binaries' => 20]));
         self::assertFalse($invoke(baseline: array_diff_key($observation, ['raw_collections' => true])));
         self::assertFalse($invoke(baseline: array_diff_key($observation, ['raw_binaries' => true])));
         self::assertFalse($invoke(current: array_diff_key($outcome, ['raw_collections' => true])));
@@ -925,7 +927,7 @@ final class WorkerOrchestratorTest extends TestCase
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-03 03:04:05',
         ], ['cursor_postdate' => '2026-01-02 03:04:05'], 10_000, $now - 700));
-        $store->markBackfillContextRepeat('alt.test', $now - 1);
+        $store->markBackfillContextRepeat('alt.test', $now - 1, 7);
         self::assertTrue($store->queueBackfillDelayedAttribution([
             'generation' => 8,
             'backfill_group' => 'alt.test',
@@ -950,7 +952,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
     }
 
-    public function test_mature_two_range_chain_settles_the_combined_window_and_delta_once(): void
+    public function test_mature_three_range_chain_settles_combined_window_once_and_tombstones_every_generation(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => false,
@@ -971,15 +973,23 @@ final class WorkerOrchestratorTest extends TestCase
             'backfill_quantity' => 10_000,
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-03 03:04:05',
-        ], ['cursor_postdate' => '2026-01-02 03:04:05'], 10_000, $now - 100));
-        $store->markBackfillContextRepeat('alt.test', $now - 62);
+        ], ['cursor_postdate' => '2026-01-02 03:04:05'], 10_000, $now - 200));
+        $store->markBackfillContextRepeat('alt.test', $now - 122, 7);
         self::assertTrue($store->queueBackfillDelayedAttribution([
             'generation' => 8,
             'backfill_group' => 'alt.test',
             'backfill_quantity' => 10_000,
             'release_high_watermark' => 101,
             'backfill_cursor_postdate' => '2026-01-02 03:04:05',
-        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, $now - 61, contextContinuation: true));
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, $now - 121, contextContinuation: true));
+        $store->markBackfillContextRepeat('alt.test', $now - 62, 8);
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 9,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 102,
+            'backfill_cursor_postdate' => '2026-01-01 03:04:05',
+        ], ['cursor_postdate' => '2025-12-31 03:04:05'], 10_000, $now - 61, contextContinuation: true));
 
         $snapshot = new PipelineSnapshot(1, 2, 3, 0, 0);
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
@@ -988,12 +998,12 @@ final class WorkerOrchestratorTest extends TestCase
             'alt.test',
             100,
             '2026-01-03 03:04:05',
-            '2026-01-01 03:04:05',
+            '2025-12-31 03:04:05',
         )->andReturn(['target' => 4, 'non_target' => 0, 'uncategorized' => 0]);
         $snapshots->shouldReceive('backfillPendingCollectionsForCohort')->once()->with(
             'alt.test',
             '2026-01-03 03:04:05',
-            '2026-01-01 03:04:05',
+            '2025-12-31 03:04:05',
         )->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('apply')->twice()->andReturn(9, 10);
@@ -1005,9 +1015,22 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertContains('backfill_delayed_attribution_settled', $settled['reasons']);
         self::assertNotContains('backfill_delayed_attribution_settled', $again['reasons']);
         self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts'] ?? null);
-        self::assertSame(2.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
+        self::assertSame(1.333333, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
         self::assertSame(['alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
         self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
+        foreach ([8, 9] as $settledGeneration) {
+            self::assertFalse($store->queueBackfillDelayedAttribution([
+                'generation' => $settledGeneration,
+                'backfill_group' => 'alt.test',
+                'backfill_quantity' => 10_000,
+                'release_high_watermark' => 100 + $settledGeneration - 7,
+                'backfill_cursor_postdate' => $settledGeneration === 8
+                    ? '2026-01-02 03:04:05'
+                    : '2026-01-01 03:04:05',
+            ], ['cursor_postdate' => $settledGeneration === 8
+                ? '2026-01-01 03:04:05'
+                : '2025-12-31 03:04:05'], 10_000, $now));
+        }
         self::assertFalse($settled['permit_granted']);
     }
 
@@ -1101,14 +1124,14 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertContains('backfill_delayed_attribution_queued', $result['reasons']);
         self::assertNotContains('backfill_permit_effective', $result['reasons']);
         self::assertNotContains('backfill_permit_ineffective', $result['reasons']);
-        self::assertSame(['alt.test' => 2, 'alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
+        self::assertSame(['alt.test' => 1, 'alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
         self::assertSame([], $store->backfillYieldHistory());
         self::assertNull($store->permitObservation());
-        self::assertNull($store->backfillContextRepeat(time()));
+        self::assertSame('alt.test', $store->backfillContextRepeat(time())['group'] ?? null);
         self::assertFalse($result['permit_granted']);
     }
 
-    public function test_adjacent_raw_only_repeat_extends_one_delayed_chain_and_stops(): void
+    public function test_adjacent_raw_only_repeat_rearms_the_bounded_delayed_chain(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => false,
@@ -1263,9 +1286,9 @@ final class WorkerOrchestratorTest extends TestCase
         $result = $orchestrator->runOnce(false);
 
         self::assertContains('backfill_delayed_attribution_queued', $result['reasons']);
-        self::assertNotContains('backfill_permit_context_progress', $result['reasons']);
-        self::assertSame(1, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
-        self::assertNull($store->backfillContextRepeat(time()));
+        self::assertContains('backfill_permit_context_progress', $result['reasons']);
+        self::assertSame(0, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
+        self::assertSame('alt.test', $store->backfillContextRepeat(time())['group'] ?? null);
         self::assertNull($store->permitObservation());
         self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
         self::assertFalse($result['permit_granted']);
@@ -1288,8 +1311,8 @@ final class WorkerOrchestratorTest extends TestCase
 
         self::assertContains('backfill_delayed_attribution_queued', $continuationReplay['reasons']);
         self::assertNotContains('backfill_permit_context_progress', $continuationReplay['reasons']);
-        self::assertSame(1, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
-        self::assertNull($store->backfillContextRepeat(time()));
+        self::assertSame(0, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
+        self::assertSame(8, $store->backfillContextRepeat(time())['generation'] ?? null);
         self::assertNull($store->permitObservation());
         self::assertFalse($continuationReplay['permit_granted']);
     }
@@ -1328,7 +1351,7 @@ final class WorkerOrchestratorTest extends TestCase
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-03 03:04:05',
         ], ['cursor_postdate' => '2026-01-02 03:04:05'], 10_000, $now));
-        $store->markBackfillContextRepeat('alt.test', $now);
+        $store->markBackfillContextRepeat('alt.test', $now, 7);
         $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.test', backfillCursor: 20_000);
         $store->beginPermitObservation($baseline, 7, $now - 600, [
             'cursor' => 20_000,
@@ -1424,7 +1447,7 @@ final class WorkerOrchestratorTest extends TestCase
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-03 03:04:05',
         ], ['cursor_postdate' => '2026-01-02 03:04:05'], 10_000, $now));
-        $store->markBackfillContextRepeat('alt.test', $now);
+        $store->markBackfillContextRepeat('alt.test', $now, 7);
         $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.test', backfillCursor: 20_000);
         $store->beginPermitObservation($baseline, 8, $now - 600, [
             'cursor' => 20_000,

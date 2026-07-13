@@ -314,9 +314,18 @@ class PipelineSnapshotRepository
         $pendingGroups = $this->state->pendingBackfillDelayedAttributionGroups();
         $contextRepeat = $this->state->backfillContextRepeat($now);
         $continuationGroup = trim((string) ($contextRepeat['group'] ?? ''));
-        if (! $this->state->backfillDelayedAttributionCanContinue($continuationGroup, $now)) {
+        $expectedCursorPostdate = $this->state
+            ->backfillDelayedAttributionExpectedCursorPostdate($continuationGroup, $now);
+        $continuationCandidate = collect($candidates)->firstWhere('name', $continuationGroup);
+        if (! $this->state->backfillDelayedAttributionCanContinue($continuationGroup, $now)
+            || $expectedCursorPostdate === null
+            || ! is_array($continuationCandidate)
+            || strtotime($expectedCursorPostdate) !== strtotime((string) $continuationCandidate['cursor_postdate'])
+        ) {
             $continuationGroup = '';
             $contextRepeat = null;
+        } elseif ($contextRepeat !== null) {
+            $contextRepeat['expected_cursor_postdate'] = $expectedCursorPostdate;
         }
         $candidates = array_values(array_filter(
             $candidates,

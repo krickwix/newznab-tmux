@@ -144,7 +144,6 @@ class WorkerOrchestrator
                 $continuationAttributionReplay = $attributionGenerationRole === 'continuation';
                 $consumingContextRepeat = $sameGroupContextRepeat && $attributionGenerationRole !== 'root';
                 $rawContextProgress = $attributionGenerationRole === null
-                    && ! $consumingContextRepeat
                     && $this->hasRawBackfillOnlyContextProgress(
                         $permitObservation,
                         $outcome,
@@ -194,18 +193,23 @@ class WorkerOrchestrator
                 }
                 $queuedContextProgress = $delayedAttributionQueued
                     && ! $rootAttributionReplay
-                    && ! $consumingContextRepeat
                     && ! $continuationAttributionReplay
                     && $contextProgress
                     && $cohortReleases === 0
                     && $cohortNzbs === 0
-                    && $requestedQuantity >= 10_000
-                    && $cursorDelta === $requestedQuantity;
+                    && $requestedQuantity === 10_000
+                    && $expectedCursorDelta === 10_000
+                    && $cursorDelta === 10_000;
                 if (! $shadow && $queuedContextProgress) {
-                    $this->store->markBackfillContextRepeat($observedGroup, time());
+                    $this->store->markBackfillContextRepeat(
+                        $observedGroup,
+                        time(),
+                        (int) ($permitObservation['generation'] ?? 0),
+                    );
                 } elseif (! $shadow
                     && $delayedAttributionQueued
-                    && ($consumingContextRepeat || $continuationAttributionReplay)
+                    && $consumingContextRepeat
+                    && $attributionGenerationRole === null
                 ) {
                     $this->store->clearBackfillContextRepeat($observedGroup);
                 }
@@ -287,10 +291,15 @@ class WorkerOrchestrator
                         && $cohortNzbs === 0
                         && $cohortQuality['productive'] === 0
                         && $cohortQuality['failure'] === null
-                        && $requestedQuantity >= 10_000
-                        && $cursorDelta === $requestedQuantity
+                        && $requestedQuantity === 10_000
+                        && $expectedCursorDelta === 10_000
+                        && $cursorDelta === 10_000
                     ) {
-                        $this->store->markBackfillContextRepeat($observedGroup, time());
+                        $this->store->markBackfillContextRepeat(
+                            $observedGroup,
+                            time(),
+                            (int) ($permitObservation['generation'] ?? 0),
+                        );
                     }
                 }
                 if ($closeObservation
@@ -508,6 +517,10 @@ class WorkerOrchestrator
                 nzbCreatedDelta: 0,
                 now: $now,
                 generation: $generation,
+                relatedGenerations: array_values(array_diff(
+                    $this->store->backfillDelayedAttributionGenerations($entry),
+                    [$generation],
+                )),
             );
 
             return [
@@ -579,6 +592,10 @@ class WorkerOrchestrator
             nzbCreatedDelta: $productive,
             now: $now,
             generation: $generation,
+            relatedGenerations: array_values(array_diff(
+                $this->store->backfillDelayedAttributionGenerations($entry),
+                [$generation],
+            )),
         );
 
         return [
@@ -781,8 +798,10 @@ class WorkerOrchestrator
             && (int) ($outcome['group_active'] ?? 1) === 0
             && $requestedQuantity === 10_000
             && $cursorDelta === 10_000
-            && (int) ($outcome['raw_collections'] ?? 0) > (int) ($observation['raw_collections'] ?? 0)
-            && (int) ($outcome['raw_binaries'] ?? 0) > (int) ($observation['raw_binaries'] ?? 0)
+            && (int) ($outcome['raw_collections'] ?? 0) >= (int) ($observation['raw_collections'] ?? 0)
+            && (int) ($outcome['raw_binaries'] ?? 0) >= (int) ($observation['raw_binaries'] ?? 0)
+            && ((int) ($outcome['raw_collections'] ?? 0) > (int) ($observation['raw_collections'] ?? 0)
+                || (int) ($outcome['raw_binaries'] ?? 0) > (int) ($observation['raw_binaries'] ?? 0))
             && $cohortReleases === 0
             && $cohortNzbs === 0
             && $quality['productive'] === 0

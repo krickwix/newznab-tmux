@@ -42,6 +42,7 @@ return [
         'backfill_cohort_postdate_tolerance_seconds' => min(86400, max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_COHORT_POSTDATE_TOLERANCE_SECONDS', 3600))),
         'backfill_min_payload_bytes' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MIN_PAYLOAD_BYTES', 104_857_600)),
         'backfill_exploit_attempts_before_explore' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_EXPLOIT_ATTEMPTS_BEFORE_EXPLORE', 3)),
+        'backfill_context_max_chain_windows' => min(3, max(2, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_MAX_CHAIN_WINDOWS', 3))),
         'backfill_aggressive_explore_below_yield' => max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_AGGRESSIVE_EXPLORE_BELOW_YIELD', 0.0)),
         'backfill_scale_min_yield' => max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_SCALE_MIN_YIELD', 1.0)),
         'backfill_scale_min_attempts' => max(2, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_SCALE_MIN_ATTEMPTS', 2)),

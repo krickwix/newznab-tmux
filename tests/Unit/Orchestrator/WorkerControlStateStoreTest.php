@@ -178,11 +178,11 @@ final class WorkerControlStateStoreTest extends TestCase
         config()->set('nntmux.orchestrator.backfill_yield_ttl_seconds', 600);
         $store = new WorkerControlStateStore;
 
-        $store->markBackfillContextRepeat(' alt.test ', 1_000);
+        $store->markBackfillContextRepeat(' alt.test ', 1_000, 42);
 
-        self::assertSame(['group' => 'alt.test', 'marked_at' => 1_000], $store->backfillContextRepeat(1_001));
+        self::assertSame(['group' => 'alt.test', 'marked_at' => 1_000, 'generation' => 42], $store->backfillContextRepeat(1_001));
         self::assertFalse($store->clearBackfillContextRepeat('alt.other'));
-        self::assertSame(['group' => 'alt.test', 'marked_at' => 1_000], $store->backfillContextRepeat(1_002));
+        self::assertSame(['group' => 'alt.test', 'marked_at' => 1_000, 'generation' => 42], $store->backfillContextRepeat(1_002));
         self::assertTrue($store->clearBackfillContextRepeat('alt.test'));
         self::assertNull($store->backfillContextRepeat(1_003));
     }
@@ -290,6 +290,12 @@ final class WorkerControlStateStoreTest extends TestCase
 
         self::assertTrue($store->queueBackfillDelayedAttribution($observation, $outcome, 10_000, 1_000));
         self::assertTrue($store->queueBackfillDelayedAttribution($observation, $outcome, 10_000, 2_000));
+        self::assertFalse($store->queueBackfillDelayedAttribution(
+            [...$observation, 'backfill_cursor_postdate' => '2026-01-03 03:04:05'],
+            $outcome,
+            10_000,
+            2_001,
+        ));
         self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
         self::assertNull($store->matureBackfillDelayedAttribution(9_999));
         self::assertSame([7], array_column($store->immatureBackfillDelayedAttributions(9_999), 'generation'));
@@ -346,7 +352,7 @@ final class WorkerControlStateStoreTest extends TestCase
             10_000,
             1_000,
         ));
-        $store->markBackfillContextRepeat('alt.test', 1_001);
+        $store->markBackfillContextRepeat('alt.test', 1_001, 7);
 
         self::assertTrue($store->queueBackfillDelayedAttribution(
             $second,
@@ -385,7 +391,7 @@ final class WorkerControlStateStoreTest extends TestCase
             contextContinuation: true,
         ));
         self::assertSame([
-            'schema_version' => 1,
+            'schema_version' => 2,
             'generation' => 7,
             'group' => 'alt.test',
             'queued_at' => 1_000,
@@ -396,10 +402,145 @@ final class WorkerControlStateStoreTest extends TestCase
             'cursor_end_postdate' => '2026-01-01 03:04:05',
             'cursor_delta' => 20_000,
             'chain_count' => 2,
-            'continuation_generation' => 8,
-            'continuation_start_postdate' => '2026-01-02 03:04:05',
-            'continuation_cursor_delta' => 10_000,
+            'continuations' => [[
+                'generation' => 8,
+                'start_postdate' => '2026-01-02 03:04:05',
+                'end_postdate' => '2026-01-01 03:04:05',
+                'cursor_delta' => 10_000,
+                'queued_at' => 2_000,
+            ]],
         ], $store->matureBackfillDelayedAttribution(11_000));
+    }
+
+    public function test_delayed_attribution_allows_two_exact_contiguous_context_continuations_then_stops(): void
+    {
+        config([
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_context_max_chain_windows' => 3,
+        ]);
+        $store = new WorkerControlStateStore;
+        $window = static fn (int $generation, string $start): array => [
+            'generation' => $generation,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => $start,
+        ];
+
+        self::assertTrue($store->queueBackfillDelayedAttribution(
+            $window(7, '2026-01-04 03:04:05'),
+            ['cursor_postdate' => '2026-01-03 03:04:05'],
+            10_000,
+            1_000,
+        ));
+        $store->markBackfillContextRepeat('alt.test', 1_001, 999);
+        self::assertFalse($store->backfillDelayedAttributionCanContinue('alt.test', 1_002));
+        $store->markBackfillContextRepeat('alt.test', 1_001, 7);
+        self::assertTrue($store->backfillDelayedAttributionCanContinue('alt.test', 1_002));
+        self::assertTrue($store->queueBackfillDelayedAttribution(
+            $window(8, '2026-01-03 03:04:05'),
+            ['cursor_postdate' => '2026-01-02 03:04:05'],
+            10_000,
+            2_000,
+            contextContinuation: true,
+        ));
+        $store->markBackfillContextRepeat('alt.test', 2_001, 8);
+        self::assertTrue($store->queueBackfillDelayedAttribution(
+            $window(8, '2026-01-03 03:04:05'),
+            ['cursor_postdate' => '2026-01-02 03:04:05'],
+            10_000,
+            2_002,
+            contextContinuation: true,
+        ));
+        self::assertSame(8, $store->backfillContextRepeat(2_003)['generation'] ?? null);
+        self::assertTrue($store->backfillDelayedAttributionCanContinue('alt.test', 2_002));
+        self::assertTrue($store->queueBackfillDelayedAttribution(
+            $window(9, '2026-01-02 03:04:05'),
+            ['cursor_postdate' => '2026-01-01 03:04:05'],
+            10_000,
+            3_000,
+            contextContinuation: true,
+        ));
+
+        self::assertSame('root', $store->backfillDelayedAttributionGenerationRole('alt.test', 7));
+        self::assertSame('continuation', $store->backfillDelayedAttributionGenerationRole('alt.test', 8));
+        self::assertSame('continuation', $store->backfillDelayedAttributionGenerationRole('alt.test', 9));
+        $store->markBackfillContextRepeat('alt.test', 3_001, 9);
+        self::assertTrue($store->queueBackfillDelayedAttribution(
+            $window(8, '2026-01-03 03:04:05'),
+            ['cursor_postdate' => '2026-01-02 03:04:05'],
+            10_000,
+            3_002,
+            contextContinuation: true,
+        ));
+        self::assertSame(9, $store->backfillContextRepeat(3_003)['generation'] ?? null);
+        self::assertFalse($store->backfillDelayedAttributionCanContinue('alt.test', 3_002));
+        self::assertFalse($store->queueBackfillDelayedAttribution(
+            $window(10, '2026-01-01 03:04:05'),
+            ['cursor_postdate' => '2025-12-31 03:04:05'],
+            10_000,
+            4_000,
+            contextContinuation: true,
+        ));
+        self::assertSame(3, $store->matureBackfillDelayedAttribution(12_000)['chain_count'] ?? null);
+        self::assertSame(30_000, $store->matureBackfillDelayedAttribution(12_000)['cursor_delta'] ?? null);
+        $store->recordBackfillYield('alt.test', 30_000, 2, 12_000, 7, [8, 9]);
+        self::assertTrue($store->completeBackfillDelayedAttribution(7));
+        self::assertFalse($store->queueBackfillDelayedAttribution(
+            $window(8, '2026-01-03 03:04:05'),
+            ['cursor_postdate' => '2026-01-02 03:04:05'],
+            10_000,
+            12_001,
+        ));
+    }
+
+    public function test_larger_than_ten_thousand_root_cannot_authorize_a_context_chain(): void
+    {
+        $store = new WorkerControlStateStore;
+
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 20_000,
+            'backfill_expected_cursor_delta' => 20_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-03 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 20_000, 1_000));
+        $store->markBackfillContextRepeat('alt.test', 1_001, 7);
+
+        self::assertFalse($store->backfillDelayedAttributionCanContinue('alt.test', 1_002));
+    }
+
+    public function test_malformed_or_inconsistent_schema_two_chain_fails_closed(): void
+    {
+        Cache::store('array')->forever('nntmux:orchestrator:backfill-delayed-attribution', [
+            '7' => [
+                'schema_version' => 2,
+                'generation' => 7,
+                'group' => 'alt.test',
+                'queued_at' => 1_000,
+                'settle_after' => 10_000,
+                'quality_grace_started_at' => 2_000,
+                'release_high_watermark' => 100,
+                'cursor_start_postdate' => '2026-01-04 03:04:05',
+                'cursor_end_postdate' => '2026-01-02 03:04:05',
+                'cursor_delta' => 30_000,
+                'chain_count' => 3,
+                'continuations' => [[
+                    'generation' => 8,
+                    'start_postdate' => '2026-01-03 03:04:05',
+                    'end_postdate' => '2026-01-02 03:04:05',
+                    'cursor_delta' => 10_000,
+                    'queued_at' => 2_000,
+                ], ['generation' => 9]],
+            ],
+        ]);
+        $store = new WorkerControlStateStore;
+        $store->markBackfillContextRepeat('alt.test', 2_001, 8);
+
+        self::assertFalse($store->backfillDelayedAttributionCanContinue('alt.test', 2_002));
+        self::assertNull($store->backfillDelayedAttributionGenerationRole('alt.test', 7));
+        self::assertNull($store->backfillDelayedAttributionGenerationRole('alt.test', 8));
     }
 
     public function test_delayed_attribution_context_extension_requires_one_exact_contiguous_probe(): void

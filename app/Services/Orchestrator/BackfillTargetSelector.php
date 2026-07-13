@@ -79,7 +79,7 @@ final readonly class BackfillTargetSelector
      * @param  list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $candidates
      * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
      * @param  array<string, int>  $ineffectivePermitsByTarget
-     * @param  array{group: string, marked_at: int}|null  $contextRepeat
+     * @param  array{group: string, marked_at: int, generation?: int, expected_cursor_postdate?: string|null}|null  $contextRepeat
      * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity?: int}|null
      */
     public function select(
@@ -141,11 +141,14 @@ final readonly class BackfillTargetSelector
 
         $repeatGroup = trim((string) ($contextRepeat['group'] ?? ''));
         $repeatMarkedAt = (int) ($contextRepeat['marked_at'] ?? 0);
+        $repeatExpectedPostdate = (string) ($contextRepeat['expected_cursor_postdate'] ?? '');
         if ($repeatGroup !== ''
             && $repeatMarkedAt > 0
             && $repeatMarkedAt <= $now
             && $now - $repeatMarkedAt < $this->historyTtlSeconds
             && isset($byName[$repeatGroup])
+            && ($repeatExpectedPostdate === ''
+                || strtotime($repeatExpectedPostdate) === strtotime($byName[$repeatGroup]['cursor_postdate']))
         ) {
             return [...$byName[$repeatGroup], 'safe_quantity' => 10_000];
         }
