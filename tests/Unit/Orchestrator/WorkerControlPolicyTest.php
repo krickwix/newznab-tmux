@@ -763,6 +763,38 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('backfill_target_locked_after_ineffective_permits', $second->reasons);
     }
 
+    public function test_category_quality_failure_immediately_locks_the_exact_source_with_a_stable_reason(): void
+    {
+        $snapshot = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            0,
+            0,
+            lowPressure: true,
+            eligibleBackfillSupply: true,
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: true,
+            backfillPermitInputMoved: true,
+            backfillPermitGroup: 'alt.console',
+            backfillPermitQualityFailure: 'backfill_permit_wrong_category',
+            backfillGroup: 'alt.console',
+            backfillSafeQuantity: 10_000,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide(
+            $snapshot,
+            new ControlState(profile: ControlProfile::Fill),
+            time(),
+        );
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertSame(WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT, $decision->nextState->ineffectiveBackfillPermitsByTarget['alt.console']);
+        self::assertContains('backfill_permit_wrong_category', $decision->reasons);
+        self::assertContains('backfill_target_locked', $decision->reasons);
+    }
+
     public function test_recent_proven_yield_cannot_override_exact_target_ineffective_lock(): void
     {
         $state = new ControlState(

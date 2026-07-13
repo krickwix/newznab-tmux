@@ -322,6 +322,16 @@ final class WorkerControlPolicy
         $target = $snapshot->backfillPermitGroup;
         $targetCounts = $state->ineffectiveBackfillPermitsByTarget;
         if ($target !== '') {
+            if ($snapshot->backfillPermitQualityFailure !== '') {
+                $targetCounts[$target] = self::INEFFECTIVE_BACKFILL_LIMIT;
+
+                return [
+                    self::INEFFECTIVE_BACKFILL_LIMIT,
+                    $state->backfillLocked,
+                    $targetCounts,
+                    [$snapshot->backfillPermitQualityFailure],
+                ];
+            }
             if ($targetCounts === [] && $state->consecutiveIneffectiveBackfillPermits > 0) {
                 $targetCounts[$target] = min(
                     self::INEFFECTIVE_BACKFILL_LIMIT,
@@ -334,7 +344,7 @@ final class WorkerControlPolicy
                 return [0, $state->backfillLocked, $targetCounts, ['backfill_permit_effective']];
             }
 
-            if ($snapshot->backfillPermitClaimed && ! $snapshot->backfillPermitInputMoved) {
+            if (! $snapshot->backfillPermitInputMoved) {
                 return [
                     $state->consecutiveIneffectiveBackfillPermits,
                     $state->backfillLocked,
@@ -377,7 +387,7 @@ final class WorkerControlPolicy
             return [0, $state->backfillLocked, $targetCounts, ['backfill_permit_effective']];
         }
 
-        if ($snapshot->backfillPermitClaimed && ! $snapshot->backfillPermitInputMoved) {
+        if (! $snapshot->backfillPermitInputMoved) {
             return [
                 $state->consecutiveIneffectiveBackfillPermits,
                 $state->backfillLocked,

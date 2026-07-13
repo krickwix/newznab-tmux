@@ -86,7 +86,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 ], true)
                 ? ($name === 'nntmux-worker-binaries'
                     ? ':microservices-pods-20260713-provider-range-v93'
-                    : ':microservices-pods-20260711-worker-orchestrator-v22')
+                    : ($name === 'nntmux-worker-releases'
+                        ? ':microservices-pods-20260713-quality-cadence-v109'
+                        : ':microservices-pods-20260711-worker-orchestrator-v22'))
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
@@ -278,12 +280,16 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-completion-finalize-v107',
+            ':microservices-pods-20260713-quality-cadence-v109',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-completion-finalize-v107',
+            'microservices-pods-20260713-quality-cadence-v109',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
+        );
+        self::assertSame(
+            ['php', 'artisan', 'nntmux:worker-orchestrator', '--sleep=30'],
+            $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
         self::assertSame(
@@ -316,7 +322,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         $probeGroupsValue = $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null;
         self::assertSame(
-            'alt.binaries.movies.x264,alt.binaries.hdtv.tv-episodes,alt.binaries.dvd.movies,alt.binaries.movie,alt.binaries.lossless,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.sounds.lossless.metal,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
+            'alt.binaries.movies.x264,alt.binaries.hdtv.tv-episodes,alt.binaries.dvd.movies,alt.binaries.movie,alt.binaries.lossless,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.dvd.classic.movies,alt.binaries.sounds.lossless,alt.binaries.sounds.lossless.classical,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
             $probeGroupsValue,
         );
         $probeGroups = explode(',', (string) $probeGroupsValue);

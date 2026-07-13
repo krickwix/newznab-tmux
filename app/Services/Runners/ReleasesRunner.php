@@ -31,6 +31,11 @@ class ReleasesRunner extends BaseRunner
             }
         }
 
+        $uGroups = $this->prioritizePinnedGroup(
+            $uGroups,
+            trim((string) Settings::settingValue('orchestrator_bfc_group')),
+        );
+
         $count = count($uGroups);
         if ($count === 0) {
             $this->headerNone();
@@ -73,6 +78,33 @@ class ReleasesRunner extends BaseRunner
                 cli()->error('Batch '.($batchIndex + 1).' failed: '.$e->getMessage());
             }
         }
+    }
+
+    /**
+     * Put the group supplying the active immutable backfill permit first so its
+     * collections reach release and NZB processing before unrelated backlog.
+     * The remaining groups retain a stable ID/name order when no pin is active
+     * or the pinned group has no eligible collections.
+     *
+     * @param  array<int, array{id: int|string, name: string}>  $groups
+     * @return array<int, array{id: int|string, name: string}>
+     */
+    protected function prioritizePinnedGroup(array $groups, string $pinnedGroup): array
+    {
+        usort($groups, static function (array $left, array $right) use ($pinnedGroup): int {
+            $leftPinned = $pinnedGroup !== '' && $left['name'] === $pinnedGroup;
+            $rightPinned = $pinnedGroup !== '' && $right['name'] === $pinnedGroup;
+
+            if ($leftPinned !== $rightPinned) {
+                return $leftPinned ? -1 : 1;
+            }
+
+            $idOrder = (int) $left['id'] <=> (int) $right['id'];
+
+            return $idOrder !== 0 ? $idOrder : $left['name'] <=> $right['name'];
+        });
+
+        return $groups;
     }
 
     public function updatePerGroup(): void

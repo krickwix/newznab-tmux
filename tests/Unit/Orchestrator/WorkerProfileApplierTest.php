@@ -190,6 +190,30 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame(5, Settings::settingValue('orchestrator_generation'));
     }
 
+    public function test_quality_lock_disables_only_the_named_source_and_preserves_its_cursor(): void
+    {
+        Schema::create('usenet_groups', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name')->unique();
+            $table->boolean('backfill');
+            $table->unsignedBigInteger('first_record');
+        });
+        DB::table('usenet_groups')->insert([
+            ['name' => 'alt.console', 'backfill' => 1, 'first_record' => 47_973_297],
+            ['name' => 'alt.movie', 'backfill' => 1, 'first_record' => 12_345],
+        ]);
+
+        (new WorkerProfileApplier)->qualityLockBackfillTarget('alt.console');
+
+        self::assertSame([
+            'backfill' => 0,
+            'first_record' => 47_973_297,
+        ], (array) DB::table('usenet_groups')->where('name', 'alt.console')->first(['backfill', 'first_record']));
+        self::assertSame(1, DB::table('usenet_groups')->where('name', 'alt.movie')->value('backfill'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame('backfill_permit_wrong_category', Settings::settingValue('orchestrator_bf_quality'));
+    }
+
     public function test_it_preserves_an_unclaimed_permit_during_the_claim_grace_period(): void
     {
         Settings::query()->insert([

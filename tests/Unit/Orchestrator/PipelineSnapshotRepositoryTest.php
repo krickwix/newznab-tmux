@@ -408,6 +408,38 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         ));
     }
 
+    public function test_carried_cohort_category_counts_keep_the_release_id_upper_bound(): void
+    {
+        DB::shouldReceive('selectOne')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('r.id > ?', $sql);
+                self::assertStringContainsString('r.id <= ?', $sql);
+                self::assertStringContainsString('c.root_categories_id NOT IN (1, 2000, 5000)', $sql);
+                self::assertSame(['alt.test', 100, 103, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600], $bindings);
+
+                return true;
+            })
+            ->andReturn((object) ['target' => 0, 'non_target' => 1, 'uncategorized' => 0]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([
+            'target' => 0,
+            'non_target' => 1,
+            'uncategorized' => 0,
+        ], $repository->backfillCompletedNzbCategoryCountsForReleaseCohort(
+            'alt.test',
+            100,
+            103,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        ));
+    }
+
     public function test_group_cohort_nzb_count_is_bounded_by_release_id_and_tolerates_provider_date_disorder(): void
     {
         config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
@@ -440,6 +472,54 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         );
 
         self::assertSame(3, $repository->backfillCreatedNzbsForCohort(
+            'alt.test',
+            123,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        ));
+    }
+
+    public function test_group_cohort_completed_nzbs_are_split_into_target_wrong_and_uncategorized_roots(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+
+        DB::shouldReceive('selectOne')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('AS target', $sql);
+                self::assertStringContainsString('AS non_target', $sql);
+                self::assertStringContainsString('AS uncategorized', $sql);
+                self::assertStringContainsString('LEFT JOIN categories c ON c.id = r.categories_id', $sql);
+                self::assertStringContainsString('c.root_categories_id IN (2000, 5000)', $sql);
+                self::assertStringContainsString('c.root_categories_id NOT IN (1, 2000, 5000)', $sql);
+                self::assertStringContainsString('c.root_categories_id = 1', $sql);
+                self::assertStringContainsString('r.id > ?', $sql);
+                self::assertStringContainsString('r.nzbstatus = 1', $sql);
+                self::assertSame([
+                    'alt.test',
+                    123,
+                    '2026-01-02 03:04:05',
+                    '2026-01-01 03:04:05',
+                    3600,
+                    '2026-01-02 03:04:05',
+                    '2026-01-01 03:04:05',
+                    3600,
+                ], $bindings);
+
+                return true;
+            })
+            ->andReturn((object) ['target' => 2, 'non_target' => 1, 'uncategorized' => 3]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([
+            'target' => 2,
+            'non_target' => 1,
+            'uncategorized' => 3,
+        ], $repository->backfillCreatedNzbCategoryCountsForCohort(
             'alt.test',
             123,
             '2026-01-02 03:04:05',

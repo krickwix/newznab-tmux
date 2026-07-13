@@ -22,6 +22,7 @@ class WorkerOrchestrator
     {
         $lock = null;
         $acquired = false;
+        $shadowQualityFailure = null;
         try {
             $lock = $this->store->leaderLock();
             if (! $lock->get()) {
@@ -70,7 +71,8 @@ class WorkerOrchestrator
                     && $this->hasBackfillOnlyContextProgress($permitObservation, $outcome, $cursorMoved);
                 $produced = $outcome['ready_collections'] > (int) ($permitObservation['ready_collections'] ?? 0)
                     || $outcome['releases'] > (int) ($permitObservation['release_total'] ?? 0);
-                $cohortNzbs = 0;
+                $cohortNzbCategories = ['target' => 0, 'non_target' => 0, 'uncategorized' => 0];
+                $currentCohortNzbs = 0;
                 $cohortReleases = 0;
                 if ($permitClaimed && $hasCohortBaseline && ($observationExpired || $cursorMoved)) {
                     $cohortReleases = $this->snapshots->backfillCreatedReleasesForCohort(
@@ -79,23 +81,29 @@ class WorkerOrchestrator
                         (string) $permitObservation['backfill_cursor_postdate'],
                         (string) ($outcome['cursor_postdate'] ?? ''),
                     );
-                    $cohortNzbs = $this->snapshots->backfillCreatedNzbsForCohort(
+                    $cohortNzbCategories = $this->snapshots->backfillCreatedNzbCategoryCountsForCohort(
                         $observedGroup,
                         (int) $permitObservation['release_high_watermark'],
                         (string) $permitObservation['backfill_cursor_postdate'],
                         (string) ($outcome['cursor_postdate'] ?? ''),
                     );
+                    $currentCohortNzbs = array_sum($cohortNzbCategories);
                     $priorReleaseCohort = $permitObservation['prior_release_cohort'] ?? null;
                     if (is_array($priorReleaseCohort)) {
-                        $cohortNzbs += $this->snapshots->backfillCompletedNzbsForReleaseCohort(
+                        $carriedNzbCategories = $this->snapshots->backfillCompletedNzbCategoryCountsForReleaseCohort(
                             $observedGroup,
                             (int) ($priorReleaseCohort['id_low_exclusive'] ?? 0),
                             (int) ($priorReleaseCohort['id_high_inclusive'] ?? 0),
                             (string) ($priorReleaseCohort['cursor_start_postdate'] ?? ''),
                             (string) ($priorReleaseCohort['cursor_end_postdate'] ?? ''),
                         );
+                        foreach (array_keys($cohortNzbCategories) as $category) {
+                            $cohortNzbCategories[$category] += $carriedNzbCategories[$category];
+                        }
                     }
                 }
+                $cohortNzbs = array_sum($cohortNzbCategories);
+                $cohortQuality = $this->classifyCohortNzbQuality($cohortNzbCategories, $permitObservation, time());
                 $cursorDelta = max(0, (int) ($permitObservation['backfill_cursor'] ?? 0) - (int) $outcome['cursor']);
                 $zeroOutputContextReady = $this->zeroOutputContextReady(
                     $permitObservation,
@@ -108,18 +116,32 @@ class WorkerOrchestrator
                     $cohortNzbs,
                     time(),
                 );
-                $closeObservation = $observationExpired
-                    || ($permitCompleted && $cursorMoved && $cohortNzbs > 0 && $snapshot->eligibleNzbs === 0)
-                    || ($permitCompleted && ! $cursorMoved)
-                    || $zeroOutputContextReady;
-                if ($observationExpired && $permitClaimed && $hasCohortBaseline && ! $permitCompleted) {
+                $closeObservation = $cohortQuality['failure'] !== null
+                    || (! $cohortQuality['hold'] && (
+                        $observationExpired
+                        || ($permitCompleted && $cursorMoved && $cohortQuality['productive'] > 0 && $snapshot->eligibleNzbs === 0)
+                        || ($permitCompleted && ! $cursorMoved)
+                        || $zeroOutputContextReady
+                    ));
+                if ($shadow && $cohortQuality['failure'] !== null) {
+                    $shadowQualityFailure = $cohortQuality['failure'];
+                    $closeObservation = false;
+                }
+                if ($cohortQuality['failure'] === null
+                    && $observationExpired
+                    && $permitClaimed
+                    && $hasCohortBaseline
+                    && ! $permitCompleted
+                ) {
                     $closeObservation = false;
                     if (! $shadow) {
                         $this->applier->revokePermit();
                     }
                 }
                 if ($closeObservation && ! $shadow) {
-                    $this->applier->revokePermit();
+                    $cohortQuality['failure'] === null
+                        ? $this->applier->revokePermit()
+                        : $this->applier->qualityLockBackfillTarget($observedGroup, $cohortQuality['failure']);
                 }
                 if ($closeObservation && $permitClaimed && $hasCohortBaseline) {
                     if ($this->shouldRememberIncompleteReleaseCohort(
@@ -128,7 +150,7 @@ class WorkerOrchestrator
                         $cursorMoved,
                         $cursorDelta,
                         $cohortReleases,
-                        $cohortNzbs,
+                        $currentCohortNzbs,
                     )) {
                         $this->store->rememberIncompleteReleaseCohort(
                             $permitObservation,
@@ -140,7 +162,7 @@ class WorkerOrchestrator
                     $this->store->recordBackfillYield(
                         $observedGroup,
                         cursorDelta: $cursorDelta,
-                        nzbCreatedDelta: $cohortNzbs,
+                        nzbCreatedDelta: $cohortQuality['productive'],
                         now: time(),
                     );
                     if ($permitCompleted) {
@@ -155,11 +177,12 @@ class WorkerOrchestrator
                 if ($closeObservation) {
                     $snapshot = $snapshot->withPermitOutcome(
                         completed: true,
-                        effective: $permitClaimed && $cursorMoved && ($hasCohortBaseline ? $cohortNzbs > 0 : $produced),
+                        effective: $permitClaimed && $cursorMoved && ($hasCohortBaseline ? $cohortQuality['productive'] > 0 : $produced),
                         claimed: $permitClaimed,
                         inputMoved: $cursorMoved,
                         contextProgress: $contextProgress,
                         group: $observedGroup,
+                        qualityFailure: $cohortQuality['failure'] ?? '',
                     );
                     $this->store->clearPermitObservation();
                 }
@@ -230,9 +253,11 @@ class WorkerOrchestrator
                 'profile' => $decision->profile->profile->value,
                 'backfill_permitted' => $decision->backfillPermitted,
                 'permit_granted' => ! $shadow && $issuePermit && $decision->backfillPermitted,
-                'reasons' => $preserveUnclaimedPermit
-                    ? [...$decision->reasons, 'backfill_permit_claim_grace']
-                    : $decision->reasons,
+                'reasons' => [
+                    ...$decision->reasons,
+                    ...($preserveUnclaimedPermit ? ['backfill_permit_claim_grace'] : []),
+                    ...($shadowQualityFailure === null ? [] : [$shadowQualityFailure, 'backfill_quality_shadow_observation']),
+                ],
                 'backlogs' => [
                     'parts' => $snapshot->partsBacklog,
                     'binaries' => $snapshot->binariesBacklog,
@@ -318,6 +343,40 @@ class WorkerOrchestrator
             && $cursorDelta === $quantity
             && $cohortReleases > 0
             && $cohortNzbs === 0;
+    }
+
+    /**
+     * @param  array{target: int, non_target: int, uncategorized: int}  $counts
+     * @param  array<string, mixed>  $observation
+     * @return array{productive: int, hold: bool, failure: string|null}
+     */
+    private function classifyCohortNzbQuality(array $counts, array $observation, int $now): array
+    {
+        if ($counts['non_target'] > 0) {
+            return [
+                'productive' => 0,
+                'hold' => false,
+                'failure' => 'backfill_permit_wrong_category',
+            ];
+        }
+
+        if ($counts['uncategorized'] > 0) {
+            $completedAt = (int) ($observation['completed_observed_at'] ?? 0);
+            $graceSeconds = (int) config('nntmux.orchestrator.backfill_incomplete_release_grace_seconds', 600);
+            $graceExpired = $completedAt > 0 && $now - $completedAt >= $graceSeconds;
+
+            return [
+                'productive' => 0,
+                'hold' => ! $graceExpired,
+                'failure' => $graceExpired ? 'backfill_permit_uncategorized_after_grace' : null,
+            ];
+        }
+
+        return [
+            'productive' => max(0, $counts['target']),
+            'hold' => false,
+            'failure' => null,
+        ];
     }
 
     /**

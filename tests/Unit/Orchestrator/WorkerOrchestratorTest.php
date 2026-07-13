@@ -141,6 +141,160 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertFalse($method->invoke($orchestrator, ['backfill_quantity' => 0], true, true, 0, 1, 0));
     }
 
+    #[DataProvider('cohortCategoryQualityCases')]
+    public function test_exact_cohort_category_quality_allows_only_fully_categorized_movie_or_tv_nzbs(
+        array $counts,
+        int $now,
+        int $productive,
+        bool $hold,
+        ?string $failure,
+    ): void {
+        config()->set('nntmux.orchestrator.backfill_incomplete_release_grace_seconds', 600);
+        $orchestrator = new WorkerOrchestrator(
+            Mockery::mock(PipelineSnapshotRepository::class),
+            new WorkerControlPolicy,
+            Mockery::mock(WorkerControlStateStore::class),
+            Mockery::mock(WorkerProfileApplier::class),
+        );
+        $method = new ReflectionMethod($orchestrator, 'classifyCohortNzbQuality');
+
+        self::assertSame([
+            'productive' => $productive,
+            'hold' => $hold,
+            'failure' => $failure,
+        ], $method->invoke($orchestrator, $counts, ['completed_observed_at' => 1_000], $now));
+    }
+
+    /** @return array<string, array{array{target: int, non_target: int, uncategorized: int}, int, int, bool, string|null}> */
+    public static function cohortCategoryQualityCases(): array
+    {
+        return [
+            'carried wrong Console root overrides current target yield' => [
+                ['target' => 3, 'non_target' => 1, 'uncategorized' => 0],
+                1_001,
+                0,
+                false,
+                'backfill_permit_wrong_category',
+            ],
+            'all movie and TV roots are productive' => [
+                ['target' => 3, 'non_target' => 0, 'uncategorized' => 0],
+                1_001,
+                3,
+                false,
+                null,
+            ],
+            'Other root remains held during grace' => [
+                ['target' => 1, 'non_target' => 0, 'uncategorized' => 1],
+                1_599,
+                0,
+                true,
+                null,
+            ],
+            'Other root locks when unresolved after grace' => [
+                ['target' => 1, 'non_target' => 0, 'uncategorized' => 1],
+                1_600,
+                0,
+                false,
+                'backfill_permit_uncategorized_after_grace',
+            ],
+        ];
+    }
+
+    public function test_wrong_root_completed_nzb_immediately_quality_locks_source_and_prevents_regrant(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => true,
+            'nntmux.orchestrator.permit_observation_seconds' => 1200,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '7'],
+        ]);
+
+        $store = new WorkerControlStateStore;
+        $store->storeState(new ControlState(profile: ControlProfile::Fill));
+        $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.console', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, generation: 7, now: time() - 60, outcome: [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ], quantity: 10_000);
+
+        $current = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            0,
+            0,
+            lowPressure: true,
+            eligibleBackfillSupply: true,
+            eligibleNzbs: 1,
+            backfillGroup: 'alt.console',
+            backfillCursor: 10_000,
+            backfillRemainingArticles: 20_000,
+            backfillSafeQuantity: 10_000,
+        );
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->times(3)->andReturn($current, $current, $current);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->twice()->with('alt.console')->andReturn([
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 1,
+            'release_high_watermark' => 101,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->twice()->andReturn([
+            'target' => 0,
+            'non_target' => 1,
+            'uncategorized' => 0,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->twice()->andReturn(1);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('qualityLockBackfillTarget')->once()->with(
+            'alt.console',
+            'backfill_permit_wrong_category',
+        );
+        $applier->shouldReceive('apply')->twice()->with(
+            Mockery::on(static fn (ControlDecision $decision): bool => ! $decision->backfillPermitted),
+            Mockery::type('int'),
+            false,
+            'alt.console',
+            false,
+        )->andReturn(8, 9);
+        $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
+
+        $shadow = $orchestrator->runOnce(true);
+
+        self::assertContains('backfill_permit_wrong_category', $shadow['reasons']);
+        self::assertNotNull($store->permitObservation());
+        self::assertSame([], $store->backfillYieldHistory());
+        self::assertSame([], $store->loadState()->ineffectiveBackfillPermitsByTarget);
+
+        $locked = $orchestrator->runOnce(false);
+        $stillLocked = $orchestrator->runOnce(false);
+
+        self::assertContains('backfill_permit_wrong_category', $locked['reasons']);
+        self::assertContains('backfill_target_locked', $locked['reasons']);
+        self::assertFalse($locked['permit_granted']);
+        self::assertContains('backfill_target_locked', $stillLocked['reasons']);
+        self::assertFalse($stillLocked['permit_granted']);
+        self::assertSame(WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.console']);
+        self::assertSame(0.0, $store->backfillYieldHistory()['alt.console']['ewma_nzbs_per_10k']);
+    }
+
     public function test_zero_output_context_retry_grace_is_bounded_to_five_minutes_minimum(): void
     {
         $key = 'NNTMUX_ORCHESTRATOR_BACKFILL_ZERO_OUTPUT_GRACE_SECONDS';
@@ -342,7 +496,11 @@ final class WorkerOrchestratorTest extends TestCase
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->twice()->andReturn($eligibleReplacement, $eligibleReplacement);
         $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.exhausted')->andReturn($completedOutcome);
-        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 0,
+            'non_target' => 0,
+            'uncategorized' => 0,
+        ]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
         $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.next')->andReturn($nextOutcome);
         $applier = Mockery::mock(WorkerProfileApplier::class);
@@ -435,7 +593,11 @@ final class WorkerOrchestratorTest extends TestCase
             'releases' => 4_211,
             'release_high_watermark' => 560_367,
         ]);
-        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 0,
+            'non_target' => 0,
+            'uncategorized' => 0,
+        ]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
@@ -515,7 +677,11 @@ final class WorkerOrchestratorTest extends TestCase
             'partial_collections' => 3,
             'complete_binaries' => 24,
         ]);
-        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 0,
+            'non_target' => 0,
+            'uncategorized' => 0,
+        ]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
@@ -981,7 +1147,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertNotContains('backfill_permit_ineffective', $result['reasons']);
     }
 
-    public function test_a_claimed_permit_records_target_nzb_yield_after_attribution(): void
+    public function test_carried_target_yield_does_not_hide_a_new_incomplete_release_frontier(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => false,
@@ -1024,20 +1190,21 @@ final class WorkerOrchestratorTest extends TestCase
             'cursor_postdate' => '2026-01-01 03:04:05',
             'ready_collections' => 1,
             'releases' => 1,
+            'release_high_watermark' => 103,
         ]);
-        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->with(
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->with(
             'alt.test',
             100,
             '2026-01-02 03:04:05',
             '2026-01-01 03:04:05',
-        )->andReturn(1);
-        $snapshots->shouldReceive('backfillCompletedNzbsForReleaseCohort')->once()->with(
+        )->andReturn(['target' => 0, 'non_target' => 0, 'uncategorized' => 0]);
+        $snapshots->shouldReceive('backfillCompletedNzbCategoryCountsForReleaseCohort')->once()->with(
             'alt.test',
             90,
             100,
             '2026-01-03 03:04:05',
             '2026-01-02 03:04:05',
-        )->andReturn(2);
+        )->andReturn(['target' => 3, 'non_target' => 0, 'uncategorized' => 0]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->with(
             'alt.test',
             100,
@@ -1053,6 +1220,20 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertContains('backfill_permit_effective', $result['reasons']);
         self::assertSame(3.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
         self::assertSame(1, $store->backfillYieldHistory()['alt.test']['attempts']);
+
+        $store->beginPermitObservation($baseline, generation: 8, now: time(), outcome: [
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 1,
+            'release_high_watermark' => 103,
+        ]);
+        self::assertSame([
+            'id_low_exclusive' => 100,
+            'id_high_inclusive' => 103,
+            'cursor_start_postdate' => '2026-01-02 03:04:05',
+            'cursor_end_postdate' => '2026-01-01 03:04:05',
+        ], $store->permitObservation()['prior_release_cohort'] ?? null);
     }
 
     #[DataProvider('actionableFrontierCases')]
@@ -1107,7 +1288,11 @@ final class WorkerOrchestratorTest extends TestCase
             'ready_collections' => 0,
             'releases' => 0,
         ]);
-        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(2);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 2,
+            'non_target' => 0,
+            'uncategorized' => 0,
+        ]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(2);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->times($closes ? 1 : 0);
@@ -1170,7 +1355,11 @@ final class WorkerOrchestratorTest extends TestCase
             'ready_collections' => 1,
             'releases' => 1,
         ]);
-        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 0,
+            'non_target' => 0,
+            'uncategorized' => 0,
+        ]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldNotReceive('revokePermit');
@@ -1221,7 +1410,11 @@ final class WorkerOrchestratorTest extends TestCase
             'ready_collections' => 1,
             'releases' => 1,
         ]);
-        $snapshots->shouldReceive('backfillCreatedNzbsForCohort')->once()->andReturn(0);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 0,
+            'non_target' => 0,
+            'uncategorized' => 0,
+        ]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
@@ -1273,7 +1466,7 @@ final class WorkerOrchestratorTest extends TestCase
             'ready_collections' => 0,
             'releases' => 0,
         ]);
-        $snapshots->shouldNotReceive('backfillCreatedNzbsForCohort');
+        $snapshots->shouldNotReceive('backfillCreatedNzbCategoryCountsForCohort');
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
         $applier->shouldReceive('apply')->once()->andReturn(8);
@@ -1328,7 +1521,7 @@ final class WorkerOrchestratorTest extends TestCase
             'releases' => 1,
             'release_high_watermark' => 101,
         ]);
-        $snapshots->shouldNotReceive('backfillCreatedNzbsForCohort');
+        $snapshots->shouldNotReceive('backfillCreatedNzbCategoryCountsForCohort');
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
         $applier->shouldReceive('apply')->once()->andReturn(8);

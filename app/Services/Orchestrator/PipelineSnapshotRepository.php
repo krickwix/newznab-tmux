@@ -353,6 +353,22 @@ class PipelineSnapshotRepository
         ]);
     }
 
+    /** @return array{target: int, non_target: int, uncategorized: int} */
+    public function backfillCreatedNzbCategoryCountsForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        return $this->backfillNzbCategoryCountsForCohort(
+            $group,
+            max(0, $releaseHighWatermark),
+            null,
+            $startPostdate,
+            $endPostdate,
+        );
+    }
+
     public function backfillCompletedNzbsForReleaseCohort(
         string $group,
         int $releaseIdLowExclusive,
@@ -384,6 +400,74 @@ class PipelineSnapshotRepository
             $endPostdate,
             $postdateToleranceSeconds,
         ]);
+    }
+
+    /** @return array{target: int, non_target: int, uncategorized: int} */
+    public function backfillCompletedNzbCategoryCountsForReleaseCohort(
+        string $group,
+        int $releaseIdLowExclusive,
+        int $releaseIdHighInclusive,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        if ($releaseIdHighInclusive <= $releaseIdLowExclusive) {
+            return ['target' => 0, 'non_target' => 0, 'uncategorized' => 0];
+        }
+
+        return $this->backfillNzbCategoryCountsForCohort(
+            $group,
+            max(0, $releaseIdLowExclusive),
+            max(0, $releaseIdHighInclusive),
+            $startPostdate,
+            $endPostdate,
+        );
+    }
+
+    /** @return array{target: int, non_target: int, uncategorized: int} */
+    private function backfillNzbCategoryCountsForCohort(
+        string $group,
+        int $releaseIdLowExclusive,
+        ?int $releaseIdHighInclusive,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+        $upperBound = $releaseIdHighInclusive === null ? '' : 'AND r.id <= ?';
+        $bindings = [$group, $releaseIdLowExclusive];
+        if ($releaseIdHighInclusive !== null) {
+            $bindings[] = $releaseIdHighInclusive;
+        }
+        array_push(
+            $bindings,
+            $startPostdate,
+            $endPostdate,
+            $postdateToleranceSeconds,
+            $startPostdate,
+            $endPostdate,
+            $postdateToleranceSeconds,
+        );
+        $row = DB::selectOne('SELECT
+            COALESCE(SUM(CASE WHEN c.root_categories_id IN (2000, 5000) THEN 1 ELSE 0 END), 0) AS target,
+            COALESCE(SUM(CASE WHEN c.root_categories_id IS NOT NULL
+                AND c.root_categories_id NOT IN (1, 2000, 5000) THEN 1 ELSE 0 END), 0) AS non_target,
+            COALESCE(SUM(CASE WHEN c.id IS NULL
+                OR c.root_categories_id IS NULL
+                OR c.root_categories_id = 1 THEN 1 ELSE 0 END), 0) AS uncategorized
+            FROM releases r
+            INNER JOIN usenet_groups g ON g.id = r.groups_id
+            LEFT JOIN categories c ON c.id = r.categories_id
+            WHERE g.name = ?
+            AND r.id > ?
+            '.$upperBound.'
+            AND r.nzbstatus = 1
+            AND r.postdate BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)
+                AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', $bindings);
+
+        return [
+            'target' => max(0, (int) ($row->target ?? 0)),
+            'non_target' => max(0, (int) ($row->non_target ?? 0)),
+            'uncategorized' => max(0, (int) ($row->uncategorized ?? 0)),
+        ];
     }
 
     public function backfillCreatedReleasesForCohort(

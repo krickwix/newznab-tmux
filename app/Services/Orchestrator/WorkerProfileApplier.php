@@ -127,4 +127,23 @@ class WorkerProfileApplier
         Settings::query()->updateOrCreate(['name' => 'orchestrator_bf_permit'], ['value' => '0']);
         Settings::forgetCachedSettings();
     }
+
+    public function qualityLockBackfillTarget(string $group, string $reason = 'backfill_permit_wrong_category'): void
+    {
+        DB::transaction(function () use ($group, $reason): void {
+            DB::table('usenet_groups')
+                ->where('name', $group)
+                ->lockForUpdate()
+                ->update(['backfill' => 0]);
+            foreach ([
+                'orchestrator_bf_permit' => '0',
+                'orchestrator_bf_paused' => '1',
+                'orchestrator_bf_group' => $group,
+                'orchestrator_bf_quality' => $reason,
+            ] as $name => $value) {
+                Settings::query()->updateOrCreate(['name' => $name], ['value' => $value]);
+            }
+            Settings::forgetCachedSettings();
+        }, 3);
+    }
 }

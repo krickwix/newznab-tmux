@@ -31,6 +31,7 @@ final readonly class PipelineSnapshot
         public bool $backfillPermitInputMoved = true,
         public bool $backfillPermitContextProgress = false,
         public string $backfillPermitGroup = '',
+        public string $backfillPermitQualityFailure = '',
         public int $databaseDeadlocks = 0,
         public int $databaseCurrentWaits = 0,
         public int $storageAvailableBytes = 0,
@@ -70,6 +71,7 @@ final readonly class PipelineSnapshot
         bool $inputMoved = true,
         bool $contextProgress = false,
         string $group = '',
+        string $qualityFailure = '',
     ): self {
         return new self(
             partsBacklog: $this->partsBacklog,
@@ -96,6 +98,7 @@ final readonly class PipelineSnapshot
             backfillPermitInputMoved: $inputMoved,
             backfillPermitContextProgress: $contextProgress,
             backfillPermitGroup: $group,
+            backfillPermitQualityFailure: $qualityFailure,
             databaseDeadlocks: $this->databaseDeadlocks,
             databaseCurrentWaits: $this->databaseCurrentWaits,
             storageAvailableBytes: $this->storageAvailableBytes,
