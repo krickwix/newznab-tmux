@@ -17,12 +17,15 @@ final readonly class BackfillTargetSelector
 
     private float $aggressiveExploreBelowYield;
 
+    private int $lockRetrySeconds;
+
     /** @param list<string> $probeGroups */
     public function __construct(
         ?array $probeGroups = null,
         ?int $historyTtlSeconds = null,
         ?int $exploitAttemptsBeforeExplore = null,
         ?float $aggressiveExploreBelowYield = null,
+        ?int $lockRetrySeconds = null,
     ) {
         $configuredGroups = $probeGroups ?? config('nntmux.orchestrator.backfill_probe_groups', []);
         $this->probeGroups = array_values(array_filter(array_map(
@@ -46,6 +49,12 @@ final readonly class BackfillTargetSelector
                 ? (float) config('nntmux.orchestrator.backfill_aggressive_explore_below_yield', 0.0)
                 : 0.0),
         );
+        $this->lockRetrySeconds = max(
+            300,
+            $lockRetrySeconds ?? ($container->bound('config')
+                ? (int) config('nntmux.orchestrator.backfill_target_lock_retry_seconds', 21_600)
+                : 21_600),
+        );
     }
 
     /**
@@ -65,6 +74,9 @@ final readonly class BackfillTargetSelector
                     && is_array($entry)
                     && $now - (int) ($entry['last_attempt_at'] ?? 0) < $this->historyTtlSeconds
                     && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) >= $this->aggressiveExploreBelowYield;
+                $lockRetryDue = is_array($entry)
+                    && (int) ($entry['last_attempt_at'] ?? 0) > 0
+                    && $now - (int) $entry['last_attempt_at'] >= $this->lockRetrySeconds;
 
                 return $candidate['cursor'] > 0
                     && $candidate['remaining_articles'] >= 20_000
@@ -72,6 +84,7 @@ final readonly class BackfillTargetSelector
                     && (int) substr($candidate['cursor_postdate'], 0, 4) >= 2000
                     && $timestamp <= $now
                     && ($provenAboveThreshold
+                        || $lockRetryDue
                         || (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) < WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT);
             },
         ));

@@ -595,6 +595,54 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertNull($target);
     }
 
+    public function test_it_retries_a_locked_target_after_the_bounded_cooldown(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.probe.criterion'],
+            historyTtlSeconds: 86_400,
+            lockRetrySeconds: 21_600,
+        );
+        $history = [
+            'alt.probe.criterion' => [
+                'attempts' => 2,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_970_000,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.probe.criterion', '2009-05-15 06:49:20'),
+        ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: ['alt.probe.criterion' => 2]);
+
+        self::assertSame('alt.probe.criterion', $target['name'] ?? null);
+    }
+
+    public function test_it_keeps_a_locked_target_excluded_during_the_cooldown(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.probe.criterion'],
+            historyTtlSeconds: 86_400,
+            lockRetrySeconds: 21_600,
+        );
+        $history = [
+            'alt.probe.criterion' => [
+                'attempts' => 2,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_990_000,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        $target = $selector->select([
+            $this->candidate('alt.probe.criterion', '2009-05-15 06:49:20'),
+        ], $history, now: 2_000_000_000, ineffectivePermitsByTarget: ['alt.probe.criterion' => 2]);
+
+        self::assertNull($target);
+    }
+
     public function test_zero_yield_candidates_rotate_by_oldest_attempt(): void
     {
         $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
