@@ -122,6 +122,70 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertFalse($method->invoke($orchestrator, [], $progress, true));
     }
 
+    public function test_raw_context_requires_exact_completed_dual_growth_without_output(): void
+    {
+        $orchestrator = new WorkerOrchestrator(
+            Mockery::mock(PipelineSnapshotRepository::class),
+            new WorkerControlPolicy,
+            Mockery::mock(WorkerControlStateStore::class),
+            Mockery::mock(WorkerProfileApplier::class),
+        );
+        $method = new ReflectionMethod($orchestrator, 'hasRawBackfillOnlyContextProgress');
+        $observation = [
+            'backfill_group_active' => 0,
+            'raw_collections' => 10,
+            'raw_binaries' => 20,
+        ];
+        $outcome = [
+            'group_active' => 0,
+            'raw_collections' => 11,
+            'raw_binaries' => 21,
+        ];
+        $quality = ['productive' => 0, 'hold' => false, 'failure' => null];
+        $invoke = static function (
+            ?array $baseline = null,
+            ?array $current = null,
+            bool $claimed = true,
+            bool $completed = true,
+            int $delta = 10_000,
+            int $quantity = 10_000,
+            int $releases = 0,
+            int $nzbs = 0,
+            ?array $cohortQuality = null,
+        ) use ($method, $orchestrator, $observation, $outcome, $quality): bool {
+            return $method->invoke(
+                $orchestrator,
+                $baseline ?? $observation,
+                $current ?? $outcome,
+                $claimed,
+                $completed,
+                $delta,
+                $quantity,
+                $releases,
+                $nzbs,
+                $cohortQuality ?? $quality,
+            );
+        };
+
+        self::assertTrue($invoke());
+        self::assertFalse($invoke(current: [...$outcome, 'group_active' => 1]));
+        self::assertFalse($invoke(baseline: [...$observation, 'backfill_group_active' => 1]));
+        self::assertFalse($invoke(current: [...$outcome, 'raw_collections' => 10]));
+        self::assertFalse($invoke(current: [...$outcome, 'raw_binaries' => 20]));
+        self::assertFalse($invoke(baseline: array_diff_key($observation, ['raw_collections' => true])));
+        self::assertFalse($invoke(baseline: array_diff_key($observation, ['raw_binaries' => true])));
+        self::assertFalse($invoke(current: array_diff_key($outcome, ['raw_collections' => true])));
+        self::assertFalse($invoke(current: array_diff_key($outcome, ['raw_binaries' => true])));
+        self::assertFalse($invoke(claimed: false));
+        self::assertFalse($invoke(completed: false));
+        self::assertFalse($invoke(delta: 9_999));
+        self::assertFalse($invoke(quantity: 20_000, delta: 20_000));
+        self::assertFalse($invoke(releases: 1));
+        self::assertFalse($invoke(nzbs: 1));
+        self::assertFalse($invoke(cohortQuality: ['productive' => 1, 'hold' => false, 'failure' => null]));
+        self::assertFalse($invoke(cohortQuality: ['productive' => 0, 'hold' => false, 'failure' => 'wrong']));
+    }
+
     public function test_incomplete_release_lineage_requires_exact_completed_input(): void
     {
         $orchestrator = new WorkerOrchestrator(
@@ -645,7 +709,7 @@ final class WorkerOrchestratorTest extends TestCase
             profile: ControlProfile::Balanced,
             ineffectiveBackfillPermitsByTarget: ['alt.test' => 2, 'alt.other' => 1],
         ));
-        $store->markBackfillContextRepeat('alt.other', time() - 30);
+        $store->markBackfillContextRepeat('alt.test', time() - 30);
         $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.test', backfillCursor: 20_000);
         $store->beginPermitObservation($baseline, generation: 7, now: time() - 600, outcome: [
             'cursor' => 20_000,
@@ -700,7 +764,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertNotNull($store->permitObservation());
         self::assertSame([], $store->backfillYieldHistory());
         self::assertSame(['alt.test' => 2, 'alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
-        self::assertSame('alt.other', $store->backfillContextRepeat(time())['group'] ?? null);
+        self::assertSame('alt.test', $store->backfillContextRepeat(time())['group'] ?? null);
 
         $result = $orchestrator->runOnce(false);
 
@@ -710,7 +774,122 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame(['alt.test' => 1, 'alt.other' => 1], $store->loadState()->ineffectiveBackfillPermitsByTarget);
         self::assertSame(0.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k'] ?? null);
         self::assertNull($store->permitObservation());
+        self::assertNull($store->backfillContextRepeat(time()));
+        self::assertFalse($result['permit_granted']);
+    }
+
+    public function test_adjacent_raw_only_repeat_is_bounded_and_restores_the_second_strike(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.permit_observation_seconds' => 1200,
+            'nntmux.orchestrator.backfill_zero_output_grace_seconds' => 300,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '7'],
+        ]);
+
+        $store = new WorkerControlStateStore;
+        $store->storeState(new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.test' => 2],
+        ));
+        $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, 7, time() - 600, [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+            'group_active' => 0,
+            'raw_collections' => 10,
+            'raw_binaries' => 20,
+            'partial_collections' => 2,
+            'complete_binaries' => 20,
+        ], 10_000);
+        $store->observePermitCompletion(7, time() - 301);
+        $snapshot = new PipelineSnapshot(
+            1, 2, 3, 0, 0,
+            lowPressure: true,
+            eligibleBackfillSupply: true,
+            backfillGroup: 'alt.test',
+            backfillCursor: 10_000,
+            backfillSafeQuantity: 10_000,
+        );
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->twice()->andReturn($snapshot);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->twice()->andReturn([
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+            'group_active' => 0,
+            'raw_collections' => 11,
+            'raw_binaries' => 21,
+            'partial_collections' => 2,
+            'complete_binaries' => 20,
+        ], [
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+            'group_active' => 0,
+            'raw_collections' => 12,
+            'raw_binaries' => 22,
+            'partial_collections' => 2,
+            'complete_binaries' => 20,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->twice()->andReturn([
+            'target' => 0, 'non_target' => 0, 'uncategorized' => 0,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->twice()->andReturn(0);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('revokePermit')->twice();
+        $applier->shouldReceive('apply')->twice()->andReturn(8, 9);
+        $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
+
+        $first = $orchestrator->runOnce(false);
+
+        self::assertContains('backfill_permit_context_progress', $first['reasons']);
+        self::assertSame(1, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
         self::assertSame('alt.test', $store->backfillContextRepeat(time())['group'] ?? null);
+
+        DB::table('settings')->where('name', 'orchestrator_bf_claimed')->update(['value' => '8']);
+        DB::table('settings')->where('name', 'orchestrator_bf_completed')->update(['value' => '8']);
+        $store->beginPermitObservation($baseline, 8, time() - 600, [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+            'group_active' => 0,
+            'raw_collections' => 11,
+            'raw_binaries' => 21,
+            'partial_collections' => 2,
+            'complete_binaries' => 20,
+        ], 10_000);
+        $store->observePermitCompletion(8, time() - 301);
+
+        $result = $orchestrator->runOnce(false);
+
+        self::assertContains('backfill_target_locked_after_ineffective_permits', $result['reasons']);
+        self::assertNotContains('backfill_permit_context_progress', $result['reasons']);
+        self::assertSame(2, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);
+        self::assertNull($store->backfillContextRepeat(time()));
         self::assertFalse($result['permit_granted']);
     }
 

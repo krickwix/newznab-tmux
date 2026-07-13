@@ -136,6 +136,8 @@ final class WorkerControlStateStoreTest extends TestCase
             'releases' => 77,
             'release_high_watermark' => 88,
             'group_active' => 0,
+            'raw_collections' => 2,
+            'raw_binaries' => 23,
             'partial_collections' => 3,
             'complete_binaries' => 24,
         ]);
@@ -152,6 +154,8 @@ final class WorkerControlStateStoreTest extends TestCase
             'release_total' => 77,
             'release_high_watermark' => 88,
             'backfill_group_active' => 0,
+            'raw_collections' => 2,
+            'raw_binaries' => 23,
             'partial_collections' => 3,
             'complete_binaries' => 24,
             'baseline_deadlocks' => 0,

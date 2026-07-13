@@ -374,6 +374,8 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('AS backfill_cursor', $sql);
                 self::assertDoesNotMatchRegularExpression('/\bAS cursor(?:\s|,|$)/i', $sql);
                 self::assertStringContainsString('g.active AS group_active', $sql);
+                self::assertStringContainsString('AS raw_collections', $sql);
+                self::assertStringContainsString('AS raw_binaries', $sql);
                 self::assertStringContainsString('AS partial_collections', $sql);
                 self::assertStringContainsString('AS complete_binaries', $sql);
                 self::assertSame(['alt.test'], $bindings);
@@ -387,6 +389,8 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 'releases' => 7,
                 'release_high_watermark' => 8,
                 'group_active' => 0,
+                'raw_collections' => 11,
+                'raw_binaries' => 12,
                 'partial_collections' => 9,
                 'complete_binaries' => 10,
             ]);
@@ -403,6 +407,8 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             'releases' => 7,
             'release_high_watermark' => 8,
             'group_active' => 0,
+            'raw_collections' => 11,
+            'raw_binaries' => 12,
             'partial_collections' => 9,
             'complete_binaries' => 10,
         ], $repository->backfillOutcomeForGroup('alt.test'));

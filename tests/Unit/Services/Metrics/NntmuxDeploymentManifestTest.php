@@ -87,7 +87,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 ? ($name === 'nntmux-worker-binaries'
                     ? ':microservices-pods-20260713-provider-range-v93'
                     : ($name === 'nntmux-worker-releases'
-                        ? ':microservices-pods-20260713-context-repeat-v110'
+                        ? ':microservices-pods-20260713-raw-context-v112'
                         : ':microservices-pods-20260711-worker-orchestrator-v22'))
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
@@ -280,11 +280,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-context-repeat-v110',
+            ':microservices-pods-20260713-raw-context-v112',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-context-repeat-v110',
+            'microservices-pods-20260713-raw-context-v112',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(

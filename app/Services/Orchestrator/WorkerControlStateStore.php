@@ -144,7 +144,7 @@ class WorkerControlStateStore
         return is_array($value) ? $value : null;
     }
 
-    /** @param array{cursor: int, cursor_postdate: string, ready_collections: int, releases: int, release_high_watermark: int, group_active?: int, partial_collections?: int, complete_binaries?: int} $outcome */
+    /** @param array{cursor: int, cursor_postdate: string, ready_collections: int, releases: int, release_high_watermark: int, group_active?: int, raw_collections?: int, raw_binaries?: int, partial_collections?: int, complete_binaries?: int} $outcome */
     public function beginPermitObservation(PipelineSnapshot $snapshot, int $generation, int $now, array $outcome, int $quantity = 10000): void
     {
         $priorReleaseCohort = $this->takeIncompleteReleaseCohort($snapshot->backfillGroup, $now);
@@ -168,6 +168,8 @@ class WorkerControlStateStore
             'release_total' => $outcome['releases'],
             'release_high_watermark' => $outcome['release_high_watermark'],
             'backfill_group_active' => (int) ($outcome['group_active'] ?? 1),
+            'raw_collections' => (int) ($outcome['raw_collections'] ?? 0),
+            'raw_binaries' => (int) ($outcome['raw_binaries'] ?? 0),
             'partial_collections' => (int) ($outcome['partial_collections'] ?? 0),
             'complete_binaries' => (int) ($outcome['complete_binaries'] ?? 0),
             'baseline_deadlocks' => $snapshot->databaseDeadlocks,

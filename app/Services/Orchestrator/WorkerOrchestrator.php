@@ -63,11 +63,11 @@ class WorkerOrchestrator
             if ($permitObservation !== null && ($observationExpired || ($permitClaimed && $hasCohortBaseline))) {
                 $observedGroup = (string) ($permitObservation['backfill_group'] ?? '');
                 $outcome = $observedGroup === ''
-                    ? ['cursor' => 0, 'cursor_postdate' => '', 'ready_collections' => 0, 'releases' => 0, 'release_high_watermark' => 0, 'group_active' => 1, 'partial_collections' => 0, 'complete_binaries' => 0]
+                    ? ['cursor' => 0, 'cursor_postdate' => '', 'ready_collections' => 0, 'releases' => 0, 'release_high_watermark' => 0, 'group_active' => 1, 'raw_collections' => 0, 'raw_binaries' => 0, 'partial_collections' => 0, 'complete_binaries' => 0]
                     : $this->snapshots->backfillOutcomeForGroup($observedGroup);
                 $cursorMoved = $outcome['cursor'] > 0
                     && $outcome['cursor'] < (int) ($permitObservation['backfill_cursor'] ?? 0);
-                $contextProgress = $permitClaimed
+                $strongContextProgress = $permitClaimed
                     && $this->hasBackfillOnlyContextProgress($permitObservation, $outcome, $cursorMoved);
                 $produced = $outcome['ready_collections'] > (int) ($permitObservation['ready_collections'] ?? 0)
                     || $outcome['releases'] > (int) ($permitObservation['release_total'] ?? 0);
@@ -105,6 +105,24 @@ class WorkerOrchestrator
                 $cohortNzbs = array_sum($cohortNzbCategories);
                 $cohortQuality = $this->classifyCohortNzbQuality($cohortNzbCategories, $permitObservation, time());
                 $cursorDelta = max(0, (int) ($permitObservation['backfill_cursor'] ?? 0) - (int) $outcome['cursor']);
+                $requestedQuantity = max(0, (int) ($permitObservation['backfill_quantity'] ?? 0));
+                $contextRepeat = ! $shadow && $permitClaimed && $permitCompleted && $cursorMoved
+                    ? $this->store->backfillContextRepeat(time())
+                    : null;
+                $sameGroupContextRepeat = (string) ($contextRepeat['group'] ?? '') === $observedGroup;
+                $rawContextProgress = ! $sameGroupContextRepeat
+                    && $this->hasRawBackfillOnlyContextProgress(
+                        $permitObservation,
+                        $outcome,
+                        $permitClaimed,
+                        $permitCompleted,
+                        $cursorDelta,
+                        $requestedQuantity,
+                        $cohortReleases,
+                        $cohortNzbs,
+                        $cohortQuality,
+                    );
+                $contextProgress = $strongContextProgress || $rawContextProgress;
                 $zeroOutputContextReady = $this->zeroOutputContextReady(
                     $permitObservation,
                     $outcome,
@@ -173,13 +191,9 @@ class WorkerOrchestrator
                             (int) ($permitObservation['backfill_quantity'] ?? 0),
                         );
                     }
-                    $requestedQuantity = max(0, (int) ($permitObservation['backfill_quantity'] ?? 0));
                     $isInputBearingClose = $cursorMoved && $cursorDelta > 0;
-                    $contextRepeat = $isInputBearingClose
-                        ? $this->store->backfillContextRepeat(time())
-                        : null;
                     $isExistingContextRepeat = $isInputBearingClose
-                        && (string) ($contextRepeat['group'] ?? '') === $observedGroup;
+                        && $sameGroupContextRepeat;
                     if ($isExistingContextRepeat) {
                         $this->store->clearBackfillContextRepeat($observedGroup);
                     } elseif ($contextProgress
@@ -451,5 +465,39 @@ class WorkerOrchestrator
 
         return (int) ($outcome['partial_collections'] ?? 0) > (int) ($observation['partial_collections'] ?? 0)
             || (int) ($outcome['complete_binaries'] ?? 0) > (int) ($observation['complete_binaries'] ?? 0);
+    }
+
+    /**
+     * @param  array<string, mixed>  $observation
+     * @param  array<string, mixed>  $outcome
+     * @param  array{productive: int, hold: bool, failure: string|null}  $quality
+     */
+    private function hasRawBackfillOnlyContextProgress(
+        array $observation,
+        array $outcome,
+        bool $permitClaimed,
+        bool $permitCompleted,
+        int $cursorDelta,
+        int $requestedQuantity,
+        int $cohortReleases,
+        int $cohortNzbs,
+        array $quality,
+    ): bool {
+        return $permitClaimed
+            && $permitCompleted
+            && array_key_exists('raw_collections', $observation)
+            && array_key_exists('raw_binaries', $observation)
+            && array_key_exists('raw_collections', $outcome)
+            && array_key_exists('raw_binaries', $outcome)
+            && (int) ($observation['backfill_group_active'] ?? 1) === 0
+            && (int) ($outcome['group_active'] ?? 1) === 0
+            && $requestedQuantity === 10_000
+            && $cursorDelta === 10_000
+            && (int) ($outcome['raw_collections'] ?? 0) > (int) ($observation['raw_collections'] ?? 0)
+            && (int) ($outcome['raw_binaries'] ?? 0) > (int) ($observation['raw_binaries'] ?? 0)
+            && $cohortReleases === 0
+            && $cohortNzbs === 0
+            && $quality['productive'] === 0
+            && $quality['failure'] === null;
     }
 }
