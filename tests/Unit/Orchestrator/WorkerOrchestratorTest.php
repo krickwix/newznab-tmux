@@ -434,7 +434,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertFalse($result['permit_granted']);
     }
 
-    public function test_fill_atomically_keeps_a_zero_yield_retry_at_probe_quantity(): void
+    public function test_fill_atomically_downshifts_a_positive_ewma_target_with_an_ineffective_strike(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => true,
@@ -458,14 +458,14 @@ final class WorkerOrchestratorTest extends TestCase
             eligibleBackfillSupply: true,
             backfillGroup: 'alt.multipart',
             backfillCursor: 1_000_000,
-            backfillYieldNzbsPer10k: 0.0,
-            backfillYieldAttempts: 1,
-            backfillLastCursorDelta: 10_000,
-            backfillLastEffectiveAt: 0,
+            backfillYieldNzbsPer10k: 1.848574,
+            backfillYieldAttempts: 22,
+            backfillLastCursorDelta: 80_000,
+            backfillLastEffectiveAt: time() - 600,
             backfillHistoryRecent: true,
             backfillTargetIneffectivePermits: 1,
             backfillRemainingArticles: 1_000_000,
-            backfillSafeQuantity: 150_000,
+            backfillSafeQuantity: 80_000,
         );
         $state = new ControlState(
             profile: ControlProfile::Fill,

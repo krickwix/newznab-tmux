@@ -71,6 +71,14 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(10_000, $profile->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1));
     }
 
+    public function test_recent_ineffective_permit_downshifts_a_historically_productive_target_to_probe_quantity(): void
+    {
+        $profile = WorkerControlProfile::for(ControlProfile::Fill);
+
+        self::assertSame(10_000, $profile->quantityForYield(1.848574, 1_000_000, 80_000, 22, 80_000, time(), true, 1));
+        self::assertSame(10_000, $profile->quantityForYield(3.0, 1_000_000, 150_000, 2, 10_000, time(), true, 2, true));
+    }
+
     public function test_cooldown_due_zero_yield_target_remains_at_probe_quantity(): void
     {
         $fill = WorkerControlProfile::for(ControlProfile::Fill);
@@ -82,7 +90,7 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(10_000, $fill->quantityForYield(0.0, 1_000_000, 150_000, 1, 10_000, 0, true, 1, true));
         self::assertSame(10_000, $balanced->quantityForYield(0.0, 1_000_000, 150_000, 2, 10_000, 0, true, 2, true));
 
-        self::assertSame(20_000, $fill->quantityForYield(3.0, 1_000_000, 150_000, 2, 10_000, time(), true, 2, true));
+        self::assertSame(10_000, $fill->quantityForYield(3.0, 1_000_000, 150_000, 2, 10_000, time(), true, 2, true));
     }
 
     public function test_proven_target_quantity_ramps_by_at_most_twice_the_last_exact_cohort(): void

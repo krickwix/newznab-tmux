@@ -46,11 +46,10 @@ final readonly class WorkerControlProfile
 
         $minimumYield = (float) config('nntmux.orchestrator.backfill_scale_min_yield', 1.0);
         $maxQuantity = (int) config('nntmux.orchestrator.backfill_max_quantity', 200000);
-        if ($this->profile === ControlProfile::Fill
-            && $targetLockRetryDue
-            && $targetIneffectivePermits >= WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT
-            && (! is_finite($nzbsPer10k) || $nzbsPer10k < $minimumYield)
-        ) {
+        // A positive long-term EWMA can hide a fresh source-quality cliff. Once
+        // a target has an ineffective strike, probe it at the minimum quantity
+        // until a productive cohort clears the strike or the target locks.
+        if ($targetIneffectivePermits > 0) {
             return $this->backfillQuantity;
         }
         $rampLimit = $historyRecent && $lastCursorDelta >= $this->backfillQuantity
