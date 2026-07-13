@@ -61,18 +61,6 @@ class PipelineSnapshotRepository
         $eligibleNzbs = $this->nzbBacklog->eligibleCandidateCount((int) config('nntmux.distributed_nzb_scan_cap', 10000));
         $controlState = $this->state->loadState();
         $yieldHistory = $this->state->backfillYieldHistory();
-        $backfillTarget = $this->targets->select(
-            $this->backfillCandidates(),
-            $yieldHistory,
-            time(),
-            $controlState->ineffectiveBackfillPermitsByTarget,
-        );
-        $backfillGroup = (string) ($backfillTarget['name'] ?? '');
-        $targetHistory = $yieldHistory[$backfillGroup] ?? null;
-        $historyIsRecent = is_array($targetHistory)
-            && time() - (int) ($targetHistory['last_attempt_at'] ?? 0) < (int) config('nntmux.orchestrator.backfill_yield_ttl_seconds', 86_400);
-        $historyIsProven = $historyIsRecent
-            && (int) ($targetHistory['attempts'] ?? 0) >= (int) config('nntmux.orchestrator.backfill_scale_min_attempts', 2);
 
         $totalCollections = (int) ($pipeline->collections_backlog ?? 0);
         $recoverySourceCollections = (int) $recoverySources['backlog'];
@@ -87,6 +75,18 @@ class PipelineSnapshotRepository
             'releases' => (int) ($pipeline->releases_backlog ?? 0),
             'nzbs' => (int) ($pipeline->nzbs_backlog ?? 0),
         ];
+        $backfillTarget = $this->targets->select(
+            $this->safeBackfillCandidates($this->backfillCandidates(), $backlogs),
+            $yieldHistory,
+            time(),
+            $controlState->ineffectiveBackfillPermitsByTarget,
+        );
+        $backfillGroup = (string) ($backfillTarget['name'] ?? '');
+        $targetHistory = $yieldHistory[$backfillGroup] ?? null;
+        $historyIsRecent = is_array($targetHistory)
+            && time() - (int) ($targetHistory['last_attempt_at'] ?? 0) < (int) config('nntmux.orchestrator.backfill_yield_ttl_seconds', 86_400);
+        $historyIsProven = $historyIsRecent
+            && (int) ($targetHistory['attempts'] ?? 0) >= (int) config('nntmux.orchestrator.backfill_scale_min_attempts', 2);
         $ages = [
             'binaries' => (int) ($pipeline->oldest_binary_age ?? 0),
             'collections' => $this->oldestOrdinaryCollectionAge($recoveryCriteria),
@@ -143,7 +143,7 @@ class PipelineSnapshotRepository
             backfillHistoryRecent: $historyIsRecent,
             backfillTargetIneffectivePermits: (int) ($controlState->ineffectiveBackfillPermitsByTarget[$backfillGroup] ?? 0),
             backfillRemainingArticles: (int) ($backfillTarget['remaining_articles'] ?? 0),
-            backfillSafeQuantity: $this->safeBackfillQuantity($backlogs, $backfillGroup),
+            backfillSafeQuantity: (int) ($backfillTarget['safe_quantity'] ?? 0),
             bodyRecoveryQueueBacklog: $this->bodyRecoveryQueueBacklog(),
             collectionsTotalBacklog: $totalCollections,
             bodyRecoverySourceBacklog: $recoverySourceCollections,
@@ -274,6 +274,24 @@ class PipelineSnapshotRepository
         }
 
         return min($quantities);
+    }
+
+    /**
+     * @param  list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>  $candidates
+     * @param  array{parts: int, binaries: int, collections: int, collections_total: int, releases: int, nzbs: int}  $backlogs
+     * @return list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity: int}>
+     */
+    private function safeBackfillCandidates(array $candidates, array $backlogs): array
+    {
+        $safe = [];
+        foreach ($candidates as $candidate) {
+            $quantity = $this->safeBackfillQuantity($backlogs, $candidate['name']);
+            if ($quantity >= 10_000) {
+                $safe[] = [...$candidate, 'safe_quantity' => $quantity];
+            }
+        }
+
+        return $safe;
     }
 
     /** @return array{cursor: int, cursor_postdate: string, ready_collections: int, releases: int, release_high_watermark: int} */

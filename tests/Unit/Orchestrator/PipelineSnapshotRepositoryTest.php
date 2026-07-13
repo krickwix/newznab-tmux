@@ -165,6 +165,50 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame(0, $quantity);
     }
 
+    public function test_zero_capacity_candidates_are_removed_before_yield_ranking(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_headroom_fraction', 0.20);
+        config()->set('nntmux.orchestrator.high_watermarks', [
+            'parts' => 300_000_000,
+            'binaries' => 1_000_000,
+            'collections' => 20_000,
+            'collections_total' => 80_000,
+        ]);
+        $state = Mockery::mock(WorkerControlStateStore::class);
+        $state->shouldReceive('backfillGrowthFor')->once()->with('alt.unsafe')->andReturn([
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 5_000,
+        ]);
+        $state->shouldReceive('backfillGrowthFor')->once()->with('alt.safe')->andReturn([
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'safeBackfillCandidates');
+        $candidates = [
+            ['name' => 'alt.unsafe', 'cursor' => 20_000, 'cursor_postdate' => '2026-01-02 00:00:00', 'remaining_articles' => 20_000],
+            ['name' => 'alt.safe', 'cursor' => 30_000, 'cursor_postdate' => '2026-01-03 00:00:00', 'remaining_articles' => 30_000],
+        ];
+
+        self::assertSame([[
+            ...$candidates[1],
+            'safe_quantity' => 20_000,
+        ]], $method->invoke($repository, $candidates, [
+            'parts' => 192_000_000,
+            'binaries' => 98_000,
+            'collections' => 9_000,
+            'collections_total' => 57_500,
+            'releases' => 12,
+            'nzbs' => 6_794,
+        ]));
+    }
+
     public function test_legacy_snapshot_resets_new_collection_split_rates_without_a_fake_drain(): void
     {
         $repository = new PipelineSnapshotRepository(
