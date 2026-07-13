@@ -268,6 +268,50 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame('alt.safe', $target['name'] ?? null);
     }
 
+    public function test_repository_excludes_an_otherwise_eligible_terminal_group_with_pending_attribution(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.backfill_probe_groups' => ['alt.terminal'],
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_terminal_min_attempts' => 3,
+            'nntmux.orchestrator.backfill_terminal_min_yield' => 1.0,
+        ]);
+        Cache::store('array')->flush();
+        $state = new WorkerControlStateStore;
+        self::assertTrue($state->queueBackfillDelayedAttribution([
+            'generation' => 8,
+            'backfill_group' => 'alt.terminal',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, 1_000));
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'selectBackfillTarget');
+
+        $target = $method->invoke($repository, [[
+            'name' => 'alt.terminal',
+            'cursor' => 16_389,
+            'cursor_postdate' => '2008-10-24 01:12:31',
+            'remaining_articles' => 16_387,
+            'safe_quantity' => 50_000,
+        ]], [
+            'alt.terminal' => [
+                'attempts' => 54,
+                'ewma_nzbs_per_10k' => 1.442194,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_998_000,
+                'last_cursor_delta' => 80_000,
+            ],
+        ], ControlState::initial(), 2_000_000_000);
+
+        self::assertNull($target);
+    }
+
     public function test_legacy_snapshot_resets_new_collection_split_rates_without_a_fake_drain(): void
     {
         $repository = new PipelineSnapshotRepository(
@@ -313,7 +357,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000', $sql);
                 self::assertStringContainsString('CAST(g.last_record AS SIGNED) BETWEEN CAST(s.first_record AS SIGNED) AND CAST(s.last_record AS SIGNED)', $sql);
                 self::assertStringContainsString('CAST(g.first_record AS SIGNED) <= CAST(g.last_record AS SIGNED) + 1', $sql);
-                self::assertStringContainsString('CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= 20000', $sql);
+                self::assertStringContainsString('CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= 10000', $sql);
                 self::assertStringContainsString("g.first_record_postdate >= '2000-01-01'", $sql);
                 self::assertStringContainsString("g.last_record_postdate >= '2000-01-01'", $sql);
                 self::assertStringContainsString('CAST(g.last_record AS SIGNED) < 9223372036854775807', $sql);

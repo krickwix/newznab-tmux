@@ -19,6 +19,10 @@ final readonly class BackfillTargetSelector
 
     private int $lockRetrySeconds;
 
+    private int $terminalMinAttempts;
+
+    private float $terminalMinYield;
+
     /** @param list<string> $probeGroups */
     public function __construct(
         ?array $probeGroups = null,
@@ -26,6 +30,8 @@ final readonly class BackfillTargetSelector
         ?int $exploitAttemptsBeforeExplore = null,
         ?float $aggressiveExploreBelowYield = null,
         ?int $lockRetrySeconds = null,
+        ?int $terminalMinAttempts = null,
+        ?float $terminalMinYield = null,
     ) {
         $configuredGroups = $probeGroups ?? config('nntmux.orchestrator.backfill_probe_groups', []);
         $this->probeGroups = array_values(array_filter(array_map(
@@ -55,6 +61,18 @@ final readonly class BackfillTargetSelector
                 ? (int) config('nntmux.orchestrator.backfill_target_lock_retry_seconds', 21_600)
                 : 21_600),
         );
+        $this->terminalMinAttempts = max(
+            3,
+            $terminalMinAttempts ?? ($container->bound('config')
+                ? (int) config('nntmux.orchestrator.backfill_terminal_min_attempts', 3)
+                : 3),
+        );
+        $this->terminalMinYield = max(
+            1.0,
+            $terminalMinYield ?? ($container->bound('config')
+                ? (float) config('nntmux.orchestrator.backfill_terminal_min_yield', 1.0)
+                : 1.0),
+        );
     }
 
     /**
@@ -79,9 +97,17 @@ final readonly class BackfillTargetSelector
                 $lockRetryDue = is_array($entry)
                     && (int) ($entry['last_attempt_at'] ?? 0) > 0
                     && $now - (int) $entry['last_attempt_at'] >= $this->lockRetrySeconds;
+                $remainingArticles = (int) $candidate['remaining_articles'];
+                $rangeEligible = $remainingArticles >= 20_000
+                    || $this->isTerminalPositiveCandidate(
+                        $candidate,
+                        $entry,
+                        $now,
+                        (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0),
+                    );
 
                 return $candidate['cursor'] > 0
-                    && $candidate['remaining_articles'] >= 20_000
+                    && $rangeEligible
                     && (int) ($candidate['safe_quantity'] ?? 10_000) >= 10_000
                     && $timestamp !== false
                     && (int) substr($candidate['cursor_postdate'], 0, 4) >= 2000
@@ -100,6 +126,10 @@ final readonly class BackfillTargetSelector
                 && (int) ($entry['last_attempt_at'] ?? 0) > 0
                 && $now - (int) $entry['last_attempt_at'] >= $this->lockRetrySeconds
                 && (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) >= WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT;
+            if ((int) $candidate['remaining_articles'] < 20_000) {
+                $candidate['safe_quantity'] = 10_000;
+                $candidate['terminal_positive'] = true;
+            }
 
             return $candidate;
         }, $candidates);
@@ -220,6 +250,33 @@ final readonly class BackfillTargetSelector
         });
 
         return $candidates[0];
+    }
+
+    /**
+     * @param  array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity?: int}  $candidate
+     * @param  array{attempts?: int, ewma_nzbs_per_10k?: float, last_attempt_at?: int, last_effective_at?: int, last_cursor_delta?: int}|null  $entry
+     */
+    private function isTerminalPositiveCandidate(
+        array $candidate,
+        ?array $entry,
+        int $now,
+        int $ineffectivePermits,
+    ): bool {
+        $remainingArticles = (int) $candidate['remaining_articles'];
+        $lastAttemptAt = (int) ($entry['last_attempt_at'] ?? 0);
+        $lastEffectiveAt = (int) ($entry['last_effective_at'] ?? 0);
+
+        return $remainingArticles >= 10_000
+            && $remainingArticles < 20_000
+            && is_array($entry)
+            && (int) ($entry['attempts'] ?? 0) >= $this->terminalMinAttempts
+            && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) >= $this->terminalMinYield
+            && $lastAttemptAt > 0
+            && $lastAttemptAt <= $now
+            && $now - $lastAttemptAt < $this->historyTtlSeconds
+            && $lastEffectiveAt > 0
+            && $lastEffectiveAt <= $now
+            && $ineffectivePermits === 0;
     }
 
     /**

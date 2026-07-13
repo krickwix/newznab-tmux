@@ -44,6 +44,24 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(10_000, $profile->quantityForYield(10.0, 20_000));
     }
 
+    public function test_terminal_positive_range_is_exactly_10k_in_fill_and_balanced_profiles(): void
+    {
+        foreach ([ControlProfile::Fill, ControlProfile::Balanced] as $profile) {
+            self::assertSame(
+                10_000,
+                WorkerControlProfile::for($profile)->quantityForYield(
+                    1.442194,
+                    16_387,
+                    10_000,
+                    54,
+                    80_000,
+                    1_999_998_000,
+                    true,
+                ),
+            );
+        }
+    }
+
     public function test_one_input_bearing_zero_yield_probe_remains_at_probe_quantity(): void
     {
         $balanced = WorkerControlProfile::for(ControlProfile::Balanced);

@@ -60,6 +60,8 @@ return [
         'backfill_growth_learning_prior_floor_fraction' => min(1.0, max(0.10, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_PRIOR_FLOOR_FRACTION', 0.25))),
         'backfill_growth_learning_latest_sample_seconds' => min(86400, max(300, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_LATEST_SAMPLE_SECONDS', 7200))),
         'backfill_target_lock_retry_seconds' => min(86400, max(300, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_TARGET_LOCK_RETRY_SECONDS', 21600))),
+        'backfill_terminal_min_attempts' => max(3, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_ATTEMPTS', 3)),
+        'backfill_terminal_min_yield' => max(1.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_YIELD', 1.0)),
         'prometheus_url' => env('NNTMUX_ORCHESTRATOR_PROMETHEUS_URL', 'http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090'),
         'prometheus_retry_attempts' => min(5, max(1, (int) env('NNTMUX_ORCHESTRATOR_PROMETHEUS_RETRY_ATTEMPTS', 3))),
         'database_memory_limit_bytes' => (int) env('NNTMUX_ORCHESTRATOR_DB_MEMORY_LIMIT_BYTES', 4456448000),

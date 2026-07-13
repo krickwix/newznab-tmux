@@ -920,6 +920,140 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertSame('alt.stale-one-strike', $target['name'] ?? null);
     }
 
+    public function test_recent_proven_zero_strike_terminal_range_is_selected_and_clamped_to_exactly_10k(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: [],
+            historyTtlSeconds: 86_400,
+            terminalMinAttempts: 3,
+            terminalMinYield: 1.0,
+        );
+        $terminal = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
+            'remaining_articles' => 16_387,
+            'safe_quantity' => 80_000,
+        ];
+
+        $target = $selector->select([$terminal], [
+            'alt.terminal' => [
+                'attempts' => 54,
+                'ewma_nzbs_per_10k' => 1.442194,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_998_000,
+                'last_cursor_delta' => 80_000,
+            ],
+        ], now: 2_000_000_000);
+
+        self::assertSame('alt.terminal', $target['name'] ?? null);
+        self::assertSame(10_000, $target['safe_quantity'] ?? null);
+        self::assertTrue($target['terminal_positive'] ?? false);
+    }
+
+    public function test_terminal_lane_includes_both_10k_and_19_999_boundaries(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: [],
+            historyTtlSeconds: 86_400,
+            terminalMinAttempts: 3,
+            terminalMinYield: 1.0,
+        );
+        $history = [
+            'alt.terminal' => [
+                'attempts' => 3,
+                'ewma_nzbs_per_10k' => 1.0,
+                'last_attempt_at' => 1_999_999_000,
+                'last_effective_at' => 1_999_998_000,
+                'last_cursor_delta' => 10_000,
+            ],
+        ];
+
+        foreach ([10_000, 19_999] as $remainingArticles) {
+            $candidate = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
+                'remaining_articles' => $remainingArticles,
+                'safe_quantity' => 50_000,
+            ];
+            $target = $selector->select([$candidate], $history, now: 2_000_000_000);
+
+            self::assertSame(10_000, $target['safe_quantity'] ?? null);
+            self::assertTrue($target['terminal_positive'] ?? false);
+        }
+    }
+
+    public function test_ordinary_20k_range_does_not_require_terminal_history(): void
+    {
+        $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
+        $candidate = [...$this->candidate('alt.ordinary', '2008-10-24 01:12:31'),
+            'remaining_articles' => 20_000,
+            'safe_quantity' => 10_000,
+        ];
+
+        $target = $selector->select([$candidate], history: [], now: 2_000_000_000);
+
+        self::assertSame('alt.ordinary', $target['name'] ?? null);
+        self::assertArrayNotHasKey('terminal_positive', $target ?? []);
+    }
+
+    public function test_context_repeat_cannot_bypass_terminal_productivity_guards(): void
+    {
+        $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
+        $candidate = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
+            'remaining_articles' => 16_387,
+            'safe_quantity' => 10_000,
+        ];
+
+        $target = $selector->select(
+            [$candidate],
+            history: [],
+            now: 2_000_000_000,
+            contextRepeat: ['group' => 'alt.terminal', 'marked_at' => 1_999_999_900],
+        );
+
+        self::assertNull($target);
+    }
+
+    public function test_terminal_range_fails_closed_without_every_productivity_guard(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: [],
+            historyTtlSeconds: 86_400,
+            terminalMinAttempts: 3,
+            terminalMinYield: 1.0,
+        );
+        $candidate = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
+            'remaining_articles' => 16_387,
+            'safe_quantity' => 80_000,
+        ];
+        $history = [
+            'attempts' => 3,
+            'ewma_nzbs_per_10k' => 1.0,
+            'last_attempt_at' => 1_999_999_000,
+            'last_effective_at' => 1_999_998_000,
+            'last_cursor_delta' => 10_000,
+        ];
+
+        $cases = [
+            'fewer than 10k articles' => [[...$candidate, 'remaining_articles' => 9_999], $history, 0],
+            'insufficient attempts' => [$candidate, [...$history, 'attempts' => 2], 0],
+            'insufficient yield' => [$candidate, [...$history, 'ewma_nzbs_per_10k' => 0.999], 0],
+            'no effective result' => [$candidate, [...$history, 'last_effective_at' => 0], 0],
+            'stale history' => [$candidate, [...$history, 'last_attempt_at' => 1_999_913_600], 0],
+            'future history' => [$candidate, [...$history, 'last_attempt_at' => 2_000_000_001], 0],
+            'future effectiveness' => [$candidate, [...$history, 'last_effective_at' => 2_000_000_001], 0],
+            'one ineffective strike' => [$candidate, $history, 1],
+            'insufficient safe capacity' => [[...$candidate, 'safe_quantity' => 9_999], $history, 0],
+        ];
+
+        foreach ($cases as $message => [$terminal, $terminalHistory, $strikes]) {
+            $target = $selector->select(
+                [$terminal],
+                ['alt.terminal' => $terminalHistory],
+                now: 2_000_000_000,
+                ineffectivePermitsByTarget: ['alt.terminal' => $strikes],
+            );
+
+            self::assertNull($target, $message);
+        }
+    }
+
     /** @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int} */
     private function candidate(string $name, string $postdate): array
     {
