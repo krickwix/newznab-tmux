@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Orchestrator;
 
 use App\Models\Settings;
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -21,6 +22,7 @@ class WorkerOrchestrator
         private readonly WorkerControlPolicy $policy,
         private readonly WorkerControlStateStore $store,
         private readonly WorkerProfileApplier $applier,
+        private readonly DistributedWorkerTelemetry $workerTelemetry = new DistributedWorkerTelemetry,
     ) {}
 
     /** @return array<string, mixed> */
@@ -29,6 +31,7 @@ class WorkerOrchestrator
         $lock = null;
         $acquired = false;
         $shadowQualityFailure = null;
+        $abandonedPermit = false;
         try {
             $lock = $this->store->leaderLock();
             if (! $lock->get()) {
@@ -157,8 +160,11 @@ class WorkerOrchestrator
                     && $hasCohortBaseline
                     && ! $permitCompleted
                 ) {
-                    $closeObservation = false;
-                    if (! $shadow) {
+                    $abandonedPermit = ! $shadow
+                        && ! $cohortQuality['hold']
+                        && $this->backfillRunFinishedAfterPermitIssue($permitObservation);
+                    $closeObservation = $abandonedPermit;
+                    if (! $shadow && ! $abandonedPermit) {
                         $this->applier->revokePermit();
                     }
                 }
@@ -167,7 +173,7 @@ class WorkerOrchestrator
                         ? $this->applier->revokePermit()
                         : $this->applier->qualityLockBackfillTarget($observedGroup, $cohortQuality['failure']);
                 }
-                if ($closeObservation && ! $shadow && $permitClaimed && $hasCohortBaseline) {
+                if ($closeObservation && ! $shadow && ! $abandonedPermit && $permitClaimed && $hasCohortBaseline) {
                     if ($this->shouldRememberIncompleteReleaseCohort(
                         $permitObservation,
                         $permitCompleted,
@@ -214,7 +220,7 @@ class WorkerOrchestrator
                         $this->store->markBackfillContextRepeat($observedGroup, time());
                     }
                 }
-                if ($closeObservation && ! $shadow) {
+                if ($closeObservation && ! $shadow && ! $abandonedPermit) {
                     $snapshot = $snapshot->withPermitOutcome(
                         completed: true,
                         effective: $permitClaimed && $cursorMoved && ($hasCohortBaseline ? $cohortQuality['productive'] > 0 : $produced),
@@ -224,6 +230,8 @@ class WorkerOrchestrator
                         group: $observedGroup,
                         qualityFailure: $cohortQuality['failure'] ?? '',
                     );
+                }
+                if ($closeObservation && ! $shadow) {
                     $this->store->clearPermitObservation();
                 }
             }
@@ -296,6 +304,7 @@ class WorkerOrchestrator
                 'reasons' => [
                     ...$decision->reasons,
                     ...($preserveUnclaimedPermit ? ['backfill_permit_claim_grace'] : []),
+                    ...($abandonedPermit ? ['backfill_permit_abandoned_after_worker_exit'] : []),
                     ...($shadowQualityFailure === null ? [] : [$shadowQualityFailure, 'backfill_quality_shadow_observation']),
                 ],
                 'backlogs' => [
@@ -364,6 +373,30 @@ class WorkerOrchestrator
                 }
             }
         }
+    }
+
+    /** @param array<string, mixed> $permitObservation */
+    private function backfillRunFinishedAfterPermitIssue(array $permitObservation): bool
+    {
+        $telemetry = $this->workerTelemetry->snapshot(['backfill']);
+        if (($telemetry['available'] ?? false) !== true) {
+            return false;
+        }
+
+        $worker = $telemetry['workers']['backfill'] ?? null;
+        if (! is_array($worker) || ($worker['in_progress'] ?? true) === true) {
+            return false;
+        }
+
+        $issuedAt = (float) ($permitObservation['issued_at'] ?? 0);
+        $startedAt = (float) ($worker['last_started_timestamp_seconds'] ?? 0);
+        $completedAt = (float) ($worker['last_completed_timestamp_seconds'] ?? 0);
+        $lastSuccessAt = (float) ($worker['last_success_timestamp_seconds'] ?? 0);
+
+        return $issuedAt > 0
+            && $startedAt >= $issuedAt
+            && $completedAt >= $startedAt
+            && $lastSuccessAt < $startedAt;
     }
 
     private function safeToFinishPermitHandoff(PipelineSnapshot $snapshot, ControlDecision $decision): bool

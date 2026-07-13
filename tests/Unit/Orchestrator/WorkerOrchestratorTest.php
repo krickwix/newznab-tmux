@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Orchestrator;
 
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Orchestrator\ControlDecision;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlState;
@@ -1620,12 +1621,193 @@ final class WorkerOrchestratorTest extends TestCase
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
         $applier->shouldReceive('apply')->once()->andReturn(8);
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('snapshot')->once()->with(['backfill'])->andReturn([
+            'available' => false,
+            'workers' => [],
+        ]);
 
-        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier, $telemetry))->runOnce(false);
 
         self::assertNotContains('backfill_permit_ineffective', $result['reasons']);
         self::assertNotNull($store->permitObservation());
         self::assertSame([], $store->backfillYieldHistory());
+    }
+
+    #[DataProvider('expiredFinishedWorkerCases')]
+    public function test_an_expired_claimed_permit_only_closes_after_finished_worker_quality_is_settled(
+        int $uncategorizedNzbs,
+        bool $closes,
+    ): void {
+        config([
+            'nntmux.orchestrator.auto_backfill' => true,
+            'nntmux.orchestrator.permit_observation_seconds' => 1200,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+        ]);
+        $issuedAt = time() - 1201;
+        $store = new WorkerControlStateStore;
+        $store->storeState(new ControlState(
+            profile: ControlProfile::Fill,
+            consecutiveIneffectiveBackfillPermits: 1,
+            ineffectiveBackfillPermitsByTarget: ['alt.test' => 1],
+        ));
+        $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, generation: 7, now: $issuedAt, outcome: [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ]);
+        $current = new PipelineSnapshot(1, 2, 3, 4, 5, eligibleBackfillSupply: true, backfillGroup: 'alt.next', backfillCursor: 30_000);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($current);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 0,
+            'non_target' => 0,
+            'uncategorized' => $uncategorizedNzbs,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(0);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $finishedTelemetry = [
+            'available' => true,
+            'workers' => ['backfill' => [
+                'last_started_timestamp_seconds' => $issuedAt + 10,
+                'last_completed_timestamp_seconds' => $issuedAt + 20,
+                'last_success_timestamp_seconds' => $issuedAt - 10,
+                'in_progress' => false,
+            ]],
+        ];
+        $closes
+            ? $telemetry->shouldReceive('snapshot')->once()->with(['backfill'])->andReturn($finishedTelemetry)
+            : $telemetry->shouldNotReceive('snapshot');
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier, $telemetry))->runOnce(false);
+
+        $closes
+            ? self::assertContains('backfill_permit_abandoned_after_worker_exit', $result['reasons'])
+            : self::assertNotContains('backfill_permit_abandoned_after_worker_exit', $result['reasons']);
+        self::assertNotContains('backfill_permit_ineffective', $result['reasons']);
+        self::assertNotContains('backfill_permit_no_input', $result['reasons']);
+        $closes
+            ? self::assertNull($store->permitObservation())
+            : self::assertNotNull($store->permitObservation());
+        self::assertSame([], $store->backfillYieldHistory());
+        self::assertSame(1, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? null);
+        self::assertFalse($result['permit_granted']);
+    }
+
+    /** @return array<string, array{int, bool}> */
+    public static function expiredFinishedWorkerCases(): array
+    {
+        return [
+            'settled zero output' => [0, true],
+            'uncategorized quality hold' => [1, false],
+        ];
+    }
+
+    public function test_explicit_grant_never_replaces_an_existing_expired_observation_in_the_same_cycle(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, generation: 7, now: time() - 1201, outcome: [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ]);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($baseline);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldNotReceive('apply');
+        $applier->shouldNotReceive('revokePermit');
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldNotReceive('snapshot');
+
+        $result = (new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy,
+            $store,
+            $applier,
+            $telemetry,
+        ))->runOnce(false, true);
+
+        self::assertSame('backfill_permit_observation_in_progress', $result['reason']);
+        self::assertNotNull($store->permitObservation());
+    }
+
+    #[DataProvider('finishedBackfillRunEvidenceCases')]
+    public function test_finished_backfill_run_evidence_fails_closed_for_ambiguous_telemetry(
+        array $telemetrySnapshot,
+        bool $expected,
+    ): void {
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('snapshot')->once()->with(['backfill'])->andReturn($telemetrySnapshot);
+        $orchestrator = new WorkerOrchestrator(
+            Mockery::mock(PipelineSnapshotRepository::class),
+            new WorkerControlPolicy,
+            Mockery::mock(WorkerControlStateStore::class),
+            Mockery::mock(WorkerProfileApplier::class),
+            $telemetry,
+        );
+        $method = new ReflectionMethod($orchestrator, 'backfillRunFinishedAfterPermitIssue');
+
+        self::assertSame($expected, $method->invoke($orchestrator, ['issued_at' => 1_000]));
+    }
+
+    /** @return array<string, array{array<string, mixed>, bool}> */
+    public static function finishedBackfillRunEvidenceCases(): array
+    {
+        $worker = static fn (
+            float $started,
+            float $completed,
+            bool $inProgress = false,
+            float $lastSuccess = 0,
+        ): array => [
+            'last_started_timestamp_seconds' => $started,
+            'last_completed_timestamp_seconds' => $completed,
+            'last_success_timestamp_seconds' => $lastSuccess,
+            'in_progress' => $inProgress,
+        ];
+
+        return [
+            'telemetry unavailable' => [['available' => false, 'workers' => []], false],
+            'worker missing' => [['available' => true, 'workers' => []], false],
+            'worker still running' => [['available' => true, 'workers' => ['backfill' => $worker(1_010, 0, true)]], false],
+            'run started before permit' => [['available' => true, 'workers' => ['backfill' => $worker(999, 1_020)]], false],
+            'completion predates start' => [['available' => true, 'workers' => ['backfill' => $worker(1_020, 1_019)]], false],
+            'successful run awaiting acknowledgement' => [['available' => true, 'workers' => ['backfill' => $worker(1_010, 1_020, false, 1_020)]], false],
+            'finished matching run' => [['available' => true, 'workers' => ['backfill' => $worker(1_010, 1_020)]], true],
+        ];
     }
 
     public function test_a_completed_no_input_permit_closes_early_without_consuming_a_strike(): void

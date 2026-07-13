@@ -78,7 +78,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-backfill'
-                ? ':microservices-pods-20260713-permit-handoff-backfill-v115'
+                ? ':microservices-pods-20260713-claimed-orphan-backfill-v116'
                 : ($name === 'nntmux-worker-hashed-fixnames'
                     ? ':microservices-pods-20260713-fresh-hashed-retry-v114'
                     : (in_array($name, [
@@ -282,11 +282,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-permit-handoff-orchestrator-v115',
+            ':microservices-pods-20260713-claimed-orphan-orchestrator-v116',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-permit-handoff-orchestrator-v115',
+            'microservices-pods-20260713-claimed-orphan-orchestrator-v116',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
@@ -389,7 +389,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_LATEST_SAMPLE_SECONDS'] ?? null,
         );
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-permit-handoff-backfill-v115',
+            ':microservices-pods-20260713-claimed-orphan-backfill-v116',
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);

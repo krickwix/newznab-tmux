@@ -79,12 +79,14 @@ class DistributedWorkerTelemetry
             $store = $this->store();
             $this->increment($store, $this->key($worker, 'runs:'.$outcome));
             $store->forever($this->key($worker, 'last_duration_seconds'), max(0.0, $finishedAt - $startedAt));
-            $store->forever($this->key($worker, 'last_completed_timestamp_seconds'), $finishedAt);
-            $store->forget($this->key($worker, 'in_progress_started_at'));
-
             if ($outcome === 'success') {
                 $store->forever($this->key($worker, 'last_success_timestamp_seconds'), $finishedAt);
             }
+            // Publish completion last so a concurrent controller snapshot can
+            // never observe a newly completed successful run with the prior
+            // success timestamp and mistake it for an abandoned permit.
+            $store->forever($this->key($worker, 'last_completed_timestamp_seconds'), $finishedAt);
+            $store->forget($this->key($worker, 'in_progress_started_at'));
 
             return true;
         } catch (Throwable) {
