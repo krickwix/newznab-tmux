@@ -602,7 +602,7 @@ class PipelineSnapshotRepository
                     AND CAST(g.first_record AS SIGNED) <= CAST(g.last_record AS SIGNED) + 1
                 )
             )
-            AND CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= 10000
+            AND CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) > 10000
             ORDER BY g.first_record_postdate DESC, g.name ASC
             LIMIT '.self::BACKFILL_CANDIDATE_LIMIT, $allowedGroups);
 

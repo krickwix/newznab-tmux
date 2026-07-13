@@ -357,7 +357,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000', $sql);
                 self::assertStringContainsString('CAST(g.last_record AS SIGNED) BETWEEN CAST(s.first_record AS SIGNED) AND CAST(s.last_record AS SIGNED)', $sql);
                 self::assertStringContainsString('CAST(g.first_record AS SIGNED) <= CAST(g.last_record AS SIGNED) + 1', $sql);
-                self::assertStringContainsString('CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= 10000', $sql);
+                self::assertStringContainsString('CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) > 10000', $sql);
                 self::assertStringContainsString("g.first_record_postdate >= '2000-01-01'", $sql);
                 self::assertStringContainsString("g.last_record_postdate >= '2000-01-01'", $sql);
                 self::assertStringContainsString('CAST(g.last_record AS SIGNED) < 9223372036854775807', $sql);

@@ -266,7 +266,7 @@ final readonly class BackfillTargetSelector
         $lastAttemptAt = (int) ($entry['last_attempt_at'] ?? 0);
         $lastEffectiveAt = (int) ($entry['last_effective_at'] ?? 0);
 
-        return $remainingArticles >= 10_000
+        return $remainingArticles > 10_000
             && $remainingArticles < 20_000
             && is_array($entry)
             && (int) ($entry['attempts'] ?? 0) >= $this->terminalMinAttempts

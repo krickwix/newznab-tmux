@@ -948,7 +948,7 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertTrue($target['terminal_positive'] ?? false);
     }
 
-    public function test_terminal_lane_includes_both_10k_and_19_999_boundaries(): void
+    public function test_terminal_lane_includes_both_10_001_and_19_999_boundaries(): void
     {
         $selector = new BackfillTargetSelector(
             probeGroups: [],
@@ -966,7 +966,7 @@ final class BackfillTargetSelectorTest extends TestCase
             ],
         ];
 
-        foreach ([10_000, 19_999] as $remainingArticles) {
+        foreach ([10_001, 19_999] as $remainingArticles) {
             $candidate = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
                 'remaining_articles' => $remainingArticles,
                 'safe_quantity' => 50_000,
@@ -1032,6 +1032,7 @@ final class BackfillTargetSelectorTest extends TestCase
 
         $cases = [
             'fewer than 10k articles' => [[...$candidate, 'remaining_articles' => 9_999], $history, 0],
+            'exact provider reserve' => [[...$candidate, 'remaining_articles' => 10_000], $history, 0],
             'insufficient attempts' => [$candidate, [...$history, 'attempts' => 2], 0],
             'insufficient yield' => [$candidate, [...$history, 'ewma_nzbs_per_10k' => 0.999], 0],
             'no effective result' => [$candidate, [...$history, 'last_effective_at' => 0], 0],
