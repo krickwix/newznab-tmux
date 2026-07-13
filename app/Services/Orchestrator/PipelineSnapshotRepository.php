@@ -12,6 +12,8 @@ class PipelineSnapshotRepository
 {
     private const int BACKFILL_CANDIDATE_LIMIT = 16;
 
+    private const string BACKFILL_TV_EPISODE_PATTERN = '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)';
+
     private readonly BackfillTargetSelector $targets;
 
     private readonly WorkerControlStateStore $state;
@@ -476,7 +478,16 @@ class PipelineSnapshotRepository
         $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
         $minPayloadBytes = max(1, (int) config('nntmux.orchestrator.backfill_min_payload_bytes', 104_857_600));
         $upperBound = $releaseIdHighInclusive === null ? '' : 'AND r.id <= ?';
-        $bindings = [$minPayloadBytes, $minPayloadBytes, $group, $releaseIdLowExclusive];
+        $bindings = [
+            self::BACKFILL_TV_EPISODE_PATTERN,
+            self::BACKFILL_TV_EPISODE_PATTERN,
+            $minPayloadBytes,
+            self::BACKFILL_TV_EPISODE_PATTERN,
+            self::BACKFILL_TV_EPISODE_PATTERN,
+            $minPayloadBytes,
+            $group,
+            $releaseIdLowExclusive,
+        ];
         if ($releaseIdHighInclusive !== null) {
             $bindings[] = $releaseIdHighInclusive;
         }
@@ -491,7 +502,10 @@ class PipelineSnapshotRepository
         );
         $row = DB::selectOne('SELECT
             COALESCE(SUM(CASE WHEN c.root_categories_id IN (2000, 5000)
-                AND c.id NOT IN (2999, 5999)
+                AND (c.id NOT IN (2999, 5999)
+                    OR (c.id = 5999
+                        AND (LOWER(COALESCE(r.name, \'\')) REGEXP ?
+                            OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?)))
                 AND r.size >= ? THEN 1 ELSE 0 END), 0) AS target,
             COALESCE(SUM(CASE WHEN c.root_categories_id IS NOT NULL
                 AND c.root_categories_id NOT IN (1, 2000, 5000)
@@ -499,7 +513,11 @@ class PipelineSnapshotRepository
             COALESCE(SUM(CASE WHEN (c.id IS NULL
                 OR c.root_categories_id IS NULL
                 OR c.root_categories_id = 1
-                OR c.id IN (2999, 5999))
+                OR c.id = 2999
+                OR (c.id = 5999 AND NOT (
+                    LOWER(COALESCE(r.name, \'\')) REGEXP ?
+                    OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
+                )))
                 AND r.size >= ? THEN 1 ELSE 0 END), 0) AS uncategorized
             FROM releases r
             INNER JOIN usenet_groups g ON g.id = r.groups_id

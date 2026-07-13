@@ -18,6 +18,8 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Mockery;
+use PHPUnit\Framework\Attributes\DataProvider;
+use ReflectionClass;
 use ReflectionMethod;
 use Tests\TestCase;
 
@@ -734,9 +736,12 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('r.id <= ?', $sql);
                 self::assertStringContainsString('c.root_categories_id NOT IN (1, 2000, 5000)', $sql);
                 self::assertStringContainsString('c.id NOT IN (2999, 5999)', $sql);
-                self::assertStringContainsString('c.id IN (2999, 5999)', $sql);
+                self::assertStringContainsString('c.id = 5999', $sql);
+                self::assertStringContainsString('c.id = 2999', $sql);
+                self::assertSame(2, substr_count($sql, "LOWER(COALESCE(r.name, '')) REGEXP"));
+                self::assertSame(2, substr_count($sql, "LOWER(COALESCE(r.searchname, '')) REGEXP"));
                 self::assertSame(2, substr_count($sql, 'r.size >= ?'));
-                self::assertSame([104857600, 104857600, 'alt.test', 100, 103, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600], $bindings);
+                self::assertSame(['(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)', '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)', 104857600, '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)', '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)', 104857600, 'alt.test', 100, 103, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600], $bindings);
 
                 return true;
             })
@@ -758,6 +763,36 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             '2026-01-02 03:04:05',
             '2026-01-01 03:04:05',
         ));
+    }
+
+    #[DataProvider('tvEpisodeIdentityProvider')]
+    public function test_tv_other_episode_identity_is_conservative_and_null_safe(
+        ?string $name,
+        ?string $searchName,
+        bool $expected,
+    ): void {
+        $reflection = new ReflectionClass(PipelineSnapshotRepository::class);
+        $pattern = $reflection->getReflectionConstant('BACKFILL_TV_EPISODE_PATTERN')?->getValue();
+
+        self::assertIsString($pattern);
+        self::assertSame(
+            $expected,
+            preg_match('/'.$pattern.'/i', $name ?? '') === 1
+                || preg_match('/'.$pattern.'/i', $searchName ?? '') === 1,
+        );
+    }
+
+    /** @return iterable<string, array{?string, ?string, bool}> */
+    public static function tvEpisodeIdentityProvider(): iterable
+    {
+        yield 'search name SxxExx' => [null, 'Show.S01E02.1080p', true];
+        yield 'release name only with separators' => ['Show S1 E2', null, true];
+        yield 'nullable search name' => ['Another.Show.S12E103.WEB', null, true];
+        yield 'unsafe one-x form' => ['Show.1x02.1080p', null, false];
+        yield 'embedded token without boundaries' => ['XS01E01Y', null, false];
+        yield 'token split across fields' => ['Show.S01', 'E02.1080p', false];
+        yield 'both fields null' => [null, null, false];
+        yield 'TV Other without an episode token' => ['Show Season One Pack', null, false];
     }
 
     public function test_group_cohort_nzb_count_is_bounded_by_release_id_and_tolerates_provider_date_disorder(): void
@@ -815,12 +850,19 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('c.root_categories_id NOT IN (1, 2000, 5000)', $sql);
                 self::assertStringContainsString('c.root_categories_id = 1', $sql);
                 self::assertStringContainsString('c.id NOT IN (2999, 5999)', $sql);
-                self::assertStringContainsString('c.id IN (2999, 5999)', $sql);
+                self::assertStringContainsString('c.id = 5999', $sql);
+                self::assertStringContainsString('c.id = 2999', $sql);
+                self::assertSame(2, substr_count($sql, "LOWER(COALESCE(r.name, '')) REGEXP"));
+                self::assertSame(2, substr_count($sql, "LOWER(COALESCE(r.searchname, '')) REGEXP"));
                 self::assertStringContainsString('r.id > ?', $sql);
                 self::assertStringContainsString('r.nzbstatus = 1', $sql);
                 self::assertSame(2, substr_count($sql, 'r.size >= ?'));
                 self::assertSame([
+                    '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)',
+                    '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)',
                     104857600,
+                    '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)',
+                    '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)',
                     104857600,
                     'alt.test',
                     123,
