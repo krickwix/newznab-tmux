@@ -13,9 +13,18 @@ class PrometheusSafetySignalProvider
     public function signals(): array
     {
         try {
-            $storage = $this->query((string) config('nntmux.orchestrator.promql.storage_available'));
-            $memory = $this->query((string) config('nntmux.orchestrator.promql.database_memory'));
-            $cpu = $this->query((string) config('nntmux.orchestrator.promql.database_cpu'));
+            $storage = $this->query(
+                (string) config('nntmux.orchestrator.promql.storage_available'),
+                (string) config('nntmux.orchestrator.promql_freshness.storage_available'),
+            );
+            $memory = $this->query(
+                (string) config('nntmux.orchestrator.promql.database_memory'),
+                (string) config('nntmux.orchestrator.promql_freshness.database_memory'),
+            );
+            $cpu = $this->query(
+                (string) config('nntmux.orchestrator.promql.database_cpu'),
+                (string) config('nntmux.orchestrator.promql_freshness.database_cpu'),
+            );
 
             return [
                 'fresh' => $storage !== null && $memory !== null && $cpu !== null,
@@ -35,12 +44,32 @@ class PrometheusSafetySignalProvider
         }
     }
 
-    private function query(string $query): ?float
+    private function query(string $query, string $freshnessQuery): ?float
     {
-        if ($query === '') {
+        if ($query === '' || $freshnessQuery === '') {
             return null;
         }
 
+        $value = $this->queryValue($query);
+        if ($value === null) {
+            return null;
+        }
+        $sampleAt = $this->queryValue($freshnessQuery);
+        if ($sampleAt === null) {
+            return null;
+        }
+
+        $now = microtime(true);
+        $maximumAge = (int) config('nntmux.orchestrator.prometheus_sample_max_age_seconds', 120);
+        if ($sampleAt > $now + 30 || $now - $sampleAt > $maximumAge) {
+            return null;
+        }
+
+        return $value;
+    }
+
+    private function queryValue(string $query): ?float
+    {
         $response = Http::timeout(5)
             ->retry(
                 (int) config('nntmux.orchestrator.prometheus_retry_attempts', 3),

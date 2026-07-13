@@ -126,6 +126,18 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('backfill_high_pressure', $decision->reasons);
     }
 
+    public function test_backfill_requires_the_complete_pipeline_to_be_in_the_low_pressure_envelope(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->greenBackfillSnapshot(lowPressure: false),
+            new ControlState(profile: ControlProfile::Fill),
+            10_000,
+        );
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_pipeline_not_drained', $decision->reasons);
+    }
+
     public function test_five_consecutive_low_samples_are_required_to_move_one_rung_toward_fill(): void
     {
         $policy = new WorkerControlPolicy;

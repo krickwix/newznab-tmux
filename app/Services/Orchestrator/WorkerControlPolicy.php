@@ -155,6 +155,7 @@ final class WorkerControlPolicy
         }
         $backfillPermitted = $workerProfile->backfillEnabled
             && ! $snapshot->highPressure
+            && $snapshot->lowPressure
             && ! $backfillLocked
             && ! $targetLocked
             && $snapshot->backfillGatesPassed();
@@ -175,6 +176,7 @@ final class WorkerControlPolicy
     /**
      * @param  array<string, int>  $targetIneffectivePermits
      * @param  list<string>  $effectivenessReasons
+     * @param  list<int>  $processedPermitGenerations
      */
     private function recoverFromFailSafe(
         PipelineSnapshot $snapshot,
@@ -526,6 +528,12 @@ final class WorkerControlPolicy
         }
         if ($snapshot->backfillSafeQuantity < 10_000) {
             return 'backfill_no_safe_capacity';
+        }
+        if (! $snapshot->eligibleBackfillSupply) {
+            return 'backfill_no_eligible_supply';
+        }
+        if (! $snapshot->lowPressure) {
+            return 'backfill_pipeline_not_drained';
         }
 
         return 'backfill_no_eligible_supply';

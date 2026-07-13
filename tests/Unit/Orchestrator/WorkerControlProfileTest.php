@@ -129,9 +129,9 @@ final class WorkerControlProfileTest extends TestCase
 
     public function test_active_profiles_keep_nzb_capacity_above_the_doubled_rate_target(): void
     {
-        self::assertSame(40, WorkerControlProfile::for(ControlProfile::Drain)->nzbBatchSize);
-        self::assertSame(40, WorkerControlProfile::for(ControlProfile::Balanced)->nzbBatchSize);
-        self::assertSame(40, WorkerControlProfile::for(ControlProfile::Fill)->nzbBatchSize);
+        self::assertSame(20, WorkerControlProfile::for(ControlProfile::Drain)->nzbBatchSize);
+        self::assertSame(20, WorkerControlProfile::for(ControlProfile::Balanced)->nzbBatchSize);
+        self::assertSame(20, WorkerControlProfile::for(ControlProfile::Fill)->nzbBatchSize);
     }
 
     public function test_fill_accelerates_release_feedback_without_changing_pressure_profiles(): void

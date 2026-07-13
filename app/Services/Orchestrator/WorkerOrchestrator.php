@@ -23,6 +23,7 @@ class WorkerOrchestrator
         private readonly WorkerControlStateStore $store,
         private readonly WorkerProfileApplier $applier,
         private readonly DistributedWorkerTelemetry $workerTelemetry = new DistributedWorkerTelemetry,
+        private readonly AdaptiveWorkerControlPlanner $adaptiveControls = new AdaptiveWorkerControlPlanner,
     ) {}
 
     /** @return array<string, mixed> */
@@ -306,6 +307,7 @@ class WorkerOrchestrator
             }
             $state = $this->store->loadState();
             $decision = $this->policy->decide($snapshot, $state, time());
+            $decision = $this->adaptiveControls->plan($decision, $snapshot);
             $generation = null;
             $autoGrant = ! $shadow
                 && (bool) config('nntmux.orchestrator.auto_backfill', false)
@@ -372,6 +374,13 @@ class WorkerOrchestrator
                 'applied' => ! $shadow,
                 'generation' => $generation,
                 'profile' => $decision->profile->profile->value,
+                'worker_controls' => [
+                    'binaries_sleep_seconds' => $decision->profile->binariesSleepSeconds,
+                    'backfill_sleep_seconds' => $decision->profile->backfillSleepSeconds,
+                    'releases_sleep_seconds' => $decision->profile->releasesSleepSeconds,
+                    'nzb_sleep_seconds' => $decision->profile->nzbSleepSeconds,
+                    'nzb_batch_size' => $decision->profile->nzbBatchSize,
+                ],
                 'backfill_permitted' => $decision->backfillPermitted,
                 'permit_granted' => ! $shadow && $issuePermit && $decision->backfillPermitted,
                 'reasons' => [

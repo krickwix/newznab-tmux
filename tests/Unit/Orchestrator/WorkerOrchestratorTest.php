@@ -1342,7 +1342,7 @@ final class WorkerOrchestratorTest extends TestCase
     public function test_active_no_backfill_mode_applies_profile_without_issuing_a_permit(): void
     {
         config(['nntmux.orchestrator.auto_backfill' => false]);
-        $snapshot = new PipelineSnapshot(1, 2, 3, 4, 5, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillCursor: 123);
+        $snapshot = new PipelineSnapshot(1, 2, 3, 4, 5, lowPressure: true, eligibleBackfillSupply: true, backfillGroup: 'alt.test', backfillCursor: 123);
         $state = new ControlState(profile: ControlProfile::Balanced);
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();

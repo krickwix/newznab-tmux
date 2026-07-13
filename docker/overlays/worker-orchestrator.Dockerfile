@@ -10,6 +10,7 @@ COPY app/Services/Distributed/DistributedJobCatalog.php /app/app/Services/Distri
 COPY app/Services/Distributed/DistributedJobWorker.php /app/app/Services/Distributed/DistributedJobWorker.php
 COPY app/Services/Metrics/NntmuxPrometheusMetrics.php /app/app/Services/Metrics/NntmuxPrometheusMetrics.php
 COPY app/Services/Nzb/NzbBacklogCreationService.php /app/app/Services/Nzb/NzbBacklogCreationService.php
+COPY app/Services/NNTP/NntpArticleDate.php /app/app/Services/NNTP/NntpArticleDate.php
 COPY app/Services/Orchestrator /app/app/Services/Orchestrator
 COPY app/Services/Runners/BackfillRunner.php /app/app/Services/Runners/BackfillRunner.php
 COPY app/Services/Tmux/Tmux.php /app/app/Services/Tmux/Tmux.php

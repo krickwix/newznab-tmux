@@ -23,9 +23,9 @@ final readonly class WorkerControlProfile
     {
         return match ($profile) {
             ControlProfile::FailSafe => new self($profile, 300, 1800, 180, 180, 5, false, 0, 0, 0),
-            ControlProfile::Drain => new self($profile, 160, 1800, 45, 55, 40, false, 0, 0, 0),
-            ControlProfile::Balanced => new self($profile, 40, 900, 60, 55, 40, true, 1, 1, 10000),
-            ControlProfile::Fill => new self($profile, 20, 20, 20, 20, 40, true, 1, 1, 10000),
+            ControlProfile::Drain => new self($profile, 160, 1800, 45, 55, 20, false, 0, 0, 0),
+            ControlProfile::Balanced => new self($profile, 40, 900, 60, 55, 20, true, 1, 1, 10000),
+            ControlProfile::Fill => new self($profile, 20, 20, 20, 20, 20, true, 1, 1, 10000),
         };
     }
 

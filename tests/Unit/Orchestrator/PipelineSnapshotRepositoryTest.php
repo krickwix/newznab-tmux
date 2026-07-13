@@ -171,6 +171,49 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame(0, $quantity);
     }
 
+    public function test_release_or_nzb_headroom_can_independently_close_backfill_admission(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_headroom_fraction', 0.20);
+        config()->set('nntmux.orchestrator.high_watermarks', [
+            'parts' => 300_000_000,
+            'binaries' => 1_000_000,
+            'collections' => 20_000,
+            'collections_total' => 80_000,
+            'releases' => 20_000,
+            'nzbs' => 12_000,
+        ]);
+        config()->set('nntmux.orchestrator.backfill_growth_per_10k', [
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+            'releases' => 100,
+            'nzbs' => 100,
+        ]);
+        $state = Mockery::mock(WorkerControlStateStore::class);
+        $state->shouldReceive('backfillGrowthFor')->twice()->with('')->andReturn([
+            'parts' => 10_000,
+            'binaries' => 500,
+            'collections' => 1_000,
+        ]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'safeBackfillQuantity');
+        $base = [
+            'parts' => 100_000_000,
+            'binaries' => 100_000,
+            'collections' => 5_000,
+            'collections_total' => 30_000,
+            'releases' => 100,
+            'nzbs' => 100,
+        ];
+
+        self::assertSame(0, $method->invoke($repository, [...$base, 'releases' => 19_999]));
+        self::assertSame(0, $method->invoke($repository, [...$base, 'nzbs' => 11_999]));
+    }
+
     public function test_zero_capacity_candidates_are_removed_before_yield_ranking(): void
     {
         config()->set('nntmux.orchestrator.backfill_headroom_fraction', 0.20);
@@ -410,6 +453,27 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame(0.0, $rates['recovery_sources']);
         self::assertSame(0.0, $ewma['collections']);
         self::assertEquals(1000.0, $rates['parts']);
+    }
+
+    public function test_stale_or_future_previous_snapshots_cannot_influence_rates_or_ewma(): void
+    {
+        config(['nntmux.orchestrator.snapshot_max_age_seconds' => 180]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'rates');
+
+        foreach ([time() - 181, time() + 1] as $observedAt) {
+            [$rates, $ewma] = $method->invoke($repository, ['parts' => 200], [
+                'parts' => 100,
+                'ewma_parts' => 99.0,
+                'observed_at' => $observedAt,
+            ]);
+
+            self::assertSame(0.0, $rates['parts']);
+            self::assertSame(0.0, $ewma['parts']);
+        }
     }
 
     public function test_backfill_candidates_are_bounded_to_fresh_current_valid_ranges(): void

@@ -266,16 +266,22 @@ class PipelineSnapshotRepository
         $high = (array) config('nntmux.orchestrator.high_watermarks', []);
         $growth = $this->state->backfillGrowthFor($backfillGroup);
         $quantities = [];
-        foreach (['parts', 'binaries', 'collections', 'collections_total'] as $stage) {
+        foreach (['parts', 'binaries', 'collections', 'collections_total', 'releases', 'nzbs'] as $stage) {
             $current = $backlogs[$stage] ?? ($stage === 'collections_total' ? $backlogs['collections'] : 0);
             $limit = $high[$stage] ?? ($stage === 'collections_total' ? $high['collections'] ?? 0 : 0);
+            if ((int) $limit <= 0) {
+                continue;
+            }
             $headroom = max(0, (int) $limit - $current);
             $growthStage = $stage === 'collections_total' ? 'collections' : $stage;
-            $permits = (int) floor(($headroom * $fraction) / max(1, (int) ($growth[$growthStage] ?? 1)));
+            $configuredGrowth = (array) config('nntmux.orchestrator.backfill_growth_per_10k', []);
+            $permits = (int) floor(($headroom * $fraction) / max(1, (int) (
+                $growth[$growthStage] ?? $configuredGrowth[$growthStage] ?? 1
+            )));
             $quantities[] = $permits * 10000;
         }
 
-        return min($quantities);
+        return $quantities === [] ? 0 : min($quantities);
     }
 
     /**
@@ -659,10 +665,15 @@ class PipelineSnapshotRepository
     {
         $rates = [];
         $ewma = [];
-        $elapsed = $previous === null ? 0 : max(1, time() - (int) ($previous['observed_at'] ?? time()));
+        $currentTime = time();
+        $previousObservedAt = $previous === null ? 0 : (int) ($previous['observed_at'] ?? 0);
+        $elapsed = $currentTime - $previousObservedAt;
+        $previousFresh = $previous !== null
+            && $elapsed >= 1
+            && $elapsed <= (int) config('nntmux.orchestrator.snapshot_max_age_seconds', 180);
         foreach ($now as $stage => $value) {
             $splitStage = in_array($stage, ['collections', 'collections_total', 'recovery_sources'], true);
-            $previousCompatible = $previous !== null && (! $splitStage || (int) ($previous['schema_version'] ?? 0) === 2);
+            $previousCompatible = $previousFresh && (! $splitStage || (int) ($previous['schema_version'] ?? 0) === 2);
             $rate = ! $previousCompatible ? 0.0 : ($value - (int) ($previous[$stage] ?? $value)) * 60 / $elapsed;
             $rates[$stage] = $rate;
             $ewma[$stage] = ! $previousCompatible ? 0.0 : 0.3 * $rate + 0.7 * (float) ($previous['ewma_'.$stage] ?? 0.0);

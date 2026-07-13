@@ -284,11 +284,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-context-chain-orchestrator-v123',
+            ':microservices-pods-20260713-adaptive-worker-orchestrator-v124',
             (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'microservices-pods-20260713-context-chain-orchestrator-v123',
+            'microservices-pods-20260713-adaptive-worker-orchestrator-v124',
             $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
@@ -323,6 +323,26 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '3',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PROMETHEUS_RETRY_ATTEMPTS'] ?? null,
+        );
+        self::assertSame(
+            '120',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_PROMETHEUS_SAMPLE_MAX_AGE_SECONDS'] ?? null,
+        );
+        self::assertSame(
+            '180',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_SNAPSHOT_MAX_AGE_SECONDS'] ?? null,
+        );
+        self::assertSame(
+            'max(timestamp(kubelet_volume_stats_available_bytes{namespace="media",persistentvolumeclaim="data-nntmux-mariadb-0"}))',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_STORAGE_FRESHNESS_PROMQL'] ?? null,
+        );
+        self::assertSame(
+            'max(timestamp(container_memory_working_set_bytes{namespace="media",pod="nntmux-mariadb-0",container!="",container!="POD"}))',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_DB_MEMORY_FRESHNESS_PROMQL'] ?? null,
+        );
+        self::assertSame(
+            'max(timestamp(container_cpu_usage_seconds_total{namespace="media",pod="nntmux-mariadb-0",container!="",container!="POD"}))',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_DB_CPU_FRESHNESS_PROMQL'] ?? null,
         );
         $probeGroupsValue = $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null;
         self::assertSame(
@@ -377,6 +397,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '1000',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_COLLECTIONS_PER_10K'] ?? null,
+        );
+        self::assertSame(
+            '100',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_RELEASES_PER_10K'] ?? null,
+        );
+        self::assertSame(
+            '100',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_NZBS_PER_10K'] ?? null,
         );
         self::assertSame(
             '12',

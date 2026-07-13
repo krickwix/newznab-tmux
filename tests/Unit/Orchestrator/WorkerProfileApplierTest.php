@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit\Orchestrator;
 
 use App\Models\Settings;
+use App\Services\Distributed\DistributedJobCatalog;
 use App\Services\Orchestrator\ControlDecision;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlState;
@@ -62,7 +63,7 @@ final class WorkerProfileApplierTest extends TestCase
             'orchestrator_back_timer' => 900,
             'orchestrator_rel_timer' => 60,
             'orchestrator_nzb_timer' => 55,
-            'orchestrator_nzb_limit' => 40,
+            'orchestrator_nzb_limit' => 20,
             'orchestrator_bf_paused' => 0,
             'orchestrator_bf_group' => 'alt.test',
             'orchestrator_bf_qty' => 10_000,
@@ -88,6 +89,40 @@ final class WorkerProfileApplierTest extends TestCase
             'orchestrator_bf_group',
             'orchestrator_bf_qty',
         ])->toArray());
+    }
+
+    public function test_persisted_nzb_control_matches_the_effective_worker_plan(): void
+    {
+        $profile = new WorkerControlProfile(
+            profile: ControlProfile::Fill,
+            binariesSleepSeconds: 60,
+            backfillSleepSeconds: 60,
+            releasesSleepSeconds: 20,
+            nzbSleepSeconds: 60,
+            nzbBatchSize: 5,
+            backfillEnabled: true,
+            backfillGroups: 1,
+            backfillThreads: 1,
+            backfillQuantity: 10_000,
+        );
+        $decision = new ControlDecision(
+            profile: $profile,
+            backfillPermitted: false,
+            reasons: ['adaptive_nzb_idle'],
+            nextState: new ControlState(profile: ControlProfile::Fill),
+            transitioned: false,
+        );
+
+        (new WorkerProfileApplier)->apply($decision, time(), false);
+        $settings = Settings::query()->pluck('value', 'name')->all();
+        $plan = (new DistributedJobCatalog)->resolve('nzb-backlog', [
+            'settings' => $settings,
+            'constants' => ['sequential' => 0],
+        ]);
+
+        self::assertSame(60, $plan['sleep']);
+        self::assertSame(5, $plan['commands'][0]['arguments']['--limit'] ?? null);
+        self::assertSame(5, Settings::settingValue('orchestrator_nzb_limit'));
     }
 
     public function test_fail_safe_denies_recovery_without_an_explicit_high_pressure_admission(): void
