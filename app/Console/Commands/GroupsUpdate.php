@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
-use App\Models\ShortGroup;
 use App\Models\UsenetGroup;
 use App\Services\NNTP\NNTPService;
 use Illuminate\Console\Command;
@@ -34,9 +33,12 @@ class GroupsUpdate extends Command
     {
         $start = now();
 
-        // Create NNTP connection
-        $nntp = new NNTPService;
-        $connectResult = $nntp->doConnect();
+        // The availability snapshot and the range workers must use the same provider.
+        $nntp = app(NNTPService::class);
+        $useAlternate = config('nntmux_nntp.use_alternate_nntp_server') === true;
+        $connectResult = $useAlternate
+            ? $nntp->doConnect(false, true)
+            : $nntp->doConnect();
         if ($connectResult !== true) {
             $errorMessage = '❌ Unable to connect to usenet server';
             if (NNTPService::isError($connectResult)) {
@@ -58,11 +60,6 @@ class GroupsUpdate extends Command
                 return Command::FAILURE;
             }
 
-            $this->info('🔄 Updating short_groups table...');
-
-            // Truncate and rebuild
-            DB::statement('TRUNCATE TABLE short_groups');
-
             // Get all active groups
             $activeGroups = Arr::pluck(
                 UsenetGroup::query()
@@ -72,29 +69,41 @@ class GroupsUpdate extends Command
                 'name'
             );
 
-            $updated = 0;
-            $bar = $this->output->createProgressBar(count($data));
+            $listedGroups = [];
+            $activeLookup = array_fill_keys($activeGroups, true);
+            foreach ($data as $newgroup) {
+                $name = (string) ($newgroup['group'] ?? '');
+                if ($name !== '' && isset($activeLookup[$name])) {
+                    $listedGroups[$name] = $newgroup;
+                }
+            }
+
+            $this->info('🔄 Verifying usable ranges for active groups...');
+
+            $rows = [];
+            $bar = $this->output->createProgressBar(count($activeGroups));
             $bar->start();
 
-            foreach ($data as $newgroup) {
-                if (\in_array($newgroup['group'], $activeGroups, true)) {
-                    ShortGroup::query()->insert([
-                        'name' => $newgroup['group'],
-                        'first_record' => $newgroup['first'],
-                        'last_record' => $newgroup['last'],
-                        'updated' => now(),
-                    ]);
-
-                    $updated++;
-                }
+            foreach ($activeGroups as $groupName) {
+                $rows[] = $this->resolveUsableRange($nntp, $groupName, $listedGroups[$groupName] ?? null);
                 $bar->advance();
             }
 
             $bar->finish();
             $this->newLine(2);
 
+            // DELETE is transactional for the InnoDB table; TRUNCATE was not and
+            // exposed an empty/partially rebuilt snapshot to the orchestrator.
+            DB::transaction(function () use ($rows): void {
+                DB::table('short_groups')->delete();
+                foreach (array_chunk($rows, 500) as $chunk) {
+                    DB::table('short_groups')->insert($chunk);
+                }
+            });
+
             $elapsed = now()->diffInSeconds($start, true);
-            $this->info("✅ Updated {$updated} groups");
+            $updated = count($rows);
+            $this->info("✅ Updated {$updated} groups from verified GROUP ranges");
             $this->info("⏱️  Running time: {$elapsed} seconds");
 
             return Command::SUCCESS;
@@ -104,5 +113,37 @@ class GroupsUpdate extends Command
 
             return Command::FAILURE;
         }
+    }
+
+    /**
+     * LIST ACTIVE low-water marks can precede the first article that is
+     * actually addressable. GROUP is authoritative for the selected provider.
+     *
+     * @param  array<string, mixed>|null  $listedGroup
+     * @return array{name: string, first_record: int, last_record: int, updated: \DateTimeInterface}
+     */
+    private function resolveUsableRange(NNTPService $nntp, string $groupName, ?array $listedGroup): array
+    {
+        if ($listedGroup === null) {
+            throw new \RuntimeException("Provider did not advertise active group {$groupName}");
+        }
+
+        $summary = $nntp->selectGroup($groupName, false, true);
+        if (NNTPService::isError($summary) || ! is_array($summary)) {
+            throw new \RuntimeException("Provider GROUP range could not be verified for {$groupName}");
+        }
+
+        $first = (int) ($summary['first'] ?? 0);
+        $last = (int) ($summary['last'] ?? 0);
+        if ($first <= 0 || $last < $first) {
+            throw new \RuntimeException("Provider returned an invalid GROUP range for {$groupName}");
+        }
+
+        return [
+            'name' => $groupName,
+            'first_record' => $first,
+            'last_record' => $last,
+            'updated' => now(),
+        ];
     }
 }

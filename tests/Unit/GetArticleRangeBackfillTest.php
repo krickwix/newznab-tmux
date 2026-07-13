@@ -34,7 +34,8 @@ final class GetArticleRangeBackfillTest extends TestCase
         DB::statement('CREATE TABLE short_groups (
             name VARCHAR(255),
             first_record INTEGER,
-            last_record INTEGER
+            last_record INTEGER,
+            updated DATETIME NULL
         )');
 
         DB::table('usenet_groups')->insert([
@@ -141,6 +142,25 @@ final class GetArticleRangeBackfillTest extends TestCase
         $this->assertSame('2026-02-12 23:32:04', $group->last_record_postdate);
     }
 
+    public function test_requested_range_is_clamped_to_the_selected_provider_summary(): void
+    {
+        $this->assertSame(
+            [96727, 100000],
+            $this->clampRange(90000, 100000, ['first' => 96727, 'last' => 56925589])
+        );
+        $this->assertSame(
+            [56925000, 56925589],
+            $this->clampRange(56925000, 57000000, ['first' => 96727, 'last' => 56925589])
+        );
+    }
+
+    public function test_wholly_unavailable_requested_range_is_rejected(): void
+    {
+        $this->assertNull(
+            $this->clampRange(85300, 95299, ['first' => 96727, 'last' => 56925589])
+        );
+    }
+
     /**
      * @param  array<string, mixed>  $group
      * @param  array<string, mixed>  $return
@@ -150,5 +170,20 @@ final class GetArticleRangeBackfillTest extends TestCase
         $method = new ReflectionMethod(GetArticleRange::class, 'updateGroupRecords');
         $method->setAccessible(true);
         $method->invoke(new GetArticleRange, $mode, $group, $return, $rangeFirstArticle);
+    }
+
+    /**
+     * @param  array<string, mixed>  $summary
+     * @return array{int, int}|null
+     */
+    private function clampRange(int $first, int $last, array $summary): ?array
+    {
+        $method = new ReflectionMethod(GetArticleRange::class, 'clampToSelectedProviderRange');
+        $method->setAccessible(true);
+
+        /** @var array{int, int}|null $result */
+        $result = $method->invoke(new GetArticleRange, $first, $last, $summary);
+
+        return $result;
     }
 }

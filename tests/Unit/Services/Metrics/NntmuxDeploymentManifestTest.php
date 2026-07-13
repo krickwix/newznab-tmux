@@ -71,14 +71,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-backfill'
-                ? ':microservices-pods-20260712-part-gap-lock-v82'
+                ? ':microservices-pods-20260713-provider-range-v93'
                 : (in_array($name, [
                     'nntmux-worker-binaries',
                     'nntmux-worker-releases',
                     'nntmux-worker-nzb-backlog',
                 ], true)
                 ? ($name === 'nntmux-worker-binaries'
-                    ? ':microservices-pods-20260712-part-gap-lock-v82'
+                    ? ':microservices-pods-20260713-provider-range-v93'
                     : ':microservices-pods-20260711-worker-orchestrator-v22')
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
@@ -357,7 +357,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_LATEST_SAMPLE_SECONDS'] ?? null,
         );
         self::assertStringEndsWith(
-            ':microservices-pods-20260712-part-gap-lock-v82',
+            ':microservices-pods-20260713-provider-range-v93',
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);

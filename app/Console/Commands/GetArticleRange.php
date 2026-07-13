@@ -59,10 +59,22 @@ class GetArticleRange extends Command
                 return self::FAILURE;
             }
 
-            if (NNTPService::isError($nntp->selectGroup($groupMySQL['name']))
-                && NNTPService::isError($nntp->dataError($nntp, $groupMySQL['name']))) {
+            $groupSummary = $nntp->selectGroup($groupMySQL['name']);
+            if (NNTPService::isError($groupSummary)) {
+                $groupSummary = $nntp->dataError($nntp, $groupMySQL['name']);
+            }
+            if (NNTPService::isError($groupSummary) || ! is_array($groupSummary)) {
                 return self::FAILURE;
             }
+
+            $this->refreshSelectedProviderRange($groupMySQL['name'], $groupSummary);
+            $selectedRange = $this->clampToSelectedProviderRange($firstArticle, $lastArticle, $groupSummary);
+            if ($selectedRange === null) {
+                $this->info("Requested range {$firstArticle}-{$lastArticle} is outside the selected provider range");
+
+                return self::SUCCESS;
+            }
+            [$firstArticle, $lastArticle] = $selectedRange;
 
             $binaries = new BinariesService;
             $binaries->setNntp($nntp);
@@ -86,6 +98,40 @@ class GetArticleRange extends Command
 
             return self::FAILURE;
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $groupSummary
+     * @return array{int, int}|null
+     */
+    private function clampToSelectedProviderRange(int $firstArticle, int $lastArticle, array $groupSummary): ?array
+    {
+        $providerFirst = (int) ($groupSummary['first'] ?? 0);
+        $providerLast = (int) ($groupSummary['last'] ?? 0);
+        if ($firstArticle <= 0 || $lastArticle < $firstArticle || $providerFirst <= 0 || $providerLast < $providerFirst) {
+            return null;
+        }
+
+        $first = max($firstArticle, $providerFirst);
+        $last = min($lastArticle, $providerLast);
+
+        return $first <= $last ? [$first, $last] : null;
+    }
+
+    /** @param array<string, mixed> $groupSummary */
+    private function refreshSelectedProviderRange(string $groupName, array $groupSummary): void
+    {
+        $providerFirst = (int) ($groupSummary['first'] ?? 0);
+        $providerLast = (int) ($groupSummary['last'] ?? 0);
+        if ($providerFirst <= 0 || $providerLast < $providerFirst) {
+            return;
+        }
+
+        DB::table('short_groups')->where('name', $groupName)->update([
+            'first_record' => $providerFirst,
+            'last_record' => $providerLast,
+            'updated' => now(),
+        ]);
     }
 
     /**
