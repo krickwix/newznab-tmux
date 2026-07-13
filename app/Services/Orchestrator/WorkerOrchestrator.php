@@ -35,6 +35,7 @@ class WorkerOrchestrator
         $abandonedPermit = false;
         $delayedAttributionQueued = false;
         $delayedAttributionSettled = null;
+        $delayedAttributionEarlyQualityLock = false;
         try {
             $lock = $this->store->leaderLock();
             if (! $lock->get()) {
@@ -44,8 +45,15 @@ class WorkerOrchestrator
             $previous = $this->store->previousSnapshot();
             $snapshot = $this->snapshots->capture($previous);
             $permitObservation = $this->store->permitObservation();
-            if (! $shadow && $permitObservation === null) {
-                [$snapshot, $delayedAttributionSettled] = $this->settleMatureDelayedAttribution($snapshot, time());
+            if (! $shadow
+                && $permitObservation === null
+                && (int) Settings::settingValue('orchestrator_bf_permit') === 0
+            ) {
+                [$snapshot, $delayedAttributionSettled] = $this->lockFailedImmatureDelayedAttribution($snapshot, time());
+                $delayedAttributionEarlyQualityLock = $delayedAttributionSettled !== null;
+                if ($delayedAttributionSettled === null) {
+                    [$snapshot, $delayedAttributionSettled] = $this->settleMatureDelayedAttribution($snapshot, time());
+                }
             }
             if ((int) ($permitObservation['schema_version'] ?? 0) === 2) {
                 $permitObservation = $this->store->updatePermitObservationPeaks($snapshot);
@@ -315,7 +323,7 @@ class WorkerOrchestrator
                 && $permitObservation === null
                 && $delayedAttributionSettled === null
                 && (int) Settings::settingValue('orchestrator_bf_permit') === 0;
-            $issuePermit = $grantPermit || $autoGrant;
+            $issuePermit = ($grantPermit || $autoGrant) && $delayedAttributionSettled === null;
             $backfillQuantity = $decision->profile->quantityForYield(
                 $snapshot->backfillYieldNzbsPer10k,
                 $snapshot->backfillRemainingArticles,
@@ -389,6 +397,7 @@ class WorkerOrchestrator
                     ...($abandonedPermit ? ['backfill_permit_abandoned_after_worker_exit'] : []),
                     ...($delayedAttributionQueued ? ['backfill_delayed_attribution_queued'] : []),
                     ...($delayedAttributionSettled === null ? [] : ['backfill_delayed_attribution_settled']),
+                    ...($delayedAttributionEarlyQualityLock ? ['backfill_delayed_attribution_early_quality_lock'] : []),
                     ...($shadowQualityFailure === null ? [] : [$shadowQualityFailure, 'backfill_quality_shadow_observation']),
                 ],
                 'backlogs' => [
@@ -463,6 +472,63 @@ class WorkerOrchestrator
                 }
             }
         }
+    }
+
+    /** @return array{PipelineSnapshot, array{generation: int, group: string, result: string}|null} */
+    private function lockFailedImmatureDelayedAttribution(PipelineSnapshot $snapshot, int $now): array
+    {
+        foreach ($this->store->immatureBackfillDelayedAttributions($now) as $entry) {
+            $group = trim((string) ($entry['group'] ?? ''));
+            $generation = (int) ($entry['generation'] ?? 0);
+            $cursorDelta = (int) ($entry['cursor_delta'] ?? 0);
+            if ($group === '' || $generation <= 0 || $cursorDelta <= 0) {
+                continue;
+            }
+            $counts = $this->snapshots->backfillCreatedNzbCategoryCountsForCohort(
+                $group,
+                (int) ($entry['release_high_watermark'] ?? 0),
+                (string) ($entry['cursor_start_postdate'] ?? ''),
+                (string) ($entry['cursor_end_postdate'] ?? ''),
+            );
+            $qualityFailure = match (true) {
+                $counts['non_target'] > 0 => 'backfill_permit_wrong_category',
+                $counts['uncategorized'] > 0
+                    && $now - (int) ($entry['quality_grace_started_at'] ?? $entry['queued_at'] ?? $now)
+                        >= (int) config('nntmux.orchestrator.backfill_incomplete_release_grace_seconds', 600) => 'backfill_permit_uncategorized_after_grace',
+                default => '',
+            };
+            if ($qualityFailure === '') {
+                continue;
+            }
+
+            $this->applier->qualityLockBackfillTarget($group, $qualityFailure);
+            $this->store->recordBackfillYield(
+                $group,
+                cursorDelta: $cursorDelta,
+                nzbCreatedDelta: 0,
+                now: $now,
+                generation: $generation,
+            );
+
+            return [
+                $snapshot->withPermitOutcome(
+                    completed: true,
+                    effective: false,
+                    claimed: true,
+                    inputMoved: true,
+                    group: $group,
+                    qualityFailure: $qualityFailure,
+                    generation: $generation,
+                ),
+                [
+                    'generation' => $generation,
+                    'group' => $group,
+                    'result' => $qualityFailure,
+                ],
+            ];
+        }
+
+        return [$snapshot, null];
     }
 
     /** @return array{PipelineSnapshot, array{generation: int, group: string, result: string}|null} */

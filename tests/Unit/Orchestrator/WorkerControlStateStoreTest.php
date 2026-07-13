@@ -292,12 +292,15 @@ final class WorkerControlStateStoreTest extends TestCase
         self::assertTrue($store->queueBackfillDelayedAttribution($observation, $outcome, 10_000, 2_000));
         self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
         self::assertNull($store->matureBackfillDelayedAttribution(9_999));
+        self::assertSame([7], array_column($store->immatureBackfillDelayedAttributions(9_999), 'generation'));
+        self::assertSame([], $store->immatureBackfillDelayedAttributions(10_000));
         self::assertSame([
             'schema_version' => 1,
             'generation' => 7,
             'group' => 'alt.test',
             'queued_at' => 1_000,
             'settle_after' => 10_000,
+            'quality_grace_started_at' => 1_000,
             'release_high_watermark' => 100,
             'cursor_start_postdate' => '2026-01-02 03:04:05',
             'cursor_end_postdate' => '2026-01-01 03:04:05',
@@ -387,6 +390,7 @@ final class WorkerControlStateStoreTest extends TestCase
             'group' => 'alt.test',
             'queued_at' => 1_000,
             'settle_after' => 11_000,
+            'quality_grace_started_at' => 2_000,
             'release_high_watermark' => 100,
             'cursor_start_postdate' => '2026-01-03 03:04:05',
             'cursor_end_postdate' => '2026-01-01 03:04:05',

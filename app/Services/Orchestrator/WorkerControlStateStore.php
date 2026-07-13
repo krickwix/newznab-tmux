@@ -390,6 +390,7 @@ class WorkerControlStateStore
                     (int) ($entry['settle_after'] ?? 0),
                     $now + (int) config('nntmux.orchestrator.backfill_delayed_attribution_seconds', 9_000),
                 ),
+                'quality_grace_started_at' => $now,
                 'cursor_end_postdate' => $endPostdate,
                 'cursor_delta' => (int) ($entry['cursor_delta'] ?? 0) + $cursorDelta,
                 'chain_count' => 2,
@@ -412,6 +413,7 @@ class WorkerControlStateStore
             'group' => $group,
             'queued_at' => $now,
             'settle_after' => $now + (int) config('nntmux.orchestrator.backfill_delayed_attribution_seconds', 9_000),
+            'quality_grace_started_at' => $now,
             'release_high_watermark' => max(0, (int) ($observation['release_high_watermark'] ?? 0)),
             'cursor_start_postdate' => $startPostdate,
             'cursor_end_postdate' => $endPostdate,
@@ -525,6 +527,30 @@ class WorkerControlStateStore
         usort($mature, static fn (array $left, array $right): int => (int) $left['settle_after'] <=> (int) $right['settle_after']);
 
         return $mature[0] ?? null;
+    }
+
+    /** @return list<array<string, int|string>> */
+    public function immatureBackfillDelayedAttributions(int $now): array
+    {
+        $ledger = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+            ->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
+        if (! is_array($ledger)) {
+            return [];
+        }
+
+        $immature = array_values(array_filter($ledger, static fn (mixed $entry): bool => is_array($entry)
+            && in_array((int) ($entry['schema_version'] ?? 0), [1, 2], true)
+            && (int) ($entry['generation'] ?? 0) > 0
+            && (int) ($entry['settle_after'] ?? 0) > $now));
+        usort($immature, static fn (array $left, array $right): int => [
+            (int) ($left['queued_at'] ?? 0),
+            (int) ($left['generation'] ?? 0),
+        ] <=> [
+            (int) ($right['queued_at'] ?? 0),
+            (int) ($right['generation'] ?? 0),
+        ]);
+
+        return $immature;
     }
 
     public function completeBackfillDelayedAttribution(int $generation): bool
