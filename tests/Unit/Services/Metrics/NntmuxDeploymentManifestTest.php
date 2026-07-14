@@ -322,7 +322,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
         self::assertSame(
-            'true',
+            'false',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
@@ -375,11 +375,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         $probeGroupsValue = $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null;
         self::assertSame(
-            'alt.binaries.tvseries,alt.binaries.movies.x264,alt.binaries.hdtv.tv-episodes,alt.binaries.dvd.movies,alt.binaries.movie,alt.binaries.teevee,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.dvd.classic.movies,alt.binaries.sounds.lossless,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
+            'alt.binaries.tvseries',
             $probeGroupsValue,
         );
         $probeGroups = explode(',', (string) $probeGroupsValue);
-        self::assertCount(16, $probeGroups);
+        self::assertCount(1, $probeGroups);
         self::assertLessThanOrEqual(16, count($probeGroups));
         self::assertCount(count($probeGroups), array_unique($probeGroups));
         self::assertSame(
