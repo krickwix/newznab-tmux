@@ -311,9 +311,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-tv-series-pack-v139', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-adaptive-timers-v140', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:d2baf27218c20e32397e3be3eb79b1df29c892005791a54be3387534d993b242',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:b17b21359c54e597c5a5d7d7ff350d39cb7eb0084dffab2e287620530cf4560e',
             $orchestratorImage,
         );
         self::assertSame(
