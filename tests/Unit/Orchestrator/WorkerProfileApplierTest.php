@@ -123,6 +123,38 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame(60, $plan['sleep']);
         self::assertSame(5, $plan['commands'][0]['arguments']['--limit'] ?? null);
         self::assertSame(5, Settings::settingValue('orchestrator_nzb_limit'));
+        self::assertSame(60, Settings::settingValue('orchestrator_back_timer'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+    }
+
+    public function test_attribution_poll_timer_is_applied_without_admitting_backfill(): void
+    {
+        $profile = new WorkerControlProfile(
+            profile: ControlProfile::Fill,
+            binariesSleepSeconds: 60,
+            backfillSleepSeconds: 20,
+            releasesSleepSeconds: 20,
+            nzbSleepSeconds: 60,
+            nzbBatchSize: 5,
+            backfillEnabled: true,
+            backfillGroups: 1,
+            backfillThreads: 1,
+            backfillQuantity: 10_000,
+        );
+        $decision = new ControlDecision(
+            profile: $profile,
+            backfillPermitted: false,
+            reasons: ['adaptive_backfill_attribution'],
+            nextState: new ControlState(profile: ControlProfile::Fill),
+            transitioned: false,
+        );
+
+        (new WorkerProfileApplier)->apply($decision, time(), false);
+
+        self::assertSame(20, Settings::settingValue('orchestrator_back_timer'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
     }
 
     public function test_fail_safe_denies_recovery_without_an_explicit_high_pressure_admission(): void

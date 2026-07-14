@@ -327,7 +327,11 @@ class WorkerOrchestrator
             }
             $state = $this->store->loadState();
             $decision = $this->policy->decide($snapshot, $state, time());
-            $decision = $this->adaptiveControls->plan($decision, $snapshot);
+            $decision = $this->adaptiveControls->plan(
+                $decision,
+                $snapshot,
+                backfillAttributionPending: $this->store->pendingBackfillDelayedAttributionGroups() !== [],
+            );
             $generation = null;
             $autoGrant = ! $shadow
                 && (bool) config('nntmux.orchestrator.auto_backfill', false)

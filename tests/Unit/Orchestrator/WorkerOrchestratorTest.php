@@ -722,6 +722,8 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame([], $store->backfillYieldHistory());
         self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
         self::assertFalse($result['permit_granted']);
+        self::assertSame(20, $result['worker_controls']['backfill_sleep_seconds']);
+        self::assertContains('adaptive_backfill_attribution', $result['reasons']);
     }
 
     public function test_mature_delayed_attribution_settles_productive_yield_exactly_once(): void

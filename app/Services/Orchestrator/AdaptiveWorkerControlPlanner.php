@@ -14,8 +14,11 @@ namespace App\Services\Orchestrator;
  */
 final class AdaptiveWorkerControlPlanner
 {
-    public function plan(ControlDecision $decision, PipelineSnapshot $snapshot): ControlDecision
-    {
+    public function plan(
+        ControlDecision $decision,
+        PipelineSnapshot $snapshot,
+        bool $backfillAttributionPending = false,
+    ): ControlDecision {
         $base = $decision->profile;
         if ($base->profile === ControlProfile::FailSafe) {
             return $decision;
@@ -47,7 +50,8 @@ final class AdaptiveWorkerControlPlanner
         $nzbDemand = $snapshot->eligibleNzbs > 0;
         $nzbSleep = $nzbDemand ? 20 : max($base->nzbSleepSeconds, 60);
         $nzbBatchSize = $nzbDemand ? 20 : 5;
-        $backfillSleep = $decision->backfillPermitted ? 20 : max(60, min(1800, $base->backfillSleepSeconds));
+        $backfillPollable = $decision->backfillPermitted || $backfillAttributionPending;
+        $backfillSleep = $backfillPollable ? 20 : max(60, min(1800, $base->backfillSleepSeconds));
 
         $profile = new WorkerControlProfile(
             profile: $base->profile,
@@ -71,7 +75,11 @@ final class AdaptiveWorkerControlPlanner
         }
         $reasons[] = $releaseDemand ? 'adaptive_releases_drain' : 'adaptive_releases_idle';
         $reasons[] = $nzbDemand ? 'adaptive_nzb_drain' : 'adaptive_nzb_idle';
-        $reasons[] = $decision->backfillPermitted ? 'adaptive_backfill_ready' : 'adaptive_backfill_idle';
+        $reasons[] = match (true) {
+            $decision->backfillPermitted => 'adaptive_backfill_ready',
+            $backfillAttributionPending => 'adaptive_backfill_attribution',
+            default => 'adaptive_backfill_idle',
+        };
 
         return new ControlDecision(
             profile: $profile,

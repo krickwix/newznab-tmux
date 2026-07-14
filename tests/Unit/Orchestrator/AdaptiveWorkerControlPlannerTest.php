@@ -97,6 +97,26 @@ final class AdaptiveWorkerControlPlannerTest extends TestCase
         self::assertContains('adaptive_backfill_ready', $decision->reasons);
     }
 
+    public function test_it_keeps_backfill_pollable_while_delayed_attribution_can_unlock_a_continuation(): void
+    {
+        $decision = (new AdaptiveWorkerControlPlanner)->plan(
+            $this->decision(ControlProfile::Fill, false),
+            new PipelineSnapshot(
+                partsBacklog: 80_000_000,
+                binariesBacklog: 50_000,
+                collectionsBacklog: 1_000,
+                releasesBacklog: 0,
+                nzbsBacklog: 0,
+                collectionsTotalBacklog: 20_000,
+            ),
+            backfillAttributionPending: true,
+        );
+
+        self::assertSame(20, $decision->profile->backfillSleepSeconds);
+        self::assertContains('adaptive_backfill_attribution', $decision->reasons);
+        self::assertNotContains('adaptive_backfill_idle', $decision->reasons);
+    }
+
     public function test_projected_collection_growth_throttles_input_before_the_hard_limit(): void
     {
         $decision = (new AdaptiveWorkerControlPlanner)->plan(
@@ -165,10 +185,12 @@ final class AdaptiveWorkerControlPlannerTest extends TestCase
         $decision = (new AdaptiveWorkerControlPlanner)->plan(
             $this->decision(ControlProfile::FailSafe, false),
             new PipelineSnapshot(1, 1, 1, 1, 1, eligibleNzbs: 100),
+            backfillAttributionPending: true,
         );
 
         self::assertEquals(WorkerControlProfile::for(ControlProfile::FailSafe), $decision->profile);
         self::assertNotContains('adaptive_nzb_drain', $decision->reasons);
+        self::assertNotContains('adaptive_backfill_attribution', $decision->reasons);
     }
 
     private function decision(ControlProfile $profile, bool $backfillPermitted): ControlDecision
