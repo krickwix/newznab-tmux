@@ -132,11 +132,10 @@ final class NntmuxDeploymentManifestTest extends TestCase
                     ? ':microservices-pods-20260713-fresh-hashed-retry-v114'
                     : (in_array($name, [
                         'nntmux-worker-binaries',
+                        'nntmux-worker-current-forward',
                         'nntmux-worker-releases',
                     ], true)
-                ? ($name === 'nntmux-worker-binaries'
-                    ? ':microservices-pods-20260713-provider-range-v93'
-                    : ':microservices-pods-20260714-group-xref-v149@sha256:c3ac01b8d25170e76d73c26176f5e4b75678d709eee989014bf9f0684e41bbee')
+                ? ':microservices-pods-20260714-current-forward-v151@sha256:f4db7ae1603ba89473e0a99c317ba95b2361623bd12414e3b9d0f928eef1a341'
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
@@ -333,9 +332,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-productive-context-v146', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-current-forward-v151', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:63ef8f6ef9ee8e8ec0625644850b04559f34a637c73602dd30093f1b5e3d5a9d',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:f4db7ae1603ba89473e0a99c317ba95b2361623bd12414e3b9d0f928eef1a341',
             $orchestratorImage,
         );
         self::assertSame(
@@ -350,6 +349,26 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             'alt.binaries.dvd.movies:147218921,alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468,alt.binaries.hdtv.tv-episodes:99610786',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
+        );
+        $currentForwardWindow = 'alt.binaries.hdtv.tv-episodes:99730786-99740785@99802459';
+        self::assertSame(
+            $currentForwardWindow,
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS'] ?? null,
+        );
+        $currentForward = $deployments['nntmux-worker-current-forward'] ?? null;
+        self::assertIsArray($currentForward);
+        self::assertSame(1, $currentForward['spec']['replicas'] ?? null);
+        self::assertSame(
+            ['php', 'artisan', 'nntmux:worker', 'current-forward'],
+            $currentForward['spec']['template']['spec']['containers'][0]['args'] ?? null,
+        );
+        self::assertSame(
+            $currentForwardWindow,
+            $environment($currentForward)['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS'] ?? null,
+        );
+        self::assertSame(
+            $currentForwardWindow,
+            $environment($deployments['nntmux-worker-binaries'])['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS'] ?? null,
         );
         self::assertSame(
             '4',
@@ -386,12 +405,16 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $releases = $deployments['nntmux-worker-releases'] ?? null;
         self::assertIsArray($releases);
         self::assertSame(
-            'microservices-pods-20260714-group-xref-v149',
+            'microservices-pods-20260714-current-forward-v151',
             $environment($releases)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
             'alt.binaries.dvd.movies,alt.binaries.movies.dvd,alt.binaries.hdtv.tv-episodes',
             $environment($releases)['NNTMUX_SPLIT_COLLECTION_RECONCILE_GROUPS'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.hdtv.tv-episodes:2000',
+            $environment($releases)['NNTMUX_SPLIT_COLLECTION_XREF_GAP_OVERRIDES'] ?? null,
         );
         self::assertSame(
             'alt.binaries.tvseries',
