@@ -427,6 +427,23 @@ class PipelineSnapshotRepository
         );
     }
 
+    /** @return array{target: int, non_target: int, uncategorized: int} */
+    public function backfillCreatedReleaseCategoryCountsForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        return $this->backfillNzbCategoryCountsForCohort(
+            $group,
+            max(0, $releaseHighWatermark),
+            null,
+            $startPostdate,
+            $endPostdate,
+            completedNzbsOnly: false,
+        );
+    }
+
     public function backfillCompletedNzbsForReleaseCohort(
         string $group,
         int $releaseIdLowExclusive,
@@ -488,10 +505,12 @@ class PipelineSnapshotRepository
         ?int $releaseIdHighInclusive,
         string $startPostdate,
         string $endPostdate,
+        bool $completedNzbsOnly = true,
     ): array {
         $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
         $minPayloadBytes = max(1, (int) config('nntmux.orchestrator.backfill_min_payload_bytes', 104_857_600));
         $upperBound = $releaseIdHighInclusive === null ? '' : 'AND r.id <= ?';
+        $completedNzbPredicate = $completedNzbsOnly ? 'AND r.nzbstatus = 1' : '';
         $bindings = [
             self::BACKFILL_TV_EPISODE_PATTERN,
             self::BACKFILL_TV_EPISODE_PATTERN,
@@ -539,7 +558,7 @@ class PipelineSnapshotRepository
             WHERE g.name = ?
             AND r.id > ?
             '.$upperBound.'
-            AND r.nzbstatus = 1
+            '.$completedNzbPredicate.'
             AND r.postdate BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)
                 AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', $bindings);
 

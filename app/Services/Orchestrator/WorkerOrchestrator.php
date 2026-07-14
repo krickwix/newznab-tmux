@@ -530,7 +530,20 @@ class WorkerOrchestrator
                     (string) ($entry['cursor_start_postdate'] ?? ''),
                     (string) ($entry['cursor_end_postdate'] ?? ''),
                 );
-                $fullyDrained = $createdReleases === $classifiedNzbs
+                $allCreatedReleasesAreTarget = $createdReleases === $classifiedNzbs;
+                if ($createdReleases > $classifiedNzbs) {
+                    $releaseCounts = $this->snapshots->backfillCreatedReleaseCategoryCountsForCohort(
+                        $group,
+                        (int) ($entry['release_high_watermark'] ?? 0),
+                        (string) ($entry['cursor_start_postdate'] ?? ''),
+                        (string) ($entry['cursor_end_postdate'] ?? ''),
+                    );
+                    $allCreatedReleasesAreTarget = $releaseCounts['target'] === $createdReleases
+                        && $releaseCounts['non_target'] === 0
+                        && $releaseCounts['uncategorized'] === 0;
+                }
+                $fullyDrained = $createdReleases >= $classifiedNzbs
+                    && $allCreatedReleasesAreTarget
                     && $this->snapshots->backfillPendingCollectionsForCohort(
                         $group,
                         (string) ($entry['cursor_start_postdate'] ?? ''),

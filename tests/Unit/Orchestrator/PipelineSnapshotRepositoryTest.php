@@ -1060,6 +1060,42 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         ));
     }
 
+    public function test_group_cohort_created_releases_are_classified_before_their_nzbs_complete(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+        config()->set('nntmux.orchestrator.backfill_min_payload_bytes', 104857600);
+
+        DB::shouldReceive('selectOne')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('AS target', $sql);
+                self::assertStringContainsString('AS non_target', $sql);
+                self::assertStringContainsString('AS uncategorized', $sql);
+                self::assertStringNotContainsString('r.nzbstatus = 1', $sql);
+                self::assertSame('alt.test', $bindings[6] ?? null);
+                self::assertSame(123, $bindings[7] ?? null);
+
+                return true;
+            })
+            ->andReturn((object) ['target' => 4, 'non_target' => 0, 'uncategorized' => 0]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([
+            'target' => 4,
+            'non_target' => 0,
+            'uncategorized' => 0,
+        ], $repository->backfillCreatedReleaseCategoryCountsForCohort(
+            'alt.test',
+            123,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        ));
+    }
+
     public function test_release_backlog_only_counts_collections_from_processable_groups(): void
     {
         $source = file_get_contents(__DIR__.'/../../../app/Services/Orchestrator/PipelineSnapshotRepository.php');

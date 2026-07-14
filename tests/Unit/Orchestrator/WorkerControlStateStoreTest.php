@@ -337,6 +337,7 @@ final class WorkerControlStateStoreTest extends TestCase
 
         self::assertSame(2_000, $store->observeBackfillProductiveDrain(7, 1, 1, 2_000));
         self::assertSame(2_000, $store->observeBackfillProductiveDrain(7, 1, 1, 2_010));
+        self::assertSame(2_015, $store->observeBackfillProductiveDrain(7, 1, 2, 2_015));
         self::assertSame(2_020, $store->observeBackfillProductiveDrain(7, 2, 2, 2_020));
         self::assertSame(0, $store->observeBackfillProductiveDrain(7, 2, 1, 2_021));
 

@@ -478,7 +478,7 @@ class WorkerControlStateStore
         int $createdReleases,
         int $now,
     ): int {
-        if ($generation <= 0 || $targetNzbs <= 0 || $createdReleases !== $targetNzbs || $now <= 0) {
+        if ($generation <= 0 || $targetNzbs <= 0 || $createdReleases < $targetNzbs || $now <= 0) {
             return 0;
         }
 
