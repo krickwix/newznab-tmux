@@ -82,11 +82,16 @@ class PipelineSnapshotRepository
             'releases' => (int) ($pipeline->releases_backlog ?? 0),
             'nzbs' => (int) ($pipeline->nzbs_backlog ?? 0),
         ];
+        $safeBackfillCandidates = $this->safeBackfillCandidates($this->backfillCandidates(), $backlogs);
         $backfillTarget = $this->selectBackfillTarget(
-            $this->safeBackfillCandidates($this->backfillCandidates(), $backlogs),
+            $safeBackfillCandidates,
             $yieldHistory,
             $controlState,
             time(),
+        );
+        $backfillPermitHandoffSafe = $this->permitHandoffTargetSafe(
+            $safeBackfillCandidates,
+            $this->state->permitObservation(),
         );
         $backfillGroup = (string) ($backfillTarget['name'] ?? '');
         $targetHistory = $yieldHistory[$backfillGroup] ?? null;
@@ -156,6 +161,7 @@ class PipelineSnapshotRepository
             collectionsTotalBacklog: $totalCollections,
             bodyRecoverySourceBacklog: $recoverySourceCollections,
             oldestBodyRecoverySourceAgeSeconds: (int) $recoverySources['oldest_age'],
+            backfillPermitHandoffSafe: $backfillPermitHandoffSafe,
         );
     }
 
@@ -306,6 +312,31 @@ class PipelineSnapshotRepository
         }
 
         return $safe;
+    }
+
+    /**
+     * @param  list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity: int}>  $candidates
+     * @param  array<string, mixed>|null  $observation
+     */
+    private function permitHandoffTargetSafe(array $candidates, ?array $observation): bool
+    {
+        $group = trim((string) ($observation['backfill_group'] ?? ''));
+        $cursor = (int) ($observation['backfill_cursor'] ?? 0);
+        $quantity = (int) ($observation['backfill_quantity'] ?? 0);
+        if ($group === '' || $cursor <= 0 || $quantity < 10_000) {
+            return false;
+        }
+
+        foreach ($candidates as $candidate) {
+            if ($candidate['name'] === $group
+                && $candidate['cursor'] === $cursor
+                && $candidate['safe_quantity'] >= $quantity
+            ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -799,6 +830,8 @@ class PipelineSnapshotRepository
             ) OR (
                 c.filecheck IN (0, 1, 10)
                 AND c.dateadded < DATE_SUB(NOW(), INTERVAL ? HOUR)
+                AND COUNT(DISTINCT CASE WHEN b.filenumber > 0 THEN b.filenumber ELSE b.id END)
+                    >= GREATEST(1, CEIL(COALESCE(NULLIF(c.totalfiles, 0), MAX(NULLIF(b.filenumber, 0)), 0) * ? / 100))
                 AND SUM(CASE
                     WHEN b.totalparts > 0 AND b.currentparts >= CEIL(b.totalparts * ? / 100) THEN 1
                     ELSE 0
@@ -818,6 +851,7 @@ class PipelineSnapshotRepository
             $completion,
             $completion,
             $collectionDelayHours,
+            $completion,
             $completion,
         ]);
     }

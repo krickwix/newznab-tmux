@@ -3344,9 +3344,12 @@ final class WorkerOrchestratorTest extends TestCase
             4,
             5,
             providerAvailable: $providerAvailable,
+            cursorAvailable: $providerAvailable,
             eligibleBackfillSupply: $eligibleBackfillSupply,
-            backfillGroup: 'alt.test',
-            backfillCursor: 100,
+            backfillGroup: $providerAvailable ? 'alt.test' : '',
+            backfillCursor: $providerAvailable ? 100 : 0,
+            backfillSafeQuantity: $providerAvailable ? 10_000 : 0,
+            backfillPermitHandoffSafe: true,
         );
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
@@ -3374,7 +3377,7 @@ final class WorkerOrchestratorTest extends TestCase
             Mockery::on(static fn (ControlDecision $decision): bool => ! $decision->backfillPermitted),
             Mockery::type('int'),
             false,
-            'alt.test',
+            $providerAvailable ? 'alt.test' : '',
             true,
         )->andReturn(8);
 
@@ -3404,6 +3407,7 @@ final class WorkerOrchestratorTest extends TestCase
         int $backfillSafeQuantity = 10_000,
         bool $highPressure = false,
         int $databaseCurrentWaits = 0,
+        bool $backfillPermitHandoffSafe = false,
     ): void {
         config([
             'nntmux.orchestrator.auto_backfill' => true,
@@ -3433,6 +3437,7 @@ final class WorkerOrchestratorTest extends TestCase
             backfillGroup: 'alt.test',
             backfillCursor: 100,
             backfillSafeQuantity: $backfillSafeQuantity,
+            backfillPermitHandoffSafe: $backfillPermitHandoffSafe,
         );
         $lock = Mockery::mock(Lock::class);
         $lock->shouldReceive('get')->once()->andReturnTrue();
@@ -3469,15 +3474,17 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertNotContains('backfill_permit_claim_grace', $result['reasons']);
     }
 
-    /** @return array<string, array{int, bool, bool?, bool?, bool?, int?, bool?, int?}> */
+    /** @return array<string, array{int, bool, bool?, bool?, bool?, int?, bool?, int?, bool?}> */
     public static function claimGraceRevocationCases(): array
     {
         return [
             'hard database safety failure during grace' => [60, false],
             'soft denial at exact grace expiry' => [120, true],
-            'provider unavailable cannot mask an exhausted cursor' => [60, true, false, false],
+            'an exhausted selected cursor is not a soft supply denial' => [60, true, true, false],
             'provider unavailable cannot mask missing current groups' => [60, true, false, true, false],
-            'provider unavailable cannot mask insufficient safe capacity' => [60, true, false, true, true, 9_999],
+            'provider unavailable cannot mask an unsafe pinned target' => [60, true, false, false, true, 0],
+            'a safe selected target cannot substitute for the pinned target' => [60, true, true, true, true, 10_000],
+            'insufficient selected target capacity is not a soft supply denial' => [60, true, true, true, true, 9_999],
             'provider unavailable cannot mask high pressure' => [60, true, false, true, true, 10_000, true],
             'provider unavailable cannot mask current database waits' => [60, true, false, true, true, 10_000, false, 1],
         ];

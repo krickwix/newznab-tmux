@@ -173,6 +173,46 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame(0, $quantity);
     }
 
+    #[DataProvider('permitHandoffTargetSafetyCases')]
+    public function test_permit_handoff_target_safety_requires_the_exact_pinned_candidate_and_capacity(
+        ?array $observation,
+        array $candidates,
+        bool $expected,
+    ): void {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'permitHandoffTargetSafe');
+
+        self::assertSame($expected, $method->invoke($repository, $candidates, $observation));
+    }
+
+    /** @return array<string, array{array<string, mixed>|null, list<array<string, mixed>>, bool}> */
+    public static function permitHandoffTargetSafetyCases(): array
+    {
+        $observation = [
+            'backfill_group' => 'alt.test',
+            'backfill_cursor' => 20_000,
+            'backfill_quantity' => 10_000,
+        ];
+        $candidate = [
+            'name' => 'alt.test',
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-07-13 04:12:34',
+            'remaining_articles' => 20_000,
+            'safe_quantity' => 10_000,
+        ];
+
+        return [
+            'exact pinned candidate remains safe' => [$observation, [$candidate], true],
+            'candidate capacity fell below pinned quantity' => [$observation, [[...$candidate, 'safe_quantity' => 9_999]], false],
+            'candidate cursor moved unexpectedly' => [$observation, [[...$candidate, 'cursor' => 19_999]], false],
+            'only a different group is safe' => [$observation, [[...$candidate, 'name' => 'alt.other']], false],
+            'no permit observation exists' => [null, [$candidate], false],
+        ];
+    }
+
     public function test_release_or_nzb_headroom_can_independently_close_backfill_admission(): void
     {
         config()->set('nntmux.orchestrator.backfill_headroom_fraction', 0.20);
@@ -801,6 +841,10 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('END) >= GREATEST(1, CEIL(COALESCE(NULLIF(c.totalfiles, 0), MAX(NULLIF(b.filenumber, 0)), 0) * ? / 100))', $sql);
                 self::assertStringContainsString('c.filecheck IN (0, 1, 10)', $sql);
                 self::assertStringContainsString('c.dateadded < DATE_SUB(NOW(), INTERVAL ? HOUR)', $sql);
+                self::assertSame(2, substr_count(
+                    $sql,
+                    'COUNT(DISTINCT CASE WHEN b.filenumber > 0 THEN b.filenumber ELSE b.id END)',
+                ));
                 self::assertStringContainsString('END) = COUNT(b.id)', $sql);
                 self::assertStringContainsString('c.filecheck = 3', $sql);
                 self::assertSame([
@@ -815,6 +859,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                     94,
                     94,
                     2,
+                    94,
                     94,
                 ], $bindings);
 

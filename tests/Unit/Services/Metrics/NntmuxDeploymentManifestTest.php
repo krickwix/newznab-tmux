@@ -104,7 +104,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-backfill'
-                ? ':microservices-pods-20260714-adaptive-orchestrator-v141@sha256:c3dcb423bdab0eb549d3550eed145f53df91261a7b954afadf491c385711858f'
+                ? ':microservices-pods-20260714-permit-handoff-v144@sha256:53d14c7febe7b0f50c9676a3f374a4a31ec7244e13ec9f4dc98cf3a811a2c732'
                 : ($name === 'nntmux-worker-nzb-backlog'
                     ? ':microservices-pods-20260714-nzb-completion-v143@sha256:3f5ccef8d0c088dac9d07c4ae01426ce8aa4d109858bb91075e672ae61665e0b'
                     : ($name === 'nntmux-worker-post-additional'
@@ -314,9 +314,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-adaptive-orchestrator-v141', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-attribution-pending-v145', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:c3dcb423bdab0eb549d3550eed145f53df91261a7b954afadf491c385711858f',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:6128986d1215acbeb76dfe0ed60407eb7a2edabfdd421212b648518a5b149dee',
             $orchestratorImage,
         );
         self::assertSame(
@@ -329,7 +329,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
-            'alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468',
+            'alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468,alt.binaries.hdtv.tv-episodes:99650786',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertSame(
@@ -428,11 +428,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         $probeGroupsValue = $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null;
         self::assertSame(
-            'alt.binaries.tvseries,alt.binaries.movies.dvd',
+            'alt.binaries.tvseries,alt.binaries.movies.dvd,alt.binaries.hdtv.tv-episodes',
             $probeGroupsValue,
         );
         $probeGroups = explode(',', (string) $probeGroupsValue);
-        self::assertCount(2, $probeGroups);
+        self::assertCount(3, $probeGroups);
         self::assertLessThanOrEqual(16, count($probeGroups));
         self::assertCount(count($probeGroups), array_unique($probeGroups));
         self::assertSame(
@@ -508,9 +508,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
             '7200',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_LATEST_SAMPLE_SECONDS'] ?? null,
         );
-        $v141Image = 'docker.io/krickwix/nntmux:microservices-pods-20260714-adaptive-orchestrator-v141@sha256:c3dcb423bdab0eb549d3550eed145f53df91261a7b954afadf491c385711858f';
+        $v144Image = 'docker.io/krickwix/nntmux:microservices-pods-20260714-permit-handoff-v144@sha256:53d14c7febe7b0f50c9676a3f374a4a31ec7244e13ec9f4dc98cf3a811a2c732';
         self::assertSame(
-            $v141Image,
+            $v144Image,
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
@@ -518,7 +518,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             (string) ($deployments['nntmux-worker-nzb-backlog']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468',
+            'alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468,alt.binaries.hdtv.tv-episodes:99650786',
             $environment($deployments['nntmux-worker-backfill'])['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);

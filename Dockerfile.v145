@@ -1,0 +1,7 @@
+FROM docker.io/krickwix/nntmux:microservices-pods-20260714-permit-handoff-v144@sha256:53d14c7febe7b0f50c9676a3f374a4a31ec7244e13ec9f4dc98cf3a811a2c732
+
+ARG SOURCE_REVISION=unknown
+
+COPY app/Services/Orchestrator/PipelineSnapshotRepository.php /app/app/Services/Orchestrator/PipelineSnapshotRepository.php
+
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"

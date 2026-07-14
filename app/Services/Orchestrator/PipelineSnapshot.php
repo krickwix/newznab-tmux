@@ -63,6 +63,7 @@ final readonly class PipelineSnapshot
         public int $bodyRecoverySourceBacklog = 0,
         public int $oldestBodyRecoverySourceAgeSeconds = 0,
         public int $backfillPermitGeneration = 0,
+        public bool $backfillPermitHandoffSafe = false,
     ) {}
 
     public function withPermitOutcome(
@@ -130,6 +131,7 @@ final readonly class PipelineSnapshot
             bodyRecoverySourceBacklog: $this->bodyRecoverySourceBacklog,
             oldestBodyRecoverySourceAgeSeconds: $this->oldestBodyRecoverySourceAgeSeconds,
             backfillPermitGeneration: max(0, $generation),
+            backfillPermitHandoffSafe: $this->backfillPermitHandoffSafe,
         );
     }
 

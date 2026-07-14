@@ -730,9 +730,8 @@ class WorkerOrchestrator
             && $decision->profile->backfillEnabled
             && ! $snapshot->highPressure
             && $snapshot->databaseCurrentWaits === 0
-            && $snapshot->cursorAvailable
+            && $snapshot->backfillPermitHandoffSafe
             && $snapshot->currentGroupsAvailable
-            && $snapshot->backfillSafeQuantity >= 10_000
             && array_intersect(self::CLAIM_GRACE_SUPPLY_REASONS, $decision->reasons) !== [];
     }
 
