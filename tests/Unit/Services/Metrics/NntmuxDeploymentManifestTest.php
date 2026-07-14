@@ -115,7 +115,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 ? ($name === 'nntmux-worker-binaries'
                     ? ':microservices-pods-20260713-provider-range-v93'
                     : ($name === 'nntmux-worker-releases'
-                        ? ':microservices-pods-20260714-complete-tv-v138@sha256:b7c19efcdde98abb66d9c9ed4d23c3ff9a01be20c7b3f628f3be768548f5c4e3'
+                        ? ':microservices-pods-20260714-tv-series-pack-v139@sha256:d2baf27218c20e32397e3be3eb79b1df29c892005791a54be3387534d993b242'
                         : ':microservices-pods-20260711-worker-orchestrator-v22'))
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
@@ -311,9 +311,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-complete-tv-v138', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-tv-series-pack-v139', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:b7c19efcdde98abb66d9c9ed4d23c3ff9a01be20c7b3f628f3be768548f5c4e3',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:d2baf27218c20e32397e3be3eb79b1df29c892005791a54be3387534d993b242',
             $orchestratorImage,
         );
         self::assertSame(
@@ -349,11 +349,19 @@ final class NntmuxDeploymentManifestTest extends TestCase
             'alt.binaries.tvseries',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_TV_COMPLETE_SERIES_GROUPS'] ?? null,
         );
+        self::assertSame(
+            'alt.binaries.tvseries',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_TV_SERIES_PACK_GROUPS'] ?? null,
+        );
         $releases = $deployments['nntmux-worker-releases'] ?? null;
         self::assertIsArray($releases);
         self::assertSame(
             'alt.binaries.tvseries',
             $environment($releases)['NNTMUX_ORCHESTRATOR_BACKFILL_TV_COMPLETE_SERIES_GROUPS'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.tvseries',
+            $environment($releases)['NNTMUX_ORCHESTRATOR_BACKFILL_TV_SERIES_PACK_GROUPS'] ?? null,
         );
         self::assertSame(
             '0.90',
