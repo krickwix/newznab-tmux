@@ -293,7 +293,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $metricsEnvironment = $environment($metrics);
         self::assertSame('microservices-pods-20260714-adaptive-orchestrator-v141', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         self::assertSame('168', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_HOURS'] ?? null);
-        self::assertSame('false', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED'] ?? null);
+        self::assertSame('true', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED'] ?? null);
         self::assertSame('microservices-pods-20260713-backfill-source-v97', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
@@ -321,7 +321,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
         self::assertSame(
-            'false',
+            'true',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
