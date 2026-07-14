@@ -1,0 +1,7 @@
+FROM docker.io/krickwix/nntmux:microservices-pods-20260714-split-par2-v142@sha256:376b7bd84f4909a409a5ba48068d40e2be8bc3f4536f98da965e92cd8cb72b1a
+
+ARG SOURCE_REVISION=unknown
+
+COPY app/Services/Releases/SplitCollectionReconciler.php /app/app/Services/Releases/SplitCollectionReconciler.php
+
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"

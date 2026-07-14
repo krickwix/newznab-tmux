@@ -77,6 +77,96 @@ final class SplitCollectionReconcilerTest extends TestCase
         self::assertTrue(DB::table('collections')->where('id', 41)->exists());
     }
 
+    public function test_uses_only_current_group_articles_when_foreign_crosspost_would_hide_valid_pair(): void
+    {
+        $this->seedCollection(60, '[01/02] - "Crossposted.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:15');
+        $this->seedCollection(61, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:16');
+        DB::table('collections')->where('id', 60)->update([
+            'xref' => 'ALT.BINARIES.MOVIES.DVD:100 alt.binaries.foreign:9000000',
+        ]);
+        DB::table('collections')->where('id', 61)->update([
+            'xref' => 'alt.binaries.movies.dvd:101 alt.binaries.foreign:1',
+        ]);
+        $this->seedBinary(600, 60, 1, 'Crossposted.Episode.mkv', 10, 10);
+        $this->seedBinary(610, 61, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertFalse(DB::table('collections')->where('id', 61)->exists());
+    }
+
+    public function test_refuses_pair_when_only_foreign_crosspost_articles_are_within_gap(): void
+    {
+        $this->seedCollection(70, '[01/02] - "Distant.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:15');
+        $this->seedCollection(71, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:16');
+        DB::table('collections')->where('id', 70)->update([
+            'xref' => 'alt.binaries.movies.dvd:100 alt.binaries.foreign:1000',
+        ]);
+        DB::table('collections')->where('id', 71)->update([
+            'xref' => 'alt.binaries.movies.dvd:5000 alt.binaries.foreign:1001',
+        ]);
+        $this->seedBinary(700, 70, 1, 'Distant.Episode.mkv', 10, 10);
+        $this->seedBinary(710, 71, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertTrue(DB::table('collections')->where('id', 71)->exists());
+    }
+
+    public function test_refuses_pair_when_current_group_xref_is_missing(): void
+    {
+        $this->seedCollection(80, '[01/02] - "Wrong.Group.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:15');
+        $this->seedCollection(81, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:16');
+        DB::table('collections')->where('id', 80)->update(['xref' => 'alt.binaries.foreign:100']);
+        DB::table('collections')->where('id', 81)->update(['xref' => 'alt.binaries.foreign:101']);
+        $this->seedBinary(800, 80, 1, 'Wrong.Group.Episode.mkv', 10, 10);
+        $this->seedBinary(810, 81, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertTrue(DB::table('collections')->where('id', 81)->exists());
+    }
+
+    public function test_refuses_malformed_or_non_exact_current_group_tokens(): void
+    {
+        $this->seedCollection(90, '[01/02] - "Malformed.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:15');
+        $this->seedCollection(91, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:16');
+        DB::table('collections')->where('id', 90)->update([
+            'xref' => 'alt.binaries.movies.dvd:100junk alt.binaries.movies.dvd:-1 alt.binaries.movies.dvd:100:900 xalt.binaries.movies.dvd:100',
+        ]);
+        DB::table('collections')->where('id', 91)->update([
+            'xref' => 'alt.binaries.movies.dvd:101junk alt.binaries.movies.dvd:-2 alt.binaries.movies.dvd:101:901 xalt.binaries.movies.dvd:101',
+        ]);
+        $this->seedBinary(900, 90, 1, 'Malformed.Episode.mkv', 10, 10);
+        $this->seedBinary(910, 91, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertTrue(DB::table('collections')->where('id', 91)->exists());
+    }
+
+    public function test_accepts_xref_gap_at_limit(): void
+    {
+        $this->seedCollection(100, '[01/02] - "Boundary.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:15');
+        $this->seedCollection(101, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:16');
+        DB::table('collections')->where('id', 100)->update(['xref' => 'alt.binaries.movies.dvd:1000']);
+        DB::table('collections')->where('id', 101)->update(['xref' => 'alt.binaries.movies.dvd:2000']);
+        $this->seedBinary(1000, 100, 1, 'Boundary.Episode.mkv', 10, 10);
+        $this->seedBinary(1010, 101, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertFalse(DB::table('collections')->where('id', 101)->exists());
+    }
+
+    public function test_refuses_xref_gap_one_past_limit(): void
+    {
+        $this->seedCollection(110, '[01/02] - "Past.Boundary.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:15');
+        $this->seedCollection(111, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:16');
+        DB::table('collections')->where('id', 110)->update(['xref' => 'alt.binaries.movies.dvd:1000']);
+        DB::table('collections')->where('id', 111)->update(['xref' => 'alt.binaries.movies.dvd:2001']);
+        $this->seedBinary(1100, 110, 1, 'Past.Boundary.Episode.mkv', 10, 10);
+        $this->seedBinary(1110, 111, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertTrue(DB::table('collections')->where('id', 111)->exists());
+    }
+
     public function test_refuses_group_outside_allowlist(): void
     {
         config()->set('nntmux.split_collection_reconcile_groups', []);

@@ -241,8 +241,14 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
 
         $this->seedCollection(2700, '[01/03] - "Episode.S01E01.mkv" yEnc', 3);
         $this->seedCollection(2701, '[02/03] - "hash.par2" yEnc', 3);
-        DB::table('collections')->where('id', 2700)->update(['date' => '2026-07-13 02:18:15']);
-        DB::table('collections')->where('id', 2701)->update(['date' => '2026-07-13 02:18:16']);
+        DB::table('collections')->where('id', 2700)->update([
+            'date' => '2026-07-13 02:18:15',
+            'xref' => 'alt.binaries.movies.dvd:2700',
+        ]);
+        DB::table('collections')->where('id', 2701)->update([
+            'date' => '2026-07-13 02:18:16',
+            'xref' => 'alt.binaries.movies.dvd:2701',
+        ]);
         $this->seedBinary(27000, 2700, 1, currentParts: 10, totalParts: 10);
         $this->seedBinary(27001, 2701, 2, currentParts: 1, totalParts: 1);
         $this->seedBinary(27002, 2701, 3, currentParts: 1, totalParts: 1);

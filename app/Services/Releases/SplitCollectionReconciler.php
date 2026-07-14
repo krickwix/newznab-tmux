@@ -21,6 +21,9 @@ final class SplitCollectionReconciler
 
     private const int MAX_MATCHING_COLLECTIONS = 20;
 
+    /** @var array<int, string> */
+    private array $groupNamesById = [];
+
     public function reconcile(?int $groupId): int
     {
         $groupIds = $this->allowedGroupIds($groupId);
@@ -54,13 +57,17 @@ final class SplitCollectionReconciler
             return [];
         }
 
-        return DB::table('usenet_groups')
+        $groups = DB::table('usenet_groups')
             ->whereIn('name', $names)
             ->when($groupId !== null, static fn ($query) => $query->where('id', $groupId))
             ->orderBy('id')
-            ->pluck('id')
-            ->map(static fn (mixed $id): int => (int) $id)
-            ->all();
+            ->get(['id', 'name']);
+
+        foreach ($groups as $group) {
+            $this->groupNamesById[(int) $group->id] = (string) $group->name;
+        }
+
+        return $groups->map(static fn (object $group): int => (int) $group->id)->all();
     }
 
     /** @return list<array{anchor_id:int,companion_id:int}> */
@@ -221,8 +228,9 @@ final class SplitCollectionReconciler
     {
         $anchorTimestamp = strtotime((string) $anchor['date']);
         $companionTimestamp = strtotime((string) $companion['date']);
-        $anchorXrefMax = $this->xrefArticleMax((string) $anchor['xref']);
-        $companionXrefMin = $this->xrefArticleMin((string) $companion['xref']);
+        $groupName = $this->groupName((int) $anchor['groups_id']);
+        $anchorXrefMax = $this->xrefArticleMax((string) $anchor['xref'], $groupName);
+        $companionXrefMin = $this->xrefArticleMin((string) $companion['xref'], $groupName);
 
         return (int) $anchor['id'] !== (int) $companion['id']
             && (int) $anchor['groups_id'] === (int) $companion['groups_id']
@@ -371,24 +379,39 @@ final class SplitCollectionReconciler
             && hash_equals((string) $preflight['xref'], (string) $locked['xref']);
     }
 
-    private function xrefArticleMin(string $xref): int
+    private function groupName(int $groupId): string
     {
-        $articles = $this->xrefArticles($xref);
+        if (! array_key_exists($groupId, $this->groupNamesById)) {
+            $this->groupNamesById[$groupId] = (string) (DB::table('usenet_groups')
+                ->where('id', $groupId)
+                ->value('name') ?? '');
+        }
+
+        return $this->groupNamesById[$groupId];
+    }
+
+    private function xrefArticleMin(string $xref, string $groupName): int
+    {
+        $articles = $this->xrefArticles($xref, $groupName);
 
         return $articles === [] ? 0 : min($articles);
     }
 
-    private function xrefArticleMax(string $xref): int
+    private function xrefArticleMax(string $xref, string $groupName): int
     {
-        $articles = $this->xrefArticles($xref);
+        $articles = $this->xrefArticles($xref, $groupName);
 
         return $articles === [] ? 0 : max($articles);
     }
 
     /** @return list<int> */
-    private function xrefArticles(string $xref): array
+    private function xrefArticles(string $xref, string $groupName): array
     {
-        if (preg_match_all('/:(\d+)(?:\\n|\s|$)/', $xref, $matches) === 0) {
+        if ($groupName === '' || preg_match_all(
+            '/(?:^|\s)'.preg_quote($groupName, '/').':(\d+)(?=\s|$)/i',
+            $xref,
+            $matches,
+        ) === 0) {
             return [];
         }
 
