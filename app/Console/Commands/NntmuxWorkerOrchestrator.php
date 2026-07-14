@@ -14,7 +14,8 @@ class NntmuxWorkerOrchestrator extends Command
                             {--once : Evaluate once and exit}
                             {--shadow : Observe and decide without changing database settings}
                             {--sleep=60 : Seconds between observations}
-                            {--grant-backfill-permit : Request one bounded permit if every policy gate is green}';
+                            {--grant-backfill-permit : Request one bounded permit if every policy gate is green}
+                            {--grant-current-forward-permit : Request the one configured exact current-forward window}';
 
     protected $description = 'Continuously balance NNTmux pipeline workers using deterministic bounded profiles';
 
@@ -23,15 +24,26 @@ class NntmuxWorkerOrchestrator extends Command
         $sleep = $this->normalizedSleepSeconds((int) $this->option('sleep'));
         $shadow = (bool) $this->option('shadow');
         $grantPermit = (bool) $this->option('grant-backfill-permit');
+        $grantCurrentForwardPermit = (bool) $this->option('grant-current-forward-permit');
+        if ($grantPermit && $grantCurrentForwardPermit) {
+            $this->error('Only one permit type may be requested per control cycle.');
+
+            return self::FAILURE;
+        }
         if ($grantPermit && ! (bool) $this->option('once')) {
             $this->error('--grant-backfill-permit requires --once so one request cannot issue repeated permits.');
+
+            return self::FAILURE;
+        }
+        if ($grantCurrentForwardPermit && (! (bool) $this->option('once') || $shadow)) {
+            $this->error('--grant-current-forward-permit requires --once and cannot run in shadow mode.');
 
             return self::FAILURE;
         }
 
         do {
             try {
-                $result = $orchestrator->runOnce($shadow, $grantPermit);
+                $result = $orchestrator->runOnce($shadow, $grantPermit, $grantCurrentForwardPermit);
                 $this->line(json_encode($result, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
             } catch (Throwable $error) {
                 $this->error($error->getMessage());

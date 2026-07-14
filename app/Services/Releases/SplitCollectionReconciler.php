@@ -241,7 +241,20 @@ final class SplitCollectionReconciler
             && abs($anchorTimestamp - $companionTimestamp) <= self::MAX_POSTING_GAP_SECONDS
             && $anchorXrefMax > 0
             && $companionXrefMin > $anchorXrefMax
-            && $companionXrefMin - $anchorXrefMax <= self::MAX_XREF_ARTICLE_GAP;
+            && $companionXrefMin - $anchorXrefMax <= $this->xrefArticleGapLimit($groupName);
+    }
+
+    private function xrefArticleGapLimit(string $groupName): int
+    {
+        $configured = config('nntmux.split_collection_xref_gap_overrides', []);
+        if (! is_array($configured)) {
+            return self::MAX_XREF_ARTICLE_GAP;
+        }
+
+        return min(2000, max(
+            self::MAX_XREF_ARTICLE_GAP,
+            (int) ($configured[$groupName] ?? self::MAX_XREF_ARTICLE_GAP),
+        ));
     }
 
     /**

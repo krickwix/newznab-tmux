@@ -167,6 +167,36 @@ final class SplitCollectionReconcilerTest extends TestCase
         self::assertTrue(DB::table('collections')->where('id', 111)->exists());
     }
 
+    public function test_hdtv_group_can_use_a_bounded_2000_article_gap_override(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.tv-episodes']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.tv-episodes']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.tv-episodes' => 2000]);
+        $this->seedCollection(120, '[01/02] - "HDTV.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:15');
+        $this->seedCollection(121, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:16');
+        DB::table('collections')->where('id', 120)->update(['xref' => 'alt.binaries.hdtv.tv-episodes:1000']);
+        DB::table('collections')->where('id', 121)->update(['xref' => 'alt.binaries.hdtv.tv-episodes:3000']);
+        $this->seedBinary(1200, 120, 1, 'HDTV.Episode.mkv', 10, 10);
+        $this->seedBinary(1210, 121, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    public function test_hdtv_gap_override_rejects_2001(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.tv-episodes']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.tv-episodes']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.tv-episodes' => 2000]);
+        $this->seedCollection(130, '[01/02] - "HDTV.Past.Boundary.mkv" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:15');
+        $this->seedCollection(131, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-13 02:20:16');
+        DB::table('collections')->where('id', 130)->update(['xref' => 'alt.binaries.hdtv.tv-episodes:1000']);
+        DB::table('collections')->where('id', 131)->update(['xref' => 'alt.binaries.hdtv.tv-episodes:3001']);
+        $this->seedBinary(1300, 130, 1, 'HDTV.Past.Boundary.mkv', 10, 10);
+        $this->seedBinary(1310, 131, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
     public function test_refuses_group_outside_allowlist(): void
     {
         config()->set('nntmux.split_collection_reconcile_groups', []);

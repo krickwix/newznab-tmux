@@ -124,6 +124,7 @@ class WorkerProfileApplier
                 'orchestrator_bf_group' => '',
                 'orchestrator_bf_qty' => '0',
                 'orchestrator_bf_stop' => '0',
+                'orchestrator_cf_permit' => '0',
             ] as $name => $value) {
                 Settings::query()->updateOrCreate(['name' => $name], ['value' => $value]);
             }

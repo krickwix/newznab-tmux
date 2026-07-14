@@ -38,6 +38,30 @@ final class NntmuxWorkerOrchestratorCommandTest extends TestCase
             ->assertExitCode(1);
     }
 
+    public function test_current_forward_permit_requires_one_active_cycle(): void
+    {
+        $this->mock(WorkerOrchestrator::class)->shouldNotReceive('runOnce');
+        $this->artisan('nntmux:worker-orchestrator', ['--grant-current-forward-permit' => true])
+            ->expectsOutputToContain('requires --once')
+            ->assertExitCode(1);
+
+        $this->artisan('nntmux:worker-orchestrator', [
+            '--once' => true,
+            '--shadow' => true,
+            '--grant-current-forward-permit' => true,
+        ])->expectsOutputToContain('cannot run in shadow mode')->assertExitCode(1);
+    }
+
+    public function test_only_one_permit_type_can_be_requested(): void
+    {
+        $this->mock(WorkerOrchestrator::class)->shouldNotReceive('runOnce');
+        $this->artisan('nntmux:worker-orchestrator', [
+            '--once' => true,
+            '--grant-backfill-permit' => true,
+            '--grant-current-forward-permit' => true,
+        ])->expectsOutputToContain('Only one permit type')->assertExitCode(1);
+    }
+
     public function test_observation_sleep_accepts_fifteen_seconds_but_never_less(): void
     {
         $method = new ReflectionMethod(NntmuxWorkerOrchestrator::class, 'normalizedSleepSeconds');

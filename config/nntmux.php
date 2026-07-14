@@ -30,6 +30,17 @@ return [
         'trim',
         explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_RECONCILE_GROUPS', '')),
     )))),
+    'split_collection_xref_gap_overrides' => array_reduce(
+        array_filter(array_map('trim', explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_XREF_GAP_OVERRIDES', '')))),
+        static function (array $overrides, string $entry): array {
+            if (preg_match('/^([^:\s,]+):([1-9][0-9]*)$/', $entry, $match) === 1) {
+                $overrides[$match[1]] = min(2000, max(1, (int) $match[2]));
+            }
+
+            return $overrides;
+        },
+        [],
+    ),
     'orchestrator' => [
         'leader_lock_seconds' => min(600, max(120, (int) env('NNTMUX_ORCHESTRATOR_LEADER_LOCK_SECONDS', 120))),
         'lock_store' => env('NNTMUX_ORCHESTRATOR_LOCK_STORE', 'redis'),
@@ -45,6 +56,7 @@ return [
             ))
         ))),
         'backfill_stop_cursors' => (string) env('NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS', ''),
+        'current_forward_windows' => (string) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS', ''),
         'backfill_yield_ttl_seconds' => max(3600, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_YIELD_TTL_SECONDS', 86400)),
         'backfill_cohort_postdate_tolerance_seconds' => min(86400, max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_COHORT_POSTDATE_TOLERANCE_SECONDS', 3600))),
         'backfill_min_payload_bytes' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MIN_PAYLOAD_BYTES', 104_857_600)),

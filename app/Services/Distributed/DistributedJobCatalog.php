@@ -16,6 +16,7 @@ class DistributedJobCatalog
         return [
             'binaries' => 'Download new headers for active groups',
             'backfill' => 'Backfill enabled groups',
+            'current-forward' => 'Consume one exact orchestrator current-forward permit',
             'releases' => 'Create and categorize releases',
             'nzb-backlog' => 'Create missing NZB files in a bounded independent lane',
             'fixnames' => 'Run release name fixing passes',
@@ -66,6 +67,7 @@ class DistributedJobCatalog
         return match ($job) {
             'binaries' => $this->binaries($settings, $killswitch),
             'backfill' => $this->backfill($settings, $counts, $killswitch),
+            'current-forward' => $this->currentForward($settings),
             'releases' => $this->simple(
                 $job,
                 (int) ($settings['releases_run'] ?? 0) > 0,
@@ -131,6 +133,7 @@ class DistributedJobCatalog
         $sleep = match ($job) {
             'binaries' => $this->timer($settings, 'bins_timer', 60),
             'backfill' => $this->backfillSleep($settings, []),
+            'current-forward' => 20,
             'releases' => $this->timer($settings, 'rel_timer', 60),
             'nzb-backlog' => $this->nzbSleep($settings),
             'fixnames', 'hashed-fixnames' => (int) ($settings['fix_timer'] ?? 300),
@@ -143,7 +146,7 @@ class DistributedJobCatalog
             default => 300,
         };
 
-        if (in_array($job, ['irc', 'nzb-backlog'], true)) {
+        if (in_array($job, ['irc', 'nzb-backlog', 'current-forward'], true)) {
             return null;
         }
 
@@ -232,6 +235,41 @@ class DistributedJobCatalog
             'multiprocessing:safe',
             ['type' => 'backfill'],
             $this->isOrchestratorManaged($settings) ? min($sleep, 60) : $sleep,
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>  $settings
+     * @return array{name:string,description:string,enabled:bool,disabled_reason:string|null,commands:list<array{command:string,arguments:array<string,mixed>}>,sleep:int}
+     */
+    private function currentForward(array $settings): array
+    {
+        $generation = (int) ($settings['orchestrator_cf_permit'] ?? 0);
+        $group = trim((string) ($settings['orchestrator_cf_group'] ?? ''));
+        $first = (int) ($settings['orchestrator_cf_first'] ?? 0);
+        $last = (int) ($settings['orchestrator_cf_last'] ?? 0);
+        if (! $this->hasFreshActiveLease($settings)
+            || $generation <= 0
+            || $group === ''
+            || $first <= 0
+            || $last - $first + 1 !== 10_000
+        ) {
+            return $this->disabled('current-forward', 'no fresh exact current-forward permit', 20);
+        }
+
+        return $this->simple(
+            'current-forward',
+            true,
+            null,
+            'articles:get-range',
+            [
+                'mode' => 'binaries',
+                'group' => $group,
+                'first' => $first,
+                'last' => $last,
+                '--current-forward-generation' => $generation,
+            ],
+            20,
         );
     }
 

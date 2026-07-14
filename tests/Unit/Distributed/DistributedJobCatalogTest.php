@@ -422,6 +422,32 @@ class DistributedJobCatalogTest extends TestCase
         self::assertSame(20, $allowed['sleep']);
     }
 
+    public function test_current_forward_emits_only_the_exact_generation_pinned_range(): void
+    {
+        $settings = [
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() + 60,
+            'orchestrator_cf_permit' => 17,
+            'orchestrator_cf_group' => 'alt.binaries.hdtv.tv-episodes',
+            'orchestrator_cf_first' => 99_730_786,
+            'orchestrator_cf_last' => 99_740_785,
+        ];
+
+        $plan = (new DistributedJobCatalog)->resolve('current-forward', $this->runVar($settings));
+
+        self::assertTrue($plan['enabled']);
+        self::assertSame([[
+            'command' => 'articles:get-range',
+            'arguments' => [
+                'mode' => 'binaries',
+                'group' => 'alt.binaries.hdtv.tv-episodes',
+                'first' => 99_730_786,
+                'last' => 99_740_785,
+                '--current-forward-generation' => 17,
+            ],
+        ]], $plan['commands']);
+    }
+
     public function test_unmanaged_backfill_preserves_its_static_sleep(): void
     {
         $plan = (new DistributedJobCatalog)->resolve('backfill', $this->runVar([

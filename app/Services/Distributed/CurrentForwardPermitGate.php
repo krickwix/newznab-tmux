@@ -1,0 +1,236 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Distributed;
+
+use App\Models\Settings;
+use App\Services\Orchestrator\CurrentForwardStopCursorPolicy;
+use App\Services\Orchestrator\PipelineSnapshot;
+use Illuminate\Support\Facades\DB;
+
+/** Atomically issues and consumes one immutable current-forward window. */
+final class CurrentForwardPermitGate
+{
+    private const int PROVIDER_RESERVE = 20_000;
+
+    /** @return array{granted:bool,reason:string,generation:int,group:string,first:int,last:int,stop:int} */
+    public function issue(PipelineSnapshot $snapshot, int $generation): array
+    {
+        $denied = static fn (string $reason): array => [
+            'granted' => false,
+            'reason' => $reason,
+            'generation' => 0,
+            'group' => '',
+            'first' => 0,
+            'last' => 0,
+            'stop' => 0,
+        ];
+        if ($generation <= 0) {
+            return $denied('invalid_generation');
+        }
+        if (! $snapshot->telemetryIsValid()
+            || ! $snapshot->hardSafetyPassed()
+            || ! $snapshot->lowPressure
+            || $snapshot->highPressure
+            || $snapshot->databaseCurrentWaits > 0
+            || $snapshot->releasesBacklog > 0
+            || $snapshot->eligibleNzbs > 0
+        ) {
+            return $denied('pipeline_not_drained');
+        }
+
+        $policy = new CurrentForwardStopCursorPolicy;
+        $groups = $policy->groups();
+        if (! $policy->isValid() || count($groups) !== 1) {
+            return $denied('invalid_window_policy');
+        }
+        $group = $groups[0];
+        $window = $policy->window($group);
+        if ($window === null) {
+            return $denied('invalid_window_policy');
+        }
+
+        return DB::transaction(function () use ($denied, $generation, $group, $window): array {
+            $this->ensureSettings();
+            $settings = $this->lockedSettings();
+            if ((string) $settings->get('orchestrator_mode') !== 'active'
+                || (int) $settings->get('orchestrator_lease_until') < time()
+                || (int) $settings->get('orchestrator_bf_permit') !== 0
+                || (int) $settings->get('orchestrator_cf_permit') !== 0
+            ) {
+                return $denied('permit_conflict_or_stale_lease');
+            }
+            $groupRow = DB::table('usenet_groups')->where('name', $group)->lockForUpdate()->first();
+            if ($groupRow === null || (int) $groupRow->active !== 0 || (int) $groupRow->backfill !== 1) {
+                return $denied('group_not_inactive_backfill');
+            }
+            if ((int) $groupRow->last_record !== $window['first'] - 1) {
+                return $denied('cursor_drift');
+            }
+            $provider = DB::table('short_groups')->where('name', $group)->lockForUpdate()->first();
+            if (! $this->providerCoversWindow($provider, $window['first'], $window['last'])) {
+                return $denied('provider_range_drift');
+            }
+
+            foreach ([
+                'orchestrator_cf_generation' => $generation,
+                'orchestrator_cf_permit' => $generation,
+                'orchestrator_cf_group' => $group,
+                'orchestrator_cf_first' => $window['first'],
+                'orchestrator_cf_last' => $window['last'],
+                'orchestrator_cf_stop' => $window['stop'],
+                'orchestrator_cf_issued_at' => time(),
+                'orchestrator_cf_failure' => '',
+            ] as $name => $value) {
+                Settings::query()->updateOrCreate(['name' => $name], ['value' => (string) $value]);
+            }
+            Settings::forgetCachedSettings();
+
+            return [
+                'granted' => true,
+                'reason' => 'current_forward_permit_granted',
+                'generation' => $generation,
+                'group' => $group,
+                ...$window,
+            ];
+        }, 3);
+    }
+
+    /** @return array{generation:int,group:string,first:int,last:int,stop:int}|null */
+    public function claim(int $generation, string $group, int $first, int $last): ?array
+    {
+        return DB::transaction(function () use ($generation, $group, $first, $last): ?array {
+            $this->ensureSettings();
+            $settings = $this->lockedSettings();
+            $stop = (int) $settings->get('orchestrator_cf_stop');
+            $policy = new CurrentForwardStopCursorPolicy;
+            if ($generation <= 0
+                || ! $policy->isValid()
+                || ! $policy->matches($group, $first, $last, $stop)
+                || (string) $settings->get('orchestrator_mode') !== 'active'
+                || (int) $settings->get('orchestrator_lease_until') < time()
+                || (int) $settings->get('orchestrator_bf_permit') !== 0
+                || (int) $settings->get('orchestrator_cf_permit') !== $generation
+                || (string) $settings->get('orchestrator_cf_group') !== $group
+                || (int) $settings->get('orchestrator_cf_first') !== $first
+                || (int) $settings->get('orchestrator_cf_last') !== $last
+            ) {
+                return null;
+            }
+            $groupRow = DB::table('usenet_groups')->where('name', $group)->lockForUpdate()->first();
+            $provider = DB::table('short_groups')->where('name', $group)->lockForUpdate()->first();
+            if ($groupRow === null
+                || (int) $groupRow->active !== 0
+                || (int) $groupRow->backfill !== 1
+                || (int) $groupRow->last_record !== $first - 1
+                || ! $this->providerCoversWindow($provider, $first, $last)
+            ) {
+                return null;
+            }
+
+            Settings::query()->where('name', 'orchestrator_cf_permit')->update(['value' => '0']);
+            Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_claimed'], ['value' => (string) $generation]);
+            Settings::forgetCachedSettings();
+
+            return compact('generation', 'group', 'first', 'last', 'stop');
+        }, 3);
+    }
+
+    public function complete(int $generation): bool
+    {
+        return DB::transaction(function () use ($generation): bool {
+            $this->ensureSettings();
+            $settings = $this->lockedSettings();
+            $group = (string) $settings->get('orchestrator_cf_group');
+            $last = (int) $settings->get('orchestrator_cf_last');
+            $groupRow = DB::table('usenet_groups')->where('name', $group)->lockForUpdate()->first();
+            if ($generation <= 0
+                || (int) $settings->get('orchestrator_cf_claimed') !== $generation
+                || $groupRow === null
+                || (int) $groupRow->last_record !== $last
+                || (int) $groupRow->active !== 0
+                || (int) $groupRow->backfill !== 1
+            ) {
+                return false;
+            }
+
+            Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_completed'], ['value' => (string) $generation]);
+            Settings::forgetCachedSettings();
+
+            return true;
+        }, 3);
+    }
+
+    public function fail(int $generation, string $reason): bool
+    {
+        return DB::transaction(function () use ($generation, $reason): bool {
+            $this->ensureSettings();
+            $settings = $this->lockedSettings();
+            if ($generation <= 0 || (int) $settings->get('orchestrator_cf_generation') !== $generation) {
+                return false;
+            }
+            Settings::query()->where('name', 'orchestrator_cf_permit')->update(['value' => '0']);
+            Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_failed'], ['value' => (string) $generation]);
+            Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_failure'], ['value' => substr($reason, 0, 120)]);
+            Settings::forgetCachedSettings();
+
+            return true;
+        }, 3);
+    }
+
+    /** @return array{generation:int,group:string,first:int,last:int}|null */
+    public function pending(): ?array
+    {
+        $generation = (int) Settings::settingValue('orchestrator_cf_permit');
+        $group = trim((string) Settings::settingValue('orchestrator_cf_group'));
+        $first = (int) Settings::settingValue('orchestrator_cf_first');
+        $last = (int) Settings::settingValue('orchestrator_cf_last');
+
+        return $generation > 0 && $group !== '' && $first > 0 && $last >= $first
+            ? compact('generation', 'group', 'first', 'last')
+            : null;
+    }
+
+    private function providerCoversWindow(?object $provider, int $first, int $last): bool
+    {
+        return $provider !== null
+            && strtotime((string) $provider->updated) >= time() - 600
+            && (int) $provider->first_record <= $first
+            && (int) $provider->last_record >= $last + self::PROVIDER_RESERVE;
+    }
+
+    private function ensureSettings(): void
+    {
+        foreach ([
+            'orchestrator_mode' => '',
+            'orchestrator_lease_until' => 0,
+            'orchestrator_bf_permit' => 0,
+            'orchestrator_cf_generation' => 0,
+            'orchestrator_cf_permit' => 0,
+            'orchestrator_cf_claimed' => 0,
+            'orchestrator_cf_completed' => 0,
+            'orchestrator_cf_failed' => 0,
+            'orchestrator_cf_group' => '',
+            'orchestrator_cf_first' => 0,
+            'orchestrator_cf_last' => 0,
+            'orchestrator_cf_stop' => 0,
+        ] as $name => $value) {
+            Settings::query()->firstOrCreate(['name' => $name], ['value' => (string) $value]);
+        }
+    }
+
+    private function lockedSettings(): mixed
+    {
+        return Settings::query()
+            ->whereIn('name', [
+                'orchestrator_mode', 'orchestrator_lease_until', 'orchestrator_bf_permit',
+                'orchestrator_cf_generation', 'orchestrator_cf_permit', 'orchestrator_cf_claimed',
+                'orchestrator_cf_completed', 'orchestrator_cf_failed', 'orchestrator_cf_group',
+                'orchestrator_cf_first', 'orchestrator_cf_last', 'orchestrator_cf_stop',
+            ])
+            ->lockForUpdate()
+            ->get()
+            ->mapWithKeys(fn (Settings $setting): array => [$setting->name => $setting->getRawOriginal('value')]);
+    }
+}

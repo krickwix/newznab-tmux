@@ -8,6 +8,7 @@ use App\Models\Settings;
 use App\Models\UsenetGroup;
 use App\Services\NNTP\NntpArticleDate;
 use App\Services\NNTP\NNTPService;
+use App\Services\Orchestrator\CurrentForwardStopCursorPolicy;
 use DariusIII\NetNntp\Error;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -325,8 +326,18 @@ class BinariesService
      * @throws \Exception
      * @throws \Throwable
      */
-    public function scan(array $groupMySQL, int $first, int $last, string $type = 'update', ?array $missingParts = null): array
-    {
+    public function scan(
+        array $groupMySQL,
+        int $first,
+        int $last,
+        string $type = 'update',
+        ?array $missingParts = null,
+        bool $currentForwardPermit = false,
+    ): array {
+        $groupName = trim((string) ($groupMySQL['name'] ?? ''));
+        if ((new CurrentForwardStopCursorPolicy)->protects($groupName) && ! $currentForwardPermit) {
+            throw new \RuntimeException("Group {$groupName} requires an exact current-forward permit.");
+        }
         $this->startLoop = Carbon::now();
         $this->groupMySQL = $groupMySQL;
         $this->last = $last;

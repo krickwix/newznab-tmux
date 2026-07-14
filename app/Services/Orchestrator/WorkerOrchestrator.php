@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Orchestrator;
 
 use App\Models\Settings;
+use App\Services\Distributed\CurrentForwardPermitGate;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use Illuminate\Support\Facades\Log;
 use Throwable;
@@ -24,10 +25,11 @@ class WorkerOrchestrator
         private readonly WorkerProfileApplier $applier,
         private readonly DistributedWorkerTelemetry $workerTelemetry = new DistributedWorkerTelemetry,
         private readonly AdaptiveWorkerControlPlanner $adaptiveControls = new AdaptiveWorkerControlPlanner,
+        private readonly ?CurrentForwardPermitGate $currentForwardPermits = null,
     ) {}
 
     /** @return array<string, mixed> */
-    public function runOnce(bool $shadow, bool $grantPermit = false): array
+    public function runOnce(bool $shadow, bool $grantPermit = false, bool $grantCurrentForwardPermit = false): array
     {
         $lock = null;
         $acquired = false;
@@ -36,6 +38,15 @@ class WorkerOrchestrator
         $delayedAttributionQueued = false;
         $delayedAttributionSettled = null;
         $delayedAttributionEarlyQualityLock = false;
+        $currentForward = [
+            'granted' => false,
+            'reason' => $grantCurrentForwardPermit ? 'current_forward_not_evaluated' : 'not_requested',
+            'generation' => 0,
+            'group' => '',
+            'first' => 0,
+            'last' => 0,
+            'stop' => 0,
+        ];
         try {
             $lock = $this->store->leaderLock();
             if (! $lock->get()) {
@@ -403,6 +414,14 @@ class WorkerOrchestrator
                         $this->store->markBackfillTargetAttempted($snapshot->backfillGroup, time());
                     }
                 }
+                if ($grantCurrentForwardPermit) {
+                    if ($permitObservation !== null || $this->store->pendingBackfillDelayedAttributionGroups() !== []) {
+                        $currentForward['reason'] = 'backfill_attribution_in_progress';
+                    } else {
+                        $currentForward = ($this->currentForwardPermits ?? app(CurrentForwardPermitGate::class))
+                            ->issue($snapshot, (int) $generation);
+                    }
+                }
             }
             $this->store->storeState($decision->nextState);
             if ($delayedAttributionSettled !== null) {
@@ -425,6 +444,7 @@ class WorkerOrchestrator
                 ],
                 'backfill_permitted' => $decision->backfillPermitted,
                 'permit_granted' => ! $shadow && $issuePermit && $decision->backfillPermitted,
+                'current_forward' => $currentForward,
                 'reasons' => [
                     ...$decision->reasons,
                     ...($preserveUnclaimedPermit ? ['backfill_permit_claim_grace'] : []),

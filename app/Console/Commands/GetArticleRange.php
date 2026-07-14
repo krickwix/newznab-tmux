@@ -7,8 +7,10 @@ namespace App\Console\Commands;
 use App\Models\Settings;
 use App\Models\UsenetGroup;
 use App\Services\Binaries\BinariesService;
+use App\Services\Distributed\CurrentForwardPermitGate;
 use App\Services\NNTP\NntpArticleDate;
 use App\Services\NNTP\NNTPService;
+use App\Services\Orchestrator\CurrentForwardStopCursorPolicy;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -24,7 +26,8 @@ class GetArticleRange extends Command
                             {mode : Mode: binaries or backfill}
                             {group : Group name}
                             {first : First article number}
-                            {last : Last article number}';
+                            {last : Last article number}
+                            {--current-forward-generation= : Claim one exact orchestrator current-forward permit}';
 
     /**
      * The console command description.
@@ -42,14 +45,38 @@ class GetArticleRange extends Command
         $groupName = $this->argument('group');
         $firstArticle = (int) $this->argument('first');
         $lastArticle = (int) $this->argument('last');
+        $generationOption = $this->option('current-forward-generation');
+        $currentForward = is_numeric($generationOption) && (int) $generationOption > 0;
+        $claimedGeneration = null;
+        $permitGate = null;
 
         if (! \in_array($mode, ['binaries', 'backfill'], true)) {
             $this->error('Mode must be either "binaries" or "backfill".');
 
             return self::FAILURE;
         }
+        if ((new CurrentForwardStopCursorPolicy)->protects((string) $groupName) && ! $currentForward) {
+            $this->error("Group {$groupName} requires an exact current-forward permit.");
+
+            return self::FAILURE;
+        }
+        if ($generationOption !== null && ! $currentForward) {
+            $this->error('Current-forward generation must be a positive integer.');
+
+            return self::FAILURE;
+        }
 
         try {
+            if ($currentForward) {
+                if ($mode !== 'binaries') {
+                    throw new \RuntimeException('Current-forward permits require binaries mode.');
+                }
+                $claimedGeneration = (int) $generationOption;
+                $permitGate = app(CurrentForwardPermitGate::class);
+                if ($permitGate->claim($claimedGeneration, (string) $groupName, $firstArticle, $lastArticle) === null) {
+                    throw new \RuntimeException('Current-forward permit was absent, stale, or did not match the exact range.');
+                }
+            }
             $nntp = $this->getNntp();
             $groupMySQL = UsenetGroup::getByName($groupName)->toArray();
 
@@ -64,11 +91,14 @@ class GetArticleRange extends Command
                 $groupSummary = $nntp->dataError($nntp, $groupMySQL['name']);
             }
             if (NNTPService::isError($groupSummary) || ! is_array($groupSummary)) {
-                return self::FAILURE;
+                throw new \RuntimeException('Unable to select the current-forward group from the provider.');
             }
 
             $this->refreshSelectedProviderRange($groupMySQL['name'], $groupSummary);
             $selectedRange = $this->clampToSelectedProviderRange($firstArticle, $lastArticle, $groupSummary);
+            if ($currentForward && $selectedRange !== [$firstArticle, $lastArticle]) {
+                throw new \RuntimeException('Provider range would clamp or omit the exact current-forward window.');
+            }
             if ($selectedRange === null) {
                 $this->info("Requested range {$firstArticle}-{$lastArticle} is outside the selected provider range");
 
@@ -82,17 +112,34 @@ class GetArticleRange extends Command
                 $groupMySQL,
                 $firstArticle,
                 $lastArticle,
-                ((int) Settings::settingValue('safepartrepair') === 1 ? 'update' : 'backfill')
+                ((int) Settings::settingValue('safepartrepair') === 1 ? 'update' : 'backfill'),
+                currentForwardPermit: $currentForward,
             );
 
             if (empty($return)) {
+                if ($currentForward) {
+                    throw new \RuntimeException('Provider returned no usable headers for the exact current-forward window.');
+                }
+
                 return self::SUCCESS;
+            }
+            if ($currentForward
+                && ((int) ($return['firstArticleNumber'] ?? 0) !== $firstArticle
+                    || (int) ($return['lastArticleNumber'] ?? 0) !== $lastArticle)
+            ) {
+                throw new \RuntimeException('Provider did not return both exact current-forward boundaries.');
             }
 
             $this->updateGroupRecords($mode, $groupMySQL, $return, $firstArticle);
+            if ($currentForward && ! $permitGate->complete((int) $claimedGeneration)) {
+                throw new \RuntimeException('Current-forward cursor completion receipt could not be recorded.');
+            }
 
             return self::SUCCESS;
         } catch (\Throwable $e) {
+            if ($claimedGeneration !== null && $permitGate !== null) {
+                $permitGate->fail($claimedGeneration, $e->getMessage());
+            }
             Log::error($e->getTraceAsString());
             $this->error($e->getMessage());
 
