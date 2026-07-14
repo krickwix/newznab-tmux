@@ -115,7 +115,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 ? ($name === 'nntmux-worker-binaries'
                     ? ':microservices-pods-20260713-provider-range-v93'
                     : ($name === 'nntmux-worker-releases'
-                        ? ':microservices-pods-20260713-stage6-coverage-v126'
+                        ? ':microservices-pods-20260714-complete-tv-v138@sha256:b7c19efcdde98abb66d9c9ed4d23c3ff9a01be20c7b3f628f3be768548f5c4e3'
                         : ':microservices-pods-20260711-worker-orchestrator-v22'))
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
@@ -130,7 +130,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             );
             $environment = array_column($container['env'] ?? [], 'value', 'name');
             self::assertSame(
-                ltrim($expectedImage, ':'),
+                explode('@', ltrim($expectedImage, ':'), 2)[0],
                 $environment['NNTMUX_BUILD_VERSION'] ?? null,
                 sprintf('%s build telemetry must match its image.', $name),
             );
@@ -311,9 +311,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-dated-tv-v137', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-complete-tv-v138', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:cc5ce5860e94e8107b267d76beb902aa3a9fc29e4236032d587856f23a99791b',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:b7c19efcdde98abb66d9c9ed4d23c3ff9a01be20c7b3f628f3be768548f5c4e3',
             $orchestratorImage,
         );
         self::assertSame(
@@ -344,6 +344,16 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             'alt.binaries.tvseries',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_TV_DATE_RANGE_GROUPS'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.tvseries',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_TV_COMPLETE_SERIES_GROUPS'] ?? null,
+        );
+        $releases = $deployments['nntmux-worker-releases'] ?? null;
+        self::assertIsArray($releases);
+        self::assertSame(
+            'alt.binaries.tvseries',
+            $environment($releases)['NNTMUX_ORCHESTRATOR_BACKFILL_TV_COMPLETE_SERIES_GROUPS'] ?? null,
         );
         self::assertSame(
             '0.90',
