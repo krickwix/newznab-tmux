@@ -309,21 +309,17 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $orchestrator = $deployments['nntmux-worker-orchestrator'] ?? null;
         self::assertIsArray($orchestrator);
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
-        self::assertStringEndsWith(
-            ':microservices-pods-20260713-tv-source-canary-v125',
-            (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? ''),
-        );
+        $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
+        $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
+        self::assertSame('microservices-pods-20260714-stable-drain-v132', $orchestratorBuild);
+        self::assertSame('docker.io/krickwix/nntmux:'.$orchestratorBuild, $orchestratorImage);
         self::assertSame(
-            'microservices-pods-20260713-tv-source-canary-v125',
-            $environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? null,
-        );
-        self::assertSame(
-            ['php', 'artisan', 'nntmux:worker-orchestrator', '--sleep=30'],
+            ['php', 'artisan', 'nntmux:worker-orchestrator', '--sleep=15'],
             $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? null,
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
         self::assertSame(
-            'false',
+            'true',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
@@ -376,7 +372,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         $probeGroupsValue = $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null;
         self::assertSame(
-            'alt.binaries.tv,alt.binaries.movies.x264,alt.binaries.hdtv.tv-episodes,alt.binaries.dvd.movies,alt.binaries.movie,alt.binaries.teevee,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.dvd.classic.movies,alt.binaries.sounds.lossless,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
+            'alt.binaries.tvseries,alt.binaries.movies.x264,alt.binaries.hdtv.tv-episodes,alt.binaries.dvd.movies,alt.binaries.movie,alt.binaries.teevee,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.dvd.classic.movies,alt.binaries.sounds.lossless,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd',
             $probeGroupsValue,
         );
         $probeGroups = explode(',', (string) $probeGroupsValue);
@@ -388,7 +384,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_YIELD_TTL_SECONDS'] ?? null,
         );
         self::assertSame(
-            '3',
+            '9',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_EXPLOIT_ATTEMPTS_BEFORE_EXPLORE'] ?? null,
         );
         self::assertSame(
@@ -403,6 +399,10 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '600',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_INCOMPLETE_RELEASE_GRACE_SECONDS'] ?? null,
+        );
+        self::assertSame(
+            '45',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PRODUCTIVE_SETTLEMENT_GRACE_SECONDS'] ?? null,
         );
         self::assertSame(
             '9000',

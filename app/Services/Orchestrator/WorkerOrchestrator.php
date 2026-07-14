@@ -511,31 +511,47 @@ class WorkerOrchestrator
                 default => '',
             };
             $productive = 0;
+            $createdReleases = 0;
+            $fullyDrained = false;
             if ($qualityFailure === ''
                 && $counts['target'] > 0
                 && $counts['non_target'] === 0
                 && $counts['uncategorized'] === 0
-                && $now - (int) ($entry['quality_grace_started_at'] ?? $entry['queued_at'] ?? $now)
-                    >= (int) config('nntmux.orchestrator.backfill_incomplete_release_grace_seconds', 600)
                 && $snapshot->telemetryIsValid()
                 && $snapshot->hardSafetyPassed()
                 && $snapshot->lowPressure
                 && ! $snapshot->highPressure
                 && $snapshot->databaseCurrentWaits === 0
                 && $snapshot->eligibleNzbs === 0
-                && $this->snapshots->backfillCreatedReleasesForCohort(
+            ) {
+                $createdReleases = $this->snapshots->backfillCreatedReleasesForCohort(
                     $group,
                     (int) ($entry['release_high_watermark'] ?? 0),
                     (string) ($entry['cursor_start_postdate'] ?? ''),
                     (string) ($entry['cursor_end_postdate'] ?? ''),
-                ) === $classifiedNzbs
-                && $this->snapshots->backfillPendingCollectionsForCohort(
-                    $group,
-                    (string) ($entry['cursor_start_postdate'] ?? ''),
-                    (string) ($entry['cursor_end_postdate'] ?? ''),
-                ) === 0
-            ) {
-                $productive = (int) $counts['target'];
+                );
+                $fullyDrained = $createdReleases === $classifiedNzbs
+                    && $this->snapshots->backfillPendingCollectionsForCohort(
+                        $group,
+                        (string) ($entry['cursor_start_postdate'] ?? ''),
+                        (string) ($entry['cursor_end_postdate'] ?? ''),
+                    ) === 0;
+            }
+            if ($fullyDrained) {
+                $drainStartedAt = $this->store->observeBackfillProductiveDrain(
+                    $generation,
+                    (int) $counts['target'],
+                    $createdReleases,
+                    $now,
+                );
+                if ($drainStartedAt > 0
+                    && $now - $drainStartedAt
+                        >= (int) config('nntmux.orchestrator.backfill_productive_settlement_grace_seconds', 120)
+                ) {
+                    $productive = (int) $counts['target'];
+                }
+            } else {
+                $this->store->clearBackfillProductiveDrain($generation);
             }
             if ($qualityFailure === '' && $productive === 0) {
                 continue;

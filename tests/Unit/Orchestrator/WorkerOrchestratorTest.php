@@ -413,6 +413,35 @@ final class WorkerOrchestratorTest extends TestCase
         }
     }
 
+    public function test_productive_settlement_grace_is_bounded_between_thirty_seconds_and_five_minutes(): void
+    {
+        $key = 'NNTMUX_ORCHESTRATOR_BACKFILL_PRODUCTIVE_SETTLEMENT_GRACE_SECONDS';
+        $previous = getenv($key);
+
+        try {
+            putenv($key.'=29');
+            $_ENV[$key] = '29';
+            $_SERVER[$key] = '29';
+            $configuration = require base_path('config/nntmux.php');
+            self::assertSame(30, $configuration['orchestrator']['backfill_productive_settlement_grace_seconds']);
+
+            putenv($key.'=301');
+            $_ENV[$key] = '301';
+            $_SERVER[$key] = '301';
+            $configuration = require base_path('config/nntmux.php');
+            self::assertSame(300, $configuration['orchestrator']['backfill_productive_settlement_grace_seconds']);
+        } finally {
+            if ($previous === false) {
+                putenv($key);
+                unset($_ENV[$key], $_SERVER[$key]);
+            } else {
+                putenv($key.'='.$previous);
+                $_ENV[$key] = $previous;
+                $_SERVER[$key] = $previous;
+            }
+        }
+    }
+
     public function test_zero_output_context_retry_requires_exact_completed_input_and_unambiguous_safety(): void
     {
         config([
@@ -757,6 +786,7 @@ final class WorkerOrchestratorTest extends TestCase
             'nntmux.orchestrator.lock_store' => 'array',
             'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
             'nntmux.orchestrator.backfill_incomplete_release_grace_seconds' => 600,
+            'nntmux.orchestrator.backfill_productive_settlement_grace_seconds' => 45,
         ]);
         Cache::store('array')->flush();
         $store = new WorkerControlStateStore;
@@ -771,23 +801,24 @@ final class WorkerOrchestratorTest extends TestCase
             'backfill_quantity' => 10_000,
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-04 03:04:05',
-        ], ['cursor_postdate' => '2026-01-03 03:04:05'], 10_000, $now - 801));
-        $store->markBackfillContextRepeat('alt.test', $now - 702, 7);
+        ], ['cursor_postdate' => '2026-01-03 03:04:05'], 10_000, $now - 201));
+        $store->markBackfillContextRepeat('alt.test', $now - 102, 7);
         self::assertTrue($store->queueBackfillDelayedAttribution([
             'generation' => 8,
             'backfill_group' => 'alt.test',
             'backfill_quantity' => 10_000,
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-03 03:04:05',
-        ], ['cursor_postdate' => '2026-01-02 03:04:05'], 10_000, $now - 701, contextContinuation: true));
-        $store->markBackfillContextRepeat('alt.test', $now - 602, 8);
+        ], ['cursor_postdate' => '2026-01-02 03:04:05'], 10_000, $now - 101, contextContinuation: true));
+        $store->markBackfillContextRepeat('alt.test', $now - 47, 8);
         self::assertTrue($store->queueBackfillDelayedAttribution([
             'generation' => 9,
             'backfill_group' => 'alt.test',
             'backfill_quantity' => 10_000,
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-02 03:04:05',
-        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, $now - 601, contextContinuation: true));
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, $now - 46, contextContinuation: true));
+        self::assertSame($now - 46, $store->observeBackfillProductiveDrain(7, 2, 2, $now - 46));
 
         $snapshot = new PipelineSnapshot(1, 2, 3, 0, 0, lowPressure: true);
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
@@ -920,13 +951,13 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame([], $store->backfillYieldHistory());
     }
 
-    public function test_immature_productive_attribution_waits_for_the_drain_grace(): void
+    public function test_immature_productive_attribution_waits_for_the_productive_settlement_grace(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => false,
             'nntmux.orchestrator.state_store' => 'array',
             'nntmux.orchestrator.lock_store' => 'array',
-            'nntmux.orchestrator.backfill_incomplete_release_grace_seconds' => 600,
+            'nntmux.orchestrator.backfill_productive_settlement_grace_seconds' => 45,
         ]);
         Cache::store('array')->flush();
         $store = new WorkerControlStateStore;
@@ -936,7 +967,7 @@ final class WorkerOrchestratorTest extends TestCase
             'backfill_quantity' => 10_000,
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-02 03:04:05',
-        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time()));
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time() - 44));
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->once()->andReturn(new PipelineSnapshot(
             1, 2, 3, 0, 0,
@@ -945,8 +976,8 @@ final class WorkerOrchestratorTest extends TestCase
         $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
             'target' => 1, 'non_target' => 0, 'uncategorized' => 0,
         ]);
-        $snapshots->shouldNotReceive('backfillCreatedReleasesForCohort');
-        $snapshots->shouldNotReceive('backfillPendingCollectionsForCohort');
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(1);
+        $snapshots->shouldReceive('backfillPendingCollectionsForCohort')->once()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('apply')->once()->andReturn(8);
 
@@ -958,6 +989,48 @@ final class WorkerOrchestratorTest extends TestCase
         ))->runOnce(false);
 
         self::assertNotContains('backfill_delayed_attribution_settled', $result['reasons']);
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
+        self::assertSame([], $store->backfillYieldHistory());
+    }
+
+    public function test_productive_settlement_grace_starts_at_the_first_clean_drain_and_restarts_for_late_output(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_productive_settlement_grace_seconds' => 30,
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time() - 600));
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->twice()->andReturn(new PipelineSnapshot(
+            1, 2, 3, 0, 0,
+            lowPressure: true,
+        ));
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->twice()->andReturn(
+            ['target' => 1, 'non_target' => 0, 'uncategorized' => 0],
+            ['target' => 2, 'non_target' => 0, 'uncategorized' => 0],
+        );
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->twice()->andReturn(1, 2);
+        $snapshots->shouldReceive('backfillPendingCollectionsForCohort')->twice()->andReturn(0);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->twice()->andReturn(8);
+        $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
+
+        $firstCleanSample = $orchestrator->runOnce(false);
+        $lateOutputSample = $orchestrator->runOnce(false);
+
+        self::assertNotContains('backfill_delayed_attribution_settled', $firstCleanSample['reasons']);
+        self::assertNotContains('backfill_delayed_attribution_settled', $lateOutputSample['reasons']);
         self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
         self::assertSame([], $store->backfillYieldHistory());
     }

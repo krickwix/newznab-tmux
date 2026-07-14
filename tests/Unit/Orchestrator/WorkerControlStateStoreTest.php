@@ -320,6 +320,40 @@ final class WorkerControlStateStoreTest extends TestCase
         self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
     }
 
+    public function test_productive_drain_observation_is_durable_and_resets_for_late_output_or_continuation(): void
+    {
+        config([
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_context_max_chain_windows' => 3,
+        ]);
+        $store = new WorkerControlStateStore;
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, 1_000));
+
+        self::assertSame(2_000, $store->observeBackfillProductiveDrain(7, 1, 1, 2_000));
+        self::assertSame(2_000, $store->observeBackfillProductiveDrain(7, 1, 1, 2_010));
+        self::assertSame(2_020, $store->observeBackfillProductiveDrain(7, 2, 2, 2_020));
+        self::assertSame(0, $store->observeBackfillProductiveDrain(7, 2, 1, 2_021));
+
+        $store->clearBackfillProductiveDrain(7);
+        self::assertSame(2_030, $store->observeBackfillProductiveDrain(7, 2, 2, 2_030));
+
+        $store->markBackfillContextRepeat('alt.test', 2_031, 7);
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 8,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-01 03:04:05',
+        ], ['cursor_postdate' => '2025-12-31 03:04:05'], 10_000, 3_000, contextContinuation: true));
+        self::assertSame(3_001, $store->observeBackfillProductiveDrain(7, 2, 2, 3_001));
+    }
+
     public function test_delayed_attribution_extends_one_marked_context_chain_exactly_once(): void
     {
         config()->set('nntmux.orchestrator.backfill_delayed_attribution_seconds', 9_000);

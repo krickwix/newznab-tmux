@@ -49,6 +49,7 @@ return [
         'backfill_target_nzbs_per_permit' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_TARGET_NZBS_PER_PERMIT', 60)),
         'backfill_zero_output_grace_seconds' => min(1200, max(300, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_ZERO_OUTPUT_GRACE_SECONDS', 300))),
         'backfill_incomplete_release_grace_seconds' => min(1200, max(600, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_INCOMPLETE_RELEASE_GRACE_SECONDS', 600))),
+        'backfill_productive_settlement_grace_seconds' => min(300, max(30, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_PRODUCTIVE_SETTLEMENT_GRACE_SECONDS', 120))),
         'backfill_delayed_attribution_seconds' => min(21_600, max(7_200, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_DELAYED_ATTRIBUTION_SECONDS', 9_000))),
         'backfill_max_quantity' => max(10000, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_QUANTITY', 200000)),
         'backfill_headroom_fraction' => min(0.5, max(0.01, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_HEADROOM_FRACTION', 0.10))),

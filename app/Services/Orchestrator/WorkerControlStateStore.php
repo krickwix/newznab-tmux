@@ -442,6 +442,8 @@ class WorkerControlStateStore
                 $extended['continuation_generation'],
                 $extended['continuation_start_postdate'],
                 $extended['continuation_cursor_delta'],
+                $extended['productive_drain_started_at'],
+                $extended['productive_drain_signature'],
             );
             $ledger[$entryKey] = $extended;
             $cache->forever(self::BACKFILL_DELAYED_ATTRIBUTION_KEY, $ledger);
@@ -468,6 +470,65 @@ class WorkerControlStateStore
         $cache->forever(self::BACKFILL_DELAYED_ATTRIBUTION_KEY, $ledger);
 
         return true;
+    }
+
+    public function observeBackfillProductiveDrain(
+        int $generation,
+        int $targetNzbs,
+        int $createdReleases,
+        int $now,
+    ): int {
+        if ($generation <= 0 || $targetNzbs <= 0 || $createdReleases !== $targetNzbs || $now <= 0) {
+            return 0;
+        }
+
+        $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+        $ledger = $cache->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
+        $key = (string) $generation;
+        if (! is_array($ledger) || ! isset($ledger[$key]) || ! is_array($ledger[$key])) {
+            return 0;
+        }
+
+        $signature = $targetNzbs.':'.$createdReleases;
+        $entry = $ledger[$key];
+        $startedAt = (int) ($entry['productive_drain_started_at'] ?? 0);
+        if ((string) ($entry['productive_drain_signature'] ?? '') === $signature
+            && $startedAt > 0
+            && $startedAt <= $now
+        ) {
+            return $startedAt;
+        }
+
+        $ledger[$key] = [
+            ...$entry,
+            'productive_drain_started_at' => $now,
+            'productive_drain_signature' => $signature,
+        ];
+        $cache->forever(self::BACKFILL_DELAYED_ATTRIBUTION_KEY, $ledger);
+
+        return $now;
+    }
+
+    public function clearBackfillProductiveDrain(int $generation): void
+    {
+        if ($generation <= 0) {
+            return;
+        }
+
+        $cache = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+        $ledger = $cache->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
+        $key = (string) $generation;
+        if (! is_array($ledger)
+            || ! isset($ledger[$key])
+            || ! is_array($ledger[$key])
+            || (! array_key_exists('productive_drain_started_at', $ledger[$key])
+                && ! array_key_exists('productive_drain_signature', $ledger[$key]))
+        ) {
+            return;
+        }
+
+        unset($ledger[$key]['productive_drain_started_at'], $ledger[$key]['productive_drain_signature']);
+        $cache->forever(self::BACKFILL_DELAYED_ATTRIBUTION_KEY, $ledger);
     }
 
     /** @return list<string> */
