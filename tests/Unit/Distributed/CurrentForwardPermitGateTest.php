@@ -55,6 +55,8 @@ final class CurrentForwardPermitGateTest extends TestCase
         ]);
         Settings::query()->insert([
             ['name' => 'orchestrator_mode', 'value' => 'active'],
+            ['name' => 'orchestrator_profile', 'value' => 'fill'],
+            ['name' => 'orchestrator_recovery_ok', 'value' => '1'],
             ['name' => 'orchestrator_lease_until', 'value' => (string) (time() + 600)],
             ['name' => 'orchestrator_bf_permit', 'value' => '0'],
         ]);
@@ -103,6 +105,35 @@ final class CurrentForwardPermitGateTest extends TestCase
         self::assertTrue($gate->fail(17, 'provider_range_drift'));
         self::assertSame(17, Settings::settingValue('orchestrator_cf_failed'));
         self::assertSame('provider_range_drift', Settings::settingValue('orchestrator_cf_failure'));
+    }
+
+    public function test_issue_rejects_fail_safe_or_incomplete_recovery(): void
+    {
+        $gate = new CurrentForwardPermitGate;
+        Settings::query()->where('name', 'orchestrator_profile')->update(['value' => 'fail_safe']);
+        Settings::query()->where('name', 'orchestrator_recovery_ok')->update(['value' => '0']);
+
+        self::assertSame('controller_not_recovered', $gate->issue($this->safeSnapshot(), 17)['reason']);
+
+        Settings::query()->where('name', 'orchestrator_profile')->update(['value' => 'fill']);
+        self::assertSame('controller_not_recovered', $gate->issue($this->safeSnapshot(), 18)['reason']);
+
+        Settings::query()->where('name', 'orchestrator_recovery_ok')->update(['value' => '1']);
+        self::assertTrue($gate->issue($this->safeSnapshot(), 19)['granted']);
+    }
+
+    public function test_unresolved_claim_blocks_reissue_and_stale_completion(): void
+    {
+        $gate = new CurrentForwardPermitGate;
+        self::assertTrue($gate->issue($this->safeSnapshot(), 17)['granted']);
+        self::assertNotNull($gate->claim(17, 'alt.test', 101, 10_100));
+
+        self::assertSame('current_forward_in_progress', $gate->issue($this->safeSnapshot(), 18)['reason']);
+
+        DB::table('usenet_groups')->where('name', 'alt.test')->update(['last_record' => 10_100]);
+        Settings::query()->where('name', 'orchestrator_cf_gen')->update(['value' => '18']);
+        self::assertFalse($gate->complete(17));
+        self::assertSame(0, Settings::settingValue('orchestrator_cf_completed'));
     }
 
     public function test_every_current_forward_setting_key_fits_the_live_schema(): void

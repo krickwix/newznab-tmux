@@ -54,12 +54,24 @@ final class CurrentForwardPermitGate
         return DB::transaction(function () use ($denied, $generation, $group, $window): array {
             $this->ensureSettings();
             $settings = $this->lockedSettings();
+            if ((string) $settings->get('orchestrator_profile') === 'fail_safe'
+                || (int) $settings->get('orchestrator_recovery_ok') !== 1
+            ) {
+                return $denied('controller_not_recovered');
+            }
             if ((string) $settings->get('orchestrator_mode') !== 'active'
                 || (int) $settings->get('orchestrator_lease_until') < time()
                 || (int) $settings->get('orchestrator_bf_permit') !== 0
                 || (int) $settings->get('orchestrator_cf_permit') !== 0
             ) {
                 return $denied('permit_conflict_or_stale_lease');
+            }
+            $claimed = (int) $settings->get('orchestrator_cf_claimed');
+            if ($claimed > 0
+                && $claimed !== (int) $settings->get('orchestrator_cf_completed')
+                && $claimed !== (int) $settings->get('orchestrator_cf_failed')
+            ) {
+                return $denied('current_forward_in_progress');
             }
             $groupRow = DB::table('usenet_groups')->where('name', $group)->lockForUpdate()->first();
             if ($groupRow === null || (int) $groupRow->active !== 0 || (int) $groupRow->backfill !== 1) {
@@ -109,6 +121,8 @@ final class CurrentForwardPermitGate
                 || ! $policy->isValid()
                 || ! $policy->matches($group, $first, $last, $stop)
                 || (string) $settings->get('orchestrator_mode') !== 'active'
+                || (string) $settings->get('orchestrator_profile') === 'fail_safe'
+                || (int) $settings->get('orchestrator_recovery_ok') !== 1
                 || (int) $settings->get('orchestrator_lease_until') < time()
                 || (int) $settings->get('orchestrator_bf_permit') !== 0
                 || (int) $settings->get('orchestrator_cf_permit') !== $generation
@@ -146,7 +160,10 @@ final class CurrentForwardPermitGate
             $last = (int) $settings->get('orchestrator_cf_last');
             $groupRow = DB::table('usenet_groups')->where('name', $group)->lockForUpdate()->first();
             if ($generation <= 0
+                || (int) $settings->get('orchestrator_cf_gen') !== $generation
+                || (int) $settings->get('orchestrator_cf_permit') !== 0
                 || (int) $settings->get('orchestrator_cf_claimed') !== $generation
+                || (int) $settings->get('orchestrator_cf_failed') === $generation
                 || $groupRow === null
                 || (int) $groupRow->last_record !== $last
                 || (int) $groupRow->active !== 0
@@ -204,6 +221,8 @@ final class CurrentForwardPermitGate
     {
         foreach ([
             'orchestrator_mode' => '',
+            'orchestrator_profile' => 'fail_safe',
+            'orchestrator_recovery_ok' => 0,
             'orchestrator_lease_until' => 0,
             'orchestrator_bf_permit' => 0,
             'orchestrator_cf_gen' => 0,
@@ -224,7 +243,8 @@ final class CurrentForwardPermitGate
     {
         return Settings::query()
             ->whereIn('name', [
-                'orchestrator_mode', 'orchestrator_lease_until', 'orchestrator_bf_permit',
+                'orchestrator_mode', 'orchestrator_profile', 'orchestrator_recovery_ok',
+                'orchestrator_lease_until', 'orchestrator_bf_permit',
                 'orchestrator_cf_gen', 'orchestrator_cf_permit', 'orchestrator_cf_claimed',
                 'orchestrator_cf_completed', 'orchestrator_cf_failed', 'orchestrator_cf_group',
                 'orchestrator_cf_first', 'orchestrator_cf_last', 'orchestrator_cf_stop',
