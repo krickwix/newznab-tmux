@@ -39,6 +39,9 @@ final class CurrentForwardPermitGate
         ) {
             return $denied('pipeline_not_drained');
         }
+        if (! $snapshot->databaseAdmissionSafe) {
+            return $denied('database_admission_blocked');
+        }
 
         $policy = new CurrentForwardStopCursorPolicy;
         $groups = $policy->groups();

@@ -640,6 +640,30 @@ class NntmuxPrometheusMetrics
         $lines[] = '# HELP nntmux_orchestrator_body_recovery_queue Current actionable BODY recovery queue across configured groups.';
         $lines[] = '# TYPE nntmux_orchestrator_body_recovery_queue gauge';
         $lines[] = $this->metric('nntmux_orchestrator_body_recovery_queue', (int) ($decision['body_recovery_queue'] ?? 0));
+        $contention = is_array($decision['database_contention'] ?? null)
+            ? $decision['database_contention']
+            : [];
+        $lines[] = '# HELP nntmux_orchestrator_database_row_lock_waits Cumulative InnoDB row-lock waits observed by the controller.';
+        $lines[] = '# TYPE nntmux_orchestrator_database_row_lock_waits gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_database_row_lock_waits', (int) ($contention['row_lock_waits'] ?? 0));
+        $lines[] = '# HELP nntmux_orchestrator_database_row_lock_delta New row-lock waits since the prior controller sample.';
+        $lines[] = '# TYPE nntmux_orchestrator_database_row_lock_delta gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_database_row_lock_delta', (int) ($contention['row_lock_delta'] ?? 0));
+        $lines[] = '# HELP nntmux_orchestrator_database_row_lock_instant_rate_per_minute Instantaneous row-lock wait rate.';
+        $lines[] = '# TYPE nntmux_orchestrator_database_row_lock_instant_rate_per_minute gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_database_row_lock_instant_rate_per_minute', (float) ($contention['instant_rate_per_minute'] ?? 0.0));
+        $lines[] = '# HELP nntmux_orchestrator_database_row_lock_window_rate_per_minute Completed contention-window row-lock wait rate.';
+        $lines[] = '# TYPE nntmux_orchestrator_database_row_lock_window_rate_per_minute gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_database_row_lock_window_rate_per_minute', (float) ($contention['window_rate_per_minute'] ?? 0.0));
+        $lines[] = '# HELP nntmux_orchestrator_database_admission_blocked Whether contention hysteresis blocks new supply.';
+        $lines[] = '# TYPE nntmux_orchestrator_database_admission_blocked gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_database_admission_blocked', ($contention['admission_blocked'] ?? true) ? 1 : 0);
+        $lines[] = '# HELP nntmux_orchestrator_database_admission_safe Whether DB contention and profile-settlement gates allow new supply.';
+        $lines[] = '# TYPE nntmux_orchestrator_database_admission_safe gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_database_admission_safe', ($contention['admission_safe'] ?? false) ? 1 : 0);
+        $lines[] = '# HELP nntmux_orchestrator_database_hard_breach_timestamp_seconds Last hard contention breach timestamp; zero means none retained.';
+        $lines[] = '# TYPE nntmux_orchestrator_database_hard_breach_timestamp_seconds gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_database_hard_breach_timestamp_seconds', (int) ($contention['hard_breach_at'] ?? 0));
         $lines[] = '# HELP nntmux_orchestrator_collection_backlog Collection backlog split into physical total, ordinary pressure, and proven BODY recovery sources.';
         $lines[] = '# TYPE nntmux_orchestrator_collection_backlog gauge';
         foreach (['total', 'ordinary', 'body_recovery_sources'] as $scope) {

@@ -137,7 +137,7 @@ class WorkerControlStateStore
     public function storeSnapshot(PipelineSnapshot $snapshot): void
     {
         $value = [
-            'schema_version' => 2,
+            'schema_version' => 3,
             'parts' => $snapshot->partsBacklog,
             'binaries' => $snapshot->binariesBacklog,
             'collections' => $snapshot->collectionsBacklog,
@@ -147,6 +147,16 @@ class WorkerControlStateStore
             'nzbs' => $snapshot->nzbsBacklog,
             'database_deadlocks' => $snapshot->databaseDeadlocks,
             'database_current_waits' => $snapshot->databaseCurrentWaits,
+            'database_row_lock_waits' => $snapshot->databaseRowLockWaits,
+            'database_row_lock_delta' => $snapshot->databaseRowLockDelta,
+            'database_row_lock_instant_rate' => $snapshot->databaseRowLockInstantRate,
+            'database_row_lock_window_started_at' => $snapshot->databaseRowLockWindowStartedAt,
+            'database_row_lock_window_start_count' => $snapshot->databaseRowLockWindowStartCount,
+            'database_row_lock_window_rate' => $snapshot->databaseRowLockWindowRate,
+            'database_row_lock_admission_blocked' => $snapshot->databaseRowLockAdmissionBlocked,
+            'database_row_lock_hard_breach_at' => $snapshot->databaseRowLockHardBreachAt,
+            'database_current_wait_started_at' => $snapshot->databaseCurrentWaitStartedAt,
+            'database_admission_safe' => $snapshot->databaseAdmissionSafe,
             'observed_at' => $snapshot->observedAt,
         ];
         foreach ($snapshot->backlogEwmaPerMinute as $stage => $rate) {
@@ -1090,6 +1100,7 @@ class WorkerControlStateStore
     {
         return $snapshot->telemetryIsValid()
             && $snapshot->hardSafetyPassed()
+            && $snapshot->databaseAdmissionSafe
             && ! $snapshot->highPressure
             && $snapshot->databaseCurrentWaits === 0
             && $snapshot->databaseDeadlocks === $baselineDeadlocks;

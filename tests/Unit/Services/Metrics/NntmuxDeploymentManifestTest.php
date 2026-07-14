@@ -99,6 +99,43 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
     }
 
+    public function test_contention_overlay_packages_the_complete_controller_contract(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/current-forward-v157.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260714-current-forward-v156@sha256:53bc17e26ba3f9ac66665999fcff6de7fbebf017b9741eaf9e18c9ab8b32296d',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Metrics/NntmuxPrometheusMetrics.php',
+            'app/Services/Orchestrator/PipelineSnapshot.php',
+            'app/Services/Orchestrator/PipelineSnapshotRepository.php',
+            'app/Services/Orchestrator/WorkerControlStateStore.php',
+            'app/Services/Orchestrator/WorkerOrchestrator.php',
+            'app/Services/Distributed/CurrentForwardPermitGate.php',
+            'config/nntmux.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    public function test_contention_metrics_overlay_preserves_the_metrics_runtime_base(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/row-lock-metrics-v158.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260713-backfill-source-v97@sha256:653f3982d2a35cf05981916a167d10cc1a231e6d4aedd6eeef1e5bab6257363f',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/Metrics/NntmuxPrometheusMetrics.php /app/app/Services/Metrics/NntmuxPrometheusMetrics.php',
+            $dockerfile,
+        );
+    }
+
     public function test_lossless_body_preamble_repair_is_explicitly_enabled(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/infra.yaml';
@@ -225,6 +262,16 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('60000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_RECOVERY_SOURCES_HIGH'] ?? null);
         self::assertSame('60000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_COLLECTIONS_TOTAL_LOW'] ?? null);
         self::assertSame('50000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_RECOVERY_SOURCES_LOW'] ?? null);
+        self::assertSame('120', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_WINDOW_SECONDS'] ?? null);
+        self::assertSame('4.0', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_BLOCK_RATE'] ?? null);
+        self::assertSame('3.0', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_REOPEN_RATE'] ?? null);
+        self::assertSame('6.0', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_RATE'] ?? null);
+        self::assertSame('12', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_BURST_WAITS'] ?? null);
+        self::assertSame('60', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_BURST_SECONDS'] ?? null);
+        self::assertSame('30.0', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_INSTANT_HARD_RATE'] ?? null);
+        self::assertSame('600', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_COOLDOWN_SECONDS'] ?? null);
+        self::assertSame('30', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_CURRENT_WAIT_HARD_SECONDS'] ?? null);
+        self::assertSame('120', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_PROFILE_STABLE_SECONDS'] ?? null);
         self::assertSame('3', $orchestratorEnv['NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_ATTEMPTS'] ?? null);
         self::assertSame('1.0', $orchestratorEnv['NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_YIELD'] ?? null);
         self::assertIsArray($bodyRecovery);

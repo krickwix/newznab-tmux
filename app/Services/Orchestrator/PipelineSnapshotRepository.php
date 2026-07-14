@@ -59,7 +59,7 @@ class PipelineSnapshotRepository
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(adddate), NOW()), 0) FROM releases WHERE nzbstatus = 0) AS oldest_nzb_age,
             NOT EXISTS(SELECT 1 FROM usenet_groups g LEFT JOIN short_groups s ON s.name = g.name
                 WHERE g.active = 1 AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > 10000)) AS current_groups');
-        $statusRows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Innodb_deadlocks', 'Innodb_row_lock_current_waits')");
+        $statusRows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Innodb_deadlocks', 'Innodb_row_lock_current_waits', 'Innodb_row_lock_waits')");
         $status = [];
         foreach ($statusRows as $row) {
             $status[(string) $row->Variable_name] = (int) $row->Value;
@@ -113,6 +113,11 @@ class PipelineSnapshotRepository
         $low = $this->pressure->isLow($backlogs, $ewma);
         $deadlocks = isset($status['Innodb_deadlocks']) ? (int) $status['Innodb_deadlocks'] : null;
         $waits = isset($status['Innodb_row_lock_current_waits']) ? (int) $status['Innodb_row_lock_current_waits'] : null;
+        $rowLockWaits = isset($status['Innodb_row_lock_waits']) ? (int) $status['Innodb_row_lock_waits'] : null;
+        $now = time();
+        $database = $this->databaseContentionTelemetry($deadlocks, $waits, $rowLockWaits, $previous, $now);
+        $databaseAdmissionSafe = $database['database_admission_safe']
+            && $this->databaseProfileStable($controlState, $now);
 
         return new PipelineSnapshot(
             partsBacklog: $backlogs['parts'],
@@ -125,7 +130,7 @@ class PipelineSnapshotRepository
             telemetryConsistent: $splitConsistent,
             databaseMemorySafe: $signals['memory_safe'],
             databaseCpuSafe: $signals['cpu_safe'],
-            databaseWaitsSafe: $this->databaseWaitsSafe($deadlocks, $waits, $previous),
+            databaseWaitsSafe: $database['database_waits_safe'],
             storageSafe: $signals['storage_safe'],
             highPressure: $high,
             lowPressure: $low,
@@ -136,7 +141,7 @@ class PipelineSnapshotRepository
             databaseDeadlocks: $deadlocks ?? 0,
             databaseCurrentWaits: $waits ?? 0,
             storageAvailableBytes: $signals['storage_available_bytes'],
-            observedAt: time(),
+            observedAt: $now,
             readyCollections: (int) ($pipeline->ready_collections ?? 0),
             releaseTotal: (int) ($pipeline->release_total ?? 0),
             eligibleNzbs: $eligibleNzbs,
@@ -162,26 +167,180 @@ class PipelineSnapshotRepository
             bodyRecoverySourceBacklog: $recoverySourceCollections,
             oldestBodyRecoverySourceAgeSeconds: (int) $recoverySources['oldest_age'],
             backfillPermitHandoffSafe: $backfillPermitHandoffSafe,
+            databaseRowLockWaits: $rowLockWaits ?? 0,
+            databaseRowLockDelta: $database['database_row_lock_delta'],
+            databaseRowLockInstantRate: $database['database_row_lock_instant_rate'],
+            databaseRowLockWindowStartedAt: $database['database_row_lock_window_started_at'],
+            databaseRowLockWindowStartCount: $database['database_row_lock_window_start_count'],
+            databaseRowLockWindowRate: $database['database_row_lock_window_rate'],
+            databaseRowLockAdmissionBlocked: $database['database_row_lock_admission_blocked'],
+            databaseRowLockHardBreachAt: $database['database_row_lock_hard_breach_at'],
+            databaseCurrentWaitStartedAt: $database['database_current_wait_started_at'],
+            databaseAdmissionSafe: $databaseAdmissionSafe,
         );
     }
 
-    /** @param array<string, int|float>|null $previous */
-    private function databaseWaitsSafe(?int $deadlocks, ?int $currentWaits, ?array $previous): bool
-    {
-        if ($deadlocks === null || $currentWaits === null) {
-            return false;
+    /**
+     * @param  array<string, int|float|bool>|null  $previous
+     * @return array{
+     *     database_waits_safe: bool,
+     *     database_row_lock_delta: int,
+     *     database_row_lock_instant_rate: float,
+     *     database_row_lock_window_started_at: int,
+     *     database_row_lock_window_start_count: int,
+     *     database_row_lock_window_rate: float,
+     *     database_row_lock_admission_blocked: bool,
+     *     database_row_lock_hard_breach_at: int,
+     *     database_current_wait_started_at: int,
+     *     database_admission_safe: bool
+     * }
+     */
+    private function databaseContentionTelemetry(
+        ?int $deadlocks,
+        ?int $currentWaits,
+        ?int $rowLockWaits,
+        ?array $previous,
+        int $now,
+    ): array {
+        $windowSeconds = $this->boundedIntConfig('database_row_lock_window_seconds', 120, 60, 600);
+        $blockRate = $this->boundedFloatConfig('database_row_lock_admission_block_rate', 4.0, 0.1, 1_000.0);
+        $reopenRate = $this->boundedFloatConfig('database_row_lock_admission_reopen_rate', 3.0, 0.0, $blockRate);
+        $hardRate = $this->boundedFloatConfig('database_row_lock_hard_rate', 6.0, $blockRate, 1_000.0);
+        $burstWaits = $this->boundedIntConfig('database_row_lock_burst_waits', 12, 1, 10_000);
+        $burstSeconds = $this->boundedIntConfig('database_row_lock_burst_seconds', 60, 1, $windowSeconds);
+        $instantHardRate = $this->boundedFloatConfig('database_row_lock_instant_hard_rate', 30.0, $hardRate, 10_000.0);
+        $hardCooldownSeconds = $this->boundedIntConfig('database_row_lock_hard_cooldown_seconds', 600, 60, 86_400);
+        $currentWaitHardSeconds = $this->boundedIntConfig('database_current_wait_hard_seconds', 30, 5, 300);
+        $profileStableSeconds = $this->boundedIntConfig('database_profile_stable_seconds', 120, 60, $windowSeconds);
+
+        if ($deadlocks === null || $currentWaits === null || $rowLockWaits === null) {
+            return [
+                'database_waits_safe' => false,
+                'database_row_lock_delta' => 0,
+                'database_row_lock_instant_rate' => 0.0,
+                'database_row_lock_window_started_at' => $now,
+                'database_row_lock_window_start_count' => max(0, $rowLockWaits ?? 0),
+                'database_row_lock_window_rate' => 0.0,
+                'database_row_lock_admission_blocked' => true,
+                'database_row_lock_hard_breach_at' => $now,
+                'database_current_wait_started_at' => $currentWaits !== null && $currentWaits > 0 ? $now : 0,
+                'database_admission_safe' => false,
+            ];
         }
 
-        $deadlockDelta = $previous !== null
-            && isset($previous['database_deadlocks'])
-            && $deadlocks > (int) $previous['database_deadlocks'];
-        $elapsed = $previous === null ? 0 : time() - (int) ($previous['observed_at'] ?? 0);
-        $previousIsConsecutive = $elapsed >= 30 && $elapsed <= 180;
-        $persistentWaits = $currentWaits > 0
-            && $previousIsConsecutive
-            && (int) ($previous['database_current_waits'] ?? 0) > 0;
+        $previousObservedAt = (int) ($previous['observed_at'] ?? 0);
+        $hasV3Baseline = (int) ($previous['schema_version'] ?? 0) === 3
+            && array_key_exists('database_row_lock_waits', $previous ?? [])
+            && $previousObservedAt > 0
+            && $previousObservedAt < $now
+            && $rowLockWaits >= (int) ($previous['database_row_lock_waits'] ?? 0);
+        if (! $hasV3Baseline) {
+            return [
+                'database_waits_safe' => true,
+                'database_row_lock_delta' => 0,
+                'database_row_lock_instant_rate' => 0.0,
+                'database_row_lock_window_started_at' => $now,
+                'database_row_lock_window_start_count' => $rowLockWaits,
+                'database_row_lock_window_rate' => 0.0,
+                'database_row_lock_admission_blocked' => true,
+                'database_row_lock_hard_breach_at' => 0,
+                'database_current_wait_started_at' => $currentWaits > 0 ? $now : 0,
+                'database_admission_safe' => false,
+            ];
+        }
 
-        return ! $deadlockDelta && ! $persistentWaits;
+        $previousRowLockWaits = (int) $previous['database_row_lock_waits'];
+        $elapsed = $now - $previousObservedAt;
+        $delta = max(0, $rowLockWaits - $previousRowLockWaits);
+        $instantRate = (float) ($delta * 60 / $elapsed);
+        $windowStartedAt = (int) ($previous['database_row_lock_window_started_at'] ?? 0);
+        $windowStartCount = (int) ($previous['database_row_lock_window_start_count'] ?? $previousRowLockWaits);
+        if ($windowStartedAt <= 0 || $windowStartedAt > $previousObservedAt || $windowStartCount > $rowLockWaits) {
+            $windowStartedAt = $previousObservedAt;
+            $windowStartCount = $previousRowLockWaits;
+        }
+        $windowElapsed = max(1, $now - $windowStartedAt);
+        $windowDelta = max(0, $rowLockWaits - $windowStartCount);
+        $windowRate = (float) ($windowDelta * 60 / $windowElapsed);
+        $windowComplete = $windowElapsed >= $windowSeconds;
+
+        $currentWaitStartedAt = 0;
+        if ($currentWaits > 0) {
+            $previousWaitStartedAt = (int) ($previous['database_current_wait_started_at'] ?? 0);
+            $currentWaitStartedAt = (int) ($previous['database_current_waits'] ?? 0) > 0
+                && $previousWaitStartedAt > 0
+                && $previousWaitStartedAt <= $previousObservedAt
+                    ? $previousWaitStartedAt
+                    : $now;
+        }
+
+        $deadlockDelta = $deadlocks > (int) ($previous['database_deadlocks'] ?? $deadlocks);
+        $persistentCurrentWait = $currentWaitStartedAt > 0
+            && $now - $currentWaitStartedAt >= $currentWaitHardSeconds;
+        $burst = $delta >= $burstWaits && $elapsed <= $burstSeconds;
+        $instantHard = $instantRate >= $instantHardRate;
+        $windowHard = $windowComplete && $windowRate >= $hardRate;
+        $hardBreach = $deadlockDelta || $persistentCurrentWait || $burst || $instantHard || $windowHard;
+        $hardBreachAt = $hardBreach ? $now : max(0, (int) ($previous['database_row_lock_hard_breach_at'] ?? 0));
+        $cooldownActive = $hardBreachAt > 0 && $now - $hardBreachAt < $hardCooldownSeconds;
+
+        $admissionBlocked = (bool) ($previous['database_row_lock_admission_blocked'] ?? true);
+        if ($instantRate >= $blockRate || $currentWaits > 0 || $hardBreach || $cooldownActive) {
+            $admissionBlocked = true;
+        } elseif ($windowComplete) {
+            if ($windowRate >= $blockRate) {
+                $admissionBlocked = true;
+            } elseif ($windowRate <= $reopenRate) {
+                $admissionBlocked = false;
+            }
+        }
+
+        $profileStable = (bool) ($previous['database_admission_safe'] ?? false)
+            || ($windowComplete && $windowElapsed >= $profileStableSeconds && $windowRate <= $reopenRate);
+        $admissionSafe = ! $admissionBlocked
+            && ! $cooldownActive
+            && $currentWaits === 0
+            && $profileStable;
+
+        if ($windowComplete) {
+            $windowStartedAt = $now;
+            $windowStartCount = $rowLockWaits;
+        }
+
+        return [
+            'database_waits_safe' => ! $hardBreach,
+            'database_row_lock_delta' => $delta,
+            'database_row_lock_instant_rate' => $instantRate,
+            'database_row_lock_window_started_at' => $windowStartedAt,
+            'database_row_lock_window_start_count' => $windowStartCount,
+            'database_row_lock_window_rate' => $windowRate,
+            'database_row_lock_admission_blocked' => $admissionBlocked,
+            'database_row_lock_hard_breach_at' => $hardBreachAt,
+            'database_current_wait_started_at' => $currentWaitStartedAt,
+            'database_admission_safe' => $admissionSafe,
+        ];
+    }
+
+    private function boundedIntConfig(string $key, int $default, int $minimum, int $maximum): int
+    {
+        return min($maximum, max($minimum, (int) config('nntmux.orchestrator.'.$key, $default)));
+    }
+
+    private function boundedFloatConfig(string $key, float $default, float $minimum, float $maximum): float
+    {
+        return min($maximum, max($minimum, (float) config('nntmux.orchestrator.'.$key, $default)));
+    }
+
+    private function databaseProfileStable(ControlState $state, int $now): bool
+    {
+        if ($state->lastTransitionAt === 0) {
+            return true;
+        }
+
+        $stableSeconds = $this->boundedIntConfig('database_profile_stable_seconds', 120, 120, 3_600);
+
+        return $state->lastTransitionAt <= $now
+            && $now - $state->lastTransitionAt >= $stableSeconds;
     }
 
     private function bodyRecoveryCriteria(): ?BodyRecoverySourceCriteria

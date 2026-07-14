@@ -468,6 +468,18 @@ class WorkerOrchestrator
                     'ordinary' => $snapshot->collectionsBacklog,
                     'body_recovery_sources' => $snapshot->bodyRecoverySourceBacklog,
                 ],
+                'database_contention' => [
+                    'row_lock_waits' => $snapshot->databaseRowLockWaits,
+                    'row_lock_delta' => $snapshot->databaseRowLockDelta,
+                    'instant_rate_per_minute' => $snapshot->databaseRowLockInstantRate,
+                    'window_started_at' => $snapshot->databaseRowLockWindowStartedAt,
+                    'window_start_count' => $snapshot->databaseRowLockWindowStartCount,
+                    'window_rate_per_minute' => $snapshot->databaseRowLockWindowRate,
+                    'admission_blocked' => $snapshot->databaseRowLockAdmissionBlocked,
+                    'hard_breach_at' => $snapshot->databaseRowLockHardBreachAt,
+                    'current_wait_started_at' => $snapshot->databaseCurrentWaitStartedAt,
+                    'admission_safe' => $snapshot->databaseAdmissionSafe,
+                ],
                 'storage_available_bytes' => $snapshot->storageAvailableBytes,
                 'observed_at' => $snapshot->observedAt,
                 'eligible_nzbs' => $snapshot->eligibleNzbs,
@@ -568,6 +580,7 @@ class WorkerOrchestrator
                 && $snapshot->lowPressure
                 && ! $snapshot->highPressure
                 && $snapshot->databaseCurrentWaits === 0
+                && $snapshot->databaseAdmissionSafe
                 && $snapshot->eligibleNzbs === 0
             ) {
                 $createdReleases = $this->snapshots->backfillCreatedReleasesForCohort(
@@ -663,6 +676,7 @@ class WorkerOrchestrator
             || ! $snapshot->hardSafetyPassed()
             || $snapshot->highPressure
             || $snapshot->databaseCurrentWaits > 0
+            || ! $snapshot->databaseAdmissionSafe
             || $snapshot->eligibleNzbs > 0
         ) {
             return [$snapshot, null];
@@ -759,6 +773,7 @@ class WorkerOrchestrator
             && $decision->profile->backfillEnabled
             && ! $snapshot->highPressure
             && $snapshot->databaseCurrentWaits === 0
+            && $snapshot->databaseAdmissionSafe
             && $snapshot->backfillPermitHandoffSafe
             && $snapshot->currentGroupsAvailable
             && array_intersect(self::CLAIM_GRACE_SUPPLY_REASONS, $decision->reasons) !== [];
@@ -1012,7 +1027,8 @@ class WorkerOrchestrator
             && $snapshot->telemetryIsValid()
             && $snapshot->hardSafetyPassed()
             && ! $snapshot->highPressure
-            && $snapshot->databaseCurrentWaits === 0;
+            && $snapshot->databaseCurrentWaits === 0
+            && $snapshot->databaseAdmissionSafe;
     }
 
     /** @param array<string, mixed> $observation */

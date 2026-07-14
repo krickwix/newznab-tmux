@@ -64,6 +64,16 @@ final readonly class PipelineSnapshot
         public int $oldestBodyRecoverySourceAgeSeconds = 0,
         public int $backfillPermitGeneration = 0,
         public bool $backfillPermitHandoffSafe = false,
+        public int $databaseRowLockWaits = 0,
+        public int $databaseRowLockDelta = 0,
+        public float $databaseRowLockInstantRate = 0.0,
+        public int $databaseRowLockWindowStartedAt = 0,
+        public int $databaseRowLockWindowStartCount = 0,
+        public float $databaseRowLockWindowRate = 0.0,
+        public bool $databaseRowLockAdmissionBlocked = false,
+        public int $databaseRowLockHardBreachAt = 0,
+        public int $databaseCurrentWaitStartedAt = 0,
+        public bool $databaseAdmissionSafe = true,
     ) {}
 
     public function withPermitOutcome(
@@ -132,6 +142,16 @@ final readonly class PipelineSnapshot
             oldestBodyRecoverySourceAgeSeconds: $this->oldestBodyRecoverySourceAgeSeconds,
             backfillPermitGeneration: max(0, $generation),
             backfillPermitHandoffSafe: $this->backfillPermitHandoffSafe,
+            databaseRowLockWaits: $this->databaseRowLockWaits,
+            databaseRowLockDelta: $this->databaseRowLockDelta,
+            databaseRowLockInstantRate: $this->databaseRowLockInstantRate,
+            databaseRowLockWindowStartedAt: $this->databaseRowLockWindowStartedAt,
+            databaseRowLockWindowStartCount: $this->databaseRowLockWindowStartCount,
+            databaseRowLockWindowRate: $this->databaseRowLockWindowRate,
+            databaseRowLockAdmissionBlocked: $this->databaseRowLockAdmissionBlocked,
+            databaseRowLockHardBreachAt: $this->databaseRowLockHardBreachAt,
+            databaseCurrentWaitStartedAt: $this->databaseCurrentWaitStartedAt,
+            databaseAdmissionSafe: $this->databaseAdmissionSafe,
         );
     }
 
@@ -154,7 +174,8 @@ final readonly class PipelineSnapshot
 
     public function backfillGatesPassed(): bool
     {
-        return $this->databaseCurrentWaits === 0
+        return $this->databaseAdmissionSafe
+            && $this->databaseCurrentWaits === 0
             && $this->providerAvailable
             && $this->cursorAvailable
             && $this->currentGroupsAvailable

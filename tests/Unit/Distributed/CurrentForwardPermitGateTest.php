@@ -88,6 +88,7 @@ final class CurrentForwardPermitGateTest extends TestCase
     {
         $gate = new CurrentForwardPermitGate;
         self::assertSame('pipeline_not_drained', $gate->issue($this->safeSnapshot(highPressure: true), 17)['reason']);
+        self::assertSame('database_admission_blocked', $gate->issue($this->safeSnapshot(databaseAdmissionSafe: false), 17)['reason']);
 
         DB::table('usenet_groups')->where('name', 'alt.test')->update(['active' => 1]);
         self::assertSame('group_not_inactive_backfill', $gate->issue($this->safeSnapshot(), 18)['reason']);
@@ -147,7 +148,7 @@ final class CurrentForwardPermitGateTest extends TestCase
         }
     }
 
-    private function safeSnapshot(bool $highPressure = false): PipelineSnapshot
+    private function safeSnapshot(bool $highPressure = false, bool $databaseAdmissionSafe = true): PipelineSnapshot
     {
         return new PipelineSnapshot(
             100,
@@ -158,6 +159,7 @@ final class CurrentForwardPermitGateTest extends TestCase
             highPressure: $highPressure,
             lowPressure: ! $highPressure,
             databaseCurrentWaits: 0,
+            databaseAdmissionSafe: $databaseAdmissionSafe,
             eligibleNzbs: 0,
         );
     }

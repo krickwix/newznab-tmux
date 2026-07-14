@@ -524,6 +524,16 @@ class NntmuxPrometheusMetricsTest extends TestCase
             'eligible_nzbs' => 0,
             'body_recovery_queue' => 17,
             'collection_backlogs' => ['total' => 70, 'ordinary' => 30, 'body_recovery_sources' => 40],
+            'database_contention' => [
+                'row_lock_waits' => 1868,
+                'row_lock_delta' => 2,
+                'instant_rate_per_minute' => 2.6,
+                'window_rate_per_minute' => 1.5,
+                'admission_blocked' => false,
+                'hard_breach_at' => 0,
+                'current_wait_started_at' => 0,
+                'admission_safe' => true,
+            ],
             'backlogs' => ['parts' => 100, 'binaries' => 20, 'collections' => 30, 'collections_total' => 70, 'recovery_sources' => 40, 'releases' => 4, 'nzbs' => 50],
             'rates_per_minute' => ['parts' => 1.5, 'collections_total' => -2.0, 'recovery_sources' => -2.0],
             'ewma_per_minute' => ['parts' => 0.5, 'collections_total' => -1.0, 'recovery_sources' => -1.0],
@@ -550,6 +560,11 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="total"} 70', $output);
         $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="ordinary"} 30', $output);
         $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="body_recovery_sources"} 40', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_database_row_lock_waits 1868', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_database_row_lock_delta 2', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_database_row_lock_instant_rate_per_minute 2.6', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_database_row_lock_window_rate_per_minute 1.5', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_database_admission_safe 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_stage_backlog{stage="collections_total"} 70', $output);
         $this->assertStringContainsString('nntmux_orchestrator_stage_backlog{stage="recovery_sources"} 40', $output);
         $this->assertStringContainsString('nntmux_orchestrator_stage_rate_per_minute{stage="recovery_sources",estimator="instant"} -2', $output);

@@ -936,6 +936,8 @@ final class WorkerOrchestratorTest extends TestCase
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
 
+        self::assertArrayHasKey('database_contention', $result);
+        self::assertTrue($result['database_contention']['admission_safe']);
         self::assertContains('backfill_delayed_attribution_queued', $result['reasons']);
         self::assertNull($store->permitObservation());
         self::assertSame(0, $store->loadState()->ineffectiveBackfillPermitsByTarget['alt.test'] ?? 0);

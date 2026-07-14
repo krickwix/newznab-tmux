@@ -99,11 +99,21 @@ final class WorkerControlStateStoreTest extends TestCase
             nzbsBacklog: 55,
             databaseDeadlocks: 6,
             databaseCurrentWaits: 3,
+            databaseRowLockWaits: 81,
+            databaseRowLockDelta: 2,
+            databaseRowLockInstantRate: 8.0,
+            databaseRowLockWindowStartedAt: 100,
+            databaseRowLockWindowStartCount: 70,
+            databaseRowLockWindowRate: 5.5,
+            databaseRowLockAdmissionBlocked: true,
+            databaseRowLockHardBreachAt: 90,
+            databaseCurrentWaitStartedAt: 75,
+            databaseAdmissionSafe: false,
             observedAt: 7,
         ));
 
         self::assertSame([
-            'schema_version' => 2,
+            'schema_version' => 3,
             'parts' => 11,
             'binaries' => 22,
             'collections' => 33,
@@ -113,6 +123,16 @@ final class WorkerControlStateStoreTest extends TestCase
             'nzbs' => 55,
             'database_deadlocks' => 6,
             'database_current_waits' => 3,
+            'database_row_lock_waits' => 81,
+            'database_row_lock_delta' => 2,
+            'database_row_lock_instant_rate' => 8.0,
+            'database_row_lock_window_started_at' => 100,
+            'database_row_lock_window_start_count' => 70,
+            'database_row_lock_window_rate' => 5.5,
+            'database_row_lock_admission_blocked' => true,
+            'database_row_lock_hard_breach_at' => 90,
+            'database_current_wait_started_at' => 75,
+            'database_admission_safe' => false,
             'observed_at' => 7,
         ], $store->previousSnapshot());
     }
@@ -770,6 +790,24 @@ final class WorkerControlStateStoreTest extends TestCase
             -1, 2, 3, 4, 5,
             highPressure: true,
             lowPressure: true,
+            backfillGroup: 'alt.test',
+        ), 8, 9, [
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 10,
+        ]);
+
+        self::assertFalse($store->permitObservation()['safety_clean'] ?? true);
+    }
+
+    public function test_growth_safety_rejects_database_admission_telemetry_during_soft_hysteresis(): void
+    {
+        $store = new WorkerControlStateStore;
+        $store->beginPermitObservation(new PipelineSnapshot(
+            1, 2, 3, 4, 5,
+            databaseAdmissionSafe: false,
             backfillGroup: 'alt.test',
         ), 8, 9, [
             'cursor' => 10_000,

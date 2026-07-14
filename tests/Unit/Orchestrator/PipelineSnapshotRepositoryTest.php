@@ -25,47 +25,180 @@ use Tests\TestCase;
 
 final class PipelineSnapshotRepositoryTest extends TestCase
 {
-    public function test_database_wait_safety_requires_persistence_but_never_ignores_a_deadlock_delta(): void
+    public function test_legacy_snapshot_establishes_a_blocked_row_lock_baseline_until_a_clean_window_completes(): void
     {
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
             app(NzbBacklogCreationService::class),
         );
-        $method = new ReflectionMethod($repository, 'databaseWaitsSafe');
+        $method = new ReflectionMethod($repository, 'databaseContentionTelemetry');
 
-        $observedAt = time() - 60;
-        self::assertTrue($method->invoke($repository, 24, 0, [
+        $baseline = $method->invoke($repository, 24, 0, 100, [
+            'schema_version' => 2,
             'database_deadlocks' => 24,
             'database_current_waits' => 0,
-            'observed_at' => $observedAt,
-        ]));
-        self::assertTrue($method->invoke($repository, 24, 3, [
+            'observed_at' => 880,
+        ], 1_000);
+
+        self::assertTrue($baseline['database_waits_safe']);
+        self::assertTrue($baseline['database_row_lock_admission_blocked']);
+        self::assertFalse($baseline['database_admission_safe']);
+        self::assertSame(1_000, $baseline['database_row_lock_window_started_at']);
+        self::assertSame(100, $baseline['database_row_lock_window_start_count']);
+
+        $clean = $method->invoke($repository, 24, 0, 106, [
+            'schema_version' => 3,
             'database_deadlocks' => 24,
             'database_current_waits' => 0,
-            'observed_at' => $observedAt,
-        ]), 'One transient busy sample must not renew the hard fail-safe cooldown.');
-        self::assertFalse($method->invoke($repository, 24, 2, [
-            'database_deadlocks' => 24,
-            'database_current_waits' => 3,
-            'observed_at' => $observedAt,
-        ]), 'Two consecutive busy samples represent persistent contention.');
-        self::assertTrue($method->invoke($repository, 24, 2, [
-            'database_deadlocks' => 24,
-            'database_current_waits' => 3,
-            'observed_at' => time() - 5,
-        ]), 'Rapid manual samples must not manufacture persistence.');
-        self::assertTrue($method->invoke($repository, 24, 2, [
-            'database_deadlocks' => 24,
-            'database_current_waits' => 3,
-            'observed_at' => time() - 300,
-        ]), 'A stale pre-restart sample must not manufacture persistence.');
-        self::assertFalse($method->invoke($repository, 25, 0, [
+            'database_row_lock_waits' => 100,
+            'database_row_lock_window_started_at' => 1_000,
+            'database_row_lock_window_start_count' => 100,
+            'database_row_lock_admission_blocked' => true,
+            'database_row_lock_hard_breach_at' => 0,
+            'database_current_wait_started_at' => 0,
+            'database_admission_safe' => false,
+            'observed_at' => 1_000,
+        ], 1_120);
+
+        self::assertSame(3.0, $clean['database_row_lock_window_rate']);
+        self::assertFalse($clean['database_row_lock_admission_blocked']);
+        self::assertTrue($clean['database_admission_safe']);
+    }
+
+    public function test_row_lock_hysteresis_blocks_at_four_and_only_reopens_after_a_complete_clean_window(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'databaseContentionTelemetry');
+        $previous = [
+            'schema_version' => 3,
             'database_deadlocks' => 24,
             'database_current_waits' => 0,
-            'observed_at' => $observedAt,
-        ]), 'Any deadlock delta remains an immediate hard-safety failure.');
-        self::assertFalse($method->invoke($repository, null, 0, null));
-        self::assertFalse($method->invoke($repository, 24, null, null));
+            'database_row_lock_waits' => 100,
+            'database_row_lock_window_started_at' => 1_000,
+            'database_row_lock_window_start_count' => 100,
+            'database_row_lock_admission_blocked' => false,
+            'database_row_lock_hard_breach_at' => 0,
+            'database_current_wait_started_at' => 0,
+            'database_admission_safe' => true,
+            'observed_at' => 1_000,
+        ];
+
+        $blocked = $method->invoke($repository, 24, 0, 101, $previous, 1_015);
+        self::assertSame(4.0, $blocked['database_row_lock_instant_rate']);
+        self::assertTrue($blocked['database_row_lock_admission_blocked']);
+        self::assertFalse($blocked['database_admission_safe']);
+
+        $previous = array_merge($previous, $blocked, [
+            'database_row_lock_waits' => 101,
+            'observed_at' => 1_015,
+        ]);
+        $stillBlocked = $method->invoke($repository, 24, 0, 107, $previous, 1_120);
+        self::assertSame(3.5, $stillBlocked['database_row_lock_window_rate']);
+        self::assertTrue($stillBlocked['database_row_lock_admission_blocked']);
+
+        $previous = array_merge($previous, $stillBlocked, [
+            'database_row_lock_waits' => 107,
+            'observed_at' => 1_120,
+        ]);
+        $reopened = $method->invoke($repository, 24, 0, 113, $previous, 1_240);
+        self::assertSame(3.0, $reopened['database_row_lock_window_rate']);
+        self::assertFalse($reopened['database_row_lock_admission_blocked']);
+        self::assertTrue($reopened['database_admission_safe']);
+    }
+
+    public function test_row_lock_hard_breaches_cover_window_burst_instant_deadlock_current_wait_and_missing_metrics(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'databaseContentionTelemetry');
+        $previous = [
+            'schema_version' => 3,
+            'database_deadlocks' => 24,
+            'database_current_waits' => 1,
+            'database_row_lock_waits' => 100,
+            'database_row_lock_window_started_at' => 1_000,
+            'database_row_lock_window_start_count' => 100,
+            'database_row_lock_admission_blocked' => false,
+            'database_row_lock_hard_breach_at' => 0,
+            'database_current_wait_started_at' => 1_090,
+            'database_admission_safe' => true,
+            'observed_at' => 1_105,
+        ];
+
+        $window = $method->invoke($repository, 24, 0, 112, array_merge($previous, [
+            'database_current_waits' => 0,
+            'database_current_wait_started_at' => 0,
+            'observed_at' => 1_100,
+        ]), 1_120);
+        self::assertFalse($window['database_waits_safe'], 'Six waits/minute over a complete window is hard.');
+
+        $burst = $method->invoke($repository, 24, 0, 112, array_merge($previous, [
+            'database_current_waits' => 0,
+            'database_current_wait_started_at' => 0,
+        ]), 1_150);
+        self::assertFalse($burst['database_waits_safe'], 'Twelve waits inside sixty seconds is hard.');
+
+        $instant = $method->invoke($repository, 24, 0, 105, array_merge($previous, [
+            'database_current_waits' => 0,
+            'database_current_wait_started_at' => 0,
+            'observed_at' => 1_100,
+        ]), 1_110);
+        self::assertFalse($instant['database_waits_safe'], 'Thirty waits/minute instantaneously is hard.');
+
+        self::assertFalse($method->invoke($repository, 25, 0, 100, $previous, 1_120)['database_waits_safe']);
+        self::assertFalse($method->invoke($repository, 24, 1, 100, $previous, 1_120)['database_waits_safe']);
+        self::assertFalse($method->invoke($repository, null, 0, 100, $previous, 1_120)['database_waits_safe']);
+        self::assertFalse($method->invoke($repository, 24, null, 100, $previous, 1_120)['database_waits_safe']);
+        self::assertFalse($method->invoke($repository, 24, 0, null, $previous, 1_120)['database_waits_safe']);
+    }
+
+    public function test_hard_breach_cooldown_requires_a_post_cooldown_clean_window_before_admission(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'databaseContentionTelemetry');
+        $previous = [
+            'schema_version' => 3,
+            'database_deadlocks' => 24,
+            'database_current_waits' => 0,
+            'database_row_lock_waits' => 100,
+            'database_row_lock_window_started_at' => 500,
+            'database_row_lock_window_start_count' => 100,
+            'database_row_lock_admission_blocked' => true,
+            'database_row_lock_hard_breach_at' => 100,
+            'database_current_wait_started_at' => 0,
+            'database_admission_safe' => false,
+            'observed_at' => 500,
+        ];
+
+        $duringCooldown = $method->invoke($repository, 24, 0, 100, $previous, 620);
+        self::assertTrue($duringCooldown['database_row_lock_admission_blocked']);
+        self::assertFalse($duringCooldown['database_admission_safe']);
+
+        $previous = array_merge($previous, $duringCooldown, ['observed_at' => 620]);
+        $afterCooldown = $method->invoke($repository, 24, 0, 100, $previous, 740);
+        self::assertFalse($afterCooldown['database_row_lock_admission_blocked']);
+        self::assertTrue($afterCooldown['database_admission_safe']);
+    }
+
+    public function test_database_admission_requires_the_control_profile_to_be_stable_for_two_minutes(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'databaseProfileStable');
+
+        self::assertFalse($method->invoke($repository, new ControlState(lastTransitionAt: 1_000), 1_119));
+        self::assertTrue($method->invoke($repository, new ControlState(lastTransitionAt: 1_000), 1_120));
+        self::assertTrue($method->invoke($repository, ControlState::initial(), 1_000));
     }
 
     public function test_current_database_waits_block_backfill_even_before_persistent_fail_safe(): void
@@ -84,6 +217,42 @@ final class PipelineSnapshotRepositoryTest extends TestCase
 
         self::assertFalse($snapshot->backfillGatesPassed());
         self::assertSame(1, $snapshot->withPermitOutcome(true, false)->databaseCurrentWaits);
+    }
+
+    public function test_database_admission_safety_is_preserved_by_permit_outcome_and_required_by_backfill(): void
+    {
+        $snapshot = new PipelineSnapshot(
+            1,
+            1,
+            1,
+            0,
+            0,
+            eligibleBackfillSupply: true,
+            backfillSafeQuantity: 10_000,
+            databaseAdmissionSafe: false,
+            databaseRowLockWaits: 88,
+            databaseRowLockDelta: 2,
+            databaseRowLockInstantRate: 4.5,
+            databaseRowLockWindowStartedAt: 100,
+            databaseRowLockWindowStartCount: 80,
+            databaseRowLockWindowRate: 3.5,
+            databaseRowLockAdmissionBlocked: true,
+            databaseRowLockHardBreachAt: 90,
+            databaseCurrentWaitStartedAt: 75,
+        );
+
+        self::assertFalse($snapshot->backfillGatesPassed());
+        $outcome = $snapshot->withPermitOutcome(true, true);
+        self::assertFalse($outcome->databaseAdmissionSafe);
+        self::assertSame(88, $outcome->databaseRowLockWaits);
+        self::assertSame(2, $outcome->databaseRowLockDelta);
+        self::assertSame(4.5, $outcome->databaseRowLockInstantRate);
+        self::assertSame(100, $outcome->databaseRowLockWindowStartedAt);
+        self::assertSame(80, $outcome->databaseRowLockWindowStartCount);
+        self::assertSame(3.5, $outcome->databaseRowLockWindowRate);
+        self::assertTrue($outcome->databaseRowLockAdmissionBlocked);
+        self::assertSame(90, $outcome->databaseRowLockHardBreachAt);
+        self::assertSame(75, $outcome->databaseCurrentWaitStartedAt);
     }
 
     public function test_body_recovery_source_backlog_uses_the_exact_bounded_reconciliation_contract(): void
