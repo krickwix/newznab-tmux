@@ -28,12 +28,22 @@ class TvCategorizer extends AbstractCategorizer
     /** @var list<string> */
     private array $completeSeriesGroups;
 
-    /** @param list<string>|null $completeSeriesGroups */
-    public function __construct(?array $completeSeriesGroups = null)
+    /** @var list<string> */
+    private array $seriesPackGroups;
+
+    /**
+     * @param  list<string>|null  $completeSeriesGroups
+     * @param  list<string>|null  $seriesPackGroups
+     */
+    public function __construct(?array $completeSeriesGroups = null, ?array $seriesPackGroups = null)
     {
         $this->completeSeriesGroups = $completeSeriesGroups
             ?? (app()->bound('config')
                 ? array_values((array) config('nntmux.orchestrator.backfill_tv_complete_series_groups', []))
+                : []);
+        $this->seriesPackGroups = $seriesPackGroups
+            ?? (app()->bound('config')
+                ? array_values((array) config('nntmux.orchestrator.backfill_tv_series_pack_groups', []))
                 : []);
     }
 
@@ -66,7 +76,7 @@ class TvCategorizer extends AbstractCategorizer
             return $this->matched(Category::TV_OTHER, 0.85, 'tv_dedicated_group_complete_series');
         }
 
-        if (! $this->looksLikeTV($name)) {
+        if (! $this->isSeriesPackInDedicatedTvGroup($name, $context) && ! $this->looksLikeTV($name)) {
             return $this->noMatch();
         }
 
@@ -112,6 +122,18 @@ class TvCategorizer extends AbstractCategorizer
 
         return preg_match(
             '/\bkomplett[ ._-]+abenteuerserie[ ._-]+(?:19|20)\d{2}\b.*\b(?:avi|mkv|mp4|mpeg|xvid|divx|h\.?26[45])\b/iu',
+            $name,
+        ) === 1;
+    }
+
+    private function isSeriesPackInDedicatedTvGroup(string $name, ReleaseContext $context): bool
+    {
+        if (! in_array($context->groupName, $this->seriesPackGroups, true)) {
+            return false;
+        }
+
+        return preg_match(
+            '/\bs\d{1,3}[ ._-]+[\p{L}]*serie(?:n)?[ ._-]+(?:19|20)\d{2}\b.*\b(?:avi|mkv|mp4|mpeg|xvid|divx|h\.?26[45])\b.*\b(?:480p|720p|1080[pi]|2160p)\b/iu',
             $name,
         ) === 1;
     }
