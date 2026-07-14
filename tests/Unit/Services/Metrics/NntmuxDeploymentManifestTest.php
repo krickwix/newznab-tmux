@@ -54,6 +54,21 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
     }
 
+    public function test_current_forward_overlay_packages_the_matching_header_parser(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/current-forward-v154.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260714-current-forward-v153@sha256:5b1970082c6702bb96f146adf238e224efdb101dda3fbffdcc22a9e03d970767',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/Binaries/HeaderParser.php /app/app/Services/Binaries/HeaderParser.php',
+            $dockerfile,
+        );
+    }
+
     public function test_lossless_body_preamble_repair_is_explicitly_enabled(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/infra.yaml';
