@@ -14,6 +14,8 @@ class PipelineSnapshotRepository
 
     private const string BACKFILL_TV_EPISODE_PATTERN = '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)';
 
+    private const string BACKFILL_TV_DATE_RANGE_PATTERN = '(^|[^[:alnum:]])(0?[1-9]|[12][0-9]|3[01])\.-(0?[1-9]|[12][0-9]|3[01])\.(0?[1-9]|1[0-2])\.[0-9]{2}([^[:alnum:]]|$)';
+
     private readonly BackfillTargetSelector $targets;
 
     private readonly WorkerControlStateStore $state;
@@ -637,14 +639,25 @@ class PipelineSnapshotRepository
     ): array {
         $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
         $minPayloadBytes = max(1, (int) config('nntmux.orchestrator.backfill_min_payload_bytes', 104_857_600));
+        $allowTvDateRange = in_array(
+            $group,
+            (array) config('nntmux.orchestrator.backfill_tv_date_range_groups', []),
+            true,
+        ) ? 1 : 0;
         $upperBound = $releaseIdHighInclusive === null ? '' : 'AND r.id <= ?';
         $completedNzbPredicate = $completedNzbsOnly ? 'AND r.nzbstatus = 1' : '';
         $bindings = [
             self::BACKFILL_TV_EPISODE_PATTERN,
             self::BACKFILL_TV_EPISODE_PATTERN,
+            $allowTvDateRange,
+            self::BACKFILL_TV_DATE_RANGE_PATTERN,
+            self::BACKFILL_TV_DATE_RANGE_PATTERN,
             $minPayloadBytes,
             self::BACKFILL_TV_EPISODE_PATTERN,
             self::BACKFILL_TV_EPISODE_PATTERN,
+            $allowTvDateRange,
+            self::BACKFILL_TV_DATE_RANGE_PATTERN,
+            self::BACKFILL_TV_DATE_RANGE_PATTERN,
             $minPayloadBytes,
             $group,
             $releaseIdLowExclusive,
@@ -674,7 +687,11 @@ class PipelineSnapshotRepository
                 AND (c.id NOT IN (2999, 5999)
                     OR (c.id = 5999
                         AND (LOWER(COALESCE(r.name, \'\')) REGEXP ?
-                            OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?)))
+                            OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
+                            OR (? = 1 AND (
+                                LOWER(COALESCE(r.name, \'\')) REGEXP ?
+                                OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
+                            )))))
                 AND r.size >= ? THEN 1 ELSE 0 END AS is_target,
                 CASE WHEN c.root_categories_id IS NOT NULL
                 AND c.root_categories_id NOT IN (1, 2000, 5000)
@@ -686,6 +703,10 @@ class PipelineSnapshotRepository
                 OR (c.id = 5999 AND NOT (
                     LOWER(COALESCE(r.name, \'\')) REGEXP ?
                     OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
+                    OR (? = 1 AND (
+                        LOWER(COALESCE(r.name, \'\')) REGEXP ?
+                        OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
+                    ))
                 )))
                 AND r.size >= ? THEN 1 ELSE 0 END AS is_uncategorized
                 FROM releases r

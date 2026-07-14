@@ -41,6 +41,10 @@ return [
         'backfill_yield_ttl_seconds' => max(3600, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_YIELD_TTL_SECONDS', 86400)),
         'backfill_cohort_postdate_tolerance_seconds' => min(86400, max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_COHORT_POSTDATE_TOLERANCE_SECONDS', 3600))),
         'backfill_min_payload_bytes' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MIN_PAYLOAD_BYTES', 104_857_600)),
+        'backfill_tv_date_range_groups' => array_values(array_unique(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('NNTMUX_ORCHESTRATOR_BACKFILL_TV_DATE_RANGE_GROUPS', '')),
+        )))),
         'backfill_min_target_byte_share' => min(1.0, max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_MIN_TARGET_BYTE_SHARE', 1.0))),
         'backfill_max_non_target_releases' => min(10, max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_RELEASES', 0))),
         'backfill_max_non_target_bytes' => max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_BYTES', 0)),

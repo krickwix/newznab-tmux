@@ -630,6 +630,38 @@ final class WorkerOrchestratorTest extends TestCase
         }
     }
 
+    public function test_tv_date_range_identity_groups_are_empty_by_default_and_normalized_when_configured(): void
+    {
+        $key = 'NNTMUX_ORCHESTRATOR_BACKFILL_TV_DATE_RANGE_GROUPS';
+        $previous = getenv($key);
+
+        try {
+            putenv($key);
+            unset($_ENV[$key], $_SERVER[$key]);
+            $strict = require base_path('config/nntmux.php');
+            self::assertSame([], $strict['orchestrator']['backfill_tv_date_range_groups']);
+
+            $configured = ' alt.binaries.tvseries,alt.binaries.tvseries, alt.binaries.other ';
+            putenv($key.'='.$configured);
+            $_ENV[$key] = $configured;
+            $_SERVER[$key] = $configured;
+            $scoped = require base_path('config/nntmux.php');
+            self::assertSame(
+                ['alt.binaries.tvseries', 'alt.binaries.other'],
+                $scoped['orchestrator']['backfill_tv_date_range_groups'],
+            );
+        } finally {
+            if ($previous === false) {
+                putenv($key);
+                unset($_ENV[$key], $_SERVER[$key]);
+            } else {
+                putenv($key.'='.$previous);
+                $_ENV[$key] = $previous;
+                $_SERVER[$key] = $previous;
+            }
+        }
+    }
+
     public function test_zero_output_context_retry_requires_exact_completed_input_and_unambiguous_safety(): void
     {
         config([

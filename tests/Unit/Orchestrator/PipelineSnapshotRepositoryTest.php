@@ -903,10 +903,18 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('c.id NOT IN (2999, 5999)', $sql);
                 self::assertStringContainsString('c.id = 5999', $sql);
                 self::assertStringContainsString('c.id = 2999', $sql);
-                self::assertSame(2, substr_count($sql, "LOWER(COALESCE(r.name, '')) REGEXP"));
-                self::assertSame(2, substr_count($sql, "LOWER(COALESCE(r.searchname, '')) REGEXP"));
+                self::assertSame(4, substr_count($sql, "LOWER(COALESCE(r.name, '')) REGEXP"));
+                self::assertSame(4, substr_count($sql, "LOWER(COALESCE(r.searchname, '')) REGEXP"));
                 self::assertSame(2, substr_count($sql, 'r.size >= ?'));
-                self::assertSame(['(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)', '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)', 104857600, '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)', '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)', 104857600, 'alt.test', 100, 103, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600], $bindings);
+                $episode = '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)';
+                $dateRange = '(^|[^[:alnum:]])(0?[1-9]|[12][0-9]|3[01])\.-(0?[1-9]|[12][0-9]|3[01])\.(0?[1-9]|1[0-2])\.[0-9]{2}([^[:alnum:]]|$)';
+                self::assertSame([
+                    $episode, $episode, 0, $dateRange, $dateRange, 104857600,
+                    $episode, $episode, 0, $dateRange, $dateRange, 104857600,
+                    'alt.test', 100, 103,
+                    '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600,
+                    '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600,
+                ], $bindings);
 
                 return true;
             })
@@ -967,6 +975,31 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         yield 'TV Other without an episode token' => ['Show Season One Pack', null, false];
     }
 
+    #[DataProvider('tvDateRangeIdentityProvider')]
+    public function test_tv_other_date_range_identity_requires_a_valid_explicit_day_range(
+        string $name,
+        bool $expected,
+    ): void {
+        $reflection = new ReflectionClass(PipelineSnapshotRepository::class);
+        $pattern = $reflection->getReflectionConstant('BACKFILL_TV_DATE_RANGE_PATTERN')?->getValue();
+
+        self::assertIsString($pattern);
+        self::assertSame($expected, preg_match('/'.$pattern.'/i', $name) === 1);
+    }
+
+    /** @return iterable<string, array{string, bool}> */
+    public static function tvDateRangeIdentityProvider(): iterable
+    {
+        yield 'observed Unter uns batch' => ['Unter uns 6.-9.7.26 by Uwealex01', true];
+        yield 'observed Alles was zaehlt batch' => ['Alles was zaehlt 6.-10.7.26', true];
+        yield 'single date is not a batch' => ['Release 9.7.26', false];
+        yield 'missing dotted range separator' => ['Software 6-9.7.26', false];
+        yield 'invalid first day' => ['Show 36.-9.7.26', false];
+        yield 'invalid second day' => ['Show 6.-39.7.26', false];
+        yield 'invalid month' => ['Show 6.-9.17.26', false];
+        yield 'four digit year is outside observed identity' => ['Show 6.-9.7.2026', false];
+    }
+
     public function test_group_cohort_nzb_count_is_bounded_by_release_id_and_tolerates_provider_date_disorder(): void
     {
         config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
@@ -1024,26 +1057,19 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('c.id NOT IN (2999, 5999)', $sql);
                 self::assertStringContainsString('c.id = 5999', $sql);
                 self::assertStringContainsString('c.id = 2999', $sql);
-                self::assertSame(2, substr_count($sql, "LOWER(COALESCE(r.name, '')) REGEXP"));
-                self::assertSame(2, substr_count($sql, "LOWER(COALESCE(r.searchname, '')) REGEXP"));
+                self::assertSame(4, substr_count($sql, "LOWER(COALESCE(r.name, '')) REGEXP"));
+                self::assertSame(4, substr_count($sql, "LOWER(COALESCE(r.searchname, '')) REGEXP"));
                 self::assertStringContainsString('r.id > ?', $sql);
                 self::assertStringContainsString('r.nzbstatus = 1', $sql);
                 self::assertSame(2, substr_count($sql, 'r.size >= ?'));
+                $episode = '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)';
+                $dateRange = '(^|[^[:alnum:]])(0?[1-9]|[12][0-9]|3[01])\.-(0?[1-9]|[12][0-9]|3[01])\.(0?[1-9]|1[0-2])\.[0-9]{2}([^[:alnum:]]|$)';
                 self::assertSame([
-                    '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)',
-                    '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)',
-                    104857600,
-                    '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)',
-                    '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)',
-                    104857600,
-                    'alt.test',
-                    123,
-                    '2026-01-02 03:04:05',
-                    '2026-01-01 03:04:05',
-                    3600,
-                    '2026-01-02 03:04:05',
-                    '2026-01-01 03:04:05',
-                    3600,
+                    $episode, $episode, 0, $dateRange, $dateRange, 104857600,
+                    $episode, $episode, 0, $dateRange, $dateRange, 104857600,
+                    'alt.test', 123,
+                    '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600,
+                    '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600,
                 ], $bindings);
 
                 return true;
@@ -1078,6 +1104,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
     {
         config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
         config()->set('nntmux.orchestrator.backfill_min_payload_bytes', 104857600);
+        config()->set('nntmux.orchestrator.backfill_tv_date_range_groups', ['alt.other']);
 
         DB::shouldReceive('selectOne')
             ->once()
@@ -1086,8 +1113,10 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('AS non_target', $sql);
                 self::assertStringContainsString('AS uncategorized', $sql);
                 self::assertStringNotContainsString('r.nzbstatus = 1', $sql);
-                self::assertSame('alt.test', $bindings[6] ?? null);
-                self::assertSame(123, $bindings[7] ?? null);
+                self::assertSame('alt.test', $bindings[12] ?? null);
+                self::assertSame(123, $bindings[13] ?? null);
+                self::assertSame(0, $bindings[2] ?? null);
+                self::assertSame(0, $bindings[8] ?? null);
 
                 return true;
             })
@@ -1121,6 +1150,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
     {
         config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
         config()->set('nntmux.orchestrator.backfill_min_payload_bytes', 104857600);
+        config()->set('nntmux.orchestrator.backfill_tv_date_range_groups', ['alt.test']);
 
         DB::shouldReceive('selectOne')
             ->once()
@@ -1130,8 +1160,10 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('AS target_bytes', $sql);
                 self::assertStringContainsString('r.nzbstatus = 1', $sql);
                 self::assertStringNotContainsString('r.id <= ?', $sql);
-                self::assertSame('alt.test', $bindings[6] ?? null);
-                self::assertSame(123, $bindings[7] ?? null);
+                self::assertSame('alt.test', $bindings[12] ?? null);
+                self::assertSame(123, $bindings[13] ?? null);
+                self::assertSame(1, $bindings[2] ?? null);
+                self::assertSame(1, $bindings[8] ?? null);
 
                 return true;
             })
@@ -1168,8 +1200,8 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             ->withArgs(function (string $sql, array $bindings): bool {
                 self::assertStringContainsString('THEN classified.size ELSE 0 END', $sql);
                 self::assertStringNotContainsString('r.nzbstatus = 1', $sql);
-                self::assertSame('alt.test', $bindings[6] ?? null);
-                self::assertSame(123, $bindings[7] ?? null);
+                self::assertSame('alt.test', $bindings[12] ?? null);
+                self::assertSame(123, $bindings[13] ?? null);
 
                 return true;
             })
@@ -1205,9 +1237,9 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             ->withArgs(function (string $sql, array $bindings): bool {
                 self::assertStringContainsString('r.nzbstatus = 1', $sql);
                 self::assertStringContainsString('r.id <= ?', $sql);
-                self::assertSame('alt.test', $bindings[6] ?? null);
-                self::assertSame(100, $bindings[7] ?? null);
-                self::assertSame(103, $bindings[8] ?? null);
+                self::assertSame('alt.test', $bindings[12] ?? null);
+                self::assertSame(100, $bindings[13] ?? null);
+                self::assertSame(103, $bindings[14] ?? null);
 
                 return true;
             })
@@ -1256,7 +1288,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('AS target_count', $sql);
                 self::assertStringContainsString('AS target_bytes', $sql);
                 self::assertStringContainsString('r.id <= ?', $sql);
-                self::assertSame(103, $bindings[8] ?? null);
+                self::assertSame(103, $bindings[14] ?? null);
 
                 return true;
             })
