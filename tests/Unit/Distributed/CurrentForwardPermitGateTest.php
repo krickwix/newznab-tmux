@@ -105,6 +105,17 @@ final class CurrentForwardPermitGateTest extends TestCase
         self::assertSame('provider_range_drift', Settings::settingValue('orchestrator_cf_failure'));
     }
 
+    public function test_every_current_forward_setting_key_fits_the_live_schema(): void
+    {
+        $source = (string) file_get_contents(app_path('Services/Distributed/CurrentForwardPermitGate.php'));
+        preg_match_all("/'(orchestrator_cf_[a-z_]+)'/", $source, $matches);
+
+        self::assertNotEmpty($matches[1]);
+        foreach (array_unique($matches[1]) as $key) {
+            self::assertLessThanOrEqual(25, strlen($key), $key);
+        }
+    }
+
     private function safeSnapshot(bool $highPressure = false): PipelineSnapshot
     {
         return new PipelineSnapshot(

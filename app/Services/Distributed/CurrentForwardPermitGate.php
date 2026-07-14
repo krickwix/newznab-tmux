@@ -74,7 +74,7 @@ final class CurrentForwardPermitGate
             }
 
             foreach ([
-                'orchestrator_cf_generation' => $generation,
+                'orchestrator_cf_gen' => $generation,
                 'orchestrator_cf_permit' => $generation,
                 'orchestrator_cf_group' => $group,
                 'orchestrator_cf_first' => $window['first'],
@@ -167,7 +167,7 @@ final class CurrentForwardPermitGate
         return DB::transaction(function () use ($generation, $reason): bool {
             $this->ensureSettings();
             $settings = $this->lockedSettings();
-            if ($generation <= 0 || (int) $settings->get('orchestrator_cf_generation') !== $generation) {
+            if ($generation <= 0 || (int) $settings->get('orchestrator_cf_gen') !== $generation) {
                 return false;
             }
             Settings::query()->where('name', 'orchestrator_cf_permit')->update(['value' => '0']);
@@ -206,7 +206,7 @@ final class CurrentForwardPermitGate
             'orchestrator_mode' => '',
             'orchestrator_lease_until' => 0,
             'orchestrator_bf_permit' => 0,
-            'orchestrator_cf_generation' => 0,
+            'orchestrator_cf_gen' => 0,
             'orchestrator_cf_permit' => 0,
             'orchestrator_cf_claimed' => 0,
             'orchestrator_cf_completed' => 0,
@@ -225,7 +225,7 @@ final class CurrentForwardPermitGate
         return Settings::query()
             ->whereIn('name', [
                 'orchestrator_mode', 'orchestrator_lease_until', 'orchestrator_bf_permit',
-                'orchestrator_cf_generation', 'orchestrator_cf_permit', 'orchestrator_cf_claimed',
+                'orchestrator_cf_gen', 'orchestrator_cf_permit', 'orchestrator_cf_claimed',
                 'orchestrator_cf_completed', 'orchestrator_cf_failed', 'orchestrator_cf_group',
                 'orchestrator_cf_first', 'orchestrator_cf_last', 'orchestrator_cf_stop',
             ])
