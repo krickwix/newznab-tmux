@@ -24,6 +24,14 @@ class TmuxMonitorService
         'orchestrator_bf_permit' => 'orchestrator_bf_permit',
     ];
 
+    /** @var array<string, string> */
+    private const array NZB_CONTROL_SETTINGS = [
+        'orchestrator_mode' => 'orchestrator_mode',
+        'orchestrator_lease_until' => 'orchestrator_lease_until',
+        'orchestrator_nzb_timer' => 'orchestrator_nzb_timer',
+        'orchestrator_nzb_limit' => 'orchestrator_nzb_limit',
+    ];
+
     protected Tmux $tmux;
 
     /**
@@ -171,6 +179,27 @@ class TmuxMonitorService
             ->toArray();
 
         $this->runVar['settings'] = array_replace($this->runVar['settings'] ?? [], $settings);
+
+        return $this->runVar;
+    }
+
+    /**
+     * Refresh only the controls needed after a saturated NZB pass.
+     *
+     * @return array<string, mixed>
+     */
+    public function refreshNzbControlSettings(): array
+    {
+        $settings = Settings::query()
+            ->whereIn('name', array_keys(self::NZB_CONTROL_SETTINGS))
+            ->get()
+            ->mapWithKeys(static fn (Settings $setting): array => [
+                self::NZB_CONTROL_SETTINGS[$setting->name] => Settings::convertValue($setting->getRawOriginal('value')),
+            ])
+            ->toArray();
+
+        $this->runVar['settings'] = array_replace($this->runVar['settings'] ?? [], $settings);
+        $this->runVar['nzb_controls_fresh'] = count($settings) === count(self::NZB_CONTROL_SETTINGS);
 
         return $this->runVar;
     }

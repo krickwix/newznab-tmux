@@ -35,6 +35,25 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
     }
 
+    public function test_nzb_saturated_retry_overlay_packages_the_fresh_control_loop(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/nzb-saturated-retry.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260714-nzb-completion-v143@sha256:3f5ccef8d0c088dac9d07c4ae01426ce8aa4d109858bb91075e672ae61665e0b',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/Distributed/DistributedJobWorker.php /app/app/Services/Distributed/DistributedJobWorker.php',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/Tmux/TmuxMonitorService.php /app/app/Services/Tmux/TmuxMonitorService.php',
+            $dockerfile,
+        );
+    }
+
     public function test_lossless_body_preamble_repair_is_explicitly_enabled(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/infra.yaml';

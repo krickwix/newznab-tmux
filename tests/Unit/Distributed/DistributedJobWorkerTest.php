@@ -12,6 +12,7 @@ use App\Services\Tmux\TmuxMonitorService;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Mockery;
+use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionClass;
 use ReflectionMethod;
 use Symfony\Component\Console\Output\BufferedOutput;
@@ -53,7 +54,7 @@ class DistributedJobWorkerTest extends TestCase
         );
         $method = new ReflectionMethod($worker, 'runLockedPlan');
 
-        $exitCode = $method->invoke($worker, [
+        $result = $method->invoke($worker, [
             'name' => 'releases',
             'description' => 'test release processing',
             'enabled' => true,
@@ -62,7 +63,8 @@ class DistributedJobWorkerTest extends TestCase
             'sleep' => 1,
         ], 60, new BufferedOutput);
 
-        self::assertSame(0, $exitCode);
+        self::assertSame(0, $result['exit_code']);
+        self::assertTrue($result['completed']);
     }
 
     public function test_successful_backfill_marks_the_claimed_generation_complete(): void
@@ -86,7 +88,7 @@ class DistributedJobWorkerTest extends TestCase
         );
         $method = new ReflectionMethod($worker, 'runLockedPlan');
 
-        $exitCode = $method->invoke($worker, [
+        $result = $method->invoke($worker, [
             'name' => 'backfill',
             'description' => 'test backfill',
             'enabled' => true,
@@ -95,7 +97,8 @@ class DistributedJobWorkerTest extends TestCase
             'sleep' => 60,
         ], 60, new BufferedOutput);
 
-        self::assertSame(0, $exitCode);
+        self::assertSame(0, $result['exit_code']);
+        self::assertTrue($result['completed']);
     }
 
     public function test_backfill_refreshes_control_settings_before_resolving_each_plan(): void
@@ -145,5 +148,100 @@ class DistributedJobWorkerTest extends TestCase
         ))->run('backfill', true, null, 60, new BufferedOutput);
 
         self::assertSame(0, $exitCode);
+    }
+
+    #[DataProvider('nzbPostPassSleepProvider')]
+    public function test_nzb_post_pass_sleep_only_accelerates_a_saturated_batch_with_a_fresh_active_lease(
+        string $mode,
+        int $leaseUntil,
+        bool $controlsFresh,
+        int $selected,
+        int $created,
+        int $expectedSleep,
+        int $refreshes,
+    ): void {
+        config([
+            'nntmux.distributed_nzb_limit' => 5,
+            'nntmux.distributed_nzb_sleep' => 60,
+            'nntmux.distributed_nzb_terminal_stale_enabled' => false,
+        ]);
+        $runVar = [
+            'nzb_controls_fresh' => $controlsFresh,
+            'constants' => ['sequential' => 0],
+            'settings' => [
+                'orchestrator_mode' => $mode,
+                'orchestrator_lease_until' => $leaseUntil,
+                'orchestrator_nzb_timer' => 60,
+                'orchestrator_nzb_limit' => 5,
+            ],
+            'counts' => ['now' => []],
+            'killswitch' => [],
+        ];
+        $plan = (new DistributedJobCatalog)->resolve('nzb-backlog', $runVar);
+        $monitor = Mockery::mock(TmuxMonitorService::class);
+        $refreshes === 0
+            ? $monitor->shouldNotReceive('refreshNzbControlSettings')
+            : $monitor->shouldReceive('refreshNzbControlSettings')->once()->andReturn($runVar);
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $worker = new DistributedJobWorker(new DistributedJobCatalog, $monitor, $telemetry);
+        $method = new ReflectionMethod($worker, 'sleepAfterSaturatedNzbPass');
+
+        self::assertSame($expectedSleep, $method->invoke(
+            $worker,
+            $plan,
+            [
+                'exit_code' => 0,
+                'completed' => true,
+                'nzb_batch_before' => ['selected' => 0, 'created' => 0],
+                'nzb_batch_after' => ['selected' => $selected, 'created' => $created],
+            ],
+            (int) $plan['sleep'],
+        ));
+    }
+
+    public static function nzbPostPassSleepProvider(): array
+    {
+        return [
+            'active saturated successful batch retries within twenty seconds' => ['active', time() + 600, true, 5, 5, 20, 1],
+            'active saturated batch with a failed write keeps idle timer' => ['active', time() + 600, true, 5, 4, 60, 0],
+            'active partial batch keeps idle timer' => ['active', time() + 600, true, 4, 4, 60, 0],
+            'stale lease keeps fail-safe timer' => ['active', time() - 1, true, 5, 5, 180, 1],
+            'incomplete control refresh keeps original timer' => ['active', time() + 600, false, 5, 5, 60, 1],
+        ];
+    }
+
+    public function test_lock_contention_never_samples_or_marks_an_nzb_batch_complete(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'array']);
+        Cache::store('array')->flush();
+        $heldLock = Cache::store('array')->lock('nntmux:distributed-worker:nzb-backlog', 60);
+        self::assertTrue($heldLock->get());
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('recordRunOutcome')->once()->with('nzb-backlog', 'lock_contended');
+        $telemetry->shouldNotReceive('snapshot');
+        $worker = new DistributedJobWorker(
+            new DistributedJobCatalog,
+            Mockery::mock(TmuxMonitorService::class),
+            $telemetry,
+        );
+        $method = new ReflectionMethod($worker, 'runLockedPlan');
+        $result = $method->invoke($worker, [
+            'name' => 'nzb-backlog',
+            'description' => 'test NZB backlog',
+            'enabled' => true,
+            'disabled_reason' => null,
+            'commands' => [[
+                'command' => 'nntmux:nzb-create-backlog',
+                'arguments' => ['--limit' => 5, '--order' => 'desc'],
+            ]],
+            'sleep' => 60,
+        ], 60, new BufferedOutput);
+
+        self::assertSame(0, $result['exit_code']);
+        self::assertFalse($result['completed']);
+        self::assertNull($result['nzb_batch_before']);
+        self::assertNull($result['nzb_batch_after']);
+        $heldLock->release();
     }
 }
