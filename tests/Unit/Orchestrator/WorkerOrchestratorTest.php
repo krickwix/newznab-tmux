@@ -2195,6 +2195,104 @@ final class WorkerOrchestratorTest extends TestCase
         ];
     }
 
+    #[DataProvider('productiveContinuationContextProvider')]
+    public function test_productive_context_continuation_only_rearms_the_bounded_delayed_chain_with_proven_context(
+        bool $hasContextProgress,
+    ): void {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '8'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '8'],
+        ]);
+
+        $now = time();
+        $store = new WorkerControlStateStore;
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-03 03:04:05',
+        ], ['cursor_postdate' => '2026-01-02 03:04:05'], 10_000, $now));
+        $store->markBackfillContextRepeat('alt.test', $now, 7);
+        $baseline = new PipelineSnapshot(1, 2, 3, 0, 0, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, 8, $now - 600, [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+            'group_active' => 0,
+            'raw_collections' => 10,
+            'raw_binaries' => 20,
+            'partial_collections' => 2,
+            'complete_binaries' => 20,
+        ], 10_000);
+        $store->observePermitCompletion(8, $now - 301);
+        $snapshot = new PipelineSnapshot(
+            1, 2, 3, 0, 0,
+            lowPressure: true,
+            eligibleBackfillSupply: true,
+            backfillGroup: 'alt.test',
+            backfillCursor: 10_000,
+            backfillSafeQuantity: 10_000,
+        );
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($snapshot);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
+            'cursor' => 10_000,
+            'cursor_postdate' => '2026-01-01 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 1,
+            'release_high_watermark' => 101,
+            'group_active' => 0,
+            'raw_collections' => 11,
+            'raw_binaries' => 21,
+            'partial_collections' => $hasContextProgress ? 3 : 2,
+            'complete_binaries' => $hasContextProgress ? 21 : 20,
+        ]);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(1);
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
+            'target' => 1, 'non_target' => 0, 'uncategorized' => 0,
+        ]);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldReceive('apply')->once()->andReturn(9);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertContains('backfill_delayed_attribution_queued', $result['reasons']);
+        self::assertSame($hasContextProgress, in_array('backfill_permit_effective', $result['reasons'], true));
+        self::assertSame($hasContextProgress ? 8 : null, $store->backfillContextRepeat(time())['generation'] ?? null);
+        self::assertSame($hasContextProgress, $store->backfillDelayedAttributionCanContinue('alt.test', time()));
+        self::assertSame(20_000, $store->matureBackfillDelayedAttribution(time() + 9_001)['cursor_delta'] ?? null);
+        self::assertSame([], $store->backfillYieldHistory());
+        self::assertNull($store->permitObservation());
+        self::assertFalse($result['permit_granted']);
+    }
+
+    public static function productiveContinuationContextProvider(): array
+    {
+        return [
+            'target output plus context progress' => [true],
+            'target output without context progress' => [false],
+        ];
+    }
+
     public function test_context_continuation_with_wrong_category_merges_before_quality_lock_without_early_yield(): void
     {
         config([

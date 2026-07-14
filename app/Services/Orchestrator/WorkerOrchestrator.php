@@ -203,12 +203,21 @@ class WorkerOrchestrator
                         contextContinuation: $pendingContextContinuation || $continuationAttributionReplay,
                     );
                 }
+                $zeroOutputContextProgress = $cohortReleases === 0
+                    && $cohortNzbs === 0;
+                $productiveContinuationContextProgress = $pendingContextContinuation
+                    && $cohortReleases > 0
+                    && $currentCohortNzbs === $cohortReleases
+                    && $cohortNzbCategories['target'] === $currentCohortNzbs
+                    && $cohortNzbCategories['non_target'] === 0
+                    && $cohortNzbCategories['uncategorized'] === 0
+                    && $cohortQuality['productive'] > 0
+                    && $cohortQuality['failure'] === null;
                 $queuedContextProgress = $delayedAttributionQueued
                     && ! $rootAttributionReplay
                     && ! $continuationAttributionReplay
                     && $contextProgress
-                    && $cohortReleases === 0
-                    && $cohortNzbs === 0
+                    && ($zeroOutputContextProgress || $productiveContinuationContextProgress)
                     && $requestedQuantity === 10_000
                     && $expectedCursorDelta === 10_000
                     && $cursorDelta === 10_000;
