@@ -348,7 +348,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
-            'alt.binaries.dvd.movies:147228921,alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468,alt.binaries.hdtv.tv-episodes:99610786',
+            'alt.binaries.dvd.movies:147218921,alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468,alt.binaries.hdtv.tv-episodes:99610786',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertSame(
@@ -537,7 +537,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             (string) ($deployments['nntmux-worker-nzb-backlog']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'alt.binaries.dvd.movies:147228921,alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468,alt.binaries.hdtv.tv-episodes:99610786',
+            'alt.binaries.dvd.movies:147218921,alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468,alt.binaries.hdtv.tv-episodes:99610786',
             $environment($deployments['nntmux-worker-backfill'])['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);
