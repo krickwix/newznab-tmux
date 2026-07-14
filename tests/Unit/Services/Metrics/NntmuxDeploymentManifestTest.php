@@ -311,9 +311,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-attribution-poll-v135', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-byte-quality-v136', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:54089c09e2aab30f2a7386505c3153142bb00231bacfbaf333b77b934f0e47f0',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:8858461ac3c0eee0810512b2e58feab5016fa2e5f21d8a5e5ca9b6d8feed1cc0',
             $orchestratorImage,
         );
         self::assertSame(
@@ -322,7 +322,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
         self::assertSame(
-            'true',
+            'false',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
@@ -340,6 +340,18 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(
             '104857600',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_MIN_PAYLOAD_BYTES'] ?? null,
+        );
+        self::assertSame(
+            '0.90',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_MIN_TARGET_BYTE_SHARE'] ?? null,
+        );
+        self::assertSame(
+            '1',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_RELEASES'] ?? null,
+        );
+        self::assertSame(
+            '536870912',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_BYTES'] ?? null,
         );
         self::assertSame(
             '3600',
