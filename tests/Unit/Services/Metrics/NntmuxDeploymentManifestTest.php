@@ -104,7 +104,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = in_array($name, ['nntmux-worker-backfill', 'nntmux-worker-nzb-backlog'], true)
-                ? ':microservices-pods-20260714-adaptive-orchestrator-v141@sha256:ef09ca84eb3c371871ec926e29dba75e59c811c0ecc8f33cbcbe56c4bfc60b64'
+                ? ':microservices-pods-20260714-adaptive-orchestrator-v141@sha256:c3dcb423bdab0eb549d3550eed145f53df91261a7b954afadf491c385711858f'
                 : ($name === 'nntmux-worker-hashed-fixnames'
                     ? ':microservices-pods-20260713-fresh-hashed-retry-v114'
                     : (in_array($name, [
@@ -312,7 +312,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
         self::assertSame('microservices-pods-20260714-adaptive-orchestrator-v141', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:ef09ca84eb3c371871ec926e29dba75e59c811c0ecc8f33cbcbe56c4bfc60b64',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:c3dcb423bdab0eb549d3550eed145f53df91261a7b954afadf491c385711858f',
             $orchestratorImage,
         );
         self::assertSame(
@@ -496,7 +496,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             '7200',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_LATEST_SAMPLE_SECONDS'] ?? null,
         );
-        $v141Image = 'docker.io/krickwix/nntmux:microservices-pods-20260714-adaptive-orchestrator-v141@sha256:ef09ca84eb3c371871ec926e29dba75e59c811c0ecc8f33cbcbe56c4bfc60b64';
+        $v141Image = 'docker.io/krickwix/nntmux:microservices-pods-20260714-adaptive-orchestrator-v141@sha256:c3dcb423bdab0eb549d3550eed145f53df91261a7b954afadf491c385711858f';
         self::assertSame(
             $v141Image,
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
