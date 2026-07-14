@@ -103,20 +103,17 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
-            $expectedImage = $name === 'nntmux-worker-backfill'
-                ? ':microservices-pods-20260713-claimed-orphan-backfill-v116'
+            $expectedImage = in_array($name, ['nntmux-worker-backfill', 'nntmux-worker-nzb-backlog'], true)
+                ? ':microservices-pods-20260714-adaptive-orchestrator-v141@sha256:ef09ca84eb3c371871ec926e29dba75e59c811c0ecc8f33cbcbe56c4bfc60b64'
                 : ($name === 'nntmux-worker-hashed-fixnames'
                     ? ':microservices-pods-20260713-fresh-hashed-retry-v114'
                     : (in_array($name, [
                         'nntmux-worker-binaries',
                         'nntmux-worker-releases',
-                        'nntmux-worker-nzb-backlog',
                     ], true)
                 ? ($name === 'nntmux-worker-binaries'
                     ? ':microservices-pods-20260713-provider-range-v93'
-                    : ($name === 'nntmux-worker-releases'
-                        ? ':microservices-pods-20260714-tv-series-pack-v139@sha256:d2baf27218c20e32397e3be3eb79b1df29c892005791a54be3387534d993b242'
-                        : ':microservices-pods-20260711-worker-orchestrator-v22'))
+                    : ':microservices-pods-20260714-tv-series-pack-v139@sha256:d2baf27218c20e32397e3be3eb79b1df29c892005791a54be3387534d993b242')
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
@@ -294,7 +291,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
         $backlogEnvironment = $environment($deployments['nntmux-worker-nzb-backlog'] ?? []);
         $metricsEnvironment = $environment($metrics);
-        self::assertSame('microservices-pods-20260711-worker-orchestrator-v22', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260714-adaptive-orchestrator-v141', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('168', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_HOURS'] ?? null);
+        self::assertSame('false', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED'] ?? null);
         self::assertSame('microservices-pods-20260713-backfill-source-v97', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
@@ -311,9 +310,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-adaptive-timers-v140', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-adaptive-orchestrator-v141', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:b17b21359c54e597c5a5d7d7ff350d39cb7eb0084dffab2e287620530cf4560e',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:ef09ca84eb3c371871ec926e29dba75e59c811c0ecc8f33cbcbe56c4bfc60b64',
             $orchestratorImage,
         );
         self::assertSame(
@@ -322,8 +321,16 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
         self::assertSame(
-            'true',
+            'false',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.tvseries:948528922',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
+        );
+        self::assertSame(
+            '4',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_MAX_CHAIN_WINDOWS'] ?? null,
         );
         self::assertSame(
             '120',
@@ -489,9 +496,15 @@ final class NntmuxDeploymentManifestTest extends TestCase
             '7200',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_LATEST_SAMPLE_SECONDS'] ?? null,
         );
-        self::assertStringEndsWith(
-            ':microservices-pods-20260713-claimed-orphan-backfill-v116',
+        $v141Image = 'docker.io/krickwix/nntmux:microservices-pods-20260714-adaptive-orchestrator-v141@sha256:ef09ca84eb3c371871ec926e29dba75e59c811c0ecc8f33cbcbe56c4bfc60b64';
+        self::assertSame(
+            $v141Image,
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
+        );
+        self::assertSame($v141Image, (string) ($deployments['nntmux-worker-nzb-backlog']['spec']['template']['spec']['containers'][0]['image'] ?? ''));
+        self::assertSame(
+            'alt.binaries.tvseries:948528922',
+            $environment($deployments['nntmux-worker-backfill'])['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);
 
