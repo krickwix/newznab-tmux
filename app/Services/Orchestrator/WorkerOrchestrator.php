@@ -98,6 +98,7 @@ class WorkerOrchestrator
                 $produced = $outcome['ready_collections'] > (int) ($permitObservation['ready_collections'] ?? 0)
                     || $outcome['releases'] > (int) ($permitObservation['release_total'] ?? 0);
                 $cohortNzbCategories = ['target' => 0, 'non_target' => 0, 'uncategorized' => 0];
+                $cohortNzbBytes = ['target' => 0, 'non_target' => 0, 'uncategorized' => 0];
                 $currentCohortNzbs = 0;
                 $cohortReleases = 0;
                 if ($permitClaimed && $hasCohortBaseline && ($observationExpired || $cursorMoved)) {
@@ -107,16 +108,18 @@ class WorkerOrchestrator
                         (string) $permitObservation['backfill_cursor_postdate'],
                         (string) ($outcome['cursor_postdate'] ?? ''),
                     );
-                    $cohortNzbCategories = $this->snapshots->backfillCreatedNzbCategoryCountsForCohort(
+                    $cohortNzbQuality = $this->backfillCreatedNzbCategoryQualityForCohort(
                         $observedGroup,
                         (int) $permitObservation['release_high_watermark'],
                         (string) $permitObservation['backfill_cursor_postdate'],
                         (string) ($outcome['cursor_postdate'] ?? ''),
                     );
+                    $cohortNzbCategories = $cohortNzbQuality['counts'];
+                    $cohortNzbBytes = $cohortNzbQuality['bytes'];
                     $currentCohortNzbs = array_sum($cohortNzbCategories);
                     $priorReleaseCohort = $permitObservation['prior_release_cohort'] ?? null;
                     if (is_array($priorReleaseCohort)) {
-                        $carriedNzbCategories = $this->snapshots->backfillCompletedNzbCategoryCountsForReleaseCohort(
+                        $carriedNzbQuality = $this->backfillCompletedNzbCategoryQualityForReleaseCohort(
                             $observedGroup,
                             (int) ($priorReleaseCohort['id_low_exclusive'] ?? 0),
                             (int) ($priorReleaseCohort['id_high_inclusive'] ?? 0),
@@ -124,12 +127,18 @@ class WorkerOrchestrator
                             (string) ($priorReleaseCohort['cursor_end_postdate'] ?? ''),
                         );
                         foreach (array_keys($cohortNzbCategories) as $category) {
-                            $cohortNzbCategories[$category] += $carriedNzbCategories[$category];
+                            $cohortNzbCategories[$category] += $carriedNzbQuality['counts'][$category];
+                            $cohortNzbBytes[$category] += $carriedNzbQuality['bytes'][$category];
                         }
                     }
                 }
                 $cohortNzbs = array_sum($cohortNzbCategories);
-                $cohortQuality = $this->classifyCohortNzbQuality($cohortNzbCategories, $permitObservation, time());
+                $cohortQuality = $this->classifyCohortNzbQuality(
+                    $cohortNzbCategories,
+                    $permitObservation,
+                    time(),
+                    $cohortNzbBytes,
+                );
                 $cursorDelta = max(0, (int) ($permitObservation['backfill_cursor'] ?? 0) - (int) $outcome['cursor']);
                 $requestedQuantity = max(0, (int) ($permitObservation['backfill_quantity'] ?? 0));
                 $expectedCursorDelta = $this->expectedCursorDelta($permitObservation);
@@ -500,18 +509,22 @@ class WorkerOrchestrator
             if ($group === '' || $generation <= 0 || $cursorDelta <= 0) {
                 continue;
             }
-            $counts = $this->snapshots->backfillCreatedNzbCategoryCountsForCohort(
+            $quality = $this->backfillCreatedNzbCategoryQualityForCohort(
                 $group,
                 (int) ($entry['release_high_watermark'] ?? 0),
                 (string) ($entry['cursor_start_postdate'] ?? ''),
                 (string) ($entry['cursor_end_postdate'] ?? ''),
             );
+            $counts = $quality['counts'];
+            $bytes = $quality['bytes'];
             $classifiedNzbs = array_sum($counts);
             $qualityFailure = match (true) {
-                $counts['non_target'] > 0 => 'backfill_permit_wrong_category',
                 $counts['uncategorized'] > 0
                     && $now - (int) ($entry['quality_grace_started_at'] ?? $entry['queued_at'] ?? $now)
                         >= (int) config('nntmux.orchestrator.backfill_incomplete_release_grace_seconds', 600) => 'backfill_permit_uncategorized_after_grace',
+                $counts['uncategorized'] === 0
+                    && $counts['non_target'] > 0
+                    && ! $this->cohortMeetsTargetQuality($counts, $bytes) => 'backfill_permit_wrong_category',
                 default => '',
             };
             $productive = 0;
@@ -519,7 +532,7 @@ class WorkerOrchestrator
             $fullyDrained = false;
             if ($qualityFailure === ''
                 && $counts['target'] > 0
-                && $counts['non_target'] === 0
+                && $this->cohortMeetsTargetQuality($counts, $bytes)
                 && $counts['uncategorized'] === 0
                 && $snapshot->telemetryIsValid()
                 && $snapshot->hardSafetyPassed()
@@ -534,20 +547,22 @@ class WorkerOrchestrator
                     (string) ($entry['cursor_start_postdate'] ?? ''),
                     (string) ($entry['cursor_end_postdate'] ?? ''),
                 );
-                $allCreatedReleasesAreTarget = $createdReleases === $classifiedNzbs;
+                $allCreatedReleasesAreClassified = $createdReleases === $classifiedNzbs;
                 if ($createdReleases > $classifiedNzbs) {
-                    $releaseCounts = $this->snapshots->backfillCreatedReleaseCategoryCountsForCohort(
+                    $releaseQuality = $this->backfillCreatedReleaseCategoryQualityForCohort(
                         $group,
                         (int) ($entry['release_high_watermark'] ?? 0),
                         (string) ($entry['cursor_start_postdate'] ?? ''),
                         (string) ($entry['cursor_end_postdate'] ?? ''),
                     );
-                    $allCreatedReleasesAreTarget = $releaseCounts['target'] === $createdReleases
-                        && $releaseCounts['non_target'] === 0
-                        && $releaseCounts['uncategorized'] === 0;
+                    $releaseCounts = $releaseQuality['counts'];
+                    $releaseBytes = $releaseQuality['bytes'];
+                    $allCreatedReleasesAreClassified = array_sum($releaseCounts) === $createdReleases
+                        && $releaseCounts['uncategorized'] === 0
+                        && $this->cohortMeetsTargetQuality($releaseCounts, $releaseBytes);
                 }
                 $fullyDrained = $createdReleases >= $classifiedNzbs
-                    && $allCreatedReleasesAreTarget
+                    && $allCreatedReleasesAreClassified
                     && $this->snapshots->backfillPendingCollectionsForCohort(
                         $group,
                         (string) ($entry['cursor_start_postdate'] ?? ''),
@@ -630,12 +645,13 @@ class WorkerOrchestrator
         if ($group === '' || $generation <= 0 || $cursorDelta <= 0) {
             return [$snapshot, null];
         }
-        $counts = $this->snapshots->backfillCreatedNzbCategoryCountsForCohort(
+        $quality = $this->backfillCreatedNzbCategoryQualityForCohort(
             $group,
             (int) ($entry['release_high_watermark'] ?? 0),
             (string) ($entry['cursor_start_postdate'] ?? ''),
             (string) ($entry['cursor_end_postdate'] ?? ''),
         );
+        $counts = $quality['counts'];
         if ($this->snapshots->backfillPendingCollectionsForCohort(
             $group,
             (string) ($entry['cursor_start_postdate'] ?? ''),
@@ -643,9 +659,10 @@ class WorkerOrchestrator
         ) > 0) {
             return [$snapshot, null];
         }
+        $bytes = $quality['bytes'];
         $qualityFailure = match (true) {
-            $counts['non_target'] > 0 => 'backfill_permit_wrong_category',
             $counts['uncategorized'] > 0 => 'backfill_permit_uncategorized_after_grace',
+            $counts['non_target'] > 0 && ! $this->cohortMeetsTargetQuality($counts, $bytes) => 'backfill_permit_wrong_category',
             default => '',
         };
         $productive = $qualityFailure === '' ? max(0, (int) $counts['target']) : 0;
@@ -743,18 +760,15 @@ class WorkerOrchestrator
     /**
      * @param  array{target: int, non_target: int, uncategorized: int}  $counts
      * @param  array<string, mixed>  $observation
+     * @param  array{target: int, non_target: int, uncategorized: int}  $bytes
      * @return array{productive: int, hold: bool, failure: string|null}
      */
-    private function classifyCohortNzbQuality(array $counts, array $observation, int $now): array
-    {
-        if ($counts['non_target'] > 0) {
-            return [
-                'productive' => 0,
-                'hold' => false,
-                'failure' => 'backfill_permit_wrong_category',
-            ];
-        }
-
+    private function classifyCohortNzbQuality(
+        array $counts,
+        array $observation,
+        int $now,
+        array $bytes = ['target' => 0, 'non_target' => 0, 'uncategorized' => 0],
+    ): array {
         if ($counts['uncategorized'] > 0) {
             $completedAt = (int) ($observation['completed_observed_at'] ?? 0);
             $graceSeconds = (int) config('nntmux.orchestrator.backfill_incomplete_release_grace_seconds', 600);
@@ -767,11 +781,172 @@ class WorkerOrchestrator
             ];
         }
 
+        if ($counts['non_target'] > 0 && ! $this->cohortMeetsTargetQuality($counts, $bytes)) {
+            return [
+                'productive' => 0,
+                'hold' => false,
+                'failure' => 'backfill_permit_wrong_category',
+            ];
+        }
+
         return [
             'productive' => max(0, $counts['target']),
             'hold' => false,
             'failure' => null,
         ];
+    }
+
+    /**
+     * @return array{
+     *     counts: array{target: int, non_target: int, uncategorized: int},
+     *     bytes: array{target: int, non_target: int, uncategorized: int}
+     * }
+     */
+    private function backfillCreatedNzbCategoryQualityForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        if ($this->mixedCohortToleranceEnabled()) {
+            return $this->snapshots->backfillCreatedNzbCategoryQualityForCohort(
+                $group,
+                $releaseHighWatermark,
+                $startPostdate,
+                $endPostdate,
+            );
+        }
+
+        return $this->strictBackfillCategoryQuality(
+            $this->snapshots->backfillCreatedNzbCategoryCountsForCohort(
+                $group,
+                $releaseHighWatermark,
+                $startPostdate,
+                $endPostdate,
+            ),
+        );
+    }
+
+    /**
+     * @return array{
+     *     counts: array{target: int, non_target: int, uncategorized: int},
+     *     bytes: array{target: int, non_target: int, uncategorized: int}
+     * }
+     */
+    private function backfillCreatedReleaseCategoryQualityForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        if ($this->mixedCohortToleranceEnabled()) {
+            return $this->snapshots->backfillCreatedReleaseCategoryQualityForCohort(
+                $group,
+                $releaseHighWatermark,
+                $startPostdate,
+                $endPostdate,
+            );
+        }
+
+        return $this->strictBackfillCategoryQuality(
+            $this->snapshots->backfillCreatedReleaseCategoryCountsForCohort(
+                $group,
+                $releaseHighWatermark,
+                $startPostdate,
+                $endPostdate,
+            ),
+        );
+    }
+
+    /**
+     * @return array{
+     *     counts: array{target: int, non_target: int, uncategorized: int},
+     *     bytes: array{target: int, non_target: int, uncategorized: int}
+     * }
+     */
+    private function backfillCompletedNzbCategoryQualityForReleaseCohort(
+        string $group,
+        int $releaseIdLowExclusive,
+        int $releaseIdHighInclusive,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        if ($this->mixedCohortToleranceEnabled()) {
+            return $this->snapshots->backfillCompletedNzbCategoryQualityForReleaseCohort(
+                $group,
+                $releaseIdLowExclusive,
+                $releaseIdHighInclusive,
+                $startPostdate,
+                $endPostdate,
+            );
+        }
+
+        return $this->strictBackfillCategoryQuality(
+            $this->snapshots->backfillCompletedNzbCategoryCountsForReleaseCohort(
+                $group,
+                $releaseIdLowExclusive,
+                $releaseIdHighInclusive,
+                $startPostdate,
+                $endPostdate,
+            ),
+        );
+    }
+
+    private function mixedCohortToleranceEnabled(): bool
+    {
+        return (int) config('nntmux.orchestrator.backfill_max_non_target_releases', 0) > 0
+            && (int) config('nntmux.orchestrator.backfill_max_non_target_bytes', 0) > 0;
+    }
+
+    /**
+     * @param  array{target: int, non_target: int, uncategorized: int}  $counts
+     * @return array{
+     *     counts: array{target: int, non_target: int, uncategorized: int},
+     *     bytes: array{target: int, non_target: int, uncategorized: int}
+     * }
+     */
+    private function strictBackfillCategoryQuality(array $counts): array
+    {
+        return [
+            'counts' => $counts,
+            'bytes' => ['target' => 0, 'non_target' => 0, 'uncategorized' => 0],
+        ];
+    }
+
+    /**
+     * @param  array{target: int, non_target: int, uncategorized: int}  $counts
+     * @param  array{target: int, non_target: int, uncategorized: int}  $bytes
+     */
+    private function cohortMeetsTargetQuality(array $counts, array $bytes): bool
+    {
+        $targetCount = max(0, (int) $counts['target']);
+        $nonTargetCount = max(0, (int) $counts['non_target']);
+        if ($targetCount === 0 || $counts['uncategorized'] > 0) {
+            return false;
+        }
+
+        $targetBytes = max(0, (int) $bytes['target']);
+        $nonTargetBytes = max(0, (int) $bytes['non_target']);
+        $uncategorizedBytes = max(0, (int) $bytes['uncategorized']);
+        if ($this->mixedCohortToleranceEnabled()
+            && ($targetBytes === 0
+                || ($nonTargetCount > 0) !== ($nonTargetBytes > 0)
+                || ($counts['uncategorized'] > 0) !== ($uncategorizedBytes > 0))
+        ) {
+            return false;
+        }
+        if ($nonTargetCount === 0) {
+            return true;
+        }
+
+        $classifiedBytes = $targetBytes + $nonTargetBytes;
+
+        return $nonTargetCount <= (int) config('nntmux.orchestrator.backfill_max_non_target_releases', 0)
+            && $nonTargetBytes <= (int) config('nntmux.orchestrator.backfill_max_non_target_bytes', 0)
+            && $targetBytes > 0
+            && $classifiedBytes > 0
+            && ($targetBytes / $classifiedBytes)
+                >= (float) config('nntmux.orchestrator.backfill_min_target_byte_share', 1.0);
     }
 
     /**

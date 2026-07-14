@@ -910,7 +910,14 @@ final class PipelineSnapshotRepositoryTest extends TestCase
 
                 return true;
             })
-            ->andReturn((object) ['target' => 0, 'non_target' => 1, 'uncategorized' => 0]);
+            ->andReturn((object) [
+                'target_count' => 0,
+                'non_target_count' => 1,
+                'uncategorized_count' => 0,
+                'target_bytes' => 0,
+                'non_target_bytes' => 100,
+                'uncategorized_bytes' => 0,
+            ]);
 
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
@@ -1041,7 +1048,14 @@ final class PipelineSnapshotRepositoryTest extends TestCase
 
                 return true;
             })
-            ->andReturn((object) ['target' => 2, 'non_target' => 1, 'uncategorized' => 3]);
+            ->andReturn((object) [
+                'target_count' => 2,
+                'non_target_count' => 1,
+                'uncategorized_count' => 3,
+                'target_bytes' => 900,
+                'non_target_bytes' => 100,
+                'uncategorized_bytes' => 300,
+            ]);
 
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
@@ -1077,7 +1091,14 @@ final class PipelineSnapshotRepositoryTest extends TestCase
 
                 return true;
             })
-            ->andReturn((object) ['target' => 4, 'non_target' => 0, 'uncategorized' => 0]);
+            ->andReturn((object) [
+                'target_count' => 4,
+                'non_target_count' => 0,
+                'uncategorized_count' => 0,
+                'target_bytes' => 4_000,
+                'non_target_bytes' => 0,
+                'uncategorized_bytes' => 0,
+            ]);
 
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
@@ -1091,6 +1112,175 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         ], $repository->backfillCreatedReleaseCategoryCountsForCohort(
             'alt.test',
             123,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        ));
+    }
+
+    public function test_group_cohort_category_bytes_use_the_same_payload_identity_and_completed_nzb_fence(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+        config()->set('nntmux.orchestrator.backfill_min_payload_bytes', 104857600);
+
+        DB::shouldReceive('selectOne')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('THEN classified.size ELSE 0 END', $sql);
+                self::assertStringContainsString('AS target_count', $sql);
+                self::assertStringContainsString('AS target_bytes', $sql);
+                self::assertStringContainsString('r.nzbstatus = 1', $sql);
+                self::assertStringNotContainsString('r.id <= ?', $sql);
+                self::assertSame('alt.test', $bindings[6] ?? null);
+                self::assertSame(123, $bindings[7] ?? null);
+
+                return true;
+            })
+            ->andReturn((object) [
+                'target_count' => 1,
+                'non_target_count' => 1,
+                'uncategorized_count' => 0,
+                'target_bytes' => 3_867_698_952,
+                'non_target_bytes' => 324_000_760,
+                'uncategorized_bytes' => 0,
+            ]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([
+            'target' => 3_867_698_952,
+            'non_target' => 324_000_760,
+            'uncategorized' => 0,
+        ], $repository->backfillCreatedNzbCategoryBytesForCohort(
+            'alt.test',
+            123,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        ));
+    }
+
+    public function test_created_release_category_bytes_do_not_require_completed_nzbs(): void
+    {
+        DB::shouldReceive('selectOne')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('THEN classified.size ELSE 0 END', $sql);
+                self::assertStringNotContainsString('r.nzbstatus = 1', $sql);
+                self::assertSame('alt.test', $bindings[6] ?? null);
+                self::assertSame(123, $bindings[7] ?? null);
+
+                return true;
+            })
+            ->andReturn((object) [
+                'target_count' => 1,
+                'non_target_count' => 1,
+                'uncategorized_count' => 0,
+                'target_bytes' => 900,
+                'non_target_bytes' => 100,
+                'uncategorized_bytes' => 0,
+            ]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame(
+            ['target' => 900, 'non_target' => 100, 'uncategorized' => 0],
+            $repository->backfillCreatedReleaseCategoryBytesForCohort(
+                'alt.test',
+                123,
+                '2026-01-02 03:04:05',
+                '2026-01-01 03:04:05',
+            ),
+        );
+    }
+
+    public function test_carried_release_category_bytes_are_generation_bounded(): void
+    {
+        DB::shouldReceive('selectOne')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('r.nzbstatus = 1', $sql);
+                self::assertStringContainsString('r.id <= ?', $sql);
+                self::assertSame('alt.test', $bindings[6] ?? null);
+                self::assertSame(100, $bindings[7] ?? null);
+                self::assertSame(103, $bindings[8] ?? null);
+
+                return true;
+            })
+            ->andReturn((object) [
+                'target_count' => 1,
+                'non_target_count' => 1,
+                'uncategorized_count' => 0,
+                'target_bytes' => 900,
+                'non_target_bytes' => 100,
+                'uncategorized_bytes' => 0,
+            ]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame(
+            ['target' => 900, 'non_target' => 100, 'uncategorized' => 0],
+            $repository->backfillCompletedNzbCategoryBytesForReleaseCohort(
+                'alt.test',
+                100,
+                103,
+                '2026-01-02 03:04:05',
+                '2026-01-01 03:04:05',
+            ),
+        );
+
+        self::assertSame(
+            ['target' => 0, 'non_target' => 0, 'uncategorized' => 0],
+            $repository->backfillCompletedNzbCategoryBytesForReleaseCohort(
+                'alt.test',
+                103,
+                103,
+                '2026-01-02 03:04:05',
+                '2026-01-01 03:04:05',
+            ),
+        );
+    }
+
+    public function test_atomic_carried_release_quality_returns_counts_and_bytes_with_one_upper_bounded_query(): void
+    {
+        DB::shouldReceive('selectOne')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('AS target_count', $sql);
+                self::assertStringContainsString('AS target_bytes', $sql);
+                self::assertStringContainsString('r.id <= ?', $sql);
+                self::assertSame(103, $bindings[8] ?? null);
+
+                return true;
+            })
+            ->andReturn((object) [
+                'target_count' => 3,
+                'non_target_count' => 1,
+                'uncategorized_count' => 0,
+                'target_bytes' => 3_867_698_952,
+                'non_target_bytes' => 324_000_760,
+                'uncategorized_bytes' => 0,
+            ]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([
+            'counts' => ['target' => 3, 'non_target' => 1, 'uncategorized' => 0],
+            'bytes' => ['target' => 3_867_698_952, 'non_target' => 324_000_760, 'uncategorized' => 0],
+        ], $repository->backfillCompletedNzbCategoryQualityForReleaseCohort(
+            'alt.test',
+            100,
+            103,
             '2026-01-02 03:04:05',
             '2026-01-01 03:04:05',
         ));

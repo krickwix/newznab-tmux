@@ -418,13 +418,13 @@ class PipelineSnapshotRepository
         string $startPostdate,
         string $endPostdate,
     ): array {
-        return $this->backfillNzbCategoryCountsForCohort(
+        return $this->backfillNzbCategoryQualityForCohort(
             $group,
             max(0, $releaseHighWatermark),
             null,
             $startPostdate,
             $endPostdate,
-        );
+        )['counts'];
     }
 
     /** @return array{target: int, non_target: int, uncategorized: int} */
@@ -434,13 +434,136 @@ class PipelineSnapshotRepository
         string $startPostdate,
         string $endPostdate,
     ): array {
-        return $this->backfillNzbCategoryCountsForCohort(
+        return $this->backfillNzbCategoryQualityForCohort(
             $group,
             max(0, $releaseHighWatermark),
             null,
             $startPostdate,
             $endPostdate,
             completedNzbsOnly: false,
+        )['counts'];
+    }
+
+    /**
+     * @return array{
+     *     counts: array{target: int, non_target: int, uncategorized: int},
+     *     bytes: array{target: int, non_target: int, uncategorized: int}
+     * }
+     */
+    public function backfillCreatedNzbCategoryQualityForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        return $this->backfillNzbCategoryQualityForCohort(
+            $group,
+            max(0, $releaseHighWatermark),
+            null,
+            $startPostdate,
+            $endPostdate,
+        );
+    }
+
+    /**
+     * @return array{
+     *     counts: array{target: int, non_target: int, uncategorized: int},
+     *     bytes: array{target: int, non_target: int, uncategorized: int}
+     * }
+     */
+    public function backfillCreatedReleaseCategoryQualityForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        return $this->backfillNzbCategoryQualityForCohort(
+            $group,
+            max(0, $releaseHighWatermark),
+            null,
+            $startPostdate,
+            $endPostdate,
+            completedNzbsOnly: false,
+        );
+    }
+
+    /** @return array{target: int, non_target: int, uncategorized: int} */
+    public function backfillCreatedNzbCategoryBytesForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        return $this->backfillNzbCategoryQualityForCohort(
+            $group,
+            max(0, $releaseHighWatermark),
+            null,
+            $startPostdate,
+            $endPostdate,
+        )['bytes'];
+    }
+
+    /** @return array{target: int, non_target: int, uncategorized: int} */
+    public function backfillCreatedReleaseCategoryBytesForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        return $this->backfillNzbCategoryQualityForCohort(
+            $group,
+            max(0, $releaseHighWatermark),
+            null,
+            $startPostdate,
+            $endPostdate,
+            completedNzbsOnly: false,
+        )['bytes'];
+    }
+
+    /** @return array{target: int, non_target: int, uncategorized: int} */
+    public function backfillCompletedNzbCategoryBytesForReleaseCohort(
+        string $group,
+        int $releaseIdLowExclusive,
+        int $releaseIdHighInclusive,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        if ($releaseIdHighInclusive <= $releaseIdLowExclusive) {
+            return ['target' => 0, 'non_target' => 0, 'uncategorized' => 0];
+        }
+
+        return $this->backfillNzbCategoryQualityForCohort(
+            $group,
+            max(0, $releaseIdLowExclusive),
+            max(0, $releaseIdHighInclusive),
+            $startPostdate,
+            $endPostdate,
+        )['bytes'];
+    }
+
+    /**
+     * @return array{
+     *     counts: array{target: int, non_target: int, uncategorized: int},
+     *     bytes: array{target: int, non_target: int, uncategorized: int}
+     * }
+     */
+    public function backfillCompletedNzbCategoryQualityForReleaseCohort(
+        string $group,
+        int $releaseIdLowExclusive,
+        int $releaseIdHighInclusive,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        if ($releaseIdHighInclusive <= $releaseIdLowExclusive) {
+            return $this->emptyBackfillCategoryQuality();
+        }
+
+        return $this->backfillNzbCategoryQualityForCohort(
+            $group,
+            max(0, $releaseIdLowExclusive),
+            max(0, $releaseIdHighInclusive),
+            $startPostdate,
+            $endPostdate,
         );
     }
 
@@ -489,17 +612,22 @@ class PipelineSnapshotRepository
             return ['target' => 0, 'non_target' => 0, 'uncategorized' => 0];
         }
 
-        return $this->backfillNzbCategoryCountsForCohort(
+        return $this->backfillNzbCategoryQualityForCohort(
             $group,
             max(0, $releaseIdLowExclusive),
             max(0, $releaseIdHighInclusive),
             $startPostdate,
             $endPostdate,
-        );
+        )['counts'];
     }
 
-    /** @return array{target: int, non_target: int, uncategorized: int} */
-    private function backfillNzbCategoryCountsForCohort(
+    /**
+     * @return array{
+     *     counts: array{target: int, non_target: int, uncategorized: int},
+     *     bytes: array{target: int, non_target: int, uncategorized: int}
+     * }
+     */
+    private function backfillNzbCategoryQualityForCohort(
         string $group,
         int $releaseIdLowExclusive,
         ?int $releaseIdHighInclusive,
@@ -534,16 +662,24 @@ class PipelineSnapshotRepository
             $postdateToleranceSeconds,
         );
         $row = DB::selectOne('SELECT
-            COALESCE(SUM(CASE WHEN c.root_categories_id IN (2000, 5000)
+            COALESCE(SUM(classified.is_target), 0) AS target_count,
+            COALESCE(SUM(classified.is_non_target), 0) AS non_target_count,
+            COALESCE(SUM(classified.is_uncategorized), 0) AS uncategorized_count,
+            COALESCE(SUM(CASE WHEN classified.is_target = 1 THEN classified.size ELSE 0 END), 0) AS target_bytes,
+            COALESCE(SUM(CASE WHEN classified.is_non_target = 1 THEN classified.size ELSE 0 END), 0) AS non_target_bytes,
+            COALESCE(SUM(CASE WHEN classified.is_uncategorized = 1 THEN classified.size ELSE 0 END), 0) AS uncategorized_bytes
+            FROM (
+                SELECT r.size,
+                CASE WHEN c.root_categories_id IN (2000, 5000)
                 AND (c.id NOT IN (2999, 5999)
                     OR (c.id = 5999
                         AND (LOWER(COALESCE(r.name, \'\')) REGEXP ?
                             OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?)))
-                AND r.size >= ? THEN 1 ELSE 0 END), 0) AS target,
-            COALESCE(SUM(CASE WHEN c.root_categories_id IS NOT NULL
+                AND r.size >= ? THEN 1 ELSE 0 END AS is_target,
+                CASE WHEN c.root_categories_id IS NOT NULL
                 AND c.root_categories_id NOT IN (1, 2000, 5000)
-                AND c.id NOT IN (2999, 5999) THEN 1 ELSE 0 END), 0) AS non_target,
-            COALESCE(SUM(CASE WHEN (c.id IS NULL
+                AND c.id NOT IN (2999, 5999) THEN 1 ELSE 0 END AS is_non_target,
+                CASE WHEN (c.id IS NULL
                 OR c.root_categories_id IS NULL
                 OR c.root_categories_id = 1
                 OR c.id = 2999
@@ -551,21 +687,43 @@ class PipelineSnapshotRepository
                     LOWER(COALESCE(r.name, \'\')) REGEXP ?
                     OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
                 )))
-                AND r.size >= ? THEN 1 ELSE 0 END), 0) AS uncategorized
-            FROM releases r
-            INNER JOIN usenet_groups g ON g.id = r.groups_id
-            LEFT JOIN categories c ON c.id = r.categories_id
-            WHERE g.name = ?
-            AND r.id > ?
-            '.$upperBound.'
-            '.$completedNzbPredicate.'
-            AND r.postdate BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)
-                AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', $bindings);
+                AND r.size >= ? THEN 1 ELSE 0 END AS is_uncategorized
+                FROM releases r
+                INNER JOIN usenet_groups g ON g.id = r.groups_id
+                LEFT JOIN categories c ON c.id = r.categories_id
+                WHERE g.name = ?
+                AND r.id > ?
+                '.$upperBound.'
+                '.$completedNzbPredicate.'
+                AND r.postdate BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)
+                    AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)
+            ) classified', $bindings);
 
         return [
-            'target' => max(0, (int) ($row->target ?? 0)),
-            'non_target' => max(0, (int) ($row->non_target ?? 0)),
-            'uncategorized' => max(0, (int) ($row->uncategorized ?? 0)),
+            'counts' => [
+                'target' => max(0, (int) ($row->target_count ?? 0)),
+                'non_target' => max(0, (int) ($row->non_target_count ?? 0)),
+                'uncategorized' => max(0, (int) ($row->uncategorized_count ?? 0)),
+            ],
+            'bytes' => [
+                'target' => max(0, (int) ($row->target_bytes ?? 0)),
+                'non_target' => max(0, (int) ($row->non_target_bytes ?? 0)),
+                'uncategorized' => max(0, (int) ($row->uncategorized_bytes ?? 0)),
+            ],
+        ];
+    }
+
+    /**
+     * @return array{
+     *     counts: array{target: int, non_target: int, uncategorized: int},
+     *     bytes: array{target: int, non_target: int, uncategorized: int}
+     * }
+     */
+    private function emptyBackfillCategoryQuality(): array
+    {
+        return [
+            'counts' => ['target' => 0, 'non_target' => 0, 'uncategorized' => 0],
+            'bytes' => ['target' => 0, 'non_target' => 0, 'uncategorized' => 0],
         ];
     }
 

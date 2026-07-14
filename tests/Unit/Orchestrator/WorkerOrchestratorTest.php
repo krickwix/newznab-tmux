@@ -267,6 +267,125 @@ final class WorkerOrchestratorTest extends TestCase
         ];
     }
 
+    public function test_mixed_cohort_is_productive_when_target_share_meets_the_configured_floor(): void
+    {
+        config([
+            'nntmux.orchestrator.backfill_min_target_byte_share' => 0.9,
+            'nntmux.orchestrator.backfill_max_non_target_releases' => 1,
+            'nntmux.orchestrator.backfill_max_non_target_bytes' => 536_870_912,
+            'nntmux.orchestrator.backfill_incomplete_release_grace_seconds' => 600,
+        ]);
+        $orchestrator = new WorkerOrchestrator(
+            Mockery::mock(PipelineSnapshotRepository::class),
+            new WorkerControlPolicy,
+            Mockery::mock(WorkerControlStateStore::class),
+            Mockery::mock(WorkerProfileApplier::class),
+        );
+        $method = new ReflectionMethod($orchestrator, 'classifyCohortNzbQuality');
+
+        self::assertSame([
+            'productive' => 1,
+            'hold' => false,
+            'failure' => null,
+        ], $method->invoke(
+            $orchestrator,
+            ['target' => 1, 'non_target' => 1, 'uncategorized' => 0],
+            ['completed_observed_at' => 1_000],
+            1_001,
+            ['target' => 3_867_698_952, 'non_target' => 324_000_760, 'uncategorized' => 0],
+        ));
+    }
+
+    #[DataProvider('mixedCohortByteQualityCases')]
+    public function test_mixed_cohort_byte_quality_enforces_share_count_size_and_uncategorized_guards(
+        array $counts,
+        array $bytes,
+        float $minimumShare,
+        int $maximumReleases,
+        int $maximumBytes,
+        int $now,
+        array $expected,
+    ): void {
+        config([
+            'nntmux.orchestrator.backfill_min_target_byte_share' => $minimumShare,
+            'nntmux.orchestrator.backfill_max_non_target_releases' => $maximumReleases,
+            'nntmux.orchestrator.backfill_max_non_target_bytes' => $maximumBytes,
+            'nntmux.orchestrator.backfill_incomplete_release_grace_seconds' => 600,
+        ]);
+        $orchestrator = new WorkerOrchestrator(
+            Mockery::mock(PipelineSnapshotRepository::class),
+            new WorkerControlPolicy,
+            Mockery::mock(WorkerControlStateStore::class),
+            Mockery::mock(WorkerProfileApplier::class),
+        );
+        $method = new ReflectionMethod($orchestrator, 'classifyCohortNzbQuality');
+
+        self::assertSame($expected, $method->invoke(
+            $orchestrator,
+            $counts,
+            ['completed_observed_at' => 1_000],
+            $now,
+            $bytes,
+        ));
+    }
+
+    /** @return array<string, array{array<string, int>, array<string, int>, float, int, int, int, array<string, int|bool|string|null>}> */
+    public static function mixedCohortByteQualityCases(): array
+    {
+        $productive = ['productive' => 1, 'hold' => false, 'failure' => null];
+        $wrong = ['productive' => 0, 'hold' => false, 'failure' => 'backfill_permit_wrong_category'];
+
+        return [
+            'byte share equality passes' => [
+                ['target' => 1, 'non_target' => 1, 'uncategorized' => 0],
+                ['target' => 900, 'non_target' => 100, 'uncategorized' => 0],
+                0.9, 1, 100, 1_001, $productive,
+            ],
+            'byte share below floor locks' => [
+                ['target' => 1, 'non_target' => 1, 'uncategorized' => 0],
+                ['target' => 899, 'non_target' => 101, 'uncategorized' => 0],
+                0.9, 1, 512, 1_001, $wrong,
+            ],
+            'release count above cap locks' => [
+                ['target' => 1, 'non_target' => 2, 'uncategorized' => 0],
+                ['target' => 9_800, 'non_target' => 200, 'uncategorized' => 0],
+                0.9, 1, 512, 1_001, $wrong,
+            ],
+            'non target bytes above cap lock' => [
+                ['target' => 1, 'non_target' => 1, 'uncategorized' => 0],
+                ['target' => 9_500, 'non_target' => 500, 'uncategorized' => 0],
+                0.9, 1, 499, 1_001, $wrong,
+            ],
+            'atomic bucket mismatch with uncategorized bytes locks' => [
+                ['target' => 1, 'non_target' => 1, 'uncategorized' => 0],
+                ['target' => 900, 'non_target' => 0, 'uncategorized' => 100],
+                0.9, 1, 512, 1_001, $wrong,
+            ],
+            'positive non target count with zero non target bytes locks' => [
+                ['target' => 1, 'non_target' => 1, 'uncategorized' => 0],
+                ['target' => 900, 'non_target' => 0, 'uncategorized' => 0],
+                0.9, 1, 512, 1_001, $wrong,
+            ],
+            'wrong only locks even at zero floor' => [
+                ['target' => 0, 'non_target' => 1, 'uncategorized' => 0],
+                ['target' => 0, 'non_target' => 100, 'uncategorized' => 0],
+                0.0, 10, 1_000, 1_001, $wrong,
+            ],
+            'uncategorized output holds before grace before evaluating mixed share' => [
+                ['target' => 1, 'non_target' => 2, 'uncategorized' => 1],
+                ['target' => 100, 'non_target' => 900, 'uncategorized' => 100],
+                0.9, 1, 512, 1_599,
+                ['productive' => 0, 'hold' => true, 'failure' => null],
+            ],
+            'uncategorized output locks with its own reason after grace' => [
+                ['target' => 1, 'non_target' => 2, 'uncategorized' => 1],
+                ['target' => 100, 'non_target' => 900, 'uncategorized' => 100],
+                0.9, 1, 512, 1_600,
+                ['productive' => 0, 'hold' => false, 'failure' => 'backfill_permit_uncategorized_after_grace'],
+            ],
+        ];
+    }
+
     public function test_wrong_root_completed_nzb_immediately_quality_locks_source_and_prevents_regrant(): void
     {
         config([
@@ -438,6 +557,75 @@ final class WorkerOrchestratorTest extends TestCase
                 putenv($key.'='.$previous);
                 $_ENV[$key] = $previous;
                 $_SERVER[$key] = $previous;
+            }
+        }
+    }
+
+    public function test_mixed_cohort_target_byte_share_is_bounded_between_zero_and_one(): void
+    {
+        $key = 'NNTMUX_ORCHESTRATOR_BACKFILL_MIN_TARGET_BYTE_SHARE';
+        $previous = getenv($key);
+
+        try {
+            foreach (['-1.0' => 0.0, '2.0' => 1.0] as $configured => $expected) {
+                putenv($key.'='.$configured);
+                $_ENV[$key] = $configured;
+                $_SERVER[$key] = $configured;
+
+                $configuration = require base_path('config/nntmux.php');
+
+                self::assertSame($expected, $configuration['orchestrator']['backfill_min_target_byte_share']);
+            }
+        } finally {
+            if ($previous === false) {
+                putenv($key);
+                unset($_ENV[$key], $_SERVER[$key]);
+            } else {
+                putenv($key.'='.$previous);
+                $_ENV[$key] = $previous;
+                $_SERVER[$key] = $previous;
+            }
+        }
+    }
+
+    public function test_mixed_cohort_quality_limits_default_to_strict_and_clamp_invalid_caps(): void
+    {
+        $keys = [
+            'NNTMUX_ORCHESTRATOR_BACKFILL_MIN_TARGET_BYTE_SHARE',
+            'NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_RELEASES',
+            'NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_BYTES',
+        ];
+        $previous = array_combine($keys, array_map(getenv(...), $keys));
+
+        try {
+            foreach ($keys as $key) {
+                putenv($key);
+                unset($_ENV[$key], $_SERVER[$key]);
+            }
+            $strict = require base_path('config/nntmux.php');
+            self::assertSame(1.0, $strict['orchestrator']['backfill_min_target_byte_share']);
+            self::assertSame(0, $strict['orchestrator']['backfill_max_non_target_releases']);
+            self::assertSame(0, $strict['orchestrator']['backfill_max_non_target_bytes']);
+
+            putenv('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_RELEASES=99');
+            putenv('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_BYTES=-1');
+            $_ENV['NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_RELEASES'] = '99';
+            $_ENV['NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_BYTES'] = '-1';
+            $_SERVER['NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_RELEASES'] = '99';
+            $_SERVER['NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_BYTES'] = '-1';
+            $clamped = require base_path('config/nntmux.php');
+            self::assertSame(10, $clamped['orchestrator']['backfill_max_non_target_releases']);
+            self::assertSame(0, $clamped['orchestrator']['backfill_max_non_target_bytes']);
+        } finally {
+            foreach ($previous as $key => $value) {
+                if ($value === false) {
+                    putenv($key);
+                    unset($_ENV[$key], $_SERVER[$key]);
+                } else {
+                    putenv($key.'='.$value);
+                    $_ENV[$key] = $value;
+                    $_SERVER[$key] = $value;
+                }
             }
         }
     }
@@ -733,6 +921,9 @@ final class WorkerOrchestratorTest extends TestCase
             'nntmux.orchestrator.state_store' => 'array',
             'nntmux.orchestrator.lock_store' => 'array',
             'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 7_200,
+            'nntmux.orchestrator.backfill_min_target_byte_share' => 0.9,
+            'nntmux.orchestrator.backfill_max_non_target_releases' => 1,
+            'nntmux.orchestrator.backfill_max_non_target_bytes' => 536_870_912,
         ]);
         Cache::store('array')->flush();
         $store = new WorkerControlStateStore;
@@ -752,12 +943,15 @@ final class WorkerOrchestratorTest extends TestCase
         $snapshot = new PipelineSnapshot(1, 2, 3, 0, 0);
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->twice()->andReturn($snapshot);
-        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->with(
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryQualityForCohort')->once()->with(
             'alt.test',
             100,
             '2026-01-02 03:04:05',
             '2026-01-01 03:04:05',
-        )->andReturn(['target' => 3, 'non_target' => 0, 'uncategorized' => 0]);
+        )->andReturn([
+            'counts' => ['target' => 3, 'non_target' => 1, 'uncategorized' => 0],
+            'bytes' => ['target' => 3_867_698_952, 'non_target' => 324_000_760, 'uncategorized' => 0],
+        ]);
         $snapshots->shouldReceive('backfillPendingCollectionsForCohort')->once()->with(
             'alt.test',
             '2026-01-02 03:04:05',
@@ -780,6 +974,60 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
     }
 
+    public function test_mature_delayed_attribution_locks_when_atomic_byte_share_is_below_floor(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 7_200,
+            'nntmux.orchestrator.backfill_min_target_byte_share' => 0.9,
+            'nntmux.orchestrator.backfill_max_non_target_releases' => 1,
+            'nntmux.orchestrator.backfill_max_non_target_bytes' => 512,
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'backfill_expected_cursor_delta' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time() - 7_201));
+
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn(new PipelineSnapshot(1, 2, 3, 0, 0));
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryQualityForCohort')->once()->with(
+            'alt.test',
+            100,
+            '2026-01-02 03:04:05',
+            '2026-01-01 03:04:05',
+        )->andReturn([
+            'counts' => ['target' => 1, 'non_target' => 1, 'uncategorized' => 0],
+            'bytes' => ['target' => 899, 'non_target' => 101, 'uncategorized' => 0],
+        ]);
+        $snapshots->shouldReceive('backfillPendingCollectionsForCohort')->once()->andReturn(0);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('qualityLockBackfillTarget')->once()->with(
+            'alt.test',
+            'backfill_permit_wrong_category',
+        );
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy,
+            $store,
+            $applier,
+        ))->runOnce(false);
+
+        self::assertContains('backfill_delayed_attribution_settled', $result['reasons']);
+        self::assertSame('backfill_permit_wrong_category', $result['delayed_attribution']['settled_result']);
+        self::assertSame(0.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
+        self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
+    }
+
     public function test_immature_productive_attribution_settles_when_the_cohort_is_fully_drained(): void
     {
         config([
@@ -789,6 +1037,9 @@ final class WorkerOrchestratorTest extends TestCase
             'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
             'nntmux.orchestrator.backfill_incomplete_release_grace_seconds' => 600,
             'nntmux.orchestrator.backfill_productive_settlement_grace_seconds' => 45,
+            'nntmux.orchestrator.backfill_min_target_byte_share' => 0.9,
+            'nntmux.orchestrator.backfill_max_non_target_releases' => 1,
+            'nntmux.orchestrator.backfill_max_non_target_bytes' => 536_870_912,
         ]);
         Cache::store('array')->flush();
         $store = new WorkerControlStateStore;
@@ -820,23 +1071,26 @@ final class WorkerOrchestratorTest extends TestCase
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-02 03:04:05',
         ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, $now - 46, contextContinuation: true));
-        self::assertSame($now - 46, $store->observeBackfillProductiveDrain(7, 2, 2, $now - 46));
+        self::assertSame($now - 46, $store->observeBackfillProductiveDrain(7, 2, 3, $now - 46));
 
         $snapshot = new PipelineSnapshot(1, 2, 3, 0, 0, lowPressure: true);
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->once()->andReturn($snapshot);
-        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->with(
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryQualityForCohort')->once()->with(
             'alt.test',
             100,
             '2026-01-04 03:04:05',
             '2026-01-01 03:04:05',
-        )->andReturn(['target' => 2, 'non_target' => 0, 'uncategorized' => 0]);
+        )->andReturn([
+            'counts' => ['target' => 2, 'non_target' => 1, 'uncategorized' => 0],
+            'bytes' => ['target' => 3_867_698_952, 'non_target' => 324_000_760, 'uncategorized' => 0],
+        ]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->with(
             'alt.test',
             100,
             '2026-01-04 03:04:05',
             '2026-01-01 03:04:05',
-        )->andReturn(2);
+        )->andReturn(3);
         $snapshots->shouldReceive('backfillPendingCollectionsForCohort')->once()->with(
             'alt.test',
             '2026-01-04 03:04:05',
@@ -912,7 +1166,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame([], $store->backfillYieldHistory());
     }
 
-    public function test_stable_target_release_waiting_for_its_nzb_does_not_block_productive_settlement(): void
+    public function test_stable_mixed_release_waiting_for_its_nzb_uses_full_release_byte_quality(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => false,
@@ -920,6 +1174,9 @@ final class WorkerOrchestratorTest extends TestCase
             'nntmux.orchestrator.lock_store' => 'array',
             'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
             'nntmux.orchestrator.backfill_productive_settlement_grace_seconds' => 45,
+            'nntmux.orchestrator.backfill_min_target_byte_share' => 0.9,
+            'nntmux.orchestrator.backfill_max_non_target_releases' => 1,
+            'nntmux.orchestrator.backfill_max_non_target_bytes' => 536_870_912,
         ]);
         Cache::store('array')->flush();
         $store = new WorkerControlStateStore;
@@ -931,18 +1188,20 @@ final class WorkerOrchestratorTest extends TestCase
             'release_high_watermark' => 100,
             'backfill_cursor_postdate' => '2026-01-02 03:04:05',
         ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, $now - 600));
-        self::assertSame($now - 46, $store->observeBackfillProductiveDrain(7, 3, 4, $now - 46));
+        self::assertSame($now - 46, $store->observeBackfillProductiveDrain(7, 2, 4, $now - 46));
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->once()->andReturn(new PipelineSnapshot(
             1, 2, 3, 0, 0,
             lowPressure: true,
         ));
-        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn([
-            'target' => 3, 'non_target' => 0, 'uncategorized' => 0,
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryQualityForCohort')->once()->andReturn([
+            'counts' => ['target' => 2, 'non_target' => 1, 'uncategorized' => 0],
+            'bytes' => ['target' => 3_867_698_952, 'non_target' => 324_000_760, 'uncategorized' => 0],
         ]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(4);
-        $snapshots->shouldReceive('backfillCreatedReleaseCategoryCountsForCohort')->once()->andReturn([
-            'target' => 4, 'non_target' => 0, 'uncategorized' => 0,
+        $snapshots->shouldReceive('backfillCreatedReleaseCategoryQualityForCohort')->once()->andReturn([
+            'counts' => ['target' => 3, 'non_target' => 1, 'uncategorized' => 0],
+            'bytes' => ['target' => 4_500_000_000, 'non_target' => 324_000_760, 'uncategorized' => 0],
         ]);
         $snapshots->shouldReceive('backfillPendingCollectionsForCohort')->once()->andReturn(0);
         $applier = Mockery::mock(WorkerProfileApplier::class);
@@ -957,8 +1216,64 @@ final class WorkerOrchestratorTest extends TestCase
 
         self::assertContains('backfill_delayed_attribution_settled', $result['reasons']);
         self::assertSame('productive', $result['delayed_attribution']['settled_result']);
-        self::assertSame(3.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
+        self::assertSame(2.0, $store->backfillYieldHistory()['alt.test']['ewma_nzbs_per_10k']);
         self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
+    }
+
+    public function test_stable_drain_clears_when_full_release_bytes_exceed_the_mixed_cohort_cap(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_productive_settlement_grace_seconds' => 45,
+            'nntmux.orchestrator.backfill_min_target_byte_share' => 0.9,
+            'nntmux.orchestrator.backfill_max_non_target_releases' => 1,
+            'nntmux.orchestrator.backfill_max_non_target_bytes' => 536_870_912,
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        $now = time();
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, $now - 600));
+        self::assertSame($now - 46, $store->observeBackfillProductiveDrain(7, 2, 4, $now - 46));
+
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn(new PipelineSnapshot(
+            1, 2, 3, 0, 0,
+            lowPressure: true,
+        ));
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryQualityForCohort')->once()->andReturn([
+            'counts' => ['target' => 2, 'non_target' => 1, 'uncategorized' => 0],
+            'bytes' => ['target' => 3_867_698_952, 'non_target' => 324_000_760, 'uncategorized' => 0],
+        ]);
+        $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->andReturn(4);
+        $snapshots->shouldReceive('backfillCreatedReleaseCategoryQualityForCohort')->once()->andReturn([
+            'counts' => ['target' => 3, 'non_target' => 1, 'uncategorized' => 0],
+            'bytes' => ['target' => 4_500_000_000, 'non_target' => 600_000_000, 'uncategorized' => 0],
+        ]);
+        $snapshots->shouldNotReceive('backfillPendingCollectionsForCohort');
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldNotReceive('qualityLockBackfillTarget');
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy,
+            $store,
+            $applier,
+        ))->runOnce(false);
+
+        self::assertNotContains('backfill_delayed_attribution_settled', $result['reasons']);
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
+        self::assertSame([], $store->backfillYieldHistory());
+        self::assertSame($now, $store->observeBackfillProductiveDrain(7, 2, 4, $now));
     }
 
     public function test_release_waiting_for_its_nzb_blocks_settlement_when_its_category_is_non_target(): void
@@ -1182,6 +1497,9 @@ final class WorkerOrchestratorTest extends TestCase
             'nntmux.orchestrator.state_store' => 'array',
             'nntmux.orchestrator.lock_store' => 'array',
             'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_min_target_byte_share' => 0.9,
+            'nntmux.orchestrator.backfill_max_non_target_releases' => 1,
+            'nntmux.orchestrator.backfill_max_non_target_bytes' => 512,
         ]);
         Cache::store('array')->flush();
         $store = new WorkerControlStateStore;
@@ -1196,12 +1514,15 @@ final class WorkerOrchestratorTest extends TestCase
         $snapshot = new PipelineSnapshot(1, 2, 3, 0, 0);
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->twice()->andReturn($snapshot);
-        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->with(
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryQualityForCohort')->once()->with(
             'alt.test',
             100,
             '2026-01-02 03:04:05',
             '2026-01-01 03:04:05',
-        )->andReturn(['target' => 0, 'non_target' => 1, 'uncategorized' => 0]);
+        )->andReturn([
+            'counts' => ['target' => 1, 'non_target' => 1, 'uncategorized' => 0],
+            'bytes' => ['target' => 899, 'non_target' => 101, 'uncategorized' => 0],
+        ]);
         $snapshots->shouldNotReceive('backfillPendingCollectionsForCohort');
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('qualityLockBackfillTarget')->once()->with(
@@ -2389,6 +2710,9 @@ final class WorkerOrchestratorTest extends TestCase
             'nntmux.orchestrator.permit_observation_seconds' => 1200,
             'nntmux.orchestrator.state_store' => 'array',
             'nntmux.orchestrator.lock_store' => 'array',
+            'nntmux.orchestrator.backfill_min_target_byte_share' => 0.9,
+            'nntmux.orchestrator.backfill_max_non_target_releases' => 1,
+            'nntmux.orchestrator.backfill_max_non_target_bytes' => 536_870_912,
             'database.default' => 'sqlite',
             'database.connections.sqlite.database' => ':memory:',
         ]);
@@ -2427,19 +2751,25 @@ final class WorkerOrchestratorTest extends TestCase
             'releases' => 1,
             'release_high_watermark' => 103,
         ]);
-        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->with(
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryQualityForCohort')->once()->with(
             'alt.test',
             100,
             '2026-01-02 03:04:05',
             '2026-01-01 03:04:05',
-        )->andReturn(['target' => 0, 'non_target' => 0, 'uncategorized' => 0]);
-        $snapshots->shouldReceive('backfillCompletedNzbCategoryCountsForReleaseCohort')->once()->with(
+        )->andReturn([
+            'counts' => ['target' => 0, 'non_target' => 0, 'uncategorized' => 0],
+            'bytes' => ['target' => 0, 'non_target' => 0, 'uncategorized' => 0],
+        ]);
+        $snapshots->shouldReceive('backfillCompletedNzbCategoryQualityForReleaseCohort')->once()->with(
             'alt.test',
             90,
             100,
             '2026-01-03 03:04:05',
             '2026-01-02 03:04:05',
-        )->andReturn(['target' => 3, 'non_target' => 0, 'uncategorized' => 0]);
+        )->andReturn([
+            'counts' => ['target' => 3, 'non_target' => 1, 'uncategorized' => 0],
+            'bytes' => ['target' => 3_867_698_952, 'non_target' => 324_000_760, 'uncategorized' => 0],
+        ]);
         $snapshots->shouldReceive('backfillCreatedReleasesForCohort')->once()->with(
             'alt.test',
             100,
@@ -2448,6 +2778,7 @@ final class WorkerOrchestratorTest extends TestCase
         )->andReturn(3);
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldNotReceive('qualityLockBackfillTarget');
         $applier->shouldReceive('apply')->once()->andReturn(8);
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
