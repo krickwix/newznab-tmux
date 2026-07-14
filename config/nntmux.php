@@ -45,6 +45,10 @@ return [
             'trim',
             explode(',', (string) env('NNTMUX_ORCHESTRATOR_BACKFILL_TV_DATE_RANGE_GROUPS', '')),
         )))),
+        'backfill_tv_complete_series_groups' => array_values(array_unique(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('NNTMUX_ORCHESTRATOR_BACKFILL_TV_COMPLETE_SERIES_GROUPS', '')),
+        )))),
         'backfill_min_target_byte_share' => min(1.0, max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_MIN_TARGET_BYTE_SHARE', 1.0))),
         'backfill_max_non_target_releases' => min(10, max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_RELEASES', 0))),
         'backfill_max_non_target_bytes' => max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_BYTES', 0)),

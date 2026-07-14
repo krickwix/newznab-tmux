@@ -25,6 +25,18 @@ class TvCategorizer extends AbstractCategorizer
 
     protected int $priority = 20;
 
+    /** @var list<string> */
+    private array $completeSeriesGroups;
+
+    /** @param list<string>|null $completeSeriesGroups */
+    public function __construct(?array $completeSeriesGroups = null)
+    {
+        $this->completeSeriesGroups = $completeSeriesGroups
+            ?? (app()->bound('config')
+                ? array_values((array) config('nntmux.orchestrator.backfill_tv_complete_series_groups', []))
+                : []);
+    }
+
     public function getName(): string
     {
         return 'TV';
@@ -48,6 +60,10 @@ class TvCategorizer extends AbstractCategorizer
 
         if ($this->looksLikeClassicMoviePost($name, $context)) {
             return $this->noMatch();
+        }
+
+        if ($this->isCompleteSeriesInDedicatedTvGroup($name, $context)) {
+            return $this->matched(Category::TV_OTHER, 0.85, 'tv_dedicated_group_complete_series');
         }
 
         if (! $this->looksLikeTV($name)) {
@@ -86,6 +102,18 @@ class TvCategorizer extends AbstractCategorizer
         }
 
         return $this->noMatch();
+    }
+
+    private function isCompleteSeriesInDedicatedTvGroup(string $name, ReleaseContext $context): bool
+    {
+        if (! in_array($context->groupName, $this->completeSeriesGroups, true)) {
+            return false;
+        }
+
+        return preg_match(
+            '/\bkomplett[ ._-]+abenteuerserie[ ._-]+(?:19|20)\d{2}\b.*\b(?:avi|mkv|mp4|mpeg|xvid|divx|h\.?26[45])\b/iu',
+            $name,
+        ) === 1;
     }
 
     protected function looksLikeClassicMoviePost(string $name, ReleaseContext $context): bool

@@ -16,6 +16,8 @@ class PipelineSnapshotRepository
 
     private const string BACKFILL_TV_DATE_RANGE_PATTERN = '(^|[^[:alnum:]])(0?[1-9]|[12][0-9]|3[01])\.-(0?[1-9]|[12][0-9]|3[01])\.(0?[1-9]|1[0-2])\.[0-9]{2}([^[:alnum:]]|$)';
 
+    private const string BACKFILL_TV_COMPLETE_SERIES_PATTERN = '(^|[^[:alnum:]])komplett[ ._-]+abenteuerserie[ ._-]+(19|20)[0-9]{2}([^[:alnum:]]|$).*(avi|mkv|mp4|mpeg|xvid|divx|h\\.?26[45])([^[:alnum:]]|$)';
+
     private readonly BackfillTargetSelector $targets;
 
     private readonly WorkerControlStateStore $state;
@@ -644,6 +646,11 @@ class PipelineSnapshotRepository
             (array) config('nntmux.orchestrator.backfill_tv_date_range_groups', []),
             true,
         ) ? 1 : 0;
+        $allowTvCompleteSeries = in_array(
+            $group,
+            (array) config('nntmux.orchestrator.backfill_tv_complete_series_groups', []),
+            true,
+        ) ? 1 : 0;
         $upperBound = $releaseIdHighInclusive === null ? '' : 'AND r.id <= ?';
         $completedNzbPredicate = $completedNzbsOnly ? 'AND r.nzbstatus = 1' : '';
         $bindings = [
@@ -652,12 +659,18 @@ class PipelineSnapshotRepository
             $allowTvDateRange,
             self::BACKFILL_TV_DATE_RANGE_PATTERN,
             self::BACKFILL_TV_DATE_RANGE_PATTERN,
+            $allowTvCompleteSeries,
+            self::BACKFILL_TV_COMPLETE_SERIES_PATTERN,
+            self::BACKFILL_TV_COMPLETE_SERIES_PATTERN,
             $minPayloadBytes,
             self::BACKFILL_TV_EPISODE_PATTERN,
             self::BACKFILL_TV_EPISODE_PATTERN,
             $allowTvDateRange,
             self::BACKFILL_TV_DATE_RANGE_PATTERN,
             self::BACKFILL_TV_DATE_RANGE_PATTERN,
+            $allowTvCompleteSeries,
+            self::BACKFILL_TV_COMPLETE_SERIES_PATTERN,
+            self::BACKFILL_TV_COMPLETE_SERIES_PATTERN,
             $minPayloadBytes,
             $group,
             $releaseIdLowExclusive,
@@ -685,9 +698,13 @@ class PipelineSnapshotRepository
                 SELECT r.size,
                 CASE WHEN c.root_categories_id IN (2000, 5000)
                 AND (c.id NOT IN (2999, 5999)
-                    OR (c.id = 5999
+                    OR (c.id IN (2999, 5999)
                         AND (LOWER(COALESCE(r.name, \'\')) REGEXP ?
                             OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
+                            OR (? = 1 AND (
+                                LOWER(COALESCE(r.name, \'\')) REGEXP ?
+                                OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
+                            ))
                             OR (? = 1 AND (
                                 LOWER(COALESCE(r.name, \'\')) REGEXP ?
                                 OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
@@ -699,10 +716,13 @@ class PipelineSnapshotRepository
                 CASE WHEN (c.id IS NULL
                 OR c.root_categories_id IS NULL
                 OR c.root_categories_id = 1
-                OR c.id = 2999
-                OR (c.id = 5999 AND NOT (
+                OR (c.id IN (2999, 5999) AND NOT (
                     LOWER(COALESCE(r.name, \'\')) REGEXP ?
                     OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
+                    OR (? = 1 AND (
+                        LOWER(COALESCE(r.name, \'\')) REGEXP ?
+                        OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?
+                    ))
                     OR (? = 1 AND (
                         LOWER(COALESCE(r.name, \'\')) REGEXP ?
                         OR LOWER(COALESCE(r.searchname, \'\')) REGEXP ?

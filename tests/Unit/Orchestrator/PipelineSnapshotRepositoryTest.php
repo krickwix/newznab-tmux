@@ -901,16 +901,16 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('r.id <= ?', $sql);
                 self::assertStringContainsString('c.root_categories_id NOT IN (1, 2000, 5000)', $sql);
                 self::assertStringContainsString('c.id NOT IN (2999, 5999)', $sql);
-                self::assertStringContainsString('c.id = 5999', $sql);
-                self::assertStringContainsString('c.id = 2999', $sql);
-                self::assertSame(4, substr_count($sql, "LOWER(COALESCE(r.name, '')) REGEXP"));
-                self::assertSame(4, substr_count($sql, "LOWER(COALESCE(r.searchname, '')) REGEXP"));
+                self::assertStringContainsString('c.id IN (2999, 5999)', $sql);
+                self::assertSame(6, substr_count($sql, "LOWER(COALESCE(r.name, '')) REGEXP"));
+                self::assertSame(6, substr_count($sql, "LOWER(COALESCE(r.searchname, '')) REGEXP"));
                 self::assertSame(2, substr_count($sql, 'r.size >= ?'));
                 $episode = '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)';
                 $dateRange = '(^|[^[:alnum:]])(0?[1-9]|[12][0-9]|3[01])\.-(0?[1-9]|[12][0-9]|3[01])\.(0?[1-9]|1[0-2])\.[0-9]{2}([^[:alnum:]]|$)';
+                $completeSeries = '(^|[^[:alnum:]])komplett[ ._-]+abenteuerserie[ ._-]+(19|20)[0-9]{2}([^[:alnum:]]|$).*(avi|mkv|mp4|mpeg|xvid|divx|h\\.?26[45])([^[:alnum:]]|$)';
                 self::assertSame([
-                    $episode, $episode, 0, $dateRange, $dateRange, 104857600,
-                    $episode, $episode, 0, $dateRange, $dateRange, 104857600,
+                    $episode, $episode, 0, $dateRange, $dateRange, 0, $completeSeries, $completeSeries, 104857600,
+                    $episode, $episode, 0, $dateRange, $dateRange, 0, $completeSeries, $completeSeries, 104857600,
                     'alt.test', 100, 103,
                     '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600,
                     '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600,
@@ -1055,18 +1055,18 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('c.root_categories_id NOT IN (1, 2000, 5000)', $sql);
                 self::assertStringContainsString('c.root_categories_id = 1', $sql);
                 self::assertStringContainsString('c.id NOT IN (2999, 5999)', $sql);
-                self::assertStringContainsString('c.id = 5999', $sql);
-                self::assertStringContainsString('c.id = 2999', $sql);
-                self::assertSame(4, substr_count($sql, "LOWER(COALESCE(r.name, '')) REGEXP"));
-                self::assertSame(4, substr_count($sql, "LOWER(COALESCE(r.searchname, '')) REGEXP"));
+                self::assertStringContainsString('c.id IN (2999, 5999)', $sql);
+                self::assertSame(6, substr_count($sql, "LOWER(COALESCE(r.name, '')) REGEXP"));
+                self::assertSame(6, substr_count($sql, "LOWER(COALESCE(r.searchname, '')) REGEXP"));
                 self::assertStringContainsString('r.id > ?', $sql);
                 self::assertStringContainsString('r.nzbstatus = 1', $sql);
                 self::assertSame(2, substr_count($sql, 'r.size >= ?'));
                 $episode = '(^|[^[:alnum:]])s[0-9]{1,2}[ ._-]*e[0-9]{1,3}([^[:alnum:]]|$)';
                 $dateRange = '(^|[^[:alnum:]])(0?[1-9]|[12][0-9]|3[01])\.-(0?[1-9]|[12][0-9]|3[01])\.(0?[1-9]|1[0-2])\.[0-9]{2}([^[:alnum:]]|$)';
+                $completeSeries = '(^|[^[:alnum:]])komplett[ ._-]+abenteuerserie[ ._-]+(19|20)[0-9]{2}([^[:alnum:]]|$).*(avi|mkv|mp4|mpeg|xvid|divx|h\\.?26[45])([^[:alnum:]]|$)';
                 self::assertSame([
-                    $episode, $episode, 0, $dateRange, $dateRange, 104857600,
-                    $episode, $episode, 0, $dateRange, $dateRange, 104857600,
+                    $episode, $episode, 0, $dateRange, $dateRange, 0, $completeSeries, $completeSeries, 104857600,
+                    $episode, $episode, 0, $dateRange, $dateRange, 0, $completeSeries, $completeSeries, 104857600,
                     'alt.test', 123,
                     '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600,
                     '2026-01-02 03:04:05', '2026-01-01 03:04:05', 3600,
@@ -1113,10 +1113,12 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('AS non_target', $sql);
                 self::assertStringContainsString('AS uncategorized', $sql);
                 self::assertStringNotContainsString('r.nzbstatus = 1', $sql);
-                self::assertSame('alt.test', $bindings[12] ?? null);
-                self::assertSame(123, $bindings[13] ?? null);
+                self::assertSame('alt.test', $bindings[18] ?? null);
+                self::assertSame(123, $bindings[19] ?? null);
                 self::assertSame(0, $bindings[2] ?? null);
-                self::assertSame(0, $bindings[8] ?? null);
+                self::assertSame(0, $bindings[5] ?? null);
+                self::assertSame(0, $bindings[11] ?? null);
+                self::assertSame(0, $bindings[14] ?? null);
 
                 return true;
             })
@@ -1151,6 +1153,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         config()->set('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
         config()->set('nntmux.orchestrator.backfill_min_payload_bytes', 104857600);
         config()->set('nntmux.orchestrator.backfill_tv_date_range_groups', ['alt.test']);
+        config()->set('nntmux.orchestrator.backfill_tv_complete_series_groups', ['alt.test']);
 
         DB::shouldReceive('selectOne')
             ->once()
@@ -1160,10 +1163,12 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('AS target_bytes', $sql);
                 self::assertStringContainsString('r.nzbstatus = 1', $sql);
                 self::assertStringNotContainsString('r.id <= ?', $sql);
-                self::assertSame('alt.test', $bindings[12] ?? null);
-                self::assertSame(123, $bindings[13] ?? null);
+                self::assertSame('alt.test', $bindings[18] ?? null);
+                self::assertSame(123, $bindings[19] ?? null);
                 self::assertSame(1, $bindings[2] ?? null);
-                self::assertSame(1, $bindings[8] ?? null);
+                self::assertSame(1, $bindings[5] ?? null);
+                self::assertSame(1, $bindings[11] ?? null);
+                self::assertSame(1, $bindings[14] ?? null);
 
                 return true;
             })
@@ -1200,8 +1205,8 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             ->withArgs(function (string $sql, array $bindings): bool {
                 self::assertStringContainsString('THEN classified.size ELSE 0 END', $sql);
                 self::assertStringNotContainsString('r.nzbstatus = 1', $sql);
-                self::assertSame('alt.test', $bindings[12] ?? null);
-                self::assertSame(123, $bindings[13] ?? null);
+                self::assertSame('alt.test', $bindings[18] ?? null);
+                self::assertSame(123, $bindings[19] ?? null);
 
                 return true;
             })
@@ -1237,9 +1242,9 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             ->withArgs(function (string $sql, array $bindings): bool {
                 self::assertStringContainsString('r.nzbstatus = 1', $sql);
                 self::assertStringContainsString('r.id <= ?', $sql);
-                self::assertSame('alt.test', $bindings[12] ?? null);
-                self::assertSame(100, $bindings[13] ?? null);
-                self::assertSame(103, $bindings[14] ?? null);
+                self::assertSame('alt.test', $bindings[18] ?? null);
+                self::assertSame(100, $bindings[19] ?? null);
+                self::assertSame(103, $bindings[20] ?? null);
 
                 return true;
             })
@@ -1288,7 +1293,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('AS target_count', $sql);
                 self::assertStringContainsString('AS target_bytes', $sql);
                 self::assertStringContainsString('r.id <= ?', $sql);
-                self::assertSame(103, $bindings[14] ?? null);
+                self::assertSame(103, $bindings[20] ?? null);
 
                 return true;
             })
