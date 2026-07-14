@@ -29,6 +29,25 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(40_000, $profile->quantityForYield(3.0, 1_000_000, 40_000));
     }
 
+    public function test_source_stop_remaining_range_pins_the_final_permit_to_the_audited_boundary(): void
+    {
+        config([
+            'nntmux.orchestrator.backfill_scale_min_yield' => 0.15,
+            'nntmux.orchestrator.backfill_max_quantity' => 600_000,
+            'nntmux.orchestrator.backfill_target_nzbs_per_permit' => 60,
+        ]);
+
+        self::assertSame(40_000, WorkerControlProfile::for(ControlProfile::Fill)->quantityForYield(
+            0.207337,
+            50_000,
+            600_000,
+            15,
+            30_000,
+            time(),
+            true,
+        ));
+    }
+
     public function test_unknown_invalid_and_balanced_targets_remain_bounded_to_probe_quantity(): void
     {
         self::assertSame(10_000, WorkerControlProfile::for(ControlProfile::Fill)->quantityForYield(0.0, 1_000_000));

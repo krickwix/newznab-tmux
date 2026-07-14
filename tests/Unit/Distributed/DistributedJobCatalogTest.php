@@ -365,6 +365,7 @@ class DistributedJobCatalogTest extends TestCase
         config([
             'nntmux.distributed_nzb_limit' => 20,
             'nntmux.distributed_nzb_sleep' => 55,
+            'nntmux.distributed_nzb_terminal_stale_enabled' => true,
         ]);
         $settings = [
             'binaries_run' => 1,
@@ -383,6 +384,18 @@ class DistributedJobCatalogTest extends TestCase
         $nzb = $catalog->resolve('nzb-backlog', $this->runVar($settings));
         self::assertSame(90, $nzb['sleep']);
         self::assertSame(10, $nzb['commands'][0]['arguments']['--limit']);
+        self::assertTrue($nzb['commands'][0]['arguments']['--quarantine-terminal-stale']);
+    }
+
+    public function test_terminal_stale_quarantine_remains_off_by_default_with_a_fresh_lease(): void
+    {
+        config(['nntmux.distributed_nzb_terminal_stale_enabled' => false]);
+        $plan = (new DistributedJobCatalog)->resolve('nzb-backlog', $this->runVar([
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() + 300,
+        ]));
+
+        self::assertArrayNotHasKey('--quarantine-terminal-stale', $plan['commands'][0]['arguments']);
     }
 
     public function test_managed_backfill_requires_fresh_active_unpaused_permit(): void
@@ -440,6 +453,10 @@ class DistributedJobCatalogTest extends TestCase
         self::assertSame(300, $catalog->resolve('binaries', $this->runVar($settings))['sleep']);
         self::assertSame(180, $catalog->resolve('releases', $this->runVar($settings))['sleep']);
         self::assertSame(180, $catalog->resolve('nzb-backlog', $this->runVar($settings))['sleep']);
+        self::assertArrayNotHasKey(
+            '--quarantine-terminal-stale',
+            $catalog->resolve('nzb-backlog', $this->runVar($settings))['commands'][0]['arguments'],
+        );
         $backfill = $catalog->resolve('backfill', $this->runVar($settings, ['backfill_groups_days' => 1]));
         self::assertFalse($backfill['enabled']);
         self::assertSame(60, $backfill['sleep']);

@@ -529,6 +529,50 @@ final class WorkerControlStateStoreTest extends TestCase
         ));
     }
 
+    public function test_audited_four_window_cohort_defers_settlement_until_the_exact_fourth_window(): void
+    {
+        config([
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_context_max_chain_windows' => 4,
+        ]);
+        $store = new WorkerControlStateStore;
+        $window = static fn (int $generation, string $start): array => [
+            'generation' => $generation,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => $start,
+        ];
+
+        self::assertTrue($store->queueBackfillDelayedAttribution(
+            $window(7, '2026-01-05 03:04:05'),
+            ['cursor_postdate' => '2026-01-04 03:04:05'],
+            10_000,
+            1_000,
+        ));
+        foreach ([
+            [8, '2026-01-04 03:04:05', '2026-01-03 03:04:05', 2_000, 7],
+            [9, '2026-01-03 03:04:05', '2026-01-02 03:04:05', 3_000, 8],
+            [10, '2026-01-02 03:04:05', '2026-01-01 03:04:05', 4_000, 9],
+        ] as [$generation, $start, $end, $queuedAt, $predecessor]) {
+            $store->markBackfillContextRepeat('alt.test', $queuedAt - 1, $predecessor);
+            self::assertTrue($store->backfillDelayedAttributionCanContinue('alt.test', $queuedAt));
+            self::assertTrue($store->queueBackfillDelayedAttribution(
+                $window($generation, $start),
+                ['cursor_postdate' => $end],
+                10_000,
+                $queuedAt,
+                contextContinuation: true,
+            ));
+        }
+
+        $store->markBackfillContextRepeat('alt.test', 4_001, 10);
+        self::assertFalse($store->backfillDelayedAttributionCanContinue('alt.test', 4_002));
+        $mature = $store->matureBackfillDelayedAttribution(13_000);
+        self::assertSame(4, $mature['chain_count'] ?? null);
+        self::assertSame(40_000, $mature['cursor_delta'] ?? null);
+    }
+
     public function test_larger_than_ten_thousand_root_cannot_authorize_a_context_chain(): void
     {
         $store = new WorkerControlStateStore;

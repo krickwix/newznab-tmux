@@ -59,6 +59,13 @@ class WorkerProfileApplier
                 ->where('name', 'orchestrator_bf_qty')
                 ->lockForUpdate()
                 ->value('value');
+            $existingPinnedStop = (int) Settings::query()
+                ->where('name', 'orchestrator_bf_stop')
+                ->lockForUpdate()
+                ->value('value');
+            $backfillStop = $grantPermit && $backfillGroup !== null
+                ? ((new BackfillStopCursorPolicy)->stopCursor($backfillGroup) ?? 0)
+                : $existingPinnedStop;
             $permit = ($decision->backfillPermitted || $preserveUnclaimedPermit)
                 ? ($grantPermit ? $generation : $existingPermit)
                 : 0;
@@ -86,6 +93,7 @@ class WorkerProfileApplier
                 'orchestrator_bf_qty' => (string) ($grantPermit
                     ? max(10000, $backfillQuantity ?? $profile->backfillQuantity)
                     : $existingPinnedQuantity),
+                'orchestrator_bf_stop' => (string) $backfillStop,
                 'backfill_groups' => (string) max(1, $profile->backfillGroups),
                 'backfillthreads' => (string) max(1, $profile->backfillThreads),
                 'backfill_qty' => (string) max(10000, $profile->backfillQuantity),
@@ -115,6 +123,7 @@ class WorkerProfileApplier
                 'orchestrator_bf_permit' => '0',
                 'orchestrator_bf_group' => '',
                 'orchestrator_bf_qty' => '0',
+                'orchestrator_bf_stop' => '0',
             ] as $name => $value) {
                 Settings::query()->updateOrCreate(['name' => $name], ['value' => $value]);
             }

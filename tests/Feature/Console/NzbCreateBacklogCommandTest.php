@@ -192,6 +192,150 @@ final class NzbCreateBacklogCommandTest extends TestCase
         $this->assertSame(NzbService::NZB_FAILED, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
     }
 
+    public function test_command_quarantines_a_stale_pending_release_without_a_collection_when_requested(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a', withPayload: false);
+        DB::table('releases')->where('id', 1)->update([
+            'adddate' => now()->subDays(8)->format('Y-m-d H:i:s'),
+        ]);
+        $this->bindNzbWriter(static function (): bool {
+            self::fail('Terminal stale releases must not reach the NZB writer.');
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--limit' => 1,
+            '--quarantine-terminal-stale' => true,
+        ])
+            ->expectsOutputToContain('quarantined=1 quarantined_ids=1')
+            ->assertSuccessful();
+
+        $this->assertSame(NzbService::NZB_FAILED, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+        $this->assertSame('1', (string) DB::table('settings')->where('name', 'nzb_quarantine_last_ids')->value('value'));
+    }
+
+    public function test_command_quarantines_a_stale_incomplete_release_from_a_disabled_source(): void
+    {
+        DB::table('usenet_groups')->where('id', 1)->update(['active' => 0, 'backfill' => 0]);
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a', currentParts: 93, totalParts: 100);
+        DB::table('releases')->where('id', 1)->update([
+            'adddate' => now()->subDays(8)->format('Y-m-d H:i:s'),
+        ]);
+        $this->bindNzbWriter(static function (): bool {
+            self::fail('Incomplete terminal releases must not reach the NZB writer.');
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--limit' => 1,
+            '--quarantine-terminal-stale' => true,
+        ])
+            ->expectsOutputToContain('quarantined=1')
+            ->assertSuccessful();
+
+        $this->assertSame(NzbService::NZB_FAILED, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
+    public function test_command_preserves_stale_incomplete_releases_from_enabled_sources(): void
+    {
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a', currentParts: 93, totalParts: 100);
+        DB::table('releases')->where('id', 1)->update([
+            'adddate' => now()->subDays(8)->format('Y-m-d H:i:s'),
+        ]);
+        $this->bindNzbWriter(static function (): bool {
+            self::fail('Incomplete releases must not reach the NZB writer.');
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--limit' => 1,
+            '--quarantine-terminal-stale' => true,
+        ])
+            ->expectsOutputToContain('quarantined=0')
+            ->assertSuccessful();
+
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
+    public function test_command_preserves_complete_payload_when_source_is_disabled(): void
+    {
+        DB::table('usenet_groups')->where('id', 1)->update(['active' => 0, 'backfill' => 0]);
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a');
+        DB::table('releases')->where('id', 1)->update([
+            'adddate' => now()->subDays(8)->format('Y-m-d H:i:s'),
+        ]);
+        $this->bindNzbWriter(static fn (): bool => false);
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--limit' => 1,
+            '--quarantine-terminal-stale' => true,
+        ])
+            ->expectsOutputToContain('quarantined=0 quarantined_ids=none')
+            ->assertSuccessful();
+
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
+    public function test_command_quarantine_is_bounded_and_reports_exact_ids(): void
+    {
+        foreach ([1, 2, 3] as $id) {
+            $this->seedRelease($id, groupId: 1, leftGuid: 'a', withPayload: false);
+            DB::table('releases')->where('id', $id)->update([
+                'adddate' => now()->subDays(8)->format('Y-m-d H:i:s'),
+            ]);
+        }
+        $this->bindNzbWriter(static function (): bool {
+            self::fail('Terminal stale releases must not reach the NZB writer.');
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--limit' => 2,
+            '--order' => 'desc',
+            '--quarantine-terminal-stale' => true,
+        ])
+            ->expectsOutputToContain('quarantined=2 quarantined_ids=3,2')
+            ->assertSuccessful();
+
+        $this->assertSame([2, 3], DB::table('releases')->where('nzbstatus', NzbService::NZB_FAILED)->orderBy('id')->pluck('id')->map('intval')->all());
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
+    public function test_command_skips_quarantine_after_the_orchestrator_lease_expires(): void
+    {
+        DB::table('settings')->where('name', 'orchestrator_lease_until')->update(['value' => (string) (time() - 1)]);
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a', withPayload: false);
+        DB::table('releases')->where('id', 1)->update([
+            'adddate' => now()->subDays(8)->format('Y-m-d H:i:s'),
+        ]);
+        $this->bindNzbWriter(static function (): bool {
+            self::fail('Terminal stale releases must not reach the NZB writer.');
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--limit' => 1,
+            '--quarantine-terminal-stale' => true,
+        ])
+            ->expectsOutputToContain('quarantined=0 quarantined_ids=none')
+            ->assertSuccessful();
+
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
+    public function test_command_preserves_recent_terminal_pending_releases(): void
+    {
+        DB::table('usenet_groups')->where('id', 1)->update(['active' => 0, 'backfill' => 0]);
+        $this->seedRelease(1, groupId: 1, leftGuid: 'a', withPayload: false);
+        $this->bindNzbWriter(static function (): bool {
+            self::fail('Terminal releases inside the age floor must not reach the NZB writer.');
+        });
+
+        $this->artisan('nntmux:nzb-create-backlog', [
+            '--limit' => 1,
+            '--quarantine-terminal-stale' => true,
+        ])
+            ->expectsOutputToContain('quarantined=0')
+            ->assertSuccessful();
+
+        $this->assertSame(NzbService::NZB_NONE, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+    }
+
     public function test_command_does_not_mark_failed_when_payload_disappears_before_failure_update(): void
     {
         $this->seedRelease(1, groupId: 1, leftGuid: 'a');
@@ -893,6 +1037,8 @@ final class NzbCreateBacklogCommandTest extends TestCase
             'mischashedretentionhours' => '0',
             'partretentionhours' => '24',
             'last_run_time' => '',
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => (string) (time() + 600),
         ] as $name => $value) {
             DB::table('settings')->insert(['name' => $name, 'value' => $value]);
         }
@@ -915,7 +1061,12 @@ final class NzbCreateBacklogCommandTest extends TestCase
     private function createTables(): void
     {
         DB::statement('CREATE TABLE settings (name VARCHAR(255) PRIMARY KEY, value TEXT)');
-        DB::statement('CREATE TABLE usenet_groups (id INTEGER PRIMARY KEY, name VARCHAR(255))');
+        DB::statement('CREATE TABLE usenet_groups (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255),
+            active INTEGER NOT NULL DEFAULT 1,
+            backfill INTEGER NOT NULL DEFAULT 1
+        )');
         DB::statement('CREATE TABLE categories (id INTEGER PRIMARY KEY, title VARCHAR(255), parent_categories_id INTEGER NULL)');
         DB::statement('CREATE TABLE releases (
             id INTEGER PRIMARY KEY,
@@ -974,8 +1125,8 @@ final class NzbCreateBacklogCommandTest extends TestCase
         )');
 
         DB::table('usenet_groups')->insert([
-            ['id' => 1, 'name' => 'alt.binaries.boneless'],
-            ['id' => 2, 'name' => 'a.b.boneless'],
+            ['id' => 1, 'name' => 'alt.binaries.boneless', 'active' => 1, 'backfill' => 1],
+            ['id' => 2, 'name' => 'a.b.boneless', 'active' => 1, 'backfill' => 1],
         ]);
         DB::table('categories')->insert(['id' => 1, 'title' => 'Misc', 'parent_categories_id' => null]);
     }

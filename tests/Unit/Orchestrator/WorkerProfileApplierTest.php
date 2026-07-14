@@ -248,6 +248,16 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame('alt.proven', Settings::settingValue('orchestrator_bf_group'));
     }
 
+    public function test_it_pins_the_audited_stop_cursor_with_the_permit(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.proven:60000');
+        $applier = new WorkerProfileApplier;
+
+        $applier->apply($this->decision(ControlProfile::Fill, true), 1_000, true, 'alt.proven', false, 10_000);
+
+        self::assertSame(60_000, Settings::settingValue('orchestrator_bf_stop'));
+    }
+
     public function test_it_revokes_the_permit_when_the_policy_closes_the_backfill_gate(): void
     {
         (new WorkerProfileApplier)->apply($this->decision(ControlProfile::Drain, false), 1_000, true);

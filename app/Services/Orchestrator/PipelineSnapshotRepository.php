@@ -901,12 +901,21 @@ class PipelineSnapshotRepository
             ORDER BY g.first_record_postdate DESC, g.name ASC
             LIMIT '.self::BACKFILL_CANDIDATE_LIMIT, $allowedGroups);
 
-        return array_map(static fn (object $row): array => [
+        return array_map(fn (object $row): array => [
             'name' => (string) $row->name,
             'cursor' => (int) $row->backfill_cursor,
             'cursor_postdate' => (string) $row->cursor_postdate,
-            'remaining_articles' => (int) $row->remaining_articles,
+            'remaining_articles' => $this->remainingArticlesWithinStopCursor(
+                (string) $row->name,
+                (int) $row->backfill_cursor,
+                (int) $row->remaining_articles,
+            ),
         ], $rows);
+    }
+
+    private function remainingArticlesWithinStopCursor(string $group, int $cursor, int $remainingArticles): int
+    {
+        return (new BackfillStopCursorPolicy)->remainingArticles($group, $cursor, $remainingArticles);
     }
 
     /**

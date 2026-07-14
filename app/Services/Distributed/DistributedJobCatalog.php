@@ -82,6 +82,10 @@ class DistributedJobCatalog
                 [
                     '--limit' => $this->nzbLimit($settings),
                     '--order' => 'desc',
+                    ...($this->hasFreshActiveLease($settings)
+                        && (bool) config('nntmux.distributed_nzb_terminal_stale_enabled', false)
+                        ? ['--quarantine-terminal-stale' => true]
+                        : []),
                 ],
                 $this->nzbSleep($settings)
             ),

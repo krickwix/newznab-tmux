@@ -656,7 +656,7 @@ class WorkerControlStateStore
 
     private function backfillContextMaxChainWindows(): int
     {
-        return min(3, max(2, (int) config('nntmux.orchestrator.backfill_context_max_chain_windows', 3)));
+        return min(4, max(2, (int) config('nntmux.orchestrator.backfill_context_max_chain_windows', 3)));
     }
 
     /**

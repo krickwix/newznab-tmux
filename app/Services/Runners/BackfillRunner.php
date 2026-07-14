@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Runners;
 
 use App\Models\Settings;
+use App\Services\Orchestrator\BackfillStopCursorPolicy;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -73,6 +74,7 @@ class BackfillRunner extends BaseRunner
         $minimumSafeRange = $this->minimumSafeBackfillRange();
         $orchestratorGroup = trim((string) Settings::settingValue('orchestrator_bfc_group'));
         $orchestratorQuantity = (int) Settings::settingValue('orchestrator_bfc_qty');
+        $orchestratorStopCursor = (int) Settings::settingValue('orchestrator_bfc_stop');
         $backfill_qty = $this->resolveBackfillQuantity($backfill_qty, $orchestratorGroup, $orchestratorQuantity);
         $orchestratorGroupFilter = $orchestratorGroup === ''
             ? ''
@@ -120,6 +122,7 @@ class BackfillRunner extends BaseRunner
             $maxMessages,
             $threads,
             $orchestratorGroup === '' ? 0 : 10000,
+            $orchestratorStopCursor,
         );
 
         if ($queues === []) {
@@ -167,6 +170,7 @@ class BackfillRunner extends BaseRunner
         int $maxMessages,
         int $threads,
         int $reserveArticles = 0,
+        int $pinnedStopCursor = 0,
     ): array {
         if ($maxMessages < 1) {
             $maxMessages = 20000;
@@ -205,9 +209,26 @@ class BackfillRunner extends BaseRunner
                 continue;
             }
 
-            $floor = $theirFirst + max(0, $reserveArticles);
+            $policy = new BackfillStopCursorPolicy;
+            if (! $policy->isValid()) {
+                Log::error('Safe backfill stopped because the stop-cursor configuration is invalid.');
+
+                continue;
+            }
+            $configuredStopCursor = $policy->stopCursor((string) $group->name) ?? 0;
+            $floor = max(
+                $theirFirst + max(0, $reserveArticles),
+                $configuredStopCursor,
+                max(0, $pinnedStopCursor),
+            );
             $available = max(0, $ourFirst - $floor);
-            $requested = min($available, $backfillQty * $threads);
+            $requested = min(
+                $available,
+                $policy->clampQuantity((string) $group->name, $ourFirst, $backfillQty * $threads),
+            );
+            if ($requested <= 0) {
+                continue;
+            }
             $getEach = (int) ceil($requested / $maxMessages);
 
             for ($i = 0; $i <= $getEach - 1; $i++) {

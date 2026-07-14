@@ -8,7 +8,9 @@ use App\Models\Release;
 use App\Models\Settings;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 final class NzbBacklogCreationService
 {
@@ -25,7 +27,7 @@ final class NzbBacklogCreationService
      *
      * When candidate counting is requested, candidate_total is exact within
      * the bounded pending-ID scan rather than an unbounded global backlog count.
-     * @return array{candidate_total: int, selected: int, scanned: int, scan_exhausted: bool, selection_duration_seconds: float, attempted: int, created: int, failed: int, marked_failed: int}
+     * @return array{candidate_total: int, selected: int, scanned: int, scan_exhausted: bool, selection_duration_seconds: float, attempted: int, created: int, failed: int, marked_failed: int, quarantined: int, quarantined_ids: list<int>}
      */
     public function create(
         array $groups = [],
@@ -35,7 +37,8 @@ final class NzbBacklogCreationService
         string $order = 'asc',
         bool $countCandidates = false,
         ?callable $onCreated = null,
-        ?int $scanCap = null
+        ?int $scanCap = null,
+        bool $quarantineTerminalStale = false,
     ): array {
         $limit = max(1, min(5000, $limit));
         $configuredScanCap = max(
@@ -102,6 +105,8 @@ final class NzbBacklogCreationService
             'created' => 0,
             'failed' => 0,
             'marked_failed' => 0,
+            'quarantined' => 0,
+            'quarantined_ids' => [],
         ];
 
         foreach ($releases as $release) {
@@ -119,6 +124,15 @@ final class NzbBacklogCreationService
             if ($markFailed && $this->markReleaseFailed((int) $release->id)) {
                 $result['marked_failed']++;
             }
+        }
+
+        if ($quarantineTerminalStale && $result['selected'] === 0 && $this->hasFreshActiveOrchestratorLease()) {
+            $result['quarantined_ids'] = $this->quarantineTerminalStale(
+                $pendingIdValues,
+                $limit,
+                $order,
+            );
+            $result['quarantined'] = count($result['quarantined_ids']);
         }
 
         return $result;
@@ -319,5 +333,133 @@ final class NzbBacklogCreationService
                     ->limit(1);
             })
             ->update(['nzbstatus' => NzbService::NZB_FAILED]) === 1;
+    }
+
+    /**
+     * @param  list<int>  $pendingIds
+     * @return list<int>
+     */
+    private function quarantineTerminalStale(array $pendingIds, int $limit, string $order): array
+    {
+        if ($pendingIds === []) {
+            return [];
+        }
+
+        $cutoff = now()->subHours((int) config('nntmux.distributed_nzb_terminal_stale_hours', 168));
+        $completion = $this->requiredCompletionPercent();
+        $ids = Release::query()
+            ->whereIn('id', $pendingIds)
+            ->where('nzbstatus', NzbService::NZB_NONE)
+            ->where('adddate', '<=', $cutoff)
+            ->where(function ($query): void {
+                $query->whereNotExists(function ($query): void {
+                    $query->selectRaw('1')
+                        ->from('collections')
+                        ->whereColumn('collections.releases_id', 'releases.id');
+                })->orWhereExists(function ($query): void {
+                    $query->selectRaw('1')
+                        ->from('usenet_groups')
+                        ->whereColumn('usenet_groups.id', 'releases.groups_id')
+                        ->where('usenet_groups.active', 0)
+                        ->where('usenet_groups.backfill', 0);
+                });
+            })
+            ->where(fn ($query) => $this->applyCurrentlyIneligiblePredicate($query, $completion))
+            ->orderBy('id', $order)
+            ->limit($limit)
+            ->pluck('id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+
+        if ($ids === []) {
+            return [];
+        }
+
+        $quarantined = [];
+        foreach ($ids as $id) {
+            if (! $this->hasFreshActiveOrchestratorLease()) {
+                break;
+            }
+            $updated = DB::table('releases')
+                ->where('id', $id)
+                ->where('nzbstatus', NzbService::NZB_NONE)
+                ->where('adddate', '<=', $cutoff)
+                ->where(function ($query): void {
+                    $query->whereNotExists(function ($query): void {
+                        $query->selectRaw('1')
+                            ->from('collections')
+                            ->whereColumn('collections.releases_id', 'releases.id');
+                    })->orWhereExists(function ($query): void {
+                        $query->selectRaw('1')
+                            ->from('usenet_groups')
+                            ->whereColumn('usenet_groups.id', 'releases.groups_id')
+                            ->where('usenet_groups.active', 0)
+                            ->where('usenet_groups.backfill', 0);
+                    });
+                })
+                ->where(fn ($query) => $this->applyCurrentlyIneligiblePredicate($query, $completion))
+                ->update(['nzbstatus' => NzbService::NZB_FAILED]);
+            if ($updated === 1) {
+                $quarantined[] = $id;
+            }
+        }
+
+        if ($quarantined !== []) {
+            Settings::query()->updateOrCreate(
+                ['name' => 'nzb_quarantine_last_ids'],
+                ['value' => implode(',', $quarantined)],
+            );
+            Settings::query()->updateOrCreate(
+                ['name' => 'nzb_quarantine_last_at'],
+                ['value' => now()->toIso8601String()],
+            );
+            Settings::forgetCachedSettings();
+            Log::notice('NNTmux terminal-stale NZB quarantine applied.', [
+                'release_ids' => $quarantined,
+                'cutoff' => $cutoff->toIso8601String(),
+            ]);
+        }
+
+        return $quarantined;
+    }
+
+    /** @param Builder<Release>|QueryBuilder $query */
+    private function applyCurrentlyIneligiblePredicate(Builder|QueryBuilder $query, int $completion): void
+    {
+        $query->whereNotExists(function ($query): void {
+            $query->selectRaw('1')
+                ->from('collections')
+                ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                ->whereColumn('collections.releases_id', 'releases.id');
+        })->orWhereExists(function ($query) use ($completion): void {
+            $query->selectRaw('1')
+                ->from('collections')
+                ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                ->whereColumn('collections.releases_id', 'releases.id')
+                ->where(function ($query) use ($completion): void {
+                    $query->where('binaries.totalparts', '<=', 0)
+                        ->orWhereRaw('binaries.currentparts < CEIL(binaries.totalparts * ? / 100)', [$completion]);
+                });
+        })->orWhereExists(function ($query): void {
+            $query->selectRaw('1')
+                ->from('collections')
+                ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                ->whereColumn('collections.releases_id', 'releases.id')
+                ->whereNotExists(function ($query): void {
+                    $query->selectRaw('1')
+                        ->from('parts')
+                        ->whereColumn('parts.binaries_id', 'binaries.id');
+                });
+        });
+    }
+
+    private function hasFreshActiveOrchestratorLease(): bool
+    {
+        $settings = Settings::query()
+            ->whereIn('name', ['orchestrator_mode', 'orchestrator_lease_until'])
+            ->pluck('value', 'name');
+
+        return (string) $settings->get('orchestrator_mode', '') === 'active'
+            && (int) $settings->get('orchestrator_lease_until', 0) >= time();
     }
 }

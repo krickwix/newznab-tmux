@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Distributed;
 
 use App\Models\Settings;
+use App\Services\Orchestrator\BackfillStopCursorPolicy;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -28,6 +29,7 @@ class BackfillPermitGate
                     'orchestrator_bf_permit',
                     'orchestrator_bf_group',
                     'orchestrator_bf_qty',
+                    'orchestrator_bf_stop',
                 ])
                 ->lockForUpdate()
                 ->get()
@@ -35,11 +37,17 @@ class BackfillPermitGate
                     $setting->name => $setting->getRawOriginal('value'),
                 ]);
 
-            if ((string) $rows->get('orchestrator_mode', '') !== 'active'
+            $group = trim((string) $rows->get('orchestrator_bf_group', ''));
+            $policy = new BackfillStopCursorPolicy;
+            $configuredStop = $policy->stopCursor($group) ?? 0;
+            $pinnedStop = (int) $rows->get('orchestrator_bf_stop', 0);
+            if (! $policy->isValid()
+                || $configuredStop !== $pinnedStop
+                || (string) $rows->get('orchestrator_mode', '') !== 'active'
                 || (int) $rows->get('orchestrator_lease_until', 0) < time()
                 || (int) $rows->get('orchestrator_bf_paused', 1) !== 0
                 || (int) $rows->get('orchestrator_bf_permit', 0) <= 0
-                || trim((string) $rows->get('orchestrator_bf_group', '')) === ''
+                || $group === ''
                 || (int) $rows->get('orchestrator_bf_qty', 0) < 10000) {
                 return null;
             }
@@ -51,11 +59,15 @@ class BackfillPermitGate
             );
             Settings::query()->updateOrCreate(
                 ['name' => 'orchestrator_bfc_group'],
-                ['value' => trim((string) $rows->get('orchestrator_bf_group'))],
+                ['value' => $group],
             );
             Settings::query()->updateOrCreate(
                 ['name' => 'orchestrator_bfc_qty'],
                 ['value' => (string) (int) $rows->get('orchestrator_bf_qty')],
+            );
+            Settings::query()->updateOrCreate(
+                ['name' => 'orchestrator_bfc_stop'],
+                ['value' => (string) $pinnedStop],
             );
             Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
             Settings::forgetCachedSettings();

@@ -74,6 +74,57 @@ final class BackfillRunnerTest extends TestCase
         ], $queues);
     }
 
+    public function test_safe_backfill_execution_cannot_cross_a_configured_source_stop_cursor(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.tv:948528922');
+        $runner = new class extends BackfillRunner
+        {
+            /** @return array{0: array<string, string>, 1: array<string, string>} */
+            public function queues(object $group): array
+            {
+                return $this->buildSafeBackfillQueues([$group], 60_000, 10_000, 1, 10_000);
+            }
+        };
+
+        [$queues] = $runner->queues((object) [
+            'name' => 'alt.tv',
+            'our_first' => 948568922,
+            'their_first' => 900000000,
+            'their_last' => 1000000000,
+        ]);
+
+        self::assertSame([
+            'alt.tv#1' => 'get_range  backfill  alt.tv  948558922  948568921  1',
+            'alt.tv#2' => 'get_range  backfill  alt.tv  948548922  948558921  2',
+            'alt.tv#3' => 'get_range  backfill  alt.tv  948538922  948548921  3',
+            'alt.tv#4' => 'get_range  backfill  alt.tv  948528922  948538921  4',
+        ], $queues);
+    }
+
+    public function test_safe_backfill_schedules_the_exact_final_partial_range_to_the_stop_cursor(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.tv:60000');
+        $runner = new class extends BackfillRunner
+        {
+            /** @return array{0: array<string, string>, 1: array<string, string>} */
+            public function queues(object $group): array
+            {
+                return $this->buildSafeBackfillQueues([$group], 40_000, 10_000, 1, 10_000, 60_000);
+            }
+        };
+
+        [$queues] = $runner->queues((object) [
+            'name' => 'alt.tv',
+            'our_first' => 65_000,
+            'their_first' => 1,
+            'their_last' => 1_000_000,
+        ]);
+
+        self::assertSame([
+            'alt.tv#1' => 'get_range  backfill  alt.tv  60000  64999  1',
+        ], $queues);
+    }
+
     public function test_safe_backfill_schedules_meaningful_final_partial_chunk_to_provider_first_article(): void
     {
         $runner = new class extends BackfillRunner

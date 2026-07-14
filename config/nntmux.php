@@ -24,6 +24,8 @@ return [
     'distributed_nzb_sleep' => (int) env('NNTMUX_DISTRIBUTED_NZB_SLEEP', 60),
     'distributed_nzb_scan_cap' => (int) env('NNTMUX_DISTRIBUTED_NZB_SCAN_CAP', 10000),
     'distributed_nzb_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS', 7200),
+    'distributed_nzb_terminal_stale_hours' => max(168, (int) env('NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_HOURS', 168)),
+    'distributed_nzb_terminal_stale_enabled' => filter_var(env('NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED', false), FILTER_VALIDATE_BOOL),
     'orchestrator' => [
         'leader_lock_seconds' => min(600, max(120, (int) env('NNTMUX_ORCHESTRATOR_LEADER_LOCK_SECONDS', 120))),
         'lock_store' => env('NNTMUX_ORCHESTRATOR_LOCK_STORE', 'redis'),
@@ -38,6 +40,7 @@ return [
                 'alt.binaries.tv,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.sounds.lossless.metal,alt.binaries.sounds.lossless,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd'
             ))
         ))),
+        'backfill_stop_cursors' => (string) env('NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS', ''),
         'backfill_yield_ttl_seconds' => max(3600, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_YIELD_TTL_SECONDS', 86400)),
         'backfill_cohort_postdate_tolerance_seconds' => min(86400, max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_COHORT_POSTDATE_TOLERANCE_SECONDS', 3600))),
         'backfill_min_payload_bytes' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MIN_PAYLOAD_BYTES', 104_857_600)),
@@ -57,7 +60,7 @@ return [
         'backfill_max_non_target_releases' => min(10, max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_RELEASES', 0))),
         'backfill_max_non_target_bytes' => max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_NON_TARGET_BYTES', 0)),
         'backfill_exploit_attempts_before_explore' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_EXPLOIT_ATTEMPTS_BEFORE_EXPLORE', 3)),
-        'backfill_context_max_chain_windows' => min(3, max(2, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_MAX_CHAIN_WINDOWS', 3))),
+        'backfill_context_max_chain_windows' => min(4, max(2, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_MAX_CHAIN_WINDOWS', 3))),
         'backfill_aggressive_explore_below_yield' => max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_AGGRESSIVE_EXPLORE_BELOW_YIELD', 0.0)),
         'backfill_scale_min_yield' => max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_SCALE_MIN_YIELD', 1.0)),
         'backfill_scale_min_attempts' => max(2, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_SCALE_MIN_ATTEMPTS', 2)),

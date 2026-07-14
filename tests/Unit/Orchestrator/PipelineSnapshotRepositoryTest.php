@@ -687,6 +687,45 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         ]], $repository->backfillCandidates());
     }
 
+    public function test_backfill_candidate_remaining_articles_are_capped_at_the_configured_source_stop_cursor(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['alt.test']);
+        config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.test:60000');
+        DB::shouldReceive('select')->once()->andReturn([(object) [
+            'name' => 'alt.test',
+            'backfill_cursor' => 100_000,
+            'cursor_postdate' => '2020-01-01 00:00:00',
+            'remaining_articles' => 90_000,
+        ]]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([[
+            'name' => 'alt.test',
+            'cursor' => 100_000,
+            'cursor_postdate' => '2020-01-01 00:00:00',
+            'remaining_articles' => 50_000,
+        ]], $repository->backfillCandidates());
+    }
+
+    public function test_backfill_candidate_stop_cursor_fails_closed_once_reached_or_when_invalid(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'remainingArticlesWithinStopCursor');
+
+        config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.test:60000');
+        self::assertSame(0, $method->invoke($repository, 'alt.test', 60_000, 50_000));
+
+        config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.test:not-a-cursor');
+        self::assertSame(0, $method->invoke($repository, 'alt.test', 100_000, 90_000));
+    }
+
     public function test_backfill_candidates_fail_closed_without_an_explicit_allowlist(): void
     {
         config()->set('nntmux.orchestrator.backfill_probe_groups', []);

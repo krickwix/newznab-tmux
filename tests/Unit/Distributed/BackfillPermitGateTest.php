@@ -39,6 +39,7 @@ class BackfillPermitGateTest extends TestCase
         self::assertSame(17, Settings::settingValue('orchestrator_bf_claimed'));
         self::assertSame('alt.test', Settings::settingValue('orchestrator_bfc_group'));
         self::assertSame(160_000, Settings::settingValue('orchestrator_bfc_qty'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bfc_stop'));
         self::assertFalse($gate->claim());
         self::assertTrue($gate->complete(17));
         self::assertSame(17, Settings::settingValue('orchestrator_bf_completed'));
@@ -52,6 +53,26 @@ class BackfillPermitGateTest extends TestCase
         Settings::query()->where('name', 'orchestrator_bf_group')->update(['value' => '']);
 
         self::assertFalse((new BackfillPermitGate)->claim());
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_permit'));
+    }
+
+    public function test_it_atomically_copies_a_matching_audited_stop_cursor(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.test:60000');
+        $this->settings('active', time() + 60, 0, 17);
+        Settings::query()->updateOrCreate(['name' => 'orchestrator_bf_stop'], ['value' => '60000']);
+
+        self::assertSame(17, (new BackfillPermitGate)->claimGeneration());
+        self::assertSame(60_000, Settings::settingValue('orchestrator_bfc_stop'));
+    }
+
+    public function test_it_denies_a_permit_when_the_pinned_stop_does_not_match_runtime_policy(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.test:60000');
+        $this->settings('active', time() + 60, 0, 17);
+        Settings::query()->updateOrCreate(['name' => 'orchestrator_bf_stop'], ['value' => '50000']);
+
+        self::assertNull((new BackfillPermitGate)->claimGeneration());
         self::assertSame(17, Settings::settingValue('orchestrator_bf_permit'));
     }
 
