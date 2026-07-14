@@ -311,9 +311,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-target-safe-drain-v134', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-attribution-poll-v135', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:a31e9c27d1139e2db673331fe006a745b52c9c62efb3c611603b2b50c9aa25e8',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:54089c09e2aab30f2a7386505c3153142bb00231bacfbaf333b77b934f0e47f0',
             $orchestratorImage,
         );
         self::assertSame(
@@ -322,7 +322,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         self::assertNotContains('--shadow', $orchestrator['spec']['template']['spec']['containers'][0]['args'] ?? []);
         self::assertSame(
-            'true',
+            'false',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
