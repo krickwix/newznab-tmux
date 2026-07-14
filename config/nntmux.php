@@ -26,6 +26,10 @@ return [
     'distributed_nzb_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS', 7200),
     'distributed_nzb_terminal_stale_hours' => max(168, (int) env('NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_HOURS', 168)),
     'distributed_nzb_terminal_stale_enabled' => filter_var(env('NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED', false), FILTER_VALIDATE_BOOL),
+    'split_collection_reconcile_groups' => array_values(array_unique(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_RECONCILE_GROUPS', '')),
+    )))),
     'orchestrator' => [
         'leader_lock_seconds' => min(600, max(120, (int) env('NNTMUX_ORCHESTRATOR_LEADER_LOCK_SECONDS', 120))),
         'lock_store' => env('NNTMUX_ORCHESTRATOR_LOCK_STORE', 'redis'),

@@ -19,6 +19,7 @@ use App\Services\Nzb\NzbService;
 use App\Services\Releases\ReleaseBrowseService;
 use App\Services\Releases\ReleaseDuplicateFinder;
 use App\Services\Releases\ReleaseManagementService;
+use App\Services\Releases\SplitCollectionReconciler;
 use App\Support\Data\ProcessReleasesSettings;
 use App\Support\Data\ReleaseCreationResult;
 use App\Support\Data\ReleaseDeleteStats;
@@ -70,6 +71,8 @@ final class ReleaseProcessingService
 
     private readonly ?PostProcessService $postProcessService;
 
+    private readonly SplitCollectionReconciler $splitCollectionReconciler;
+
     public function __construct(
         ?NzbService $nzb = null,
         ?ReleaseCleaningService $releaseCleaning = null,
@@ -78,6 +81,7 @@ final class ReleaseProcessingService
         ?ReleaseCreationService $releaseCreationService = null,
         ?CollectionCleanupService $collectionCleanupService = null,
         ?PostProcessService $postProcessService = null,
+        ?SplitCollectionReconciler $splitCollectionReconciler = null,
     ) {
         $this->echoCLI = (bool) config('nntmux.echocli');
 
@@ -95,6 +99,7 @@ final class ReleaseProcessingService
                 app(ReleaseDuplicateFinder::class)
             );
         $this->postProcessService = $postProcessService;
+        $this->splitCollectionReconciler = $splitCollectionReconciler ?? new SplitCollectionReconciler;
 
         $this->settings = $this->loadSettings();
         $this->validateSettings();
@@ -367,6 +372,7 @@ final class ReleaseProcessingService
         $whereSql = $this->buildGroupWhereSql($normalizedGroupId, 'c');
 
         $this->processStuckCollections($normalizedGroupId ?? 0);
+        $this->splitCollectionReconciler->reconcile($normalizedGroupId);
         $this->runCollectionFileCheckStage0($normalizedGroupId);
         $this->repairObservedTotalFilesForDefaultCollections($normalizedGroupId);
         $this->runCollectionFileCheckStage1($normalizedGroupId ?? 0);
