@@ -135,7 +135,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                         'nntmux-worker-current-forward',
                         'nntmux-worker-releases',
                     ], true)
-                ? ':microservices-pods-20260714-current-forward-v152@sha256:a04d4bcfd5e5030307c7206999e7969938567c07530ac76344767b8a81a616e5'
+                ? ':microservices-pods-20260714-current-forward-v153@sha256:5b1970082c6702bb96f146adf238e224efdb101dda3fbffdcc22a9e03d970767'
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
@@ -332,9 +332,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-current-forward-v152', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-current-forward-v153', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:a04d4bcfd5e5030307c7206999e7969938567c07530ac76344767b8a81a616e5',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:5b1970082c6702bb96f146adf238e224efdb101dda3fbffdcc22a9e03d970767',
             $orchestratorImage,
         );
         self::assertSame(
@@ -405,7 +405,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $releases = $deployments['nntmux-worker-releases'] ?? null;
         self::assertIsArray($releases);
         self::assertSame(
-            'microservices-pods-20260714-current-forward-v152',
+            'microservices-pods-20260714-current-forward-v153',
             $environment($releases)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
