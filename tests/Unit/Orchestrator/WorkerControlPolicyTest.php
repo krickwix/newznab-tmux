@@ -728,6 +728,24 @@ final class WorkerControlPolicyTest extends TestCase
         }
     }
 
+    public function test_profile_transition_blocks_supply_until_a_later_settled_cycle(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->greenBackfillSnapshot(),
+            new ControlState(
+                profile: ControlProfile::Drain,
+                consecutiveLow: WorkerControlPolicy::LOW_SAMPLES_TO_FILL - 1,
+                lastTransitionAt: 1_000,
+            ),
+            10_000,
+        );
+
+        self::assertTrue($decision->transitioned);
+        self::assertSame(ControlProfile::Balanced, $decision->profile->profile);
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_profile_settling', $decision->reasons);
+    }
+
     #[DataProvider('backfillDenialProvider')]
     public function test_backfill_is_denied_when_any_supply_gate_is_closed(array $override): void
     {

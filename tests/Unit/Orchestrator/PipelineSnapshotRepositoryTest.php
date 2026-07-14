@@ -65,6 +65,37 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertTrue($clean['database_admission_safe']);
     }
 
+    public function test_stale_schema_v3_snapshot_reestablishes_a_blocked_fresh_baseline(): void
+    {
+        config()->set('nntmux.orchestrator.snapshot_max_age_seconds', 180);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'databaseContentionTelemetry');
+
+        $telemetry = $method->invoke($repository, 24, 0, 110, [
+            'schema_version' => 3,
+            'database_deadlocks' => 24,
+            'database_current_waits' => 0,
+            'database_row_lock_waits' => 100,
+            'database_row_lock_window_started_at' => 900,
+            'database_row_lock_window_start_count' => 100,
+            'database_row_lock_admission_blocked' => false,
+            'database_row_lock_hard_breach_at' => 0,
+            'database_current_wait_started_at' => 0,
+            'database_admission_safe' => true,
+            'observed_at' => 1_000,
+        ], 1_181);
+
+        self::assertTrue($telemetry['database_waits_safe']);
+        self::assertSame(0, $telemetry['database_row_lock_delta']);
+        self::assertSame(1_181, $telemetry['database_row_lock_window_started_at']);
+        self::assertSame(110, $telemetry['database_row_lock_window_start_count']);
+        self::assertTrue($telemetry['database_row_lock_admission_blocked']);
+        self::assertFalse($telemetry['database_admission_safe']);
+    }
+
     public function test_row_lock_hysteresis_blocks_at_four_and_only_reopens_after_a_complete_clean_window(): void
     {
         $repository = new PipelineSnapshotRepository(

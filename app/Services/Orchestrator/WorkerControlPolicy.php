@@ -154,13 +154,16 @@ final class WorkerControlPolicy
             $reasons[] = 'backfill_target_lock_retry_due';
         }
         $backfillPermitted = $workerProfile->backfillEnabled
+            && ! $transitioned
             && ! $snapshot->highPressure
             && $snapshot->lowPressure
             && ! $backfillLocked
             && ! $targetLocked
             && $snapshot->backfillGatesPassed();
 
-        if (! $backfillPermitted) {
+        if ($transitioned) {
+            $reasons[] = 'backfill_profile_settling';
+        } elseif (! $backfillPermitted) {
             $reasons[] = $this->backfillDenialReason($workerProfile, $snapshot, $backfillLocked, $targetLocked);
         }
 

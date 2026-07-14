@@ -136,6 +136,24 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
     }
 
+    public function test_admission_settlement_overlay_packages_staleness_and_profile_guards(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/row-lock-v159.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260714-row-lock-v157@sha256:4fc77278733238ae06c598489fb8743098b2f9cdc0429176db1bb1f4aa2435ab',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Orchestrator/PipelineSnapshotRepository.php',
+            'app/Services/Orchestrator/WorkerControlPolicy.php',
+            'app/Services/Orchestrator/WorkerOrchestrator.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
     public function test_lossless_body_preamble_repair_is_explicitly_enabled(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/infra.yaml';

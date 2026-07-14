@@ -415,7 +415,9 @@ class WorkerOrchestrator
                     }
                 }
                 if ($grantCurrentForwardPermit) {
-                    if ($permitObservation !== null || $this->store->pendingBackfillDelayedAttributionGroups() !== []) {
+                    if ($decision->transitioned) {
+                        $currentForward['reason'] = 'controller_profile_settling';
+                    } elseif ($permitObservation !== null || $this->store->pendingBackfillDelayedAttributionGroups() !== []) {
                         $currentForward['reason'] = 'backfill_attribution_in_progress';
                     } else {
                         $currentForward = ($this->currentForwardPermits ?? app(CurrentForwardPermitGate::class))

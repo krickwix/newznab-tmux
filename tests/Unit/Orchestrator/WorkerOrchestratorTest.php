@@ -123,6 +123,43 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertFalse($method->invoke($orchestrator, [], $progress, true));
     }
 
+    public function test_profile_transition_rejects_same_cycle_current_forward_admission(): void
+    {
+        $snapshot = new PipelineSnapshot(
+            0,
+            0,
+            0,
+            0,
+            0,
+            lowPressure: true,
+            databaseAdmissionSafe: true,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Drain,
+            consecutiveLow: WorkerControlPolicy::LOW_SAMPLES_TO_FILL - 1,
+            lastTransitionAt: 1,
+        );
+        $lock = Mockery::mock(Lock::class);
+        $lock->shouldReceive('get')->once()->andReturnTrue();
+        $lock->shouldReceive('release')->once();
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
+        $store->shouldReceive('leaderLock')->once()->andReturn($lock);
+        $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
+        $store->shouldReceive('permitObservation')->once()->andReturnNull();
+        $store->shouldReceive('loadState')->once()->andReturn($state);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->with(null)->andReturn($snapshot);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->once()->andReturn(42);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))
+            ->runOnce(false, grantCurrentForwardPermit: true);
+
+        self::assertContains('low_pressure_step_up', $result['reasons']);
+        self::assertSame('controller_profile_settling', $result['current_forward']['reason']);
+        self::assertFalse($result['current_forward']['granted']);
+    }
+
     public function test_raw_context_accepts_binary_growth_inside_an_existing_collection(): void
     {
         $orchestrator = new WorkerOrchestrator(

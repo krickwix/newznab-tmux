@@ -212,6 +212,7 @@ class PipelineSnapshotRepository
         $hardCooldownSeconds = $this->boundedIntConfig('database_row_lock_hard_cooldown_seconds', 600, 60, 86_400);
         $currentWaitHardSeconds = $this->boundedIntConfig('database_current_wait_hard_seconds', 30, 5, 300);
         $profileStableSeconds = $this->boundedIntConfig('database_profile_stable_seconds', 120, 60, $windowSeconds);
+        $snapshotMaxAgeSeconds = $this->boundedIntConfig('snapshot_max_age_seconds', 180, 60, 600);
 
         if ($deadlocks === null || $currentWaits === null || $rowLockWaits === null) {
             return [
@@ -233,6 +234,7 @@ class PipelineSnapshotRepository
             && array_key_exists('database_row_lock_waits', $previous ?? [])
             && $previousObservedAt > 0
             && $previousObservedAt < $now
+            && $now - $previousObservedAt <= $snapshotMaxAgeSeconds
             && $rowLockWaits >= (int) ($previous['database_row_lock_waits'] ?? 0);
         if (! $hasV3Baseline) {
             return [
