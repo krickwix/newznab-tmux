@@ -125,7 +125,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $expectedImage = $name === 'nntmux-worker-backfill'
                 ? ':microservices-pods-20260714-permit-handoff-v144@sha256:53d14c7febe7b0f50c9676a3f374a4a31ec7244e13ec9f4dc98cf3a811a2c732'
                 : ($name === 'nntmux-worker-nzb-backlog'
-                    ? ':microservices-pods-20260714-nzb-completion-v143@sha256:3f5ccef8d0c088dac9d07c4ae01426ce8aa4d109858bb91075e672ae61665e0b'
+                    ? ':microservices-pods-20260714-nzb-saturated-retry-v147@sha256:6ede1752f1d15e0334f6f8f91d9f3c3869034c65484d60a568bcccdf62703cc1'
                     : ($name === 'nntmux-worker-post-additional'
                         ? ':microservices-pods-20260714-nfo-gate-v143@sha256:82bc4bf05d48dc1e4af9ce19f6219e7dfeee16bde3d32b48cf20ace464a11ab3'
                 : ($name === 'nntmux-worker-hashed-fixnames'
@@ -314,7 +314,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
         $backlogEnvironment = $environment($deployments['nntmux-worker-nzb-backlog'] ?? []);
         $metricsEnvironment = $environment($metrics);
-        self::assertSame('microservices-pods-20260714-nzb-completion-v143', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260714-nzb-saturated-retry-v147', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         self::assertSame('168', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_HOURS'] ?? null);
         self::assertSame('true', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED'] ?? null);
         self::assertSame('microservices-pods-20260713-backfill-source-v97', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
@@ -533,7 +533,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'docker.io/krickwix/nntmux:microservices-pods-20260714-nzb-completion-v143@sha256:3f5ccef8d0c088dac9d07c4ae01426ce8aa4d109858bb91075e672ae61665e0b',
+            'docker.io/krickwix/nntmux:microservices-pods-20260714-nzb-saturated-retry-v147@sha256:6ede1752f1d15e0334f6f8f91d9f3c3869034c65484d60a568bcccdf62703cc1',
             (string) ($deployments['nntmux-worker-nzb-backlog']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
