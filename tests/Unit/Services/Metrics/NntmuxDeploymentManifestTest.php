@@ -371,7 +371,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($releases)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
-            'alt.binaries.movies.dvd',
+            'alt.binaries.movies.dvd,alt.binaries.hdtv.tv-episodes',
             $environment($releases)['NNTMUX_SPLIT_COLLECTION_RECONCILE_GROUPS'] ?? null,
         );
         self::assertSame(
