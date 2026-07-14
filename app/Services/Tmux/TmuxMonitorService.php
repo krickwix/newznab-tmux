@@ -154,7 +154,7 @@ class TmuxMonitorService
      * Refresh only the settings that make a one-shot backfill permit visible.
      *
      * The full monitor snapshot may be cached for up to a minute, while the
-     * adaptive worker loops every 20 seconds. Keeping this query narrow lets a
+     * permitted adaptive worker may loop every 10 seconds. Keeping this query narrow lets a
      * worker observe a new permit on its next loop without repeatedly loading
      * the expensive category and backlog statistics.
      *

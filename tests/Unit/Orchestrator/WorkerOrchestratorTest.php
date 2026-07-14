@@ -942,7 +942,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame([], $store->backfillYieldHistory());
         self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
         self::assertFalse($result['permit_granted']);
-        self::assertSame(20, $result['worker_controls']['backfill_sleep_seconds']);
+        self::assertSame(10, $result['worker_controls']['backfill_sleep_seconds']);
         self::assertContains('adaptive_backfill_attribution', $result['reasons']);
     }
 

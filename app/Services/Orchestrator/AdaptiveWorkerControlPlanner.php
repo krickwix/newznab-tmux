@@ -45,13 +45,19 @@ final class AdaptiveWorkerControlPlanner
             || $downstreamPressure >= 0.25
             || $this->ageSloReached('binaries', $snapshot->oldestBinaryAgeSeconds)
             || $this->ageSloReached('collections', $snapshot->oldestCollectionAgeSeconds);
-        $releasesSleep = $releaseDemand ? 20 : max($base->releasesSleepSeconds, 60);
+        // Release discovery is a bounded downstream drain: shorten only the
+        // polling gap when work is actionable; the worker's batch cap and the
+        // global pressure envelope still bound database load.
+        $releasesSleep = $releaseDemand ? 10 : max($base->releasesSleepSeconds, 60);
 
         $nzbDemand = $snapshot->eligibleNzbs > 0;
         $nzbSleep = $nzbDemand ? 20 : max($base->nzbSleepSeconds, 60);
         $nzbBatchSize = $nzbDemand ? 20 : 5;
         $backfillPollable = $decision->backfillPermitted || $backfillAttributionPending;
-        $backfillSleep = $backfillPollable ? 20 : max(60, min(1800, $base->backfillSleepSeconds));
+        // A permit or pending attribution is already pressure-qualified by the
+        // orchestrator. Poll promptly so a granted window is not stranded,
+        // without relaxing the quantity, concurrency, or pressure gates.
+        $backfillSleep = $backfillPollable ? 10 : max(60, min(1800, $base->backfillSleepSeconds));
 
         $profile = new WorkerControlProfile(
             profile: $base->profile,

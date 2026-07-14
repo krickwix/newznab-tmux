@@ -63,7 +63,7 @@ final class AdaptiveWorkerControlPlannerTest extends TestCase
         );
 
         self::assertSame(60, $decision->profile->binariesSleepSeconds);
-        self::assertSame(20, $decision->profile->releasesSleepSeconds);
+        self::assertSame(10, $decision->profile->releasesSleepSeconds);
         self::assertSame(60, $decision->profile->nzbSleepSeconds);
         self::assertSame(5, $decision->profile->nzbBatchSize);
         self::assertSame(60, $decision->profile->backfillSleepSeconds);
@@ -89,10 +89,14 @@ final class AdaptiveWorkerControlPlannerTest extends TestCase
         );
 
         self::assertSame(20, $decision->profile->binariesSleepSeconds);
-        self::assertSame(20, $decision->profile->releasesSleepSeconds);
+        self::assertSame(10, $decision->profile->releasesSleepSeconds);
         self::assertSame(20, $decision->profile->nzbSleepSeconds);
         self::assertSame(20, $decision->profile->nzbBatchSize);
-        self::assertSame(20, $decision->profile->backfillSleepSeconds);
+        self::assertSame(10, $decision->profile->backfillSleepSeconds);
+        self::assertTrue($decision->profile->backfillEnabled);
+        self::assertSame(1, $decision->profile->backfillGroups);
+        self::assertSame(1, $decision->profile->backfillThreads);
+        self::assertSame(10_000, $decision->profile->backfillQuantity);
         self::assertContains('adaptive_nzb_drain', $decision->reasons);
         self::assertContains('adaptive_backfill_ready', $decision->reasons);
     }
@@ -112,9 +116,36 @@ final class AdaptiveWorkerControlPlannerTest extends TestCase
             backfillAttributionPending: true,
         );
 
-        self::assertSame(20, $decision->profile->backfillSleepSeconds);
+        self::assertSame(10, $decision->profile->backfillSleepSeconds);
+        self::assertSame(20, $decision->profile->binariesSleepSeconds);
+        self::assertSame(60, $decision->profile->nzbSleepSeconds);
+        self::assertSame(5, $decision->profile->nzbBatchSize);
+        self::assertTrue($decision->profile->backfillEnabled);
+        self::assertSame(1, $decision->profile->backfillGroups);
+        self::assertSame(1, $decision->profile->backfillThreads);
+        self::assertSame(10_000, $decision->profile->backfillQuantity);
         self::assertContains('adaptive_backfill_attribution', $decision->reasons);
         self::assertNotContains('adaptive_backfill_idle', $decision->reasons);
+    }
+
+    public function test_it_does_not_accelerate_idle_release_or_backfill_polling(): void
+    {
+        $decision = (new AdaptiveWorkerControlPlanner)->plan(
+            $this->decision(ControlProfile::Fill, false),
+            new PipelineSnapshot(
+                partsBacklog: 80_000_000,
+                binariesBacklog: 50_000,
+                collectionsBacklog: 1_000,
+                releasesBacklog: 0,
+                nzbsBacklog: 0,
+                collectionsTotalBacklog: 10_000,
+            ),
+        );
+
+        self::assertSame(60, $decision->profile->releasesSleepSeconds);
+        self::assertSame(60, $decision->profile->backfillSleepSeconds);
+        self::assertContains('adaptive_releases_idle', $decision->reasons);
+        self::assertContains('adaptive_backfill_idle', $decision->reasons);
     }
 
     public function test_projected_collection_growth_throttles_input_before_the_hard_limit(): void
@@ -174,7 +205,6 @@ final class AdaptiveWorkerControlPlannerTest extends TestCase
         }
 
         self::assertSame([20, 40, 40, 40, 40, 60, 160], $timers);
-        self::assertSame($timers, array_values($timers));
         for ($index = 1; $index < count($timers); $index++) {
             self::assertGreaterThanOrEqual($timers[$index - 1], $timers[$index]);
         }
