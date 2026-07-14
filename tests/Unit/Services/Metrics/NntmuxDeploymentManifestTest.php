@@ -136,7 +136,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                     ], true)
                 ? ($name === 'nntmux-worker-binaries'
                     ? ':microservices-pods-20260713-provider-range-v93'
-                    : ':microservices-pods-20260714-split-par2-v142@sha256:376b7bd84f4909a409a5ba48068d40e2be8bc3f4536f98da965e92cd8cb72b1a')
+                    : ':microservices-pods-20260714-group-xref-v149@sha256:c3ac01b8d25170e76d73c26176f5e4b75678d709eee989014bf9f0684e41bbee')
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
@@ -386,7 +386,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $releases = $deployments['nntmux-worker-releases'] ?? null;
         self::assertIsArray($releases);
         self::assertSame(
-            'microservices-pods-20260714-split-par2-v142',
+            'microservices-pods-20260714-group-xref-v149',
             $environment($releases)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
