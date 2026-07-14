@@ -20,7 +20,7 @@ class NntmuxWorkerOrchestrator extends Command
 
     public function handle(WorkerOrchestrator $orchestrator): int
     {
-        $sleep = max(30, (int) $this->option('sleep'));
+        $sleep = $this->normalizedSleepSeconds((int) $this->option('sleep'));
         $shadow = (bool) $this->option('shadow');
         $grantPermit = (bool) $this->option('grant-backfill-permit');
         if ($grantPermit && ! (bool) $this->option('once')) {
@@ -45,5 +45,10 @@ class NntmuxWorkerOrchestrator extends Command
             }
             sleep($sleep);
         } while (true);
+    }
+
+    private function normalizedSleepSeconds(int $seconds): int
+    {
+        return max(15, $seconds);
     }
 }
