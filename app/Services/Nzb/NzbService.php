@@ -129,6 +129,9 @@ class NzbService
         if ($allBinaryIds === []) {
             return false;
         }
+        $expectedParts = (int) $binariesByCollection->flatten(1)->sum(
+            static fn (Binary $binary): int => max(0, (int) $binary->totalparts)
+        );
 
         $binaryIdsWithParts = DB::table('parts')
             ->whereIn('binaries_id', $allBinaryIds)
@@ -151,7 +154,13 @@ class NzbService
 
         $path = $this->buildNzbPath($release->guid, $this->nzbSplitLevel, true).$release->guid.'.nzb.gz';
         if (File::isFile($path)) {
-            $release->update(['nzbstatus' => self::NZB_ADDED]);
+            $release->update([
+                'nzbstatus' => self::NZB_ADDED,
+                'completion' => $this->completionPercent(
+                    $this->storedPartCount($allBinaryIds),
+                    $expectedParts,
+                ),
+            ]);
             $this->cleanupWrittenReleaseCollections((int) $release->id, $collectionIds);
 
             return true;
@@ -167,6 +176,7 @@ class NzbService
         $XMLWriter->setIndentString('  ');
 
         $completedWrite = false;
+        $actualParts = 0;
         try {
             $XMLWriter->startDocument('1.0', 'UTF-8');
             $XMLWriter->startDtd(self::NZB_DTD_NAME, self::NZB_DTD_PUBLIC, self::NZB_DTD_EXTERNAL);
@@ -224,6 +234,7 @@ class NzbService
                     if ($partCount === 0) {
                         return false;
                     }
+                    $actualParts += $partCount;
 
                     $XMLWriter->endElement(); // segments
                     $XMLWriter->endElement(); // file
@@ -253,8 +264,12 @@ class NzbService
 
             return false;
         }
-        // Mark release as having NZB.
-        $release->update(['nzbstatus' => self::NZB_ADDED]);
+        // Persist artifact-derived completion before collection cleanup removes
+        // the only relational source from which it can be reconstructed.
+        $release->update([
+            'nzbstatus' => self::NZB_ADDED,
+            'completion' => $this->completionPercent($actualParts, $expectedParts),
+        ]);
 
         $this->cleanupWrittenReleaseCollections((int) $release->id, $collectionIds);
 
@@ -262,6 +277,28 @@ class NzbService
         chmod($path, 0777);
 
         return true;
+    }
+
+    /**
+     * @param  list<int|string>  $binaryIds
+     */
+    private function storedPartCount(array $binaryIds): int
+    {
+        return DB::table('parts')
+            ->whereIn('binaries_id', array_map('intval', $binaryIds))
+            ->select(['binaries_id', 'messageid', 'size', 'partnumber'])
+            ->distinct()
+            ->cursor()
+            ->count();
+    }
+
+    private function completionPercent(int $actualParts, int $expectedParts): float
+    {
+        if ($actualParts <= 0 || $expectedParts <= 0) {
+            return 0.0;
+        }
+
+        return min(100.0, ($actualParts / $expectedParts) * 100.0);
     }
 
     /**

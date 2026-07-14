@@ -661,6 +661,7 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertSame(0, DB::table('binaries')->count());
         $this->assertSame(0, DB::table('collections')->count());
         $this->assertSame(1, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+        $this->assertSame(100.0, (float) DB::table('releases')->where('id', 1)->value('completion'));
     }
 
     public function test_nzb_creation_streams_large_part_sets_with_bounded_memory(): void
@@ -1167,6 +1168,7 @@ class CbpCleanupServiceTest extends TestCase
             categories_id INTEGER,
             nfostatus INTEGER,
             nzbstatus INTEGER,
+            completion REAL DEFAULT 0,
             isrenamed INTEGER,
             iscategorized INTEGER,
             predb_id INTEGER,
