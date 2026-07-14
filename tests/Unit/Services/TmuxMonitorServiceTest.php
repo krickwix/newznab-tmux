@@ -12,6 +12,53 @@ use Tests\TestCase;
 
 class TmuxMonitorServiceTest extends TestCase
 {
+    public function test_it_refreshes_only_the_current_forward_permit_control_view(): void
+    {
+        config([
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_mode', 'value' => 'active'],
+            ['name' => 'orchestrator_lease_until', 'value' => '2000'],
+            ['name' => 'orchestrator_cf_permit', 'value' => '41'],
+            ['name' => 'orchestrator_cf_group', 'value' => 'alt.test'],
+            ['name' => 'orchestrator_cf_first', 'value' => '101'],
+            ['name' => 'orchestrator_cf_last', 'value' => '10100'],
+            ['name' => 'unrelated_setting', 'value' => 'changed-in-db'],
+        ]);
+
+        $monitor = new class extends TmuxMonitorService
+        {
+            /** @param array<string, mixed> $runVar */
+            public function seedRunVar(array $runVar): void
+            {
+                $this->runVar = $runVar;
+            }
+        };
+        $monitor->seedRunVar(['settings' => [
+            'unrelated_setting' => 'cached-value',
+            'orchestrator_mode' => 'failsafe',
+            'orchestrator_lease_until' => 0,
+            'orchestrator_cf_permit' => 0,
+        ]]);
+
+        $settings = $monitor->refreshCurrentForwardControlSettings()['settings'];
+
+        self::assertSame('active', $settings['orchestrator_mode']);
+        self::assertSame(2000, $settings['orchestrator_lease_until']);
+        self::assertSame(41, $settings['orchestrator_cf_permit']);
+        self::assertSame('alt.test', $settings['orchestrator_cf_group']);
+        self::assertSame(101, $settings['orchestrator_cf_first']);
+        self::assertSame(10_100, $settings['orchestrator_cf_last']);
+        self::assertSame('cached-value', $settings['unrelated_setting']);
+    }
+
     public function test_it_refreshes_only_the_backfill_permit_control_view(): void
     {
         config([

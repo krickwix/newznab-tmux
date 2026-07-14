@@ -150,6 +150,57 @@ class DistributedJobWorkerTest extends TestCase
         self::assertSame(0, $exitCode);
     }
 
+    public function test_current_forward_refreshes_its_exact_permit_before_resolving_each_plan(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'array']);
+        Cache::store('array')->flush();
+        Artisan::shouldReceive('call')->once()->with(
+            'articles:get-range',
+            [
+                'mode' => 'binaries',
+                'group' => 'alt.test',
+                'first' => 101,
+                'last' => 10_100,
+                '--current-forward-generation' => 17,
+            ],
+            Mockery::type(BufferedOutput::class),
+        )->andReturn(0);
+
+        $staleRunVar = [
+            'constants' => ['sequential' => 0],
+            'settings' => [
+                'orchestrator_mode' => 'active',
+                'orchestrator_lease_until' => time() + 600,
+            ],
+            'counts' => ['now' => []],
+            'killswitch' => [],
+        ];
+        $freshRunVar = $staleRunVar;
+        $freshRunVar['settings'] += [
+            'orchestrator_cf_permit' => 17,
+            'orchestrator_cf_group' => 'alt.test',
+            'orchestrator_cf_first' => 101,
+            'orchestrator_cf_last' => 10_100,
+        ];
+
+        $monitor = Mockery::mock(TmuxMonitorService::class);
+        $monitor->shouldReceive('initializeMonitor')->once();
+        $monitor->shouldReceive('collectStatistics')->once()->andReturn($staleRunVar);
+        $monitor->shouldReceive('refreshCurrentForwardControlSettings')->once()->andReturn($freshRunVar);
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('startRun')->once()->with('current-forward')->andReturn(100.0);
+        $telemetry->shouldReceive('finishRun')->once()->with('current-forward', 'success', 100.0);
+
+        $exitCode = (new DistributedJobWorker(
+            new DistributedJobCatalog,
+            $monitor,
+            $telemetry,
+        ))->run('current-forward', true, null, 60, new BufferedOutput);
+
+        self::assertSame(0, $exitCode);
+    }
+
     #[DataProvider('nzbPostPassSleepProvider')]
     public function test_nzb_post_pass_sleep_only_accelerates_a_saturated_batch_with_a_fresh_active_lease(
         string $mode,

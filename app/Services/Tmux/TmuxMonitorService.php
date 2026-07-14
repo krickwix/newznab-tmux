@@ -25,6 +25,16 @@ class TmuxMonitorService
     ];
 
     /** @var array<string, string> */
+    private const array CURRENT_FORWARD_CONTROL_SETTINGS = [
+        'orchestrator_mode' => 'orchestrator_mode',
+        'orchestrator_lease_until' => 'orchestrator_lease_until',
+        'orchestrator_cf_permit' => 'orchestrator_cf_permit',
+        'orchestrator_cf_group' => 'orchestrator_cf_group',
+        'orchestrator_cf_first' => 'orchestrator_cf_first',
+        'orchestrator_cf_last' => 'orchestrator_cf_last',
+    ];
+
+    /** @var array<string, string> */
     private const array NZB_CONTROL_SETTINGS = [
         'orchestrator_mode' => 'orchestrator_mode',
         'orchestrator_lease_until' => 'orchestrator_lease_until',
@@ -175,6 +185,29 @@ class TmuxMonitorService
             ->get()
             ->mapWithKeys(static fn (Settings $setting): array => [
                 self::BACKFILL_CONTROL_SETTINGS[$setting->name] => Settings::convertValue($setting->getRawOriginal('value')),
+            ])
+            ->toArray();
+
+        $this->runVar['settings'] = array_replace($this->runVar['settings'] ?? [], $settings);
+
+        return $this->runVar;
+    }
+
+    /**
+     * Refresh only the controls needed to observe one exact current-forward permit.
+     *
+     * These settings are intentionally absent from the general tmux monitor view,
+     * so the isolated worker must read them directly on every bounded loop.
+     *
+     * @return array<string, mixed>
+     */
+    public function refreshCurrentForwardControlSettings(): array
+    {
+        $settings = Settings::query()
+            ->whereIn('name', array_keys(self::CURRENT_FORWARD_CONTROL_SETTINGS))
+            ->get()
+            ->mapWithKeys(static fn (Settings $setting): array => [
+                self::CURRENT_FORWARD_CONTROL_SETTINGS[$setting->name] => Settings::convertValue($setting->getRawOriginal('value')),
             ])
             ->toArray();
 

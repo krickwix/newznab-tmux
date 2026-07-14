@@ -36,6 +36,8 @@ class DistributedJobWorker
             $runVar = $this->monitorService->collectStatistics();
             if ($job === 'backfill') {
                 $runVar = $this->monitorService->refreshBackfillControlSettings();
+            } elseif ($job === 'current-forward') {
+                $runVar = $this->monitorService->refreshCurrentForwardControlSettings();
             }
             $plan = $this->catalog->resolve($job, $runVar);
             $sleep = $sleepOverride ?? (int) $plan['sleep'];
