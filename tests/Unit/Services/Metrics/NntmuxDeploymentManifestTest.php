@@ -314,9 +314,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-attribution-pending-v145', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-productive-context-v146', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:6128986d1215acbeb76dfe0ed60407eb7a2edabfdd421212b648518a5b149dee',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:63ef8f6ef9ee8e8ec0625644850b04559f34a637c73602dd30093f1b5e3d5a9d',
             $orchestratorImage,
         );
         self::assertSame(
