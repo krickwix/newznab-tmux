@@ -113,7 +113,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                     ], true)
                 ? ($name === 'nntmux-worker-binaries'
                     ? ':microservices-pods-20260713-provider-range-v93'
-                    : ':microservices-pods-20260714-tv-series-pack-v139@sha256:d2baf27218c20e32397e3be3eb79b1df29c892005791a54be3387534d993b242')
+                    : ':microservices-pods-20260714-split-par2-v142@sha256:376b7bd84f4909a409a5ba48068d40e2be8bc3f4536f98da965e92cd8cb72b1a')
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
@@ -362,6 +362,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         $releases = $deployments['nntmux-worker-releases'] ?? null;
         self::assertIsArray($releases);
+        self::assertSame(
+            'microservices-pods-20260714-split-par2-v142',
+            $environment($releases)['NNTMUX_BUILD_VERSION'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.movies.dvd',
+            $environment($releases)['NNTMUX_SPLIT_COLLECTION_RECONCILE_GROUPS'] ?? null,
+        );
         self::assertSame(
             'alt.binaries.tvseries',
             $environment($releases)['NNTMUX_ORCHESTRATOR_BACKFILL_TV_COMPLETE_SERIES_GROUPS'] ?? null,
