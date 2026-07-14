@@ -325,7 +325,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
-            'alt.binaries.tvseries:948528922',
+            'alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66103468',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertSame(
@@ -416,11 +416,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         $probeGroupsValue = $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null;
         self::assertSame(
-            'alt.binaries.tvseries',
+            'alt.binaries.tvseries,alt.binaries.movies.dvd',
             $probeGroupsValue,
         );
         $probeGroups = explode(',', (string) $probeGroupsValue);
-        self::assertCount(1, $probeGroups);
+        self::assertCount(2, $probeGroups);
         self::assertLessThanOrEqual(16, count($probeGroups));
         self::assertCount(count($probeGroups), array_unique($probeGroups));
         self::assertSame(
@@ -503,7 +503,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         self::assertSame($v141Image, (string) ($deployments['nntmux-worker-nzb-backlog']['spec']['template']['spec']['containers'][0]['image'] ?? ''));
         self::assertSame(
-            'alt.binaries.tvseries:948528922',
+            'alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66103468',
             $environment($deployments['nntmux-worker-backfill'])['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);
