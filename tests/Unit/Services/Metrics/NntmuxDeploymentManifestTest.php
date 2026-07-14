@@ -217,7 +217,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                         'nntmux-worker-current-forward',
                         'nntmux-worker-releases',
                     ], true)
-                ? ':microservices-pods-20260714-current-forward-v156@sha256:53bc17e26ba3f9ac66665999fcff6de7fbebf017b9741eaf9e18c9ab8b32296d'
+                ? ':microservices-pods-20260714-row-lock-v157@sha256:4fc77278733238ae06c598489fb8743098b2f9cdc0429176db1bb1f4aa2435ab'
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
@@ -386,7 +386,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringContainsString('max without(instance, pod)', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringContainsString('[20m:1m]', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringEndsWith(
-            ':microservices-pods-20260713-backfill-source-v97',
+            ':microservices-pods-20260714-row-lock-metrics-v158@sha256:f27ee85998da04a98393c95c82d4f79fb47423e1a6a12005ca2a41670a712ff5',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
@@ -408,7 +408,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('microservices-pods-20260714-nzb-saturated-retry-v147', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         self::assertSame('168', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_HOURS'] ?? null);
         self::assertSame('true', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED'] ?? null);
-        self::assertSame('microservices-pods-20260713-backfill-source-v97', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260714-row-lock-metrics-v158', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
         ksort($expected);
@@ -424,9 +424,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-current-forward-v156', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260714-row-lock-v157', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:53bc17e26ba3f9ac66665999fcff6de7fbebf017b9741eaf9e18c9ab8b32296d',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:4fc77278733238ae06c598489fb8743098b2f9cdc0429176db1bb1f4aa2435ab',
             $orchestratorImage,
         );
         self::assertSame(
@@ -497,7 +497,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $releases = $deployments['nntmux-worker-releases'] ?? null;
         self::assertIsArray($releases);
         self::assertSame(
-            'microservices-pods-20260714-current-forward-v156',
+            'microservices-pods-20260714-row-lock-v157',
             $environment($releases)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
