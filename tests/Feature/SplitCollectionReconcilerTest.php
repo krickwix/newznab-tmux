@@ -105,6 +105,26 @@ final class SplitCollectionReconcilerTest extends TestCase
         self::assertTrue(DB::table('collections')->where('id', 1001)->exists());
     }
 
+    public function test_locked_identity_gate_rejects_cohort_field_drift(): void
+    {
+        $method = new \ReflectionMethod(SplitCollectionReconciler::class, 'sameCohortIdentity');
+        $identity = [
+            'id' => 10,
+            'groups_id' => 5,
+            'fromname' => 'poster@example.com',
+            'totalfiles' => 11,
+            'date' => '2026-07-13 02:18:15',
+            'xref' => 'alt.binaries.movies.dvd:100',
+        ];
+
+        self::assertTrue($method->invoke(new SplitCollectionReconciler, $identity, $identity));
+        foreach (['groups_id', 'fromname', 'totalfiles', 'date', 'xref'] as $field) {
+            $drifted = $identity;
+            $drifted[$field] = is_int($identity[$field]) ? $identity[$field] + 1 : $identity[$field].'-changed';
+            self::assertFalse($method->invoke(new SplitCollectionReconciler, $identity, $drifted), $field);
+        }
+    }
+
     private function seedCollection(
         int $id,
         string $subject,

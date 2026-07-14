@@ -307,6 +307,8 @@ final class SplitCollectionReconciler
             if ($anchor === null
                 || $companion === null
                 || (int) $anchor['groups_id'] !== $groupId
+                || ! $this->sameCohortIdentity($preflightAnchor, $anchor)
+                || ! $this->sameCohortIdentity($preflightCompanion, $companion)
                 || ! $this->isAnchor($anchor)
                 || ! $this->isCompanion($companion)
                 || ! $this->pairMetadataMatches($anchor, $companion)
@@ -353,6 +355,20 @@ final class SplitCollectionReconciler
         $tokens = array_values(array_unique(array_filter(preg_split('/\s+/', trim($left.' '.$right)) ?: [])));
 
         return substr(implode(' ', $tokens), 0, 2000);
+    }
+
+    /**
+     * @param  array<string, mixed>  $preflight
+     * @param  array<string, mixed>  $locked
+     */
+    private function sameCohortIdentity(array $preflight, array $locked): bool
+    {
+        return (int) $preflight['id'] === (int) $locked['id']
+            && (int) $preflight['groups_id'] === (int) $locked['groups_id']
+            && hash_equals((string) $preflight['fromname'], (string) $locked['fromname'])
+            && (int) $preflight['totalfiles'] === (int) $locked['totalfiles']
+            && hash_equals((string) $preflight['date'], (string) $locked['date'])
+            && hash_equals((string) $preflight['xref'], (string) $locked['xref']);
     }
 
     private function xrefArticleMin(string $xref): int
