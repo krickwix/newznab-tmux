@@ -327,11 +327,16 @@ class PipelineSnapshotRepository
         } elseif ($contextRepeat !== null) {
             $contextRepeat['expected_cursor_postdate'] = $expectedCursorPostdate;
         }
-        $candidates = array_values(array_filter(
-            $candidates,
-            static fn (array $candidate): bool => ! in_array($candidate['name'], $pendingGroups, true)
-                || $candidate['name'] === $continuationGroup,
-        ));
+        if ($pendingGroups !== []) {
+            if ($continuationGroup === '') {
+                return null;
+            }
+
+            $candidates = array_values(array_filter(
+                $candidates,
+                static fn (array $candidate): bool => $candidate['name'] === $continuationGroup,
+            ));
+        }
 
         return $this->targets->select(
             $candidates,
