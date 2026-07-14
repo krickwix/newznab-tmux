@@ -329,7 +329,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
-            'alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66053468',
+            'alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66043468',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertSame(
@@ -518,7 +518,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             (string) ($deployments['nntmux-worker-nzb-backlog']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66053468',
+            'alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66043468',
             $environment($deployments['nntmux-worker-backfill'])['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);
