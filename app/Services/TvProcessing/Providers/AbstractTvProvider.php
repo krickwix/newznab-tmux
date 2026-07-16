@@ -11,6 +11,7 @@ use App\Models\TvEpisode;
 use App\Models\TvInfo;
 use App\Models\Video;
 use App\Services\Releases\ReleaseBrowseService;
+use App\Support\ReleaseNames\CompactTvEpisode;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\QueryException;
@@ -679,6 +680,11 @@ abstract class AbstractTvProvider extends BaseVideoProvider
         elseif (preg_match('/^(.*?)[^a-z0-9](\d{1,2})x(\d{1,3})[^a-z0-9]?/i', $relname, $hits)) {
             $episodeArr['season'] = (int) $hits[2];
             $episodeArr['episode'] = (int) $hits[3];
+        }
+        // Compact scene notation: 0105-720-WEB (season 1, episode 5).
+        elseif (($compactEpisode = CompactTvEpisode::match($relname)) !== null) {
+            $episodeArr['season'] = $compactEpisode['season'];
+            $episodeArr['episode'] = $compactEpisode['episode'];
         }
         // 2009.01.01 and 2009-01-01
         elseif (preg_match('/^(.*?)[^a-z0-9](?P<airdate>(19|20)(\d{2})[.\/-](\d{2})[.\/-](\d{2}))[^a-z0-9]?/i', $relname, $hits)) {

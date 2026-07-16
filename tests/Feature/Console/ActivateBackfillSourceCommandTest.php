@@ -130,6 +130,33 @@ final class ActivateBackfillSourceCommandTest extends TestCase
         self::assertSame(0, DB::table('short_groups')->count());
     }
 
+    public function test_apply_reenables_a_disabled_initialized_source_without_resetting_its_cursor(): void
+    {
+        DB::table('usenet_groups')->where('name', 'alt.binaries.movie')->update([
+            'backfill_target' => 365,
+            'first_record' => 99_950_000,
+            'first_record_postdate' => '2026-07-12 05:22:57',
+            'last_record' => 100_000_000,
+            'last_record_postdate' => '2026-07-13 05:22:57',
+        ]);
+        $this->app->instance(NNTPService::class, new BackfillSourceNntpFake);
+
+        $this->artisan('orchestrator:activate-backfill-source alt.binaries.movie --apply')
+            ->expectsOutputToContain('Activated alt.binaries.movie with active=0 and backfill=1')
+            ->assertSuccessful();
+
+        $this->assertDatabaseHas('usenet_groups', [
+            'name' => 'alt.binaries.movie',
+            'active' => 0,
+            'backfill' => 1,
+            'backfill_target' => 365,
+            'first_record' => 99_950_000,
+            'first_record_postdate' => '2026-07-12 05:22:57',
+            'last_record' => 100_000_000,
+            'last_record_postdate' => '2026-07-13 05:22:57',
+        ]);
+    }
+
     public function test_invalid_header_dates_fail_without_mutation(): void
     {
         $nntp = new BackfillSourceNntpFake;
@@ -207,7 +234,6 @@ final class ActivateBackfillSourceCommandTest extends TestCase
             'first_record' => 50_000_000,
             'first_record_postdate' => '2026-07-01 00:00:00',
             'last_record' => 60_000_000,
-            'last_record_postdate' => '2026-07-02 00:00:00',
         ]);
         $this->app->instance(NNTPService::class, new BackfillSourceNntpFake);
 
@@ -220,6 +246,28 @@ final class ActivateBackfillSourceCommandTest extends TestCase
             'backfill' => 0,
             'first_record' => 50_000_000,
             'last_record' => 60_000_000,
+        ]);
+    }
+
+    public function test_apply_refuses_an_initialized_cursor_outside_the_verified_provider_range(): void
+    {
+        DB::table('usenet_groups')->where('name', 'alt.binaries.movie')->update([
+            'first_record' => 100_000_001,
+            'first_record_postdate' => '2026-07-13 05:22:57',
+            'last_record' => 100_000_001,
+            'last_record_postdate' => '2026-07-13 05:22:57',
+        ]);
+        $this->app->instance(NNTPService::class, new BackfillSourceNntpFake);
+
+        $this->artisan('orchestrator:activate-backfill-source alt.binaries.movie --apply')
+            ->expectsOutputToContain('is not safe to preserve')
+            ->assertFailed();
+
+        $this->assertDatabaseHas('usenet_groups', [
+            'name' => 'alt.binaries.movie',
+            'backfill' => 0,
+            'first_record' => 100_000_001,
+            'last_record' => 100_000_001,
         ]);
     }
 }

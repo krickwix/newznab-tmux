@@ -167,22 +167,23 @@ final readonly class BackfillSourceActivator
                 && (int) $group->last_record > 0
                 && NntpArticleDate::timestamp($group->first_record_postdate) !== null
                 && NntpArticleDate::timestamp($group->last_record_postdate) !== null;
-            if ((int) $group->backfill === 1) {
-                $existingCursor = (int) $group->first_record;
-                $existingLast = (int) $group->last_record;
-                if (! $initialized
-                    || $existingLast === PHP_INT_MAX
-                    || $existingCursor < $inspection['provider_first']
-                    || $existingCursor > $existingLast + 1
-                    || $existingLast < $inspection['provider_first']
-                    || $existingLast > $inspection['provider_last']) {
-                    throw new RuntimeException("Existing backfill cursor for {$inspection['group']} is not safe to preserve.");
+            if ($initialized) {
+                $this->assertExistingCursorIsSafe($group, $inspection);
+                if ((int) $group->backfill === 1) {
+                    return false;
                 }
 
-                return false;
+                DB::table('usenet_groups')->where('id', $group->id)->update([
+                    'backfill' => 1,
+                    'last_updated' => now(),
+                ]);
+
+                return true;
             }
-            if ($initialized
-                || (int) $group->first_record !== 0
+            if ((int) $group->backfill === 1) {
+                throw new RuntimeException("Existing backfill cursor for {$inspection['group']} is not safe to preserve.");
+            }
+            if ((int) $group->first_record !== 0
                 || (int) $group->last_record !== 0
                 || $group->first_record_postdate !== null
                 || $group->last_record_postdate !== null) {
@@ -202,6 +203,22 @@ final readonly class BackfillSourceActivator
 
             return true;
         });
+    }
+
+    /**
+     * @param  array{group:string,provider_first:int,provider_last:int}  $inspection
+     */
+    private function assertExistingCursorIsSafe(object $group, array $inspection): void
+    {
+        $existingCursor = (int) $group->first_record;
+        $existingLast = (int) $group->last_record;
+        if ($existingLast === PHP_INT_MAX
+            || $existingCursor < $inspection['provider_first']
+            || $existingCursor > $existingLast + 1
+            || $existingLast < $inspection['provider_first']
+            || $existingLast > $inspection['provider_last']) {
+            throw new RuntimeException("Existing backfill cursor for {$inspection['group']} is not safe to preserve.");
+        }
     }
 
     private function assertManagedRuntime(): void

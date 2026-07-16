@@ -847,6 +847,65 @@ class HashedReleaseCategorizationTest extends TestCase
         $this->assertSame('documentary_video_web', $passable->bestResult->matchedBy);
     }
 
+    public function test_compact_scene_season_episode_in_documentary_group_is_tv_webdl(): void
+    {
+        $passable = $this->runPipeline(
+            'Afo-Theotherbennetsister-0105-720-Web',
+            'alt.binaries.documentaries',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::TV_WEBDL, $passable->bestResult->categoryId);
+        $this->assertSame('tv_compact_scene_episode_web', $passable->bestResult->matchedBy);
+    }
+
+    public function test_four_digit_year_in_documentary_group_remains_movie(): void
+    {
+        $passable = $this->runPipeline(
+            'A.Documentary.2024.720p.WEB',
+            'alt.binaries.documentaries',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::MOVIE_WEBDL, $passable->bestResult->categoryId);
+        $this->assertSame('documentary_video_web', $passable->bestResult->matchedBy);
+    }
+
+    public function test_compact_numeric_build_outside_tv_or_documentary_group_is_not_tv(): void
+    {
+        $passable = $this->runPipeline(
+            'Tool-Release-0105-720-web',
+            'alt.binaries.warez',
+        );
+
+        $this->assertNotSame(Category::TV_HD, $passable->bestResult->categoryId);
+        $this->assertNotSame(Category::TV_WEBDL, $passable->bestResult->categoryId);
+    }
+
+    public function test_compact_scene_shape_cannot_bypass_a_bounded_md5_hash(): void
+    {
+        $passable = $this->runPipeline(
+            'd41d8cd98f00b204e9800998ecf8427e-Title-0105-720-Web',
+            'alt.binaries.documentaries',
+        );
+
+        $this->assertTrue($passable->lockedToMisc);
+        $this->assertSame(Category::OTHER_HASHED, $passable->bestResult->categoryId);
+        $this->assertSame('hash_md5', $passable->bestResult->matchedBy);
+    }
+
+    public function test_compact_scene_foreign_marker_keeps_foreign_precedence(): void
+    {
+        $passable = $this->runPipeline(
+            'Afo-Theotherbennetsister-0105-720-Web-German-x264',
+            'alt.binaries.documentaries',
+        );
+
+        $this->assertFalse($passable->lockedToMisc);
+        $this->assertSame(Category::TV_FOREIGN, $passable->bestResult->categoryId);
+        $this->assertSame('foreign_language', $passable->bestResult->matchedBy);
+    }
+
     // ------------------------------------------------------------------
     // Tests: shouldStopProcessing() respects the lock
     // ------------------------------------------------------------------

@@ -265,7 +265,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                     : ($name === 'nntmux-worker-post-additional'
                         ? ':microservices-pods-20260714-nfo-gate-v143@sha256:82bc4bf05d48dc1e4af9ce19f6219e7dfeee16bde3d32b48cf20ace464a11ab3'
                 : ($name === 'nntmux-worker-hashed-fixnames'
-                    ? ':microservices-pods-20260713-fresh-hashed-retry-v114'
+                    ? ':microservices-pods-20260717-compact-tv-hashed-v164@sha256:5754963047c0be86b2c05dda05d714f50fc350e01f4cdf88946ce83be6f3f566'
                     : (in_array($name, [
                         'nntmux-worker-binaries',
                         'nntmux-worker-current-forward',
@@ -274,13 +274,15 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 : (in_array($name, [
                     'nntmux-worker-releases',
                 ], true)
-                ? ':microservices-pods-20260716-split-fanout-v162@sha256:3456407f7d916902ad54c7c5cba4b2c69f779e7562c64924e608f12bac05209a'
+                ? ':microservices-pods-20260717-compact-tv-release-recovery-v163@sha256:8a9b54bb40bef31bf52a6681625f357e8fd10c710d8d48969b9692a2fab348bb'
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
                 ], true)
                 ? ':microservices-pods-20260711-nzb-cleanup-lock-v9'
-                : ':microservices-pods-20260710-nzb-query-v8'))))));
+                : ($name === 'nntmux-worker-post-tv'
+                    ? ':microservices-pods-20260717-compact-tv-post-v165@sha256:e071558242c06fc56abc4f9acd96ce04cc9947d996491df2026c8fbe02977499'
+                    : ':microservices-pods-20260710-nzb-query-v8')))))));
             self::assertStringEndsWith(
                 $expectedImage,
                 (string) ($container['image'] ?? ''),
@@ -591,13 +593,26 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $releases = $deployments['nntmux-worker-releases'] ?? null;
         self::assertIsArray($releases);
         self::assertSame(
-            'microservices-pods-20260716-split-fanout-v162',
+            'microservices-pods-20260717-compact-tv-release-recovery-v163',
             $environment($releases)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
-            'docker.io/krickwix/nntmux:microservices-pods-20260716-split-fanout-v162@sha256:3456407f7d916902ad54c7c5cba4b2c69f779e7562c64924e608f12bac05209a',
+            'docker.io/krickwix/nntmux:microservices-pods-20260717-compact-tv-release-recovery-v163@sha256:8a9b54bb40bef31bf52a6681625f357e8fd10c710d8d48969b9692a2fab348bb',
             $releases['spec']['template']['spec']['containers'][0]['image'] ?? null,
         );
+        foreach (['nntmux-worker-releases', 'nntmux-worker-hashed-fixnames'] as $imageOwnedMiscWorker) {
+            $worker = $deployments[$imageOwnedMiscWorker] ?? null;
+            self::assertIsArray($worker);
+            $mountPaths = array_column(
+                $worker['spec']['template']['spec']['containers'][0]['volumeMounts'] ?? [],
+                'mountPath',
+            );
+            self::assertNotContains(
+                '/app/app/Services/Categorization/Categorizers/MiscCategorizer.php',
+                $mountPaths,
+                sprintf('%s must use the tested image-owned compact-TV misc categorizer.', $imageOwnedMiscWorker),
+            );
+        }
         self::assertSame(
             'alt.binaries.documentaries,alt.binaries.dvd.movies,alt.binaries.movies.dvd,alt.binaries.hdtv.tv-episodes',
             $environment($releases)['NNTMUX_SPLIT_COLLECTION_RECONCILE_GROUPS'] ?? null,
@@ -701,7 +716,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_HEADROOM_FRACTION'] ?? null,
         );
         self::assertSame(
-            '10000',
+            '20000',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_MAX_QUANTITY'] ?? null,
         );
         self::assertSame(
