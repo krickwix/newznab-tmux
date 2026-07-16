@@ -545,7 +545,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($currentForward);
         self::assertSame(1, $currentForward['spec']['replicas'] ?? null);
         self::assertSame(
-            ['php', 'artisan', 'nntmux:worker', 'current-forward'],
+            ['php', 'artisan', 'nntmux:worker', 'current-forward', '--sleep=5'],
             $currentForward['spec']['template']['spec']['containers'][0]['args'] ?? null,
         );
         self::assertSame(
