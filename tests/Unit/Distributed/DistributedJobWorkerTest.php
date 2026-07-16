@@ -145,7 +145,7 @@ class DistributedJobWorkerTest extends TestCase
         $monitor = Mockery::mock(TmuxMonitorService::class);
         $monitor->shouldReceive('initializeMonitor')->once();
         $monitor->shouldReceive('collectStatistics')->once()->andReturn($staleRunVar);
-        $monitor->shouldReceive('refreshBackfillControlSettings')->once()->andReturn($freshRunVar);
+        $monitor->shouldReceive('refreshBackfillControlSettings')->twice()->andReturn($freshRunVar);
 
         $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
         $telemetry->shouldReceive('startRun')->once()->with('backfill')->andReturn(100.0);
@@ -153,6 +153,113 @@ class DistributedJobWorkerTest extends TestCase
         $gate = Mockery::mock(BackfillPermitGate::class);
         $gate->shouldReceive('claimGeneration')->once()->andReturn(17);
         $gate->shouldReceive('complete')->once()->with(17)->andReturnTrue();
+
+        $exitCode = (new DistributedJobWorker(
+            new DistributedJobCatalog,
+            $monitor,
+            $telemetry,
+            $gate,
+        ))->run('backfill', true, null, 60, new BufferedOutput);
+
+        self::assertSame(0, $exitCode);
+    }
+
+    public function test_backfill_without_a_permit_uses_only_the_narrow_control_preflight(): void
+    {
+        $runVar = $this->managedBackfillRunVar(permit: 0);
+        $monitor = Mockery::mock(TmuxMonitorService::class);
+        $monitor->shouldReceive('initializeMonitor')->once();
+        $monitor->shouldReceive('refreshBackfillControlSettings')->once()->andReturn($runVar);
+        $monitor->shouldNotReceive('collectStatistics');
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('recordRunOutcome')->once()->with('backfill', 'disabled');
+        $gate = Mockery::mock(BackfillPermitGate::class);
+        $gate->shouldNotReceive('claimGeneration');
+        Artisan::shouldReceive('call')->never();
+
+        $exitCode = (new DistributedJobWorker(
+            new DistributedJobCatalog,
+            $monitor,
+            $telemetry,
+            $gate,
+        ))->run('backfill', true, null, 60, new BufferedOutput);
+
+        self::assertSame(0, $exitCode);
+    }
+
+    public function test_unmanaged_disabled_backfill_still_refreshes_full_statistics(): void
+    {
+        $runVar = $this->unmanagedBackfillRunVar(enabled: false);
+        $monitor = Mockery::mock(TmuxMonitorService::class);
+        $monitor->shouldReceive('initializeMonitor')->once();
+        $monitor->shouldReceive('refreshBackfillControlSettings')->twice()->andReturn($runVar);
+        $monitor->shouldReceive('collectStatistics')->once()->andReturn($runVar);
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('recordRunOutcome')->once()->with('backfill', 'disabled');
+        $gate = Mockery::mock(BackfillPermitGate::class);
+        $gate->shouldNotReceive('claimGeneration');
+        Artisan::shouldReceive('call')->never();
+
+        $exitCode = (new DistributedJobWorker(
+            new DistributedJobCatalog,
+            $monitor,
+            $telemetry,
+            $gate,
+        ))->run('backfill', true, null, 60, new BufferedOutput);
+
+        self::assertSame(0, $exitCode);
+    }
+
+    public function test_backfill_revalidates_a_preflight_permit_after_collecting_statistics(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'array']);
+        Cache::store('array')->flush();
+        $runVar = $this->managedBackfillRunVar(permit: 17);
+        $monitor = Mockery::mock(TmuxMonitorService::class);
+        $monitor->shouldReceive('initializeMonitor')->once();
+        $monitor->shouldReceive('refreshBackfillControlSettings')->once()->andReturn($runVar)->ordered();
+        $monitor->shouldReceive('collectStatistics')->once()->andReturn($runVar)->ordered();
+        $monitor->shouldReceive('refreshBackfillControlSettings')->once()->andReturn($runVar)->ordered();
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('startRun')->once()->with('backfill')->andReturn(100.0);
+        $telemetry->shouldReceive('finishRun')->once()->with('backfill', 'success', 100.0);
+        $gate = Mockery::mock(BackfillPermitGate::class);
+        $gate->shouldReceive('claimGeneration')->once()->andReturn(17);
+        $gate->shouldReceive('complete')->once()->with(17)->andReturnTrue();
+        Artisan::shouldReceive('call')->once()->with(
+            'multiprocessing:safe',
+            ['type' => 'backfill'],
+            Mockery::type(BufferedOutput::class),
+        )->andReturn(0);
+
+        $exitCode = (new DistributedJobWorker(
+            new DistributedJobCatalog,
+            $monitor,
+            $telemetry,
+            $gate,
+        ))->run('backfill', true, null, 60, new BufferedOutput);
+
+        self::assertSame(0, $exitCode);
+    }
+
+    public function test_backfill_does_not_run_when_a_preflight_permit_is_revoked_during_revalidation(): void
+    {
+        $permitted = $this->managedBackfillRunVar(permit: 17);
+        $revoked = $this->managedBackfillRunVar(permit: 0);
+        $monitor = Mockery::mock(TmuxMonitorService::class);
+        $monitor->shouldReceive('initializeMonitor')->once();
+        $monitor->shouldReceive('refreshBackfillControlSettings')->once()->andReturn($permitted)->ordered();
+        $monitor->shouldReceive('collectStatistics')->once()->andReturn($permitted)->ordered();
+        $monitor->shouldReceive('refreshBackfillControlSettings')->once()->andReturn($revoked)->ordered();
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('recordRunOutcome')->once()->with('backfill', 'disabled');
+        $gate = Mockery::mock(BackfillPermitGate::class);
+        $gate->shouldNotReceive('claimGeneration');
+        Artisan::shouldReceive('call')->never();
 
         $exitCode = (new DistributedJobWorker(
             new DistributedJobCatalog,
@@ -308,5 +415,38 @@ class DistributedJobWorkerTest extends TestCase
         self::assertNull($result['nzb_batch_before']);
         self::assertNull($result['nzb_batch_after']);
         $heldLock->release();
+    }
+
+    /** @return array<string, mixed> */
+    private function managedBackfillRunVar(int $permit): array
+    {
+        return [
+            'constants' => ['sequential' => 0],
+            'settings' => [
+                'backfill' => 1,
+                'back_timer' => 600,
+                'orchestrator_mode' => 'active',
+                'orchestrator_lease_until' => time() + 600,
+                'orchestrator_back_timer' => 10,
+                'orchestrator_bf_paused' => $permit > 0 ? 0 : 1,
+                'orchestrator_bf_permit' => $permit,
+            ],
+            'counts' => ['now' => ['backfill_groups_days' => 1, 'collections_table' => 0]],
+            'killswitch' => [],
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function unmanagedBackfillRunVar(bool $enabled): array
+    {
+        return [
+            'constants' => ['sequential' => 0],
+            'settings' => [
+                'backfill' => $enabled ? 1 : 0,
+                'back_timer' => 600,
+            ],
+            'counts' => ['now' => ['backfill_groups_days' => 1, 'collections_table' => 0]],
+            'killswitch' => [],
+        ];
     }
 }

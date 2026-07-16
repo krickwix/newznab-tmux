@@ -33,13 +33,26 @@ class DistributedJobWorker
         $this->monitorService->initializeMonitor();
 
         do {
-            $runVar = $this->monitorService->collectStatistics();
             if ($job === 'backfill') {
                 $runVar = $this->monitorService->refreshBackfillControlSettings();
-            } elseif ($job === 'current-forward') {
-                $runVar = $this->monitorService->refreshCurrentForwardControlSettings();
+                $plan = $this->catalog->resolve($job, $runVar);
+
+                if ($plan['enabled'] || ! ($plan['lightweight_poll'] ?? false)) {
+                    // Keep idle permit polling cheap, but retain the full
+                    // statistics/killswitch view before any backfill work.
+                    // Re-read the narrow controls afterward so a permit
+                    // revoked during collection cannot reach the claim gate.
+                    $runVar = $this->monitorService->collectStatistics();
+                    $runVar = $this->monitorService->refreshBackfillControlSettings();
+                    $plan = $this->catalog->resolve($job, $runVar);
+                }
+            } else {
+                $runVar = $this->monitorService->collectStatistics();
+                if ($job === 'current-forward') {
+                    $runVar = $this->monitorService->refreshCurrentForwardControlSettings();
+                }
+                $plan = $this->catalog->resolve($job, $runVar);
             }
-            $plan = $this->catalog->resolve($job, $runVar);
             $sleep = $sleepOverride ?? (int) $plan['sleep'];
 
             if (! $plan['enabled']) {
@@ -90,6 +103,7 @@ class DistributedJobWorker
      *     description: string,
      *     enabled: bool,
      *     disabled_reason: string|null,
+     *     lightweight_poll: bool,
      *     commands: list<array{command: string, arguments: array<string, mixed>}>,
      *     sleep: int
      * }  $plan
@@ -380,6 +394,7 @@ class DistributedJobWorker
      *     description: string,
      *     enabled: bool,
      *     disabled_reason: string|null,
+     *     lightweight_poll: bool,
      *     commands: list<array{command: string, arguments: array<string, mixed>}>,
      *     sleep: int
      * }  $plan

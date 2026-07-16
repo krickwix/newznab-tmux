@@ -412,7 +412,8 @@ class DistributedJobCatalogTest extends TestCase
         $denied = $catalog->resolve('backfill', $this->runVar($base, ['backfill_groups_days' => 1]));
         self::assertFalse($denied['enabled']);
         self::assertStringContainsString('permit', (string) $denied['disabled_reason']);
-        self::assertSame(20, $denied['sleep']);
+        self::assertSame(10, $denied['sleep']);
+        self::assertTrue($denied['lightweight_poll']);
 
         $allowed = $catalog->resolve('backfill', $this->runVar(
             $base + ['orchestrator_bf_permit' => 9],
@@ -420,6 +421,7 @@ class DistributedJobCatalogTest extends TestCase
         ));
         self::assertTrue($allowed['enabled']);
         self::assertSame(20, $allowed['sleep']);
+        self::assertFalse($allowed['lightweight_poll']);
     }
 
     public function test_current_forward_emits_only_the_exact_generation_pinned_range(): void
@@ -486,6 +488,7 @@ class DistributedJobCatalogTest extends TestCase
         $backfill = $catalog->resolve('backfill', $this->runVar($settings, ['backfill_groups_days' => 1]));
         self::assertFalse($backfill['enabled']);
         self::assertSame(60, $backfill['sleep']);
+        self::assertTrue($backfill['lightweight_poll']);
     }
 
     public function test_shadow_mode_preserves_static_timers_but_denies_backfill(): void

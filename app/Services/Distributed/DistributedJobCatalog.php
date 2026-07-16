@@ -44,6 +44,7 @@ class DistributedJobCatalog
      *     description: string,
      *     enabled: bool,
      *     disabled_reason: string|null,
+     *     lightweight_poll: bool,
      *     commands: list<array{command: string, arguments: array<string, mixed>}>,
      *     sleep: int
      * }
@@ -205,13 +206,15 @@ class DistributedJobCatalog
 
         if ($this->isOrchestratorManaged($settings) && ! $this->hasFreshActiveBackfillPermit($settings)) {
             // A permit observation expires after 20 minutes. Polling the
-            // lightweight disabled plan within one minute guarantees a worker
-            // sleeping under a prior fail-safe profile can still claim a new
-            // one-shot permit before that evaluation window closes.
+            // narrow disabled plan within ten seconds under a fresh active
+            // lease prevents a valid short-lived supply window from expiring
+            // before the worker can claim it. Stale/failsafe control retains
+            // the conservative one-minute ceiling.
             return $this->disabled(
                 'backfill',
                 'adaptive orchestrator has not granted a fresh permit',
-                min($sleep, 60),
+                min($sleep, $this->hasFreshActiveLease($settings) ? 10 : 60),
+                lightweightPoll: true,
             );
         }
 
@@ -791,17 +794,23 @@ class DistributedJobCatalog
     /**
      * @return array<string, mixed>
      */
-    private function disabled(string $job, string $reason, int $sleep): array
+    private function disabled(string $job, string $reason, int $sleep, bool $lightweightPoll = false): array
     {
-        return $this->job($job, false, $reason, [], $sleep);
+        return $this->job($job, false, $reason, [], $sleep, $lightweightPoll);
     }
 
     /**
      * @param  list<array{command: string, arguments: array<string, mixed>}>  $commands
      * @return array<string, mixed>
      */
-    private function job(string $job, bool $enabled, ?string $disabledReason, array $commands, int $sleep): array
-    {
+    private function job(
+        string $job,
+        bool $enabled,
+        ?string $disabledReason,
+        array $commands,
+        int $sleep,
+        bool $lightweightPoll = false,
+    ): array {
         $jobs = $this->jobs();
 
         return [
@@ -809,6 +818,7 @@ class DistributedJobCatalog
             'description' => $jobs[$job],
             'enabled' => $enabled,
             'disabled_reason' => $disabledReason,
+            'lightweight_poll' => $lightweightPoll,
             'commands' => $commands,
             'sleep' => max(1, $sleep),
         ];

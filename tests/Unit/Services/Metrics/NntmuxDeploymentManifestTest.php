@@ -259,7 +259,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
             $expectedImage = $name === 'nntmux-worker-backfill'
-                ? ':microservices-pods-20260714-permit-handoff-v144@sha256:53d14c7febe7b0f50c9676a3f374a4a31ec7244e13ec9f4dc98cf3a811a2c732'
+                ? ':microservices-pods-20260717-responsive-backfill-v166@sha256:822468ce92daec60fb9e63d36be32ba58bc2c9ec3b45b32d405db516aeb23a9c'
                 : ($name === 'nntmux-worker-nzb-backlog'
                     ? ':microservices-pods-20260714-nzb-saturated-retry-v147@sha256:6ede1752f1d15e0334f6f8f91d9f3c3869034c65484d60a568bcccdf62703cc1'
                     : ($name === 'nntmux-worker-post-additional'
@@ -755,9 +755,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
             '7200',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_LATEST_SAMPLE_SECONDS'] ?? null,
         );
-        $v144Image = 'docker.io/krickwix/nntmux:microservices-pods-20260714-permit-handoff-v144@sha256:53d14c7febe7b0f50c9676a3f374a4a31ec7244e13ec9f4dc98cf3a811a2c732';
+        $v166Image = 'docker.io/krickwix/nntmux:microservices-pods-20260717-responsive-backfill-v166@sha256:822468ce92daec60fb9e63d36be32ba58bc2c9ec3b45b32d405db516aeb23a9c';
         self::assertSame(
-            $v144Image,
+            $v166Image,
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
