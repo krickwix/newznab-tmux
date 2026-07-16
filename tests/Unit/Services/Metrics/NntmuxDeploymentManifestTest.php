@@ -269,15 +269,18 @@ final class NntmuxDeploymentManifestTest extends TestCase
                     : (in_array($name, [
                         'nntmux-worker-binaries',
                         'nntmux-worker-current-forward',
-                        'nntmux-worker-releases',
                     ], true)
+                ? ':microservices-pods-20260716-auto-current-forward-v160@sha256:ed90eebf73fa4013156893c2ac287b2f79b0c7af9c5e52505f46c5be56f1b44d'
+                : (in_array($name, [
+                    'nntmux-worker-releases',
+                ], true)
                 ? ':microservices-pods-20260714-admission-settle-v159@sha256:bf5a60955fe65d7a692619ae75094d3ab33aba0e107becff69a8917796724414'
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
                 ], true)
                 ? ':microservices-pods-20260711-nzb-cleanup-lock-v9'
-                : ':microservices-pods-20260710-nzb-query-v8')))));
+                : ':microservices-pods-20260710-nzb-query-v8'))))));
             self::assertStringEndsWith(
                 $expectedImage,
                 (string) ($container['image'] ?? ''),
@@ -458,7 +461,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         self::assertSame('critical', $currentForwardAlerts['NntmuxCurrentForwardHalted']['labels']['severity'] ?? null);
         self::assertStringEndsWith(
-            ':microservices-pods-20260714-row-lock-metrics-v158@sha256:f27ee85998da04a98393c95c82d4f79fb47423e1a6a12005ca2a41670a712ff5',
+            ':microservices-pods-20260716-current-forward-metrics-v161@sha256:8fe3811eaa4c190def583b2bee390dd35c3e8480799c39fc6c8cadabd420928e',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
@@ -480,7 +483,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('microservices-pods-20260714-nzb-saturated-retry-v147', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         self::assertSame('168', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_HOURS'] ?? null);
         self::assertSame('true', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED'] ?? null);
-        self::assertSame('microservices-pods-20260714-row-lock-metrics-v158', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260716-current-forward-metrics-v161', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
         ksort($expected);
@@ -496,9 +499,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260714-admission-settle-v159', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260716-auto-current-forward-v160', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:bf5a60955fe65d7a692619ae75094d3ab33aba0e107becff69a8917796724414',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:ed90eebf73fa4013156893c2ac287b2f79b0c7af9c5e52505f46c5be56f1b44d',
             $orchestratorImage,
         );
         self::assertSame(
@@ -515,7 +518,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertSame(
-            'false',
+            'true',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_CURRENT_FORWARD'] ?? null,
         );
         $currentForwardWindow = 'alt.binaries.movies.dvd:66163468-66373467@66402101,'
