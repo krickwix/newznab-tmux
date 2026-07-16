@@ -31,6 +31,8 @@ class WorkerOrchestrator
     /** @return array<string, mixed> */
     public function runOnce(bool $shadow, bool $grantPermit = false, bool $grantCurrentForwardPermit = false): array
     {
+        $requestCurrentForward = $grantCurrentForwardPermit
+            || (! $shadow && (bool) config('nntmux.orchestrator.auto_current_forward', false));
         $lock = null;
         $acquired = false;
         $shadowQualityFailure = null;
@@ -40,7 +42,7 @@ class WorkerOrchestrator
         $delayedAttributionEarlyQualityLock = false;
         $currentForward = [
             'granted' => false,
-            'reason' => $grantCurrentForwardPermit ? 'current_forward_not_evaluated' : 'not_requested',
+            'reason' => $requestCurrentForward ? 'current_forward_not_evaluated' : 'not_requested',
             'generation' => 0,
             'group' => '',
             'first' => 0,
@@ -414,7 +416,7 @@ class WorkerOrchestrator
                         $this->store->markBackfillTargetAttempted($snapshot->backfillGroup, time());
                     }
                 }
-                if ($grantCurrentForwardPermit) {
+                if ($requestCurrentForward) {
                     if ($decision->transitioned) {
                         $currentForward['reason'] = 'controller_profile_settling';
                     } elseif ($permitObservation !== null || $this->store->pendingBackfillDelayedAttributionGroups() !== []) {

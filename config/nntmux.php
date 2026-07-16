@@ -46,6 +46,7 @@ return [
         'lock_store' => env('NNTMUX_ORCHESTRATOR_LOCK_STORE', 'redis'),
         'state_store' => env('NNTMUX_ORCHESTRATOR_STATE_STORE', 'redis'),
         'auto_backfill' => filter_var(env('NNTMUX_ORCHESTRATOR_AUTO_BACKFILL', false), FILTER_VALIDATE_BOOL),
+        'auto_current_forward' => filter_var(env('NNTMUX_ORCHESTRATOR_AUTO_CURRENT_FORWARD', false), FILTER_VALIDATE_BOOL),
         'permit_observation_seconds' => max(300, (int) env('NNTMUX_ORCHESTRATOR_PERMIT_OBSERVATION_SECONDS', 1200)),
         'permit_claim_grace_seconds' => max(120, (int) env('NNTMUX_ORCHESTRATOR_PERMIT_CLAIM_GRACE_SECONDS', 120)),
         'backfill_probe_groups' => array_values(array_filter(array_map(
@@ -57,6 +58,7 @@ return [
         ))),
         'backfill_stop_cursors' => (string) env('NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS', ''),
         'current_forward_windows' => (string) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS', ''),
+        'current_forward_claim_timeout_seconds' => min(3600, max(300, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CLAIM_TIMEOUT_SECONDS', 900))),
         'backfill_yield_ttl_seconds' => max(3600, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_YIELD_TTL_SECONDS', 86400)),
         'backfill_cohort_postdate_tolerance_seconds' => min(86400, max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_COHORT_POSTDATE_TOLERANCE_SECONDS', 3600))),
         'backfill_min_payload_bytes' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MIN_PAYLOAD_BYTES', 104_857_600)),
@@ -161,6 +163,7 @@ return [
         ],
     ],
     'distributed_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_LOCK_SECONDS', 900),
+    'distributed_current_forward_max_run_seconds' => min(600, max(60, (int) env('NNTMUX_DISTRIBUTED_CURRENT_FORWARD_MAX_RUN_SECONDS', 600))),
     'distributed_long_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_LONG_LOCK_SECONDS', 3600),
     'distributed_lock_store' => env('NNTMUX_DISTRIBUTED_LOCK_STORE', 'redis'),
     'allow_large_cbp_fk_restore' => (bool) env('NNTMUX_ALLOW_LARGE_CBP_FK_RESTORE', false),

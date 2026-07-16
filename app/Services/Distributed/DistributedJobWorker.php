@@ -172,6 +172,10 @@ class DistributedJobWorker
             $startedAt,
             $output,
         );
+        $alarmSeconds = $this->executionAlarmSeconds($plan['name']);
+        if ($alarmSeconds > 0 && function_exists('pcntl_alarm')) {
+            pcntl_alarm($alarmSeconds);
+        }
 
         try {
             $output->writeln(sprintf(
@@ -206,6 +210,9 @@ class DistributedJobWorker
                 $this->nzbBatchCounts($plan['name']),
             );
         } finally {
+            if ($alarmSeconds > 0 && function_exists('pcntl_alarm')) {
+                pcntl_alarm(0);
+            }
             $this->workerTelemetry->finishRun($plan['name'], $runOutcome, $startedAt);
             if ($runOutcome === 'success' && $backfillPermitGate !== null && $claimedBackfillGeneration !== null) {
                 try {
@@ -245,6 +252,7 @@ class DistributedJobWorker
             defined('SIGTERM') ? SIGTERM : null,
             defined('SIGINT') ? SIGINT : null,
             defined('SIGHUP') ? SIGHUP : null,
+            defined('SIGALRM') ? SIGALRM : null,
         ]));
 
         if ($signals === []) {
@@ -303,6 +311,13 @@ class DistributedJobWorker
             $job,
             $lockName,
         );
+    }
+
+    private function executionAlarmSeconds(string $job): int
+    {
+        return $job === 'current-forward'
+            ? (int) config('nntmux.distributed_current_forward_max_run_seconds', 600)
+            : 0;
     }
 
     /**

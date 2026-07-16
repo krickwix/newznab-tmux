@@ -7,9 +7,12 @@ namespace App\Services\Distributed;
 use App\Models\Settings;
 use App\Services\Orchestrator\CurrentForwardStopCursorPolicy;
 use App\Services\Orchestrator\PipelineSnapshot;
+use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Throwable;
 
-/** Atomically issues and consumes one immutable current-forward window. */
+/** Atomically issues and consumes exact windows from ranked immutable corridors. */
 final class CurrentForwardPermitGate
 {
     private const int PROVIDER_RESERVE = 20_000;
@@ -45,16 +48,11 @@ final class CurrentForwardPermitGate
 
         $policy = new CurrentForwardStopCursorPolicy;
         $groups = $policy->groups();
-        if (! $policy->isValid() || count($groups) !== 1) {
-            return $denied('invalid_window_policy');
-        }
-        $group = $groups[0];
-        $window = $policy->window($group);
-        if ($window === null) {
+        if (! $policy->isValid() || $groups === []) {
             return $denied('invalid_window_policy');
         }
 
-        return DB::transaction(function () use ($denied, $generation, $group, $window): array {
+        return DB::transaction(function () use ($denied, $generation, $groups, $policy): array {
             $this->ensureSettings();
             $settings = $this->lockedSettings();
             if ((string) $settings->get('orchestrator_profile') === 'fail_safe'
@@ -65,27 +63,110 @@ final class CurrentForwardPermitGate
             if ((string) $settings->get('orchestrator_mode') !== 'active'
                 || (int) $settings->get('orchestrator_lease_until') < time()
                 || (int) $settings->get('orchestrator_bf_permit') !== 0
-                || (int) $settings->get('orchestrator_cf_permit') !== 0
             ) {
                 return $denied('permit_conflict_or_stale_lease');
             }
+            $activePermit = (int) $settings->get('orchestrator_cf_permit');
+            if ($activePermit > 0) {
+                $issuedAt = (int) $settings->get('orchestrator_cf_issued_at');
+                $timeout = $this->claimTimeoutSeconds();
+                if ($issuedAt <= 0
+                    || time() - $issuedAt < $timeout
+                    || $this->currentForwardWorkerIsActive()
+                ) {
+                    return $denied('permit_conflict_or_stale_lease');
+                }
+                Settings::query()->where('name', 'orchestrator_cf_permit')->update(['value' => '0']);
+                Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_failed'], ['value' => (string) $activePermit]);
+                Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_failure'], ['value' => 'unclaimed_timeout']);
+                Settings::forgetCachedSettings();
+            }
+            if ((int) $settings->get('orchestrator_cf_halt') === 1) {
+                return $denied('current_forward_quarantine_full');
+            }
+            $blocks = array_values(array_filter(explode(',', (string) $settings->get('orchestrator_cf_blocks'))));
             $claimed = (int) $settings->get('orchestrator_cf_claimed');
             if ($claimed > 0
                 && $claimed !== (int) $settings->get('orchestrator_cf_completed')
                 && $claimed !== (int) $settings->get('orchestrator_cf_failed')
             ) {
-                return $denied('current_forward_in_progress');
+                $issuedAt = (int) $settings->get('orchestrator_cf_issued_at');
+                $timeout = $this->claimTimeoutSeconds();
+                if ($issuedAt <= 0
+                    || time() - $issuedAt < $timeout
+                    || $this->currentForwardWorkerIsActive()
+                ) {
+                    return $denied('current_forward_in_progress');
+                }
+                [$blocks, $overflow] = $this->appendBlock(
+                    $blocks,
+                    $this->windowIdentity(
+                        (string) $settings->get('orchestrator_cf_group'),
+                        (int) $settings->get('orchestrator_cf_first'),
+                        (int) $settings->get('orchestrator_cf_last'),
+                    ),
+                );
+                Settings::query()->where('name', 'orchestrator_cf_permit')->update(['value' => '0']);
+                Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_failed'], ['value' => (string) $claimed]);
+                Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_failure'], ['value' => 'claim_timeout']);
+                Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_blocks'], ['value' => implode(',', $blocks)]);
+                if ($overflow) {
+                    Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_halt'], ['value' => '1']);
+                    Settings::forgetCachedSettings();
+
+                    return $denied('current_forward_quarantine_full');
+                }
+                Settings::forgetCachedSettings();
             }
-            $groupRow = DB::table('usenet_groups')->where('name', $group)->lockForUpdate()->first();
-            if ($groupRow === null || (int) $groupRow->active !== 0 || (int) $groupRow->backfill !== 1) {
-                return $denied('group_not_inactive_backfill');
+            $group = '';
+            $window = null;
+            $lastReason = 'current_forward_corridors_exhausted';
+            foreach ($groups as $candidateGroup) {
+                $groupRow = DB::table('usenet_groups')->where('name', $candidateGroup)->lockForUpdate()->first();
+                if ($groupRow === null || (int) $groupRow->active !== 0 || (int) $groupRow->backfill !== 1) {
+                    $lastReason = 'group_not_inactive_backfill';
+
+                    continue;
+                }
+                $corridor = $policy->window($candidateGroup);
+                $cursor = (int) $groupRow->last_record;
+                if ($corridor === null) {
+                    return $denied('invalid_window_policy');
+                }
+                if ($cursor === $corridor['last']) {
+                    $lastReason = 'current_forward_corridors_exhausted';
+
+                    continue;
+                }
+                if ($cursor < $corridor['first'] - 1
+                    || $cursor > $corridor['last']
+                    || ($cursor - ($corridor['first'] - 1)) % 10_000 !== 0
+                ) {
+                    return $denied('cursor_drift');
+                }
+                $candidateWindow = $policy->nextWindow($candidateGroup, $cursor);
+                if ($candidateWindow === null) {
+                    return $denied('cursor_drift');
+                }
+                $block = $this->windowIdentity($candidateGroup, $candidateWindow['first'], $candidateWindow['last']);
+                if (in_array($block, $blocks, true)) {
+                    $lastReason = 'current_forward_window_quarantined';
+
+                    continue;
+                }
+                $provider = DB::table('short_groups')->where('name', $candidateGroup)->lockForUpdate()->first();
+                if (! $this->providerCoversWindow($provider, $candidateWindow['first'], $candidateWindow['last'])) {
+                    $lastReason = 'provider_range_drift';
+
+                    continue;
+                }
+                $group = $candidateGroup;
+                $window = $candidateWindow;
+
+                break;
             }
-            if ((int) $groupRow->last_record !== $window['first'] - 1) {
-                return $denied('cursor_drift');
-            }
-            $provider = DB::table('short_groups')->where('name', $group)->lockForUpdate()->first();
-            if (! $this->providerCoversWindow($provider, $window['first'], $window['last'])) {
-                return $denied('provider_range_drift');
+            if ($group === '' || $window === null) {
+                return $denied($lastReason);
             }
 
             foreach ([
@@ -187,12 +268,26 @@ final class CurrentForwardPermitGate
         return DB::transaction(function () use ($generation, $reason): bool {
             $this->ensureSettings();
             $settings = $this->lockedSettings();
-            if ($generation <= 0 || (int) $settings->get('orchestrator_cf_gen') !== $generation) {
+            if ($generation <= 0
+                || (int) $settings->get('orchestrator_cf_gen') !== $generation
+                || (int) $settings->get('orchestrator_cf_claimed') !== $generation
+            ) {
                 return false;
             }
+            $block = $this->windowIdentity(
+                (string) $settings->get('orchestrator_cf_group'),
+                (int) $settings->get('orchestrator_cf_first'),
+                (int) $settings->get('orchestrator_cf_last'),
+            );
+            $blocks = array_values(array_filter(explode(',', (string) $settings->get('orchestrator_cf_blocks'))));
+            [$blocks, $overflow] = $this->appendBlock($blocks, $block);
             Settings::query()->where('name', 'orchestrator_cf_permit')->update(['value' => '0']);
             Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_failed'], ['value' => (string) $generation]);
             Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_failure'], ['value' => substr($reason, 0, 120)]);
+            Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_blocks'], ['value' => implode(',', $blocks)]);
+            if ($overflow) {
+                Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_halt'], ['value' => '1']);
+            }
             Settings::forgetCachedSettings();
 
             return true;
@@ -233,6 +328,9 @@ final class CurrentForwardPermitGate
             'orchestrator_cf_claimed' => 0,
             'orchestrator_cf_completed' => 0,
             'orchestrator_cf_failed' => 0,
+            'orchestrator_cf_issued_at' => 0,
+            'orchestrator_cf_blocks' => '',
+            'orchestrator_cf_halt' => 0,
             'orchestrator_cf_group' => '',
             'orchestrator_cf_first' => 0,
             'orchestrator_cf_last' => 0,
@@ -251,9 +349,60 @@ final class CurrentForwardPermitGate
                 'orchestrator_cf_gen', 'orchestrator_cf_permit', 'orchestrator_cf_claimed',
                 'orchestrator_cf_completed', 'orchestrator_cf_failed', 'orchestrator_cf_group',
                 'orchestrator_cf_first', 'orchestrator_cf_last', 'orchestrator_cf_stop',
+                'orchestrator_cf_issued_at', 'orchestrator_cf_blocks',
+                'orchestrator_cf_halt',
             ])
             ->lockForUpdate()
             ->get()
             ->mapWithKeys(fn (Settings $setting): array => [$setting->name => $setting->getRawOriginal('value')]);
+    }
+
+    private function windowIdentity(string $group, int $first, int $last): string
+    {
+        return $group.':'.$first.'-'.$last;
+    }
+
+    /**
+     * @param  list<string>  $blocks
+     * @return array{0:list<string>,1:bool}
+     */
+    private function appendBlock(array $blocks, string $block): array
+    {
+        if ($block === ':0-0' || in_array($block, $blocks, true)) {
+            return [$blocks, false];
+        }
+        $candidate = [...$blocks, $block];
+        if (strlen(implode(',', $candidate)) > 900) {
+            return [$blocks, true];
+        }
+
+        return [$candidate, false];
+    }
+
+    private function currentForwardWorkerIsActive(): bool
+    {
+        try {
+            $store = Cache::store((string) config('nntmux.distributed_lock_store', 'redis'))->getStore();
+            if (! $store instanceof LockProvider) {
+                return true;
+            }
+            $lock = $store->lock('nntmux:distributed-worker:current-forward', 5);
+            if (! $lock->get()) {
+                return true;
+            }
+            $lock->release();
+
+            return false;
+        } catch (Throwable) {
+            return true;
+        }
+    }
+
+    private function claimTimeoutSeconds(): int
+    {
+        return max(
+            (int) config('nntmux.orchestrator.current_forward_claim_timeout_seconds', 900),
+            (int) config('nntmux.distributed_current_forward_max_run_seconds', 600) + 60,
+        );
     }
 }

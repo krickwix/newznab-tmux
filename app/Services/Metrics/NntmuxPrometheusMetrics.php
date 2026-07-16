@@ -576,10 +576,24 @@ class NntmuxPrometheusMetrics
             'orchestrator_bf_paused',
             'orchestrator_bf_permit',
             'orchestrator_bf_qty',
+            'orchestrator_cf_permit',
+            'orchestrator_cf_claimed',
+            'orchestrator_cf_completed',
+            'orchestrator_cf_failed',
+            'orchestrator_cf_issued_at',
+            'orchestrator_cf_blocks',
+            'orchestrator_cf_halt',
+            'orchestrator_cf_group',
         ])->pluck('value', 'name');
         $mode = (string) ($settings['orchestrator_mode'] ?? 'legacy');
         $profile = (string) ($settings['orchestrator_profile'] ?? 'unknown');
         $leaseUntil = (int) ($settings['orchestrator_lease_until'] ?? 0);
+        $currentForwardClaimed = (int) ($settings['orchestrator_cf_claimed'] ?? 0);
+        $currentForwardClaimInProgress = $currentForwardClaimed > 0
+            && $currentForwardClaimed !== (int) ($settings['orchestrator_cf_completed'] ?? 0)
+            && $currentForwardClaimed !== (int) ($settings['orchestrator_cf_failed'] ?? 0);
+        $currentForwardGroup = trim((string) ($settings['orchestrator_cf_group'] ?? ''));
+        $currentForwardBlocks = array_values(array_filter(explode(',', (string) ($settings['orchestrator_cf_blocks'] ?? ''))));
 
         try {
             $decision = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
@@ -622,7 +636,30 @@ class NntmuxPrometheusMetrics
             '# HELP nntmux_orchestrator_nzb_batch_size Desired bounded NZB batch size.',
             '# TYPE nntmux_orchestrator_nzb_batch_size gauge',
             $this->metric('nntmux_orchestrator_nzb_batch_size', (int) ($settings['orchestrator_nzb_limit'] ?? 0)),
+            '# HELP nntmux_orchestrator_current_forward_permit Current exact current-forward permit generation; zero means none.',
+            '# TYPE nntmux_orchestrator_current_forward_permit gauge',
+            $this->metric('nntmux_orchestrator_current_forward_permit', (int) ($settings['orchestrator_cf_permit'] ?? 0)),
+            '# HELP nntmux_orchestrator_current_forward_claim_in_progress Whether an exact current-forward generation is claimed and unresolved.',
+            '# TYPE nntmux_orchestrator_current_forward_claim_in_progress gauge',
+            $this->metric('nntmux_orchestrator_current_forward_claim_in_progress', $currentForwardClaimInProgress ? 1 : 0),
+            '# HELP nntmux_orchestrator_current_forward_claim_age_seconds Age of the unresolved exact current-forward generation.',
+            '# TYPE nntmux_orchestrator_current_forward_claim_age_seconds gauge',
+            $this->metric(
+                'nntmux_orchestrator_current_forward_claim_age_seconds',
+                $currentForwardClaimInProgress ? max(0, time() - (int) ($settings['orchestrator_cf_issued_at'] ?? 0)) : 0,
+            ),
+            '# HELP nntmux_orchestrator_current_forward_quarantined_windows Exact current-forward windows quarantined after a claimed failure.',
+            '# TYPE nntmux_orchestrator_current_forward_quarantined_windows gauge',
+            $this->metric('nntmux_orchestrator_current_forward_quarantined_windows', count($currentForwardBlocks)),
+            '# HELP nntmux_orchestrator_current_forward_halted Whether quarantine capacity forced global current-forward fail-safe.',
+            '# TYPE nntmux_orchestrator_current_forward_halted gauge',
+            $this->metric('nntmux_orchestrator_current_forward_halted', (int) ($settings['orchestrator_cf_halt'] ?? 0)),
         ];
+        if ($currentForwardGroup !== '') {
+            $lines[] = '# HELP nntmux_orchestrator_current_forward_target_info Current exact current-forward target group.';
+            $lines[] = '# TYPE nntmux_orchestrator_current_forward_target_info gauge';
+            $lines[] = $this->metric('nntmux_orchestrator_current_forward_target_info', 1, ['group' => $currentForwardGroup]);
+        }
 
         if (! is_array($decision)) {
             return $lines;

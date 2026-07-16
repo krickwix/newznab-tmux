@@ -136,6 +136,42 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
     }
 
+    public function test_autonomous_current_forward_overlay_packages_the_ranked_corridor_contract(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/current-forward-v160.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260714-admission-settle-v159@sha256:bf5a60955fe65d7a692619ae75094d3ab33aba0e107becff69a8917796724414',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Orchestrator/CurrentForwardStopCursorPolicy.php',
+            'app/Services/Distributed/CurrentForwardPermitGate.php',
+            'app/Services/Distributed/DistributedJobWorker.php',
+            'app/Services/Orchestrator/WorkerOrchestrator.php',
+            'app/Console/Commands/GetArticleRange.php',
+            'config/nntmux.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    public function test_current_forward_metrics_overlay_preserves_the_metrics_runtime_base(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/current-forward-metrics-v161.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260714-row-lock-metrics-v158@sha256:f27ee85998da04a98393c95c82d4f79fb47423e1a6a12005ca2a41670a712ff5',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/Metrics/NntmuxPrometheusMetrics.php /app/app/Services/Metrics/NntmuxPrometheusMetrics.php',
+            $dockerfile,
+        );
+    }
+
     public function test_admission_settlement_overlay_packages_staleness_and_profile_guards(): void
     {
         $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/row-lock-v159.Dockerfile');
@@ -392,17 +428,35 @@ final class NntmuxDeploymentManifestTest extends TestCase
         }
         self::assertIsArray($prometheusRule);
         $permitAlert = null;
+        $currentForwardAlerts = [];
         foreach ($prometheusRule['spec']['groups'] ?? [] as $group) {
             foreach ($group['rules'] ?? [] as $rule) {
                 if (($rule['alert'] ?? null) === 'NntmuxBackfillPermitWithoutProgress') {
                     $permitAlert = $rule;
-                    break 2;
+                }
+                if (in_array(($rule['alert'] ?? null), [
+                    'NntmuxCurrentForwardPermitStalled',
+                    'NntmuxCurrentForwardClaimStalled',
+                    'NntmuxCurrentForwardQuarantinedWindow',
+                    'NntmuxCurrentForwardHalted',
+                ], true)) {
+                    $currentForwardAlerts[(string) $rule['alert']] = $rule;
                 }
             }
         }
         self::assertIsArray($permitAlert);
         self::assertStringContainsString('max without(instance, pod)', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringContainsString('[20m:1m]', (string) ($permitAlert['expr'] ?? ''));
+        self::assertCount(4, $currentForwardAlerts);
+        self::assertStringContainsString(
+            'nntmux_orchestrator_current_forward_claim_age_seconds',
+            (string) ($currentForwardAlerts['NntmuxCurrentForwardClaimStalled']['expr'] ?? ''),
+        );
+        self::assertStringContainsString(
+            'nntmux_orchestrator_current_forward_quarantined_windows',
+            (string) ($currentForwardAlerts['NntmuxCurrentForwardQuarantinedWindow']['expr'] ?? ''),
+        );
+        self::assertSame('critical', $currentForwardAlerts['NntmuxCurrentForwardHalted']['labels']['severity'] ?? null);
         self::assertStringEndsWith(
             ':microservices-pods-20260714-row-lock-metrics-v158@sha256:f27ee85998da04a98393c95c82d4f79fb47423e1a6a12005ca2a41670a712ff5',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
@@ -460,7 +514,13 @@ final class NntmuxDeploymentManifestTest extends TestCase
             'alt.binaries.dvd.movies:147218921,alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468,alt.binaries.hdtv.tv-episodes:99610786',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
-        $currentForwardWindow = 'alt.binaries.hdtv.tv-episodes:99750786-99760785@99802459';
+        self::assertSame(
+            'false',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_CURRENT_FORWARD'] ?? null,
+        );
+        $currentForwardWindow = 'alt.binaries.movies.dvd:66163468-66373467@66402101,'
+            .'alt.binaries.hdtv.tv-episodes:99760786-99910785@99932836,'
+            .'alt.binaries.dvd.movies:147318921-147628920@147658859';
         self::assertSame(
             $currentForwardWindow,
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS'] ?? null,

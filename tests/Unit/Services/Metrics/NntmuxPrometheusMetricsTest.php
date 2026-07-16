@@ -514,7 +514,17 @@ class NntmuxPrometheusMetricsTest extends TestCase
             'nntmux.orchestrator.high_watermarks.parts' => 1_000,
         ]);
         DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
-        DB::table('settings')->insert(['name' => 'orchestrator_bf_qty', 'value' => '200000']);
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_qty', 'value' => '200000'],
+            ['name' => 'orchestrator_cf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_cf_claimed', 'value' => '17'],
+            ['name' => 'orchestrator_cf_completed', 'value' => '16'],
+            ['name' => 'orchestrator_cf_failed', 'value' => '0'],
+            ['name' => 'orchestrator_cf_issued_at', 'value' => (string) (time() - 100)],
+            ['name' => 'orchestrator_cf_blocks', 'value' => 'alt.one:1-10000,alt.two:1-10000'],
+            ['name' => 'orchestrator_cf_halt', 'value' => '0'],
+            ['name' => 'orchestrator_cf_group', 'value' => 'alt.test'],
+        ]);
         Cache::store('array')->flush();
         Cache::store('array')->forever(WorkerControlStateStore::DECISION_KEY, [
             'mode' => 'shadow',
@@ -576,6 +586,12 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_backfill_yield_attempts{group="alt.test"} 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_target_ineffective_permits{group="alt.test"} 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_backfill_target_locked{group="alt.test"} 0', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_permit 0', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_claim_in_progress 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_claim_age_seconds 100', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_quarantined_windows 2', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_halted 0', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_target_info{group="alt.test"} 1', $output);
     }
 
     public function test_persisted_fail_safe_overrides_a_stale_redis_decision(): void

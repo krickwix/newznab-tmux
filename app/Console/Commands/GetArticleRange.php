@@ -71,11 +71,12 @@ class GetArticleRange extends Command
                 if ($mode !== 'binaries') {
                     throw new \RuntimeException('Current-forward permits require binaries mode.');
                 }
-                $claimedGeneration = (int) $generationOption;
+                $requestedGeneration = (int) $generationOption;
                 $permitGate = app(CurrentForwardPermitGate::class);
-                if ($permitGate->claim($claimedGeneration, (string) $groupName, $firstArticle, $lastArticle) === null) {
+                if ($permitGate->claim($requestedGeneration, (string) $groupName, $firstArticle, $lastArticle) === null) {
                     throw new \RuntimeException('Current-forward permit was absent, stale, or did not match the exact range.');
                 }
+                $claimedGeneration = $requestedGeneration;
             }
             $nntp = $this->getNntp();
             $groupMySQL = UsenetGroup::getByName($groupName)->toArray();

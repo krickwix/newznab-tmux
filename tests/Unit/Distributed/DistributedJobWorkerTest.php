@@ -20,6 +20,20 @@ use Tests\TestCase;
 
 class DistributedJobWorkerTest extends TestCase
 {
+    public function test_current_forward_hard_timeout_precedes_claim_recovery(): void
+    {
+        config([
+            'nntmux.distributed_current_forward_max_run_seconds' => 600,
+            'nntmux.orchestrator.current_forward_claim_timeout_seconds' => 900,
+        ]);
+        $worker = (new ReflectionClass(DistributedJobWorker::class))->newInstanceWithoutConstructor();
+        $method = new ReflectionMethod(DistributedJobWorker::class, 'executionAlarmSeconds');
+
+        self::assertSame(600, $method->invoke($worker, 'current-forward'));
+        self::assertSame(0, $method->invoke($worker, 'releases'));
+        self::assertLessThan(900, $method->invoke($worker, 'current-forward'));
+    }
+
     public function test_it_formats_array_valued_artisan_options(): void
     {
         $worker = (new ReflectionClass(DistributedJobWorker::class))->newInstanceWithoutConstructor();
