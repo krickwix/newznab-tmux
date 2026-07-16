@@ -21,6 +21,8 @@ final class SplitCollectionReconciler
 
     private const int MAX_MATCHING_COLLECTIONS = 20;
 
+    private const int MAX_FANOUT_FILES = 20;
+
     /** @var array<int, string> */
     private array $groupNamesById = [];
 
@@ -33,6 +35,14 @@ final class SplitCollectionReconciler
 
         $merged = 0;
         foreach ($groupIds as $allowedGroupId) {
+            foreach ($this->uniqueFanoutCohorts($allowedGroupId) as $cohort) {
+                if ($merged >= self::MAX_PAIRS_PER_PASS) {
+                    return $merged;
+                }
+                if ($this->mergeFanout($allowedGroupId, $cohort['anchor_id'], $cohort['companion_ids'])) {
+                    $merged++;
+                }
+            }
             foreach ($this->uniquePairs($allowedGroupId) as $pair) {
                 if ($merged >= self::MAX_PAIRS_PER_PASS) {
                     return $merged;
@@ -124,6 +134,42 @@ final class SplitCollectionReconciler
         return array_slice($pairs, 0, self::MAX_PAIRS_PER_PASS);
     }
 
+    /** @return list<array{anchor_id:int,companion_ids:list<int>}> */
+    private function uniqueFanoutCohorts(int $groupId): array
+    {
+        $collectionIds = DB::table('collections')
+            ->where('groups_id', $groupId)
+            ->where('filecheck', 0)
+            ->whereNull('releases_id')
+            ->whereBetween('totalfiles', [2, self::MAX_FANOUT_FILES])
+            ->where('dateadded', '>=', now()->subDay())
+            ->orderByDesc('id')
+            ->limit(self::MAX_COLLECTIONS_PER_GROUP)
+            ->pluck('id')
+            ->map(static fn (mixed $id): int => (int) $id)
+            ->all();
+        if ($collectionIds === []) {
+            return [];
+        }
+
+        $collections = $this->collectionData($collectionIds);
+        $cohorts = [];
+        foreach (array_filter($collections, fn (array $collection): bool => $this->isAnchor($collection)) as $anchor) {
+            $companionIds = $this->fanoutCompanionIds($collections, $anchor);
+            if ($companionIds === null || ! $this->isUniqueFanoutInDatabase($anchor, $companionIds)) {
+                continue;
+            }
+            $cohorts[] = [
+                'anchor_id' => (int) $anchor['id'],
+                'companion_ids' => $companionIds,
+            ];
+        }
+
+        usort($cohorts, static fn (array $left, array $right): int => $left['anchor_id'] <=> $right['anchor_id']);
+
+        return array_slice($cohorts, 0, self::MAX_PAIRS_PER_PASS);
+    }
+
     /**
      * @param  list<int>  $collectionIds
      * @return array<int,array{id:int,groups_id:int,fromname:string,date:string,totalfiles:int,filecheck:int,releases_id:int|null,xref:string,binaries:list<array{id:int,filenumber:int,name:string,currentparts:int,totalparts:int}>}>
@@ -200,6 +246,23 @@ final class SplitCollectionReconciler
     }
 
     /** @param array<string,mixed> $collection */
+    private function isFanoutCompanion(array $collection): bool
+    {
+        $binaries = $collection['binaries'];
+        if (! $this->isMutableCollection($collection) || count($binaries) !== 1) {
+            return false;
+        }
+
+        $binary = $binaries[0];
+        $fileNumber = (int) $binary['filenumber'];
+
+        return $fileNumber >= 2
+            && $fileNumber <= (int) $collection['totalfiles']
+            && $this->isCompleteBinary($binary)
+            && $this->isPar2((string) $binary['name']);
+    }
+
+    /** @param array<string,mixed> $collection */
     private function isMutableCollection(array $collection): bool
     {
         return (int) $collection['filecheck'] === 0
@@ -242,6 +305,60 @@ final class SplitCollectionReconciler
             && $anchorXrefMax > 0
             && $companionXrefMin > $anchorXrefMax
             && $companionXrefMin - $anchorXrefMax <= $this->xrefArticleGapLimit($groupName);
+    }
+
+    /**
+     * @param  array<string,mixed>  $anchor
+     * @param  array<string,mixed>  $companion
+     */
+    private function fanoutMetadataMatches(array $anchor, array $companion): bool
+    {
+        $anchorTimestamp = strtotime((string) $anchor['date']);
+        $companionTimestamp = strtotime((string) $companion['date']);
+        $groupName = $this->groupName((int) $anchor['groups_id']);
+        $anchorXrefMax = $this->xrefArticleMax((string) $anchor['xref'], $groupName);
+        $companionArticles = $this->xrefArticles((string) $companion['xref'], $groupName);
+
+        return (int) $anchor['id'] !== (int) $companion['id']
+            && (int) $anchor['groups_id'] === (int) $companion['groups_id']
+            && hash_equals((string) $anchor['fromname'], (string) $companion['fromname'])
+            && (int) $anchor['totalfiles'] === (int) $companion['totalfiles']
+            && $anchorTimestamp !== false
+            && $companionTimestamp !== false
+            && abs($anchorTimestamp - $companionTimestamp) <= self::MAX_POSTING_GAP_SECONDS
+            && $anchorXrefMax > 0
+            && $companionArticles !== []
+            && min(array_map(
+                static fn (int $article): int => abs($article - $anchorXrefMax),
+                $companionArticles,
+            )) <= $this->xrefArticleGapLimit($groupName);
+    }
+
+    /**
+     * @param  array<int,array<string,mixed>>  $collections
+     * @param  array<string,mixed>  $anchor
+     * @return list<int>|null
+     */
+    private function fanoutCompanionIds(array $collections, array $anchor): ?array
+    {
+        $companionsByFileNumber = [];
+        foreach ($collections as $collection) {
+            if (! $this->isFanoutCompanion($collection) || ! $this->fanoutMetadataMatches($anchor, $collection)) {
+                continue;
+            }
+            $fileNumber = (int) $collection['binaries'][0]['filenumber'];
+            if (array_key_exists($fileNumber, $companionsByFileNumber)) {
+                return null;
+            }
+            $companionsByFileNumber[$fileNumber] = (int) $collection['id'];
+        }
+
+        ksort($companionsByFileNumber, SORT_NUMERIC);
+        if (array_keys($companionsByFileNumber) !== range(2, (int) $anchor['totalfiles'])) {
+            return null;
+        }
+
+        return array_values($companionsByFileNumber);
     }
 
     private function xrefArticleGapLimit(string $groupName): int
@@ -309,6 +426,52 @@ final class SplitCollectionReconciler
             && $companionMatches === [(int) $anchor['id']];
     }
 
+    /**
+     * @param  array<string,mixed>  $anchor
+     * @param  list<int>  $companionIds
+     */
+    private function isUniqueFanoutInDatabase(array $anchor, array $companionIds, bool $lock = false): bool
+    {
+        $anchorTimestamp = strtotime((string) $anchor['date']);
+        if ($anchorTimestamp === false || (int) $anchor['totalfiles'] > self::MAX_FANOUT_FILES) {
+            return false;
+        }
+
+        $query = DB::table('collections')
+            ->where('groups_id', (int) $anchor['groups_id'])
+            ->where('fromname', (string) $anchor['fromname'])
+            ->where('totalfiles', (int) $anchor['totalfiles'])
+            ->where('filecheck', 0)
+            ->whereNull('releases_id')
+            ->whereBetween('date', [
+                date('Y-m-d H:i:s', $anchorTimestamp - self::MAX_POSTING_GAP_SECONDS),
+                date('Y-m-d H:i:s', $anchorTimestamp + self::MAX_POSTING_GAP_SECONDS),
+            ])
+            ->orderBy('id')
+            ->limit(self::MAX_MATCHING_COLLECTIONS + 1);
+        if ($lock) {
+            $query->lockForUpdate();
+        }
+        $ids = $query->pluck('id')->map(static fn (mixed $id): int => (int) $id)->all();
+        if (count($ids) !== (int) $anchor['totalfiles']) {
+            return false;
+        }
+
+        $collections = $this->collectionData($ids, $lock);
+        $anchors = array_values(array_filter($collections, fn (array $collection): bool => $this->isAnchor($collection)));
+        if (count($anchors) !== 1 || (int) $anchors[0]['id'] !== (int) $anchor['id']) {
+            return false;
+        }
+
+        $databaseCompanionIds = $this->fanoutCompanionIds($collections, $anchors[0]);
+        sort($companionIds, SORT_NUMERIC);
+        if ($databaseCompanionIds !== null) {
+            sort($databaseCompanionIds, SORT_NUMERIC);
+        }
+
+        return $databaseCompanionIds === $companionIds;
+    }
+
     private function mergePair(int $groupId, int $anchorId, int $companionId): bool
     {
         return DB::transaction(function () use ($groupId, $anchorId, $companionId): bool {
@@ -364,6 +527,81 @@ final class SplitCollectionReconciler
                 'group_id' => $groupId,
                 'anchor_collection_id' => $anchorId,
                 'companion_collection_id' => $companionId,
+                'total_files' => (int) $anchor['totalfiles'],
+            ]);
+
+            return true;
+        }, 5);
+    }
+
+    /** @param list<int> $companionIds */
+    private function mergeFanout(int $groupId, int $anchorId, array $companionIds): bool
+    {
+        return DB::transaction(function () use ($groupId, $anchorId, $companionIds): bool {
+            $collectionIds = [$anchorId, ...$companionIds];
+            $preflight = $this->collectionData($collectionIds);
+            $preflightAnchor = $preflight[$anchorId] ?? null;
+            if ($preflightAnchor === null
+                || ! $this->isUniqueFanoutInDatabase($preflightAnchor, $companionIds, true)
+            ) {
+                return false;
+            }
+
+            $collections = $this->collectionData($collectionIds, true);
+            $anchor = $collections[$anchorId] ?? null;
+            if ($anchor === null
+                || (int) $anchor['groups_id'] !== $groupId
+                || ! $this->sameCohortIdentity($preflightAnchor, $anchor)
+                || ! $this->isAnchor($anchor)
+            ) {
+                return false;
+            }
+
+            $mergedXref = (string) $anchor['xref'];
+            foreach ($companionIds as $companionId) {
+                $preflightCompanion = $preflight[$companionId] ?? null;
+                $companion = $collections[$companionId] ?? null;
+                if ($preflightCompanion === null
+                    || $companion === null
+                    || ! $this->sameCohortIdentity($preflightCompanion, $companion)
+                    || ! $this->isFanoutCompanion($companion)
+                    || ! $this->fanoutMetadataMatches($anchor, $companion)
+                ) {
+                    return false;
+                }
+
+                $mergedXref = $this->mergedXref($mergedXref, (string) $companion['xref']);
+            }
+
+            foreach ($companionIds as $companionId) {
+                $updated = DB::table('binaries')
+                    ->where('collections_id', $companionId)
+                    ->update(['collections_id' => $anchorId]);
+                if ($updated !== 1) {
+                    throw new \RuntimeException('Split collection fanout companion changed during reconciliation.');
+                }
+            }
+
+            DB::table('collections')->where('id', $anchorId)->update(['xref' => $mergedXref]);
+            foreach ($companionIds as $companionId) {
+                $deleted = DB::table('collections')
+                    ->where('id', $companionId)
+                    ->where('filecheck', 0)
+                    ->whereNull('releases_id')
+                    ->whereNotExists(static fn ($query) => $query
+                        ->selectRaw('1')
+                        ->from('binaries')
+                        ->whereColumn('binaries.collections_id', 'collections.id'))
+                    ->delete();
+                if ($deleted !== 1) {
+                    throw new \RuntimeException('Split collection fanout companion could not be removed safely.');
+                }
+            }
+
+            Log::notice('Reconciled split main and PAR2 fanout collections', [
+                'group_id' => $groupId,
+                'anchor_collection_id' => $anchorId,
+                'companion_collection_ids' => $companionIds,
                 'total_files' => (int) $anchor['totalfiles'],
             ]);
 

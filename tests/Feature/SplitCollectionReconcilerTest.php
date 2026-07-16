@@ -44,6 +44,75 @@ final class SplitCollectionReconcilerTest extends TestCase
         self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
     }
 
+    public function test_merges_unique_complete_main_and_single_file_parity_fanout(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.documentaries']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.documentaries']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.documentaries' => 2000]);
+
+        $this->seedCollection(12, '[01/11] - "X-Men.97.S02E05.720p.WEB.H264-AFO.mkv" yEnc', 'poster@example.com', 11, '2026-07-16 05:47:20');
+        DB::table('collections')->where('id', 12)->update([
+            'xref' => 'alt.binaries.documentaries:190308495 alt.binaries.documentaries:190309760',
+        ]);
+        $this->seedBinary(120, 12, 1, 'X-Men.97.S02E05.720p.WEB.H264-AFO.mkv', 1166, 1166);
+
+        for ($fileNumber = 2; $fileNumber <= 11; $fileNumber++) {
+            $collectionId = 12 + $fileNumber;
+            $this->seedCollection(
+                $collectionId,
+                sprintf('[%02d/11] - "hash-%02d.par2" yEnc', $fileNumber, $fileNumber),
+                'poster@example.com',
+                11,
+                '2026-07-16 05:47:29',
+            );
+            DB::table('collections')->where('id', $collectionId)->update([
+                'xref' => 'alt.binaries.documentaries:'.(190309650 + $fileNumber),
+            ]);
+            $this->seedBinary(120 + $fileNumber, $collectionId, $fileNumber, 'hash-'.$fileNumber.'.par2', 1, 1);
+        }
+
+        $result = (new SplitCollectionReconciler)->reconcile(5);
+
+        self::assertSame(1, $result);
+        self::assertSame(11, DB::table('binaries')->where('collections_id', 12)->count());
+        self::assertSame(
+            range(1, 11),
+            DB::table('binaries')->where('collections_id', 12)->orderBy('filenumber')->pluck('filenumber')->map('intval')->all(),
+        );
+        self::assertSame(1, DB::table('collections')->whereBetween('id', [12, 23])->count());
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    public function test_refuses_incomplete_single_file_parity_fanout(): void
+    {
+        $this->seedCollection(24, '[01/03] - "Episode.mkv" yEnc', 'fanout@example.com', 3, '2026-07-16 05:47:20');
+        $this->seedBinary(240, 24, 1, 'Episode.mkv', 100, 100);
+        foreach ([2, 3] as $fileNumber) {
+            $collectionId = 24 + $fileNumber;
+            $this->seedCollection($collectionId, sprintf('[%02d/03] - "hash.par2" yEnc', $fileNumber), 'fanout@example.com', 3, '2026-07-16 05:47:29');
+            $this->seedBinary(240 + $fileNumber, $collectionId, $fileNumber, 'hash-'.$fileNumber.'.par2', $fileNumber === 2 ? 9 : 10, 10);
+        }
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(3, DB::table('collections')->whereBetween('id', [24, 27])->count());
+    }
+
+    public function test_refuses_ambiguous_single_file_parity_fanout(): void
+    {
+        foreach ([30, 31] as $anchorId) {
+            $this->seedCollection($anchorId, '[01/03] - "Episode.mkv" yEnc', 'ambiguous@example.com', 3, '2026-07-16 05:47:20');
+            $this->seedBinary(300 + $anchorId, $anchorId, 1, 'Episode.mkv', 100, 100);
+        }
+        foreach ([2, 3] as $fileNumber) {
+            $collectionId = 31 + $fileNumber;
+            $this->seedCollection($collectionId, sprintf('[%02d/03] - "hash.par2" yEnc', $fileNumber), 'ambiguous@example.com', 3, '2026-07-16 05:47:29');
+            $this->seedBinary(330 + $fileNumber, $collectionId, $fileNumber, 'hash-'.$fileNumber.'.par2', 10, 10);
+        }
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(4, DB::table('collections')->whereBetween('id', [30, 34])->count());
+    }
+
     public function test_refuses_incomplete_main_or_non_par2_companion(): void
     {
         $this->seedCollection(20, '[01/03] - "Incomplete.mkv" yEnc', 'poster@example.com', 3, '2026-07-13 02:18:15');

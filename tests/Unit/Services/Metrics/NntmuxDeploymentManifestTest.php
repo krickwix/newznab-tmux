@@ -274,7 +274,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 : (in_array($name, [
                     'nntmux-worker-releases',
                 ], true)
-                ? ':microservices-pods-20260714-admission-settle-v159@sha256:bf5a60955fe65d7a692619ae75094d3ab33aba0e107becff69a8917796724414'
+                ? ':microservices-pods-20260716-split-fanout-v162@sha256:3456407f7d916902ad54c7c5cba4b2c69f779e7562c64924e608f12bac05209a'
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
@@ -591,15 +591,19 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $releases = $deployments['nntmux-worker-releases'] ?? null;
         self::assertIsArray($releases);
         self::assertSame(
-            'microservices-pods-20260714-admission-settle-v159',
+            'microservices-pods-20260716-split-fanout-v162',
             $environment($releases)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
-            'alt.binaries.dvd.movies,alt.binaries.movies.dvd,alt.binaries.hdtv.tv-episodes',
+            'docker.io/krickwix/nntmux:microservices-pods-20260716-split-fanout-v162@sha256:3456407f7d916902ad54c7c5cba4b2c69f779e7562c64924e608f12bac05209a',
+            $releases['spec']['template']['spec']['containers'][0]['image'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.documentaries,alt.binaries.dvd.movies,alt.binaries.movies.dvd,alt.binaries.hdtv.tv-episodes',
             $environment($releases)['NNTMUX_SPLIT_COLLECTION_RECONCILE_GROUPS'] ?? null,
         );
         self::assertSame(
-            'alt.binaries.hdtv.tv-episodes:2000',
+            'alt.binaries.documentaries:2000,alt.binaries.hdtv.tv-episodes:2000',
             $environment($releases)['NNTMUX_SPLIT_COLLECTION_XREF_GAP_OVERRIDES'] ?? null,
         );
         self::assertSame(
@@ -656,11 +660,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         $probeGroupsValue = $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS'] ?? null;
         self::assertSame(
-            'alt.binaries.dvd.movies,alt.binaries.tvseries,alt.binaries.movies.dvd,alt.binaries.hdtv.tv-episodes',
+            'alt.binaries.documentaries,alt.binaries.dvd.movies,alt.binaries.tvseries,alt.binaries.movies.dvd,alt.binaries.hdtv.tv-episodes',
             $probeGroupsValue,
         );
         $probeGroups = explode(',', (string) $probeGroupsValue);
-        self::assertCount(4, $probeGroups);
+        self::assertCount(5, $probeGroups);
         self::assertLessThanOrEqual(16, count($probeGroups));
         self::assertCount(count($probeGroups), array_unique($probeGroups));
         self::assertSame(
