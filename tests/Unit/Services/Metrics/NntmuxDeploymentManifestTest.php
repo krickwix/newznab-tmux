@@ -319,7 +319,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('60000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_RECOVERY_SOURCES_HIGH'] ?? null);
         self::assertSame('60000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_COLLECTIONS_TOTAL_LOW'] ?? null);
         self::assertSame('50000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_RECOVERY_SOURCES_LOW'] ?? null);
-        self::assertSame('120', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_WINDOW_SECONDS'] ?? null);
+        self::assertSame('60', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_WINDOW_SECONDS'] ?? null);
         self::assertSame('4.0', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_BLOCK_RATE'] ?? null);
         self::assertSame('3.0', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_REOPEN_RATE'] ?? null);
         self::assertSame('6.0', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_RATE'] ?? null);
