@@ -431,11 +431,15 @@ final class NntmuxDeploymentManifestTest extends TestCase
         }
         self::assertIsArray($prometheusRule);
         $permitAlert = null;
+        $nzbNoCreationAlert = null;
         $currentForwardAlerts = [];
         foreach ($prometheusRule['spec']['groups'] ?? [] as $group) {
             foreach ($group['rules'] ?? [] as $rule) {
                 if (($rule['alert'] ?? null) === 'NntmuxBackfillPermitWithoutProgress') {
                     $permitAlert = $rule;
+                }
+                if (($rule['alert'] ?? null) === 'NntmuxNzbNoCreationProgress') {
+                    $nzbNoCreationAlert = $rule;
                 }
                 if (in_array(($rule['alert'] ?? null), [
                     'NntmuxCurrentForwardPermitStalled',
@@ -450,6 +454,15 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertIsArray($permitAlert);
         self::assertStringContainsString('max without(instance, pod)', (string) ($permitAlert['expr'] ?? ''));
         self::assertStringContainsString('[20m:1m]', (string) ($permitAlert['expr'] ?? ''));
+        self::assertIsArray($nzbNoCreationAlert);
+        self::assertMatchesRegularExpression(
+            '/sum\(\s*increase\(\s*nntmux_worker_runs_total/s',
+            (string) ($nzbNoCreationAlert['expr'] ?? ''),
+        );
+        self::assertMatchesRegularExpression(
+            '/sum\(\s*increase\(\s*nntmux_worker_items_total/s',
+            (string) ($nzbNoCreationAlert['expr'] ?? ''),
+        );
         self::assertCount(4, $currentForwardAlerts);
         self::assertStringContainsString(
             'nntmux_orchestrator_current_forward_claim_age_seconds',
