@@ -61,7 +61,7 @@ return new class extends Migration
             $table->index(['state', 'updated_at'], 'cf_windows_state_updated_idx');
         });
 
-        if (Schema::getConnection()->getDriverName() === 'mysql') {
+        if (in_array(Schema::getConnection()->getDriverName(), ['mysql', 'mariadb'], true)) {
             DB::statement("ALTER TABLE current_forward_sources ADD CONSTRAINT cf_sources_state_chk CHECK (state IN ('PROBATION','READY','HALTED','QUALITY_LOCKED'))");
             DB::statement('ALTER TABLE current_forward_sources ADD CONSTRAINT cf_sources_range_chk CHECK (anchor_first > 0 AND audited_last >= anchor_first + 9999 AND strikes <= 2)');
             DB::statement("ALTER TABLE current_forward_windows ADD CONSTRAINT cf_windows_state_chk CHECK (state IN ('DISCOVERED','AUDITED','OFFERED','CLAIMED','INGESTED','ATTRIBUTING','PRODUCTIVE','QUARANTINED'))");
