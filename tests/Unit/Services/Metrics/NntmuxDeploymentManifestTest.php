@@ -324,10 +324,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $refreshContainer['args'] ?? null,
         );
         self::assertMatchesRegularExpression(
-            '/:microservices-pods-20260717-cf-refresh-shadow-v171@sha256:[a-f0-9]{64}$/',
+            '/:microservices-pods-20260717-cf-refresh-shadow-v172@sha256:[a-f0-9]{64}$/',
             (string) ($refreshContainer['image'] ?? ''),
         );
         $refreshEnvironment = array_column($refreshContainer['env'] ?? [], 'value', 'name');
+        self::assertSame(
+            'microservices-pods-20260717-cf-refresh-shadow-v172',
+            $refreshEnvironment['NNTMUX_BUILD_VERSION'] ?? null,
+        );
         self::assertSame('true', $refreshEnvironment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_ENABLED'] ?? null);
         self::assertArrayNotHasKey('NNTMUX_ORCHESTRATOR_AUTO_CURRENT_FORWARD', $refreshEnvironment);
         self::assertArrayNotHasKey('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_PERMIT', $refreshEnvironment);
@@ -499,7 +503,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         );
         self::assertSame('critical', $currentForwardAlerts['NntmuxCurrentForwardHalted']['labels']['severity'] ?? null);
         self::assertMatchesRegularExpression(
-            '/:microservices-pods-20260717-cf-refresh-shadow-v171@sha256:[a-f0-9]{64}$/',
+            '/:microservices-pods-20260717-cf-refresh-shadow-v172@sha256:[a-f0-9]{64}$/',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
@@ -521,7 +525,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('microservices-pods-20260714-nzb-saturated-retry-v147', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         self::assertSame('168', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_HOURS'] ?? null);
         self::assertSame('true', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED'] ?? null);
-        self::assertSame('microservices-pods-20260717-cf-refresh-shadow-v171', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260717-cf-refresh-shadow-v172', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         self::assertSame('true', $metricsEnvironment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_ENABLED'] ?? null);
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
