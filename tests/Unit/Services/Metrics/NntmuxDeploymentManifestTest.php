@@ -536,7 +536,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
             'true',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_CURRENT_FORWARD'] ?? null,
         );
-        $currentForwardWindow = 'alt.binaries.movies.dvd:66163468-66373467@66402101,'
+        $currentForwardWindow = 'alt.binaries.movies.dvd:66163468-66383467@66408646,'
             .'alt.binaries.hdtv.tv-episodes:99760786-99910785@99932836,'
             .'alt.binaries.dvd.movies:147318921-147628920@147658859';
         self::assertSame(
