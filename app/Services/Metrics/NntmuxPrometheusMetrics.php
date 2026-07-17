@@ -660,6 +660,7 @@ class NntmuxPrometheusMetrics
             $lines[] = '# TYPE nntmux_orchestrator_current_forward_target_info gauge';
             $lines[] = $this->metric('nntmux_orchestrator_current_forward_target_info', 1, ['group' => $currentForwardGroup]);
         }
+        $lines = array_merge($lines, $this->currentForwardRefreshMetrics());
 
         if (! is_array($decision)) {
             return $lines;
@@ -769,6 +770,58 @@ class NntmuxPrometheusMetrics
                 $lines[] = $this->metric('nntmux_orchestrator_stage_oldest_age_seconds', (float) ($decision['oldest_age_seconds'][$stage] ?? 0), ['stage' => $stage]);
             }
         }
+
+        return $lines;
+    }
+
+    /** @return list<string> */
+    private function currentForwardRefreshMetrics(): array
+    {
+        $schemaReady = Schema::hasTable('current_forward_sources')
+            && Schema::hasTable('current_forward_windows');
+        $lines = [
+            '# HELP nntmux_orchestrator_current_forward_refresh_enabled Whether audited current-forward refresh discovery is enabled.',
+            '# TYPE nntmux_orchestrator_current_forward_refresh_enabled gauge',
+            $this->metric(
+                'nntmux_orchestrator_current_forward_refresh_enabled',
+                config('nntmux.orchestrator.current_forward_refresh_enabled', false) ? 1 : 0,
+            ),
+            '# HELP nntmux_orchestrator_current_forward_refresh_schema_ready Whether both additive refresh ledger tables exist.',
+            '# TYPE nntmux_orchestrator_current_forward_refresh_schema_ready gauge',
+            $this->metric('nntmux_orchestrator_current_forward_refresh_schema_ready', $schemaReady ? 1 : 0),
+        ];
+        if (! $schemaReady) {
+            return $lines;
+        }
+
+        $lines[] = '# HELP nntmux_orchestrator_current_forward_refresh_sources Explicit trusted sources by lifecycle state.';
+        $lines[] = '# TYPE nntmux_orchestrator_current_forward_refresh_sources gauge';
+        foreach (['PROBATION', 'READY', 'HALTED', 'QUALITY_LOCKED'] as $state) {
+            $lines[] = $this->metric(
+                'nntmux_orchestrator_current_forward_refresh_sources',
+                DB::table('current_forward_sources')->where('state', $state)->count(),
+                ['state' => strtolower($state)],
+            );
+        }
+
+        $lines[] = '# HELP nntmux_orchestrator_current_forward_refresh_windows Immutable windows by lifecycle state.';
+        $lines[] = '# TYPE nntmux_orchestrator_current_forward_refresh_windows gauge';
+        foreach (['AUDITED', 'OFFERED', 'CLAIMED', 'INGESTED', 'ATTRIBUTING', 'PRODUCTIVE', 'QUARANTINED'] as $state) {
+            $lines[] = $this->metric(
+                'nntmux_orchestrator_current_forward_refresh_windows',
+                DB::table('current_forward_windows')->where('state', $state)->count(),
+                ['state' => strtolower($state)],
+            );
+        }
+
+        $lastAuditedAt = DB::table('current_forward_sources')->max('last_audited_at');
+        $lastAuditedTimestamp = is_string($lastAuditedAt) ? strtotime($lastAuditedAt) : false;
+        $lines[] = '# HELP nntmux_orchestrator_current_forward_refresh_last_audit_age_seconds Age of the newest durable exact-XOVER audit.';
+        $lines[] = '# TYPE nntmux_orchestrator_current_forward_refresh_last_audit_age_seconds gauge';
+        $lines[] = $this->metric(
+            'nntmux_orchestrator_current_forward_refresh_last_audit_age_seconds',
+            $lastAuditedTimestamp === false ? 0 : max(0, time() - $lastAuditedTimestamp),
+        );
 
         return $lines;
     }

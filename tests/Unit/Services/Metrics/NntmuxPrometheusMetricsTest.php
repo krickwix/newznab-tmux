@@ -618,6 +618,42 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_profile_info{profile="fail_safe"} 1', $output);
     }
 
+    public function test_orchestrator_metrics_export_shadow_refresh_ledger_state(): void
+    {
+        config(['nntmux.orchestrator.current_forward_refresh_enabled' => true]);
+        DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        DB::statement('CREATE TABLE current_forward_sources (
+            id INTEGER PRIMARY KEY,
+            state VARCHAR(32) NOT NULL,
+            last_audited_at DATETIME NULL
+        )');
+        DB::statement('CREATE TABLE current_forward_windows (
+            id INTEGER PRIMARY KEY,
+            state VARCHAR(32) NOT NULL,
+            created_at DATETIME NOT NULL
+        )');
+        DB::table('current_forward_sources')->insert([
+            ['id' => 1, 'state' => 'READY', 'last_audited_at' => now()->subSeconds(30)],
+            ['id' => 2, 'state' => 'PROBATION', 'last_audited_at' => null],
+        ]);
+        DB::table('current_forward_windows')->insert([
+            'id' => 1,
+            'state' => 'AUDITED',
+            'created_at' => now()->subSeconds(30),
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_enabled 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_schema_ready 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_sources{state="ready"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_sources{state="probation"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_windows{state="audited"} 1', $output);
+    }
+
     public function test_body_recovery_claim_metrics_split_ready_claimed_expired_and_exhausted_rows(): void
     {
         DB::statement('CREATE TABLE usenet_groups (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL)');

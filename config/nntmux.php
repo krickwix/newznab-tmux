@@ -47,6 +47,7 @@ return [
         'state_store' => env('NNTMUX_ORCHESTRATOR_STATE_STORE', 'redis'),
         'auto_backfill' => filter_var(env('NNTMUX_ORCHESTRATOR_AUTO_BACKFILL', false), FILTER_VALIDATE_BOOL),
         'auto_current_forward' => filter_var(env('NNTMUX_ORCHESTRATOR_AUTO_CURRENT_FORWARD', false), FILTER_VALIDATE_BOOL),
+        'current_forward_refresh_enabled' => filter_var(env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_ENABLED', false), FILTER_VALIDATE_BOOL),
         'permit_observation_seconds' => max(300, (int) env('NNTMUX_ORCHESTRATOR_PERMIT_OBSERVATION_SECONDS', 1200)),
         'permit_claim_grace_seconds' => max(120, (int) env('NNTMUX_ORCHESTRATOR_PERMIT_CLAIM_GRACE_SECONDS', 120)),
         'backfill_probe_groups' => array_values(array_filter(array_map(
