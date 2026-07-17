@@ -14,6 +14,7 @@ final class AuditCurrentForwardRefresh extends Command
     protected $signature = 'orchestrator:audit-current-forward
                             {group? : Exact configured current-forward group}
                             {--seed : Explicitly register the group in the durable trust ledger}
+                            {--seed-only : Register the group without opening an NNTP connection}
                             {--record : Persist successful exact XOVER audits without issuing work}
                             {--json : Emit machine-readable evidence}';
 
@@ -23,16 +24,34 @@ final class AuditCurrentForwardRefresh extends Command
     {
         $group = $this->argument('group');
         $group = $group === null ? null : trim((string) $group);
+        $seedOnly = (bool) $this->option('seed-only');
 
         try {
-            if ((bool) $this->option('seed')) {
+            if ((bool) $this->option('seed') || $seedOnly) {
                 if ($group === null || $group === '') {
-                    $this->error('--seed requires an exact group argument.');
+                    $this->error('--seed and --seed-only require an exact group argument.');
 
                     return self::FAILURE;
                 }
                 $sourceId = $ledger->seedSource($group);
                 $this->info("Registered trusted current-forward source {$group} as ledger source {$sourceId}.");
+
+                if ($seedOnly) {
+                    $result = [
+                        'enabled' => (bool) config('nntmux.orchestrator.current_forward_refresh_enabled', false),
+                        'reason' => 'source_seeded',
+                        'group' => $group,
+                        'source_id' => $sourceId,
+                        'audits' => [],
+                        'rejections' => [],
+                    ];
+
+                    if ((bool) $this->option('json')) {
+                        $this->line((string) json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+                    }
+
+                    return self::SUCCESS;
+                }
             }
 
             $result = $auditor->audit($group, (bool) $this->option('record'));
@@ -76,8 +95,6 @@ final class AuditCurrentForwardRefresh extends Command
             return self::SUCCESS;
         }
 
-        return $group === null && ! (bool) $this->option('record') && ! (bool) $this->option('seed')
-            ? self::SUCCESS
-            : self::FAILURE;
+        return $group === null ? self::SUCCESS : self::FAILURE;
     }
 }

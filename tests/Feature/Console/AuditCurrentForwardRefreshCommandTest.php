@@ -142,6 +142,50 @@ final class AuditCurrentForwardRefreshCommandTest extends TestCase
         ]);
     }
 
+    public function test_global_record_run_with_no_safe_window_is_a_successful_noop(): void
+    {
+        DB::table('short_groups')->where('name', 'alt.test')->update(['last_record' => 40_099]);
+
+        $exitCode = Artisan::call('orchestrator:audit-current-forward', [
+            '--record' => true,
+            '--json' => true,
+        ]);
+        $output = Artisan::output();
+
+        self::assertSame(0, $exitCode, $output);
+        self::assertStringContainsString('provider_range_drift', $output);
+        self::assertSame(0, DB::table('current_forward_windows')->count());
+        $this->assertDatabaseHas('current_forward_sources', [
+            'id' => 1,
+            'state' => 'PROBATION',
+            'audited_last' => 10_100,
+        ]);
+    }
+
+    public function test_seed_only_registers_a_trusted_source_without_connecting_to_nntp(): void
+    {
+        DB::table('current_forward_sources')->delete();
+
+        $exitCode = Artisan::call('orchestrator:audit-current-forward', [
+            'group' => 'alt.test',
+            '--seed-only' => true,
+            '--json' => true,
+        ]);
+        $output = Artisan::output();
+
+        self::assertSame(0, $exitCode, $output);
+        self::assertStringContainsString('"reason": "source_seeded"', $output);
+        self::assertStringContainsString('"group": "alt.test"', $output);
+        self::assertSame(0, $this->nntp->connections);
+        self::assertSame(0, DB::table('current_forward_windows')->count());
+        $this->assertDatabaseHas('current_forward_sources', [
+            'group_name' => 'alt.test',
+            'anchor_first' => 101,
+            'audited_last' => 10_100,
+            'state' => 'PROBATION',
+        ]);
+    }
+
     public function test_disabled_global_shadow_inspection_is_successful_and_performs_zero_writes_or_nntp_calls(): void
     {
         config()->set('nntmux.orchestrator.current_forward_refresh_enabled', false);
