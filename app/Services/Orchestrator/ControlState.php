@@ -34,7 +34,10 @@ final readonly class ControlState
             throw new \InvalidArgumentException('Control state counters cannot be negative.');
         }
         foreach ($ineffectiveBackfillPermitsByTarget as $group => $count) {
-            if (! is_string($group) || $group === '' || $count < 0 || $count > WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT) {
+            // Upper bound is a sanity guard only; the effective lock limit is
+            // enforced (min-capped) in WorkerControlPolicy before storage and is
+            // env-tunable, so allow up to the configured maximum here.
+            if (! is_string($group) || $group === '' || $count < 0 || $count > 50) {
                 throw new \InvalidArgumentException('Target ineffective permit counters must use a group name and remain bounded.');
             }
         }

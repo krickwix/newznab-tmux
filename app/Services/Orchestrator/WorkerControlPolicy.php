@@ -38,7 +38,21 @@ final class WorkerControlPolicy
         private readonly ?int $qualifiedSupplyRecoverySamples = null,
         private readonly ?float $qualifiedSupplyGrowthMinPerMinute = null,
         private readonly ?int $qualifiedSupplyColdStartCooldownSeconds = null,
+        private readonly ?int $ineffectiveBackfillLimitOverride = null,
     ) {}
+
+    /**
+     * Consecutive input-bearing permits without attributed output before a
+     * backfill target is locked. Env-tunable (was a hard const of 2): a cold or
+     * heavily-incomplete backlog needs several backfill passes per group before
+     * collections complete enough to yield a release, so a limit of 2 locks
+     * every group before it can produce anything. Raise it to tolerate that.
+     */
+    private function ineffectiveBackfillLimit(): int
+    {
+        return max(1, $this->ineffectiveBackfillLimitOverride
+            ?? (int) $this->orchestratorConfig('ineffective_backfill_limit', self::INEFFECTIVE_BACKFILL_LIMIT));
+    }
 
     public function decide(PipelineSnapshot $snapshot, ControlState $state, int $now): ControlDecision
     {
@@ -171,7 +185,7 @@ final class WorkerControlPolicy
         );
         $workerProfile = WorkerControlProfile::for($profile);
         $targetLocked = $snapshot->backfillGroup !== ''
-            && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= self::INEFFECTIVE_BACKFILL_LIMIT
+            && (int) ($targetIneffectivePermits[$snapshot->backfillGroup] ?? 0) >= $this->ineffectiveBackfillLimit()
             && ! $snapshot->backfillTargetLockRetryDue;
         if ($snapshot->backfillTargetLockRetryDue) {
             $reasons[] = 'backfill_target_lock_retry_due';
@@ -441,10 +455,10 @@ final class WorkerControlPolicy
         $targetCounts = $state->ineffectiveBackfillPermitsByTarget;
         if ($target !== '') {
             if ($snapshot->backfillPermitQualityFailure !== '') {
-                $targetCounts[$target] = self::INEFFECTIVE_BACKFILL_LIMIT;
+                $targetCounts[$target] = $this->ineffectiveBackfillLimit();
 
                 return [
-                    self::INEFFECTIVE_BACKFILL_LIMIT,
+                    $this->ineffectiveBackfillLimit(),
                     $state->backfillLocked,
                     $targetCounts,
                     [$snapshot->backfillPermitQualityFailure],
@@ -452,7 +466,7 @@ final class WorkerControlPolicy
             }
             if ($targetCounts === [] && $state->consecutiveIneffectiveBackfillPermits > 0) {
                 $targetCounts[$target] = min(
-                    self::INEFFECTIVE_BACKFILL_LIMIT,
+                    $this->ineffectiveBackfillLimit(),
                     $state->consecutiveIneffectiveBackfillPermits,
                 );
             }
@@ -486,16 +500,16 @@ final class WorkerControlPolicy
             }
 
             $targetCounts[$target] = min(
-                self::INEFFECTIVE_BACKFILL_LIMIT,
+                $this->ineffectiveBackfillLimit(),
                 (int) ($targetCounts[$target] ?? 0) + 1,
             );
-            $count = min(self::INEFFECTIVE_BACKFILL_LIMIT, $state->consecutiveIneffectiveBackfillPermits + 1);
+            $count = min($this->ineffectiveBackfillLimit(), $state->consecutiveIneffectiveBackfillPermits + 1);
 
             return [
                 $count,
                 $state->backfillLocked,
                 $targetCounts,
-                [$targetCounts[$target] >= self::INEFFECTIVE_BACKFILL_LIMIT
+                [$targetCounts[$target] >= $this->ineffectiveBackfillLimit()
                     ? 'backfill_target_locked_after_ineffective_permits'
                     : 'backfill_permit_ineffective'],
             ];
@@ -523,8 +537,8 @@ final class WorkerControlPolicy
             ];
         }
 
-        $count = min(self::INEFFECTIVE_BACKFILL_LIMIT, $state->consecutiveIneffectiveBackfillPermits + 1);
-        $locked = $state->backfillLocked || $count >= self::INEFFECTIVE_BACKFILL_LIMIT;
+        $count = min($this->ineffectiveBackfillLimit(), $state->consecutiveIneffectiveBackfillPermits + 1);
+        $locked = $state->backfillLocked || $count >= $this->ineffectiveBackfillLimit();
 
         return [$count, $locked, $targetCounts, [$locked ? 'backfill_locked_after_ineffective_permits' : 'backfill_permit_ineffective']];
     }

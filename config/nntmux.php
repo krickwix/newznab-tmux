@@ -132,7 +132,7 @@ return [
         'backfill_zero_output_grace_seconds' => min(1200, max(300, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_ZERO_OUTPUT_GRACE_SECONDS', 300))),
         'backfill_incomplete_release_grace_seconds' => min(1200, max(600, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_INCOMPLETE_RELEASE_GRACE_SECONDS', 600))),
         'backfill_productive_settlement_grace_seconds' => min(300, max(30, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_PRODUCTIVE_SETTLEMENT_GRACE_SECONDS', 120))),
-        'backfill_delayed_attribution_seconds' => min(21_600, max(7_200, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_DELAYED_ATTRIBUTION_SECONDS', 9_000))),
+        'backfill_delayed_attribution_seconds' => min(21_600, max(300, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_DELAYED_ATTRIBUTION_SECONDS', 9_000))),
         'backfill_max_quantity' => max(10000, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_QUANTITY', 200000)),
         'backfill_headroom_fraction' => min(0.5, max(0.01, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_HEADROOM_FRACTION', 0.10))),
         'backfill_growth_per_10k' => [
@@ -163,6 +163,11 @@ return [
         // backfill permit per cooldown window to seed qualified output and break
         // the self-referential starvation deadlock. 0 disables the cold-start.
         'qualified_supply_cold_start_cooldown_seconds' => max(0, (int) env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_COLD_START_COOLDOWN_SECONDS', 900)),
+        // Consecutive ineffective backfill permits before a target group is
+        // locked. A cold/incomplete backlog needs several passes per group to
+        // complete collections before any release is attributed, so the old
+        // hard limit of 2 locked every group prematurely. Default raised to 6.
+        'ineffective_backfill_limit' => min(50, max(1, (int) env('NNTMUX_ORCHESTRATOR_INEFFECTIVE_BACKFILL_LIMIT', 6))),
         'qualified_supply_binaries_sleep_seconds' => min(1800, max(60, (int) env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_BINARIES_SLEEP_SECONDS', 300))),
         'database_memory_limit_bytes' => (int) env('NNTMUX_ORCHESTRATOR_DB_MEMORY_LIMIT_BYTES', 4456448000),
         'database_cpu_limit_cores' => (float) env('NNTMUX_ORCHESTRATOR_DB_CPU_LIMIT_CORES', 3),

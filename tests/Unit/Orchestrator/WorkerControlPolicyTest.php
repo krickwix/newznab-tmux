@@ -793,6 +793,31 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('backfill_target_locked_after_ineffective_permits', $second->reasons);
     }
 
+    public function test_raised_ineffective_backfill_limit_defers_target_locking(): void
+    {
+        // With the env-tunable limit raised (cold/incomplete backlog needs more
+        // passes per group before a release is attributed), a group that would
+        // lock at the default of 2 keeps getting permits.
+        $policy = new WorkerControlPolicy(ineffectiveBackfillLimitOverride: 6);
+        $state = new ControlState(profile: ControlProfile::Balanced, lastTransitionAt: 9_900);
+        $ineffective = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $d = $policy->decide($ineffective, $state, 10_000);
+        for ($i = 1; $i < 5; $i++) {
+            $d = $policy->decide($ineffective, $d->nextState, 10_000 + $i * 60);
+        }
+
+        // 5 ineffective permits on alt.a, but the limit is 6 -> not locked yet.
+        self::assertSame(5, $d->nextState->ineffectiveBackfillPermitsByTarget['alt.a']);
+        self::assertFalse($d->nextState->backfillLocked);
+        self::assertTrue($d->backfillPermitted);
+    }
+
     public function test_category_quality_failure_immediately_locks_the_exact_source_with_a_stable_reason(): void
     {
         $snapshot = new PipelineSnapshot(
