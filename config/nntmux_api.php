@@ -5,10 +5,13 @@ return [
     'fanarttv_api_key' => env('FANARTTV_APIKEY', ''),
     'google_books_api_key' => env('GOOGLE_BOOKS_API_KEY', ''),
     'isbndb_api_key' => env('ISBNDB_API_KEY', ''),
-    'imdbapi_dev_enabled' => env('IMDBAPI_DEV_ENABLED', true),
+    // Disabled: imdbapi.dev is an unrelated third-party endpoint and is currently unavailable.
+    'imdbapi_dev_enabled' => env('IMDBAPI_DEV_ENABLED', false),
     'imdbapi_dev_base_url' => env('IMDBAPI_DEV_BASE_URL', 'https://api.imdbapi.dev'),
     'imdbapi_dev_min_interval_seconds' => env('IMDBAPI_DEV_MIN_INTERVAL_SECONDS', 15),
     'imdbapi_dev_cooldown_seconds' => env('IMDBAPI_DEV_COOLDOWN_SECONDS', 300),
+    'movie_lookup_max_attempts' => env('MOVIE_LOOKUP_MAX_ATTEMPTS', 3),
+    'movie_lookup_retry_minutes' => env('MOVIE_LOOKUP_RETRY_MINUTES', 30),
     'omdb_api_key' => env('OMDB_APIKEY', ''),
     'trakttv_api_key' => env('TRAKTTV_APIKEY', ''),
 ];

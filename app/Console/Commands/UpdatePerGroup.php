@@ -9,9 +9,10 @@ use App\Models\UsenetGroup;
 use App\Services\AdditionalProcessing\AdditionalProcessingOrchestrator;
 use App\Services\Backfill\BackfillService;
 use App\Services\Binaries\BinariesService;
+use App\Services\Distributed\BackfillExecutionGuard;
 use App\Services\NfoService;
 use App\Services\NNTP\NNTPService;
-use App\Services\ReleaseProcessingService;
+use App\Services\Releases\ReleasePump;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
@@ -31,12 +32,6 @@ class UpdatePerGroup extends Command
      */
     protected $description = 'Do a single group (update_binaries/backFill/update_releases/postprocess)';
 
-    public function __construct(
-        private readonly ReleaseProcessingService $releaseProcessingService
-    ) {
-        parent::__construct();
-    }
-
     /**
      * Execute the console command.
      */
@@ -51,6 +46,7 @@ class UpdatePerGroup extends Command
         }
 
         try {
+            (new BackfillExecutionGuard)->assertLegacyCommandAllowed('group:update-all');
             $group = UsenetGroup::find($groupId);
 
             if ($group === null) {
@@ -109,20 +105,11 @@ class UpdatePerGroup extends Command
      */
     private function processReleases(string $groupID): void
     {
-        $limit = $this->releaseProcessingService->getReleaseCreationLimit();
-
-        $this->releaseProcessingService->processIncompleteCollections($groupID);
-        $this->releaseProcessingService->processCollectionSizes($groupID);
-        $this->releaseProcessingService->deleteUnwantedCollections($groupID);
-
-        do {
-            $result = $this->releaseProcessingService->createReleases($groupID);
-            $nzbFilesAdded = $this->releaseProcessingService->createNZBsIfEnabled($groupID);
-
-            $shouldContinue = $result->total() >= $limit || $nzbFilesAdded >= $limit;
-        } while ($shouldContinue);
-
-        $this->releaseProcessingService->deleteCollections($groupID);
+        app(ReleasePump::class)->run(
+            $groupID,
+            (int) config('nntmux.distributed_release_pump_deadline_seconds', 25),
+            (int) config('nntmux.distributed_release_pump_batch_size', 200),
+        );
     }
 
     /**

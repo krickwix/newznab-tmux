@@ -503,6 +503,68 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertTrue(DB::table('parts')->where('binaries_id', 1400)->exists());
     }
 
+    public function test_bounded_release_cleanup_preserves_pending_nzb_descendants(): void
+    {
+        DB::table('releases')->insert([
+            'id' => 45,
+            'name' => 'Pending.Nzb.Release',
+            'searchname' => 'Pending.Nzb.Release',
+            'totalpart' => 1,
+            'groups_id' => 1,
+            'adddate' => now()->format('Y-m-d H:i:s'),
+            'guid' => str_repeat('e', 36),
+            'leftguid' => 'e',
+            'postdate' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'fromname' => 'poster@example.com',
+            'size' => 500,
+            'passwordstatus' => 0,
+            'haspreview' => -1,
+            'categories_id' => 1,
+            'nfostatus' => -1,
+            'nzbstatus' => NzbService::NZB_NONE,
+            'completion' => 100,
+            'isrenamed' => 0,
+            'iscategorized' => 0,
+            'predb_id' => 0,
+        ]);
+        DB::table('collections')->insert([
+            'id' => 145,
+            'subject' => 'Pending.Nzb.Release',
+            'fromname' => 'poster@example.com',
+            'date' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'dateadded' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'added' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'xref' => 'alt.test:145',
+            'groups_id' => 1,
+            'totalfiles' => 1,
+            'filesize' => 500,
+            'filecheck' => CollectionFileCheckStatus::Inserted->value,
+            'collectionhash' => 'pending-nzb-retention',
+            'collection_regexes_id' => 0,
+            'releases_id' => 45,
+            'noise' => '',
+        ]);
+        DB::table('binaries')->insert([
+            'id' => 1450,
+            'name' => 'Pending.Nzb.Release.rar',
+            'collections_id' => 145,
+            'totalparts' => 1,
+        ]);
+        DB::table('parts')->insert([
+            'binaries_id' => 1450,
+            'number' => 1,
+            'messageid' => '<pending-nzb@example.com>',
+            'partnumber' => 1,
+            'size' => 10,
+        ]);
+
+        (new ReleaseProcessingService)->deleteCollectionsSlice(1, 10);
+
+        $this->assertTrue(DB::table('collections')->where('id', 145)->exists());
+        $this->assertTrue(DB::table('binaries')->where('id', 1450)->exists());
+        $this->assertTrue(DB::table('parts')->where('binaries_id', 1450)->exists());
+    }
+
     public function test_group_scoped_cleanup_deletes_only_requested_group_missed_nzb_rows(): void
     {
         DB::table('usenet_groups')->insert(['id' => 2, 'name' => 'alt.other']);

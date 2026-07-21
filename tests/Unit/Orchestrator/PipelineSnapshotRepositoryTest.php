@@ -859,7 +859,59 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame(0.0, $rates['collections_total']);
         self::assertSame(0.0, $rates['recovery_sources']);
         self::assertSame(0.0, $ewma['collections']);
-        self::assertEquals(1000.0, $rates['parts']);
+        self::assertSame(0.0, $rates['parts']);
+    }
+
+    public function test_schema_three_global_rates_cannot_seed_schema_four_schedulable_ewma(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'rates');
+        [$rates, $ewma] = $method->invoke($repository, [
+            'parts' => 100,
+            'binaries' => 20,
+            'collections' => 5,
+            'releases' => 3,
+            'nzbs' => 4,
+        ], [
+            'schema_version' => 3,
+            'parts' => 200_000_000,
+            'binaries' => 70_000,
+            'collections' => 5_000,
+            'releases' => 2,
+            'nzbs' => 4,
+            'ewma_parts' => -1_000_000.0,
+            'ewma_binaries' => -1_000.0,
+            'observed_at' => time() - 60,
+        ]);
+
+        self::assertSame(0.0, $rates['parts']);
+        self::assertSame(0.0, $rates['binaries']);
+        self::assertSame(0.0, $rates['collections']);
+        self::assertSame(0.0, $ewma['parts']);
+        self::assertEquals(1.0, $rates['releases']);
+    }
+
+    public function test_physical_collection_fences_remain_hard_after_routine_pressure_becomes_schedulable(): void
+    {
+        config(['nntmux.orchestrator.high_watermarks' => [
+            'parts' => 300_000_000,
+            'binaries' => 1_000_000,
+            'collections' => 20_000,
+            'collections_total' => 80_000,
+            'recovery_sources' => 60_000,
+        ]]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'physicalCapacityHigh');
+
+        self::assertFalse($method->invoke($repository, 1, 1, 19_999, 79_999, 59_999));
+        self::assertTrue($method->invoke($repository, 1, 1, 20_000, 20_000, 0));
+        self::assertTrue($method->invoke($repository, 1, 1, 0, 60_000, 60_000));
     }
 
     public function test_stale_or_future_previous_snapshots_cannot_influence_rates_or_ewma(): void
@@ -881,6 +933,37 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             self::assertSame(0.0, $rates['parts']);
             self::assertSame(0.0, $ewma['parts']);
         }
+    }
+
+    public function test_release_yield_uses_only_fresh_monotonic_creation_counters(): void
+    {
+        config(['nntmux.orchestrator.snapshot_max_age_seconds' => 180]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'releaseYieldPerMinute');
+
+        self::assertSame(3.0, $method->invoke($repository, 103, [
+            'schema_version' => 5,
+            'release_created_total' => 100,
+            'observed_at' => 1_000,
+        ], 1_060));
+        self::assertSame(0.0, $method->invoke($repository, 99, [
+            'schema_version' => 5,
+            'release_created_total' => 100,
+            'observed_at' => 1_000,
+        ], 1_060));
+        self::assertSame(0.0, $method->invoke($repository, 103, [
+            'schema_version' => 4,
+            'release_created_total' => 100,
+            'observed_at' => 1_000,
+        ], 1_060));
+        self::assertSame(0.0, $method->invoke($repository, 103, [
+            'schema_version' => 5,
+            'release_created_total' => 100,
+            'observed_at' => 800,
+        ], 1_060));
     }
 
     public function test_backfill_candidates_are_bounded_to_fresh_current_valid_ranges(): void
@@ -1620,6 +1703,51 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             '(SELECT COUNT(*) FROM collections WHERE filecheck = 3) AS releases_backlog',
             $source,
         );
+    }
+
+    public function test_exact_release_quality_reuses_misc_pattern_and_minimum_payload_policy(): void
+    {
+        config([
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+            'nntmux.orchestrator.backfill_min_payload_bytes' => 100,
+            'nntmux.orchestrator.backfill_tv_date_range_groups' => [],
+            'nntmux.orchestrator.backfill_tv_complete_series_groups' => [],
+        ]);
+        DB::purge('sqlite');
+        Schema::create('categories', function (Blueprint $table): void {
+            $table->unsignedInteger('id')->primary();
+            $table->unsignedInteger('root_categories_id')->nullable();
+        });
+        Schema::create('releases', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name');
+            $table->string('searchname');
+            $table->unsignedBigInteger('size');
+            $table->unsignedInteger('categories_id')->nullable();
+            $table->unsignedTinyInteger('nzbstatus');
+        });
+        DB::table('categories')->insert([
+            ['id' => 2040, 'root_categories_id' => 2000],
+            ['id' => 2999, 'root_categories_id' => 2000],
+            ['id' => 3040, 'root_categories_id' => 3000],
+        ]);
+        DB::table('releases')->insert([
+            ['id' => 1, 'name' => 'Movie.2026', 'searchname' => 'Movie 2026', 'size' => 1_000, 'categories_id' => 2040, 'nzbstatus' => 1],
+            ['id' => 2, 'name' => 'Show.S01E02', 'searchname' => 'Show S01E02', 'size' => 1_000, 'categories_id' => 2999, 'nzbstatus' => 1],
+            ['id' => 3, 'name' => 'Unknown.Payload', 'searchname' => 'Unknown Payload', 'size' => 1_000, 'categories_id' => 2999, 'nzbstatus' => 1],
+            ['id' => 4, 'name' => 'Tiny.Movie', 'searchname' => 'Tiny Movie', 'size' => 99, 'categories_id' => 2040, 'nzbstatus' => 1],
+            ['id' => 5, 'name' => 'Lossless.Audio', 'searchname' => 'Lossless Audio', 'size' => 1_000, 'categories_id' => 3040, 'nzbstatus' => 1],
+        ]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame([
+            'counts' => ['target' => 2, 'non_target' => 1, 'uncategorized' => 1],
+            'bytes' => ['target' => 2_000, 'non_target' => 1_000, 'uncategorized' => 1_000],
+        ], $repository->currentForwardReleaseQualityForIds([1, 2, 3, 4, 5], 'alt.test'));
     }
 
     public function test_group_cohort_release_count_uses_the_same_exact_attribution_window_without_requiring_an_nzb(): void

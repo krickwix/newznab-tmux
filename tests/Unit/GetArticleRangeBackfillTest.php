@@ -161,6 +161,25 @@ final class GetArticleRangeBackfillTest extends TestCase
         );
     }
 
+    public function test_managed_backfill_requires_storage_errors_and_empty_provider_results_to_fail_closed(): void
+    {
+        $source = (string) file_get_contents(app_path('Console/Commands/GetArticleRange.php'));
+        $binariesSource = (string) file_get_contents(app_path('Services/Binaries/BinariesService.php'));
+
+        self::assertStringContainsString(
+            'failOnStorageError: $currentForward || $managedBackfillGeneration !== null',
+            $source,
+        );
+        self::assertStringContainsString(
+            'Provider returned no usable headers for the exact managed backfill interval.',
+            $source,
+        );
+        self::assertStringContainsString(
+            '$currentForwardGeneration !== null || $failOnStorageError',
+            $binariesSource,
+        );
+    }
+
     /**
      * @param  array<string, mixed>  $group
      * @param  array<string, mixed>  $return

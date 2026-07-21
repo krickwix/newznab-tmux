@@ -223,6 +223,56 @@ final class AdaptiveWorkerControlPlannerTest extends TestCase
         self::assertNotContains('adaptive_backfill_attribution', $decision->reasons);
     }
 
+    public function test_qualified_supply_starvation_throttles_ingestion_but_keeps_downstream_demand_driven(): void
+    {
+        config(['nntmux.orchestrator.qualified_supply_binaries_sleep_seconds' => 300]);
+        $base = $this->decision(ControlProfile::Fill, false);
+        $base = new ControlDecision(
+            profile: $base->profile,
+            backfillPermitted: false,
+            reasons: $base->reasons,
+            nextState: new ControlState(profile: ControlProfile::Fill, qualifiedSupplyStarved: true),
+            transitioned: false,
+        );
+
+        $decision = (new AdaptiveWorkerControlPlanner)->plan($base, new PipelineSnapshot(
+            partsBacklog: 290_000_000,
+            binariesBacklog: 900_000,
+            collectionsBacklog: 18_000,
+            releasesBacklog: 0,
+            nzbsBacklog: 3_000,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            schedulableCollectionsBacklog: 0,
+            eligibleNzbs: 0,
+        ));
+
+        self::assertSame(300, $decision->profile->binariesSleepSeconds);
+        self::assertSame(60, $decision->profile->releasesSleepSeconds);
+        self::assertSame(60, $decision->profile->nzbSleepSeconds);
+        self::assertContains('qualified_supply_growth_throttle', $decision->reasons);
+    }
+
+    public function test_routine_pressure_uses_schedulable_not_global_backlogs(): void
+    {
+        $decision = (new AdaptiveWorkerControlPlanner)->plan(
+            $this->decision(ControlProfile::Fill, false),
+            new PipelineSnapshot(
+                partsBacklog: 290_000_000,
+                binariesBacklog: 900_000,
+                collectionsBacklog: 18_000,
+                releasesBacklog: 0,
+                nzbsBacklog: 3_000,
+                schedulablePartsBacklog: 100,
+                schedulableBinariesBacklog: 20,
+                schedulableCollectionsBacklog: 0,
+            ),
+        );
+
+        self::assertSame(20, $decision->profile->binariesSleepSeconds);
+        self::assertContains('adaptive_binaries_fill', $decision->reasons);
+    }
+
     private function decision(ControlProfile $profile, bool $backfillPermitted): ControlDecision
     {
         return new ControlDecision(

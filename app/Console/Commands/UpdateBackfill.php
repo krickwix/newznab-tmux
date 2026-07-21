@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Console\Commands;
 
 use App\Services\Backfill\BackfillService;
+use App\Services\Distributed\BackfillExecutionGuard;
 use App\Services\NNTP\NNTPService;
 use Illuminate\Console\Command;
 
@@ -35,6 +36,7 @@ class UpdateBackfill extends Command
         $quantity = $this->argument('quantity');
 
         try {
+            (new BackfillExecutionGuard)->assertLegacyCommandAllowed('update:backfill');
             $nntp = $this->getNntp();
             $backfill = new BackfillService(nntp: $nntp);
 

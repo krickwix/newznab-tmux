@@ -157,6 +157,171 @@ final class NntmuxDeploymentManifestTest extends TestCase
         }
     }
 
+    public function test_provider_reserve_overlay_packages_every_runtime_gate_and_the_live_migration(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/cf-provider-reserve-v180.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260718-cf-release-disposition-v179@sha256:a68a20906d9ff1481a9784464c60669eee247b36cf2b07150cf11fa18b245ef6',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Distributed/CurrentForwardPermitGate.php',
+            'app/Services/Orchestrator/CurrentForwardProviderCoverage.php',
+            'app/Services/Orchestrator/CurrentForwardRefreshAuditor.php',
+            'app/Services/Orchestrator/CurrentForwardRefreshLedger.php',
+            'app/Services/Orchestrator/CurrentForwardRefreshPlanner.php',
+            'config/nntmux.php',
+            'database/migrations/2026_07_18_074500_relax_current_forward_provider_reserve_floor.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    public function test_collection_handoff_overlays_package_the_lineage_merge_contract(): void
+    {
+        foreach ([
+            'cf-collection-handoff-v181.Dockerfile',
+            'cf-collection-handoff-release-v181.Dockerfile',
+        ] as $filename) {
+            $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/'.$filename);
+
+            self::assertIsString($dockerfile);
+            foreach ([
+                'app/Services/Orchestrator/CurrentForwardWindowLineage.php',
+                'app/Services/Releases/SplitCollectionReconciler.php',
+                'database/migrations/2026_07_18_081500_add_current_forward_collection_handoffs.php',
+            ] as $path) {
+                self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+            }
+        }
+    }
+
+    public function test_split_backlog_release_overlay_packages_fair_discovery_and_lineage_guards(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/cf-split-backlog-release-v182.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260718-cf-collection-handoff-release-v181@sha256:8b6bae391cd799b6a188be9b31df906ebbc9b7f531b3c60c8335095963ee8c6c',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Releases/SplitCollectionReconciler.php',
+            'app/Services/Orchestrator/CurrentForwardWindowLineage.php',
+            'config/nntmux.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    public function test_dynamic_pair_shadow_overlays_package_the_rule_and_telemetry(): void
+    {
+        $main = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/cf-dynamic-pair-shadow-v183.Dockerfile');
+        $release = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/cf-dynamic-pair-shadow-release-v183.Dockerfile');
+
+        self::assertIsString($main);
+        self::assertIsString($release);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260718-cf-collection-handoff-v181@sha256:30740c6a253c778ce5796b448e4721279738a07a6e7b1642f79df26240c8d965',
+            $main,
+        );
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260718-cf-split-backlog-release-v182@sha256:cc31f60143352c75eede4cc9225fa720c1a77a7bf447ec41bc89232cc142f220',
+            $release,
+        );
+        foreach ([$main, $release] as $dockerfile) {
+            self::assertStringContainsString(
+                'COPY app/Services/Metrics/SplitCollectionTelemetry.php /app/app/Services/Metrics/SplitCollectionTelemetry.php',
+                $dockerfile,
+            );
+            self::assertStringContainsString('COPY config/nntmux.php /app/config/nntmux.php', $dockerfile);
+        }
+        self::assertStringContainsString(
+            'COPY app/Services/Metrics/NntmuxPrometheusMetrics.php /app/app/Services/Metrics/NntmuxPrometheusMetrics.php',
+            $main,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/Releases/SplitCollectionReconciler.php /app/app/Services/Releases/SplitCollectionReconciler.php',
+            $release,
+        );
+    }
+
+    public function test_qualified_supply_overlay_packages_the_complete_controller_contract(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/qualified-supply-v187.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        foreach ([
+            'app/Console/Commands/AuditCurrentForwardRefresh.php',
+            'app/Services/Metrics/NntmuxPrometheusMetrics.php',
+            'app/Services/Orchestrator/AdaptiveWorkerControlPlanner.php',
+            'app/Services/Orchestrator/ControlState.php',
+            'app/Services/Orchestrator/CurrentForwardRefreshLedger.php',
+            'app/Services/Orchestrator/PipelineSnapshot.php',
+            'app/Services/Orchestrator/PipelineSnapshotRepository.php',
+            'app/Services/Orchestrator/WorkerControlPolicy.php',
+            'app/Services/Orchestrator/WorkerControlStateStore.php',
+            'app/Services/Orchestrator/WorkerOrchestrator.php',
+            'config/nntmux.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    public function test_dynamic_pair_hdtv_overlay_promotes_the_reviewed_shadow_image_unchanged(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/cf-dynamic-pair-hdtv-release-v184.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260718-cf-dynamic-pair-shadow-release-v183@sha256:aec282800a761450edb313ea11287766fc05b91239f32b357d9ed4cfcb152231',
+            $dockerfile,
+        );
+    }
+
+    public function test_terminal_pair_hdtv_overlay_packages_guarded_repair_and_deferred_search_sync(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/cf-terminal-pair-hdtv-release-v186.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260718-cf-dynamic-pair-shadow-release-v183@sha256:aec282800a761450edb313ea11287766fc05b91239f32b357d9ed4cfcb152231',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Orchestrator/CurrentForwardTerminalSplitRepair.php',
+            'app/Services/Releases/SplitCollectionReconciler.php',
+            'app/Services/ReleaseCreationService.php',
+            'app/Models/Release.php',
+            'database/migrations/2026_07_18_094500_add_current_forward_terminal_split_repairs.php',
+            'config/nntmux.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    public function test_terminal_pair_migration_uses_the_pinned_image_with_all_repair_flags_disabled(): void
+    {
+        $manifest = file_get_contents(
+            dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/current-forward-terminal-pair-migration-v186.yaml',
+        );
+
+        self::assertIsString($manifest);
+        self::assertStringContainsString(
+            'docker.io/krickwix/nntmux:microservices-pods-20260718-cf-terminal-pair-hdtv-release-v186@sha256:adb8d04376221749d054ba176b6e52fdfbc066319766c18eb24f710e76546988',
+            $manifest,
+        );
+        foreach ([
+            'NNTMUX_SPLIT_COLLECTION_DYNAMIC_PAIR_GAP_GROUPS',
+            'NNTMUX_SPLIT_COLLECTION_TERMINAL_PAIR_REPAIR_GROUPS',
+            'NNTMUX_SPLIT_COLLECTION_TERMINAL_PAIR_REPAIR_ROOTS',
+        ] as $flag) {
+            self::assertStringContainsString("- name: {$flag}\n              value: \"\"", $manifest);
+        }
+    }
+
     public function test_current_forward_metrics_overlay_preserves_the_metrics_runtime_base(): void
     {
         $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/current-forward-metrics-v161.Dockerfile');
@@ -265,8 +430,12 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
-            $expectedImage = $name === 'nntmux-worker-backfill'
-                ? ':microservices-pods-20260717-responsive-backfill-v166@sha256:822468ce92daec60fb9e63d36be32ba58bc2c9ec3b45b32d405db516aeb23a9c'
+            $expectedImage = in_array($name, [
+                'nntmux-worker-backfill',
+                'nntmux-worker-binaries',
+                'nntmux-worker-current-forward',
+            ], true)
+                ? ':microservices-pods-20260720-sustainable-backfill-v188@sha256:9162bcefa4e5e0f7b6c0690d1e05c26ede86e938900dd2f8efda36dd20468a0a'
                 : ($name === 'nntmux-worker-nzb-backlog'
                     ? ':microservices-pods-20260714-nzb-saturated-retry-v147@sha256:6ede1752f1d15e0334f6f8f91d9f3c3869034c65484d60a568bcccdf62703cc1'
                     : ($name === 'nntmux-worker-post-additional'
@@ -274,22 +443,20 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 : ($name === 'nntmux-worker-hashed-fixnames'
                     ? ':microservices-pods-20260717-compact-tv-hashed-v164@sha256:5754963047c0be86b2c05dda05d714f50fc350e01f4cdf88946ce83be6f3f566'
                     : (in_array($name, [
-                        'nntmux-worker-binaries',
-                        'nntmux-worker-current-forward',
+                        'nntmux-worker-releases',
                     ], true)
-                ? ':microservices-pods-20260716-auto-current-forward-v160@sha256:ed90eebf73fa4013156893c2ac287b2f79b0c7af9c5e52505f46c5be56f1b44d'
-                : (in_array($name, [
-                    'nntmux-worker-releases',
-                ], true)
-                ? ':microservices-pods-20260717-compact-tv-release-recovery-v163@sha256:8a9b54bb40bef31bf52a6681625f357e8fd10c710d8d48969b9692a2fab348bb'
+                ? ':microservices-pods-20260721-release-yield-v189@sha256:f3516461589b5ec6f9ff5a178ec14e0a0d2a23cc26e8df1db56d1d5ab5594a74'
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
                 ], true)
-                ? ':microservices-pods-20260711-nzb-cleanup-lock-v9'
+                ? ':microservices-pods-20260718-cf-release-disposition-removecrap-v179@sha256:96d5d5c088970dc3fcd972d54997201de2976c893a36a8c3fa1f9e236c88096e'
                 : ($name === 'nntmux-worker-post-tv'
                     ? ':microservices-pods-20260717-compact-tv-post-v165@sha256:e071558242c06fc56abc4f9acd96ce04cc9947d996491df2026c8fbe02977499'
-                    : ':microservices-pods-20260710-nzb-query-v8')))))));
+                    : ':microservices-pods-20260710-nzb-query-v8'))))));
+            if ($name === 'nntmux-worker-post-movies') {
+                $expectedImage = ':microservices-pods-20260721-imdb-identity-post-movies-v13@sha256:e66333ce5da4c83a7ade98ba109725dd774306da5e0903037cba7faf46fdea1c';
+            }
             self::assertStringEndsWith(
                 $expectedImage,
                 (string) ($container['image'] ?? ''),
@@ -301,6 +468,30 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 $environment['NNTMUX_BUILD_VERSION'] ?? null,
                 sprintf('%s build telemetry must match its image.', $name),
             );
+            if ($name === 'nntmux-worker-post-movies') {
+                self::assertSame('false', $environment['IMDBAPI_DEV_ENABLED'] ?? null);
+                $mountPaths = array_column($container['volumeMounts'] ?? [], 'mountPath');
+                self::assertNotContains('/app/app/Services/MovieService.php', $mountPaths);
+                self::assertNotContains('/app/app/Services/Runners/PostProcessRunner.php', $mountPaths);
+            }
+            if (in_array($name, [
+                'nntmux-worker-binaries',
+                'nntmux-worker-current-forward',
+                'nntmux-worker-backfill',
+                'nntmux-worker-releases',
+            ], true)) {
+                self::assertSame(
+                    'true',
+                    $environment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_ENABLED'] ?? null,
+                    sprintf('%s must share the bounded continuation canary flag.', $name),
+                );
+            }
+            if ($name === 'nntmux-worker-current-forward') {
+                self::assertSame(
+                    '19000',
+                    $environment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_PROVIDER_RESERVE'] ?? null,
+                );
+            }
         }
 
         self::assertNotEmpty($workers);
@@ -324,15 +515,21 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $refreshContainer['args'] ?? null,
         );
         self::assertMatchesRegularExpression(
-            '/:microservices-pods-20260717-cf-refresh-shadow-v172@sha256:[a-f0-9]{64}$/',
+            '/:microservices-pods-20260720-sustainable-backfill-v188@sha256:9162bcefa4e5e0f7b6c0690d1e05c26ede86e938900dd2f8efda36dd20468a0a$/',
             (string) ($refreshContainer['image'] ?? ''),
         );
         $refreshEnvironment = array_column($refreshContainer['env'] ?? [], 'value', 'name');
         self::assertSame(
-            'microservices-pods-20260717-cf-refresh-shadow-v172',
+            'microservices-pods-20260720-sustainable-backfill-v188',
             $refreshEnvironment['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame('true', $refreshEnvironment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_ENABLED'] ?? null);
+        self::assertSame('true', $refreshEnvironment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_ENABLED'] ?? null);
+        self::assertSame('19000', $refreshEnvironment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_PROVIDER_RESERVE'] ?? null);
+        self::assertSame(
+            'alt.binaries.teevee:3590755586-3590765585,alt.binaries.tvseries:948898922-948908921',
+            $refreshEnvironment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_SOURCES'] ?? null,
+        );
         self::assertArrayNotHasKey('NNTMUX_ORCHESTRATOR_AUTO_CURRENT_FORWARD', $refreshEnvironment);
         self::assertArrayNotHasKey('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_PERMIT', $refreshEnvironment);
         self::assertIsArray($backfill);
@@ -358,6 +555,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('600', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_COOLDOWN_SECONDS'] ?? null);
         self::assertSame('30', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_CURRENT_WAIT_HARD_SECONDS'] ?? null);
         self::assertSame('120', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_PROFILE_STABLE_SECONDS'] ?? null);
+        self::assertSame('19000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_PROVIDER_RESERVE'] ?? null);
         self::assertSame('3', $orchestratorEnv['NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_ATTEMPTS'] ?? null);
         self::assertSame('1.0', $orchestratorEnv['NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_YIELD'] ?? null);
         self::assertIsArray($bodyRecovery);
@@ -391,7 +589,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         ], $bodyContainer['args'] ?? null);
     }
 
-    public function test_web_uses_lock_safe_overlay_without_changing_scheduler_or_legacy_worker(): void
+    public function test_web_uses_sustainable_backfill_overlay_without_changing_scheduler_or_legacy_worker(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/app.yaml';
         if (! is_file($path)) {
@@ -402,23 +600,28 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $documents = preg_split('/^---\s*$/m', (string) file_get_contents($path));
         self::assertIsArray($documents);
 
-        $images = [];
+        $deployments = [];
         foreach ($documents as $document) {
             $resource = $parser->parse($document);
             if (is_array($resource) && ($resource['kind'] ?? null) === 'Deployment') {
-                $images[(string) ($resource['metadata']['name'] ?? '')] =
-                    (string) ($resource['spec']['template']['spec']['containers'][0]['image'] ?? '');
+                $deployments[(string) ($resource['metadata']['name'] ?? '')] = $resource;
             }
         }
 
         self::assertStringEndsWith(
-            ':microservices-pods-20260711-nzb-cleanup-web-amd64-v9',
-            $images['nntmux-web'] ?? '',
+            ':microservices-pods-20260721-imdb-identity-web-amd64-v13@sha256:602c341b665631ae4e03f0acf544d11d80fa05acd9cb2ee9a32e614651550b08',
+            (string) ($deployments['nntmux-web']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
+        $webEnvironment = array_column(
+            $deployments['nntmux-web']['spec']['template']['spec']['containers'][0]['env'] ?? [],
+            'value',
+            'name',
+        );
+        self::assertSame('false', $webEnvironment['IMDBAPI_DEV_ENABLED'] ?? null);
         foreach (['nntmux-worker', 'nntmux-scheduler'] as $deployment) {
             self::assertStringEndsWith(
                 ':microservices-pods-20260615-group-delete-v1',
-                $images[$deployment] ?? '',
+                (string) ($deployments[$deployment]['spec']['template']['spec']['containers'][0]['image'] ?? ''),
             );
         }
     }
@@ -451,13 +654,47 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('nntmux-metrics', $metrics['metadata']['name'] ?? null);
 
         $prometheusRule = null;
+        $dashboardConfig = null;
         foreach ($monitoringDocuments as $document) {
             $resource = $parser->parse($document);
+            if (is_array($resource) && ($resource['kind'] ?? null) === 'ConfigMap'
+                && ($resource['metadata']['name'] ?? null) === 'nntmux-grafana-dashboard') {
+                $dashboardConfig = $resource;
+            }
             if (is_array($resource) && ($resource['kind'] ?? null) === 'PrometheusRule') {
                 $prometheusRule = $resource;
                 break;
             }
         }
+        self::assertIsArray($dashboardConfig);
+        $dashboard = json_decode(
+            (string) ($dashboardConfig['data']['nntmux-overview.json'] ?? ''),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        self::assertIsArray($dashboard);
+        $dashboardExpressions = [];
+        foreach ($dashboard['panels'] ?? [] as $panel) {
+            foreach ($panel['targets'] ?? [] as $target) {
+                if (is_string($target['expr'] ?? null)) {
+                    $dashboardExpressions[] = $target['expr'];
+                }
+            }
+        }
+        self::assertContains(
+            'increase(nntmux_worker_items_total{worker="releases",item="release",result="created"}[1h])',
+            array_map(
+                static fn (string $expression): string => preg_replace('/^sum\((.*)\)$/', '$1', $expression) ?? $expression,
+                $dashboardExpressions,
+            ),
+        );
+        self::assertContains('nntmux_orchestrator_release_yield_per_minute', $dashboardExpressions);
+        self::assertNotContains(
+            'nntmux_orchestrator_schedulable_backlog{stage="releases"} or vector(0)',
+            $dashboardExpressions,
+        );
+        self::assertNotContains('nntmux_orchestrator_eligible_nzbs or vector(0)', $dashboardExpressions);
+
         self::assertIsArray($prometheusRule);
         $permitAlert = null;
         $nzbNoCreationAlert = null;
@@ -473,6 +710,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 if (in_array(($rule['alert'] ?? null), [
                     'NntmuxCurrentForwardPermitStalled',
                     'NntmuxCurrentForwardClaimStalled',
+                    'NntmuxCurrentForwardLedgerSettlementStalled',
+                    'NntmuxCurrentForwardContinuationExpired',
+                    'NntmuxCurrentForwardContinuationDisabledOpen',
                     'NntmuxCurrentForwardQuarantinedWindow',
                     'NntmuxCurrentForwardHalted',
                 ], true)) {
@@ -492,18 +732,38 @@ final class NntmuxDeploymentManifestTest extends TestCase
             '/sum\(\s*increase\(\s*nntmux_worker_items_total/s',
             (string) ($nzbNoCreationAlert['expr'] ?? ''),
         );
-        self::assertCount(4, $currentForwardAlerts);
+        self::assertCount(7, $currentForwardAlerts);
         self::assertStringContainsString(
             'nntmux_orchestrator_current_forward_claim_age_seconds',
             (string) ($currentForwardAlerts['NntmuxCurrentForwardClaimStalled']['expr'] ?? ''),
         );
         self::assertStringContainsString(
+            'nntmux_orchestrator_current_forward_refresh_unresolved_age_seconds',
+            (string) ($currentForwardAlerts['NntmuxCurrentForwardLedgerSettlementStalled']['expr'] ?? ''),
+        );
+        self::assertStringContainsString(
+            'nntmux_orchestrator_current_forward_refresh_windows{state="continuation_pending"}',
+            (string) ($currentForwardAlerts['NntmuxCurrentForwardContinuationExpired']['expr'] ?? ''),
+        );
+        self::assertStringContainsString(
+            'nntmux_orchestrator_current_forward_continuation_deadline_remaining_seconds',
+            (string) ($currentForwardAlerts['NntmuxCurrentForwardContinuationExpired']['expr'] ?? ''),
+        );
+        self::assertStringContainsString(
+            'nntmux_orchestrator_current_forward_continuation_enabled',
+            (string) ($currentForwardAlerts['NntmuxCurrentForwardContinuationDisabledOpen']['expr'] ?? ''),
+        );
+        self::assertStringContainsString(
             'nntmux_orchestrator_current_forward_quarantined_windows',
+            (string) ($currentForwardAlerts['NntmuxCurrentForwardQuarantinedWindow']['expr'] ?? ''),
+        );
+        self::assertStringContainsString(
+            'nntmux_orchestrator_current_forward_last_quarantined_timestamp_seconds',
             (string) ($currentForwardAlerts['NntmuxCurrentForwardQuarantinedWindow']['expr'] ?? ''),
         );
         self::assertSame('critical', $currentForwardAlerts['NntmuxCurrentForwardHalted']['labels']['severity'] ?? null);
         self::assertMatchesRegularExpression(
-            '/:microservices-pods-20260717-cf-refresh-shadow-v172@sha256:[a-f0-9]{64}$/',
+            '/:microservices-pods-20260721-metrics-truth-v189@sha256:36a9484dc9c45dd51db8b78ed11ddf54411eb9a298f061d6e9246fb265026a2c$/',
             (string) ($metrics['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
 
@@ -525,8 +785,18 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('microservices-pods-20260714-nzb-saturated-retry-v147', $backlogEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
         self::assertSame('168', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_HOURS'] ?? null);
         self::assertSame('true', $backlogEnvironment['NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED'] ?? null);
-        self::assertSame('microservices-pods-20260717-cf-refresh-shadow-v172', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame('microservices-pods-20260721-metrics-truth-v189', $metricsEnvironment['NNTMUX_BUILD_VERSION'] ?? null);
+        self::assertSame(
+            'alt.binaries.documentaries,alt.binaries.dvd.movies,alt.binaries.movies.dvd,alt.binaries.hdtv.tv-episodes',
+            $metricsEnvironment['NNTMUX_SPLIT_COLLECTION_RECONCILE_GROUPS'] ?? null,
+        );
+        self::assertSame('true', $metricsEnvironment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_ENABLED'] ?? null);
         self::assertSame('true', $metricsEnvironment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_ENABLED'] ?? null);
+        self::assertSame('true', $metricsEnvironment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_LEDGER_ISSUANCE_ENABLED'] ?? null);
+        self::assertSame(
+            'alt.binaries.teevee:3590755586-3590765585,alt.binaries.tvseries:948898922-948908921',
+            $metricsEnvironment['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_SOURCES'] ?? null,
+        );
         $backlogContract = array_intersect_key($backlogEnvironment, $expected);
         $metricsContract = array_intersect_key($metricsEnvironment, $expected);
         ksort($expected);
@@ -542,9 +812,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame(1, $orchestrator['spec']['replicas'] ?? null);
         $orchestratorImage = (string) ($orchestrator['spec']['template']['spec']['containers'][0]['image'] ?? '');
         $orchestratorBuild = (string) ($environment($orchestrator)['NNTMUX_BUILD_VERSION'] ?? '');
-        self::assertSame('microservices-pods-20260716-auto-current-forward-v160', $orchestratorBuild);
+        self::assertSame('microservices-pods-20260721-metrics-truth-v189', $orchestratorBuild);
         self::assertSame(
-            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:ed90eebf73fa4013156893c2ac287b2f79b0c7af9c5e52505f46c5be56f1b44d',
+            'docker.io/krickwix/nntmux:'.$orchestratorBuild.'@sha256:36a9484dc9c45dd51db8b78ed11ddf54411eb9a298f061d6e9246fb265026a2c',
             $orchestratorImage,
         );
         self::assertSame(
@@ -557,12 +827,20 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_BACKFILL'] ?? null,
         );
         self::assertSame(
-            'alt.binaries.dvd.movies:147218921,alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468,alt.binaries.hdtv.tv-episodes:99610786',
+            'true',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_ENABLED'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.dvd.movies:147218921,alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:65143468,alt.binaries.hdtv.tv-episodes:99610786',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
         self::assertSame(
             'true',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_AUTO_CURRENT_FORWARD'] ?? null,
+        );
+        self::assertSame(
+            'true',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_LEDGER_ISSUANCE_ENABLED'] ?? null,
         );
         $currentForwardWindow = 'alt.binaries.movies.dvd:66163468-66383467@66408646,'
             .'alt.binaries.hdtv.tv-episodes:99760786-99920785@99940788,'
@@ -583,9 +861,32 @@ final class NntmuxDeploymentManifestTest extends TestCase
             $environment($currentForward)['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS'] ?? null,
         );
         self::assertSame(
+            'true',
+            $environment($currentForward)['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_LEDGER_ISSUANCE_ENABLED'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.teevee:3590755586-3590765585,alt.binaries.tvseries:948898922-948908921',
+            $environment($currentForward)['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_SOURCES'] ?? null,
+        );
+        self::assertSame(
             $currentForwardWindow,
             $environment($deployments['nntmux-worker-binaries'])['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS'] ?? null,
         );
+        self::assertSame(
+            'true',
+            $environment($deployments['nntmux-worker-binaries'])['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_LEDGER_ISSUANCE_ENABLED'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.teevee:3590755586-3590765585,alt.binaries.tvseries:948898922-948908921',
+            $environment($deployments['nntmux-worker-binaries'])['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_SOURCES'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.teevee:3590755586-3590765585,alt.binaries.tvseries:948898922-948908921',
+            $environment($orchestrator)['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_SOURCES'] ?? null,
+        );
+        self::assertSame('true', $environment($orchestrator)['NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_STARVATION_ENABLED'] ?? null);
+        self::assertSame('900', $environment($orchestrator)['NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_STARVATION_DWELL_SECONDS'] ?? null);
+        self::assertSame('300', $environment($orchestrator)['NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_BINARIES_SLEEP_SECONDS'] ?? null);
         self::assertSame(
             '4',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_MAX_CHAIN_WINDOWS'] ?? null,
@@ -621,13 +922,17 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $releases = $deployments['nntmux-worker-releases'] ?? null;
         self::assertIsArray($releases);
         self::assertSame(
-            'microservices-pods-20260717-compact-tv-release-recovery-v163',
+            'microservices-pods-20260721-release-yield-v189',
             $environment($releases)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
-            'docker.io/krickwix/nntmux:microservices-pods-20260717-compact-tv-release-recovery-v163@sha256:8a9b54bb40bef31bf52a6681625f357e8fd10c710d8d48969b9692a2fab348bb',
+            'docker.io/krickwix/nntmux:microservices-pods-20260721-release-yield-v189@sha256:f3516461589b5ec6f9ff5a178ec14e0a0d2a23cc26e8df1db56d1d5ab5594a74',
             $releases['spec']['template']['spec']['containers'][0]['image'] ?? null,
         );
+        self::assertSame('25', $environment($releases)['NNTMUX_DISTRIBUTED_RELEASE_PUMP_DEADLINE_SECONDS'] ?? null);
+        self::assertSame('200', $environment($releases)['NNTMUX_DISTRIBUTED_RELEASE_PUMP_BATCH_SIZE'] ?? null);
+        self::assertSame('1', $environment($releases)['NNTMUX_DISTRIBUTED_RELEASE_SWEEP_GROUPS'] ?? null);
+        self::assertSame('5', $environment($releases)['NNTMUX_DISTRIBUTED_CONTROL_SLEEP_SLICE_SECONDS'] ?? null);
         foreach (['nntmux-worker-releases', 'nntmux-worker-hashed-fixnames'] as $imageOwnedMiscWorker) {
             $worker = $deployments[$imageOwnedMiscWorker] ?? null;
             self::assertIsArray($worker);
@@ -649,6 +954,17 @@ final class NntmuxDeploymentManifestTest extends TestCase
             'alt.binaries.documentaries:2000,alt.binaries.hdtv.tv-episodes:2000',
             $environment($releases)['NNTMUX_SPLIT_COLLECTION_XREF_GAP_OVERRIDES'] ?? null,
         );
+        self::assertSame('72', $environment($releases)['NNTMUX_SPLIT_COLLECTION_RECONCILE_LOOKBACK_HOURS'] ?? null);
+        self::assertSame('redis', $environment($releases)['NNTMUX_SPLIT_COLLECTION_RECONCILE_CURSOR_STORE'] ?? null);
+        self::assertSame(
+            'alt.binaries.hdtv.tv-episodes',
+            $environment($releases)['NNTMUX_SPLIT_COLLECTION_DYNAMIC_PAIR_GAP_GROUPS'] ?? null,
+        );
+        self::assertSame(
+            'alt.binaries.hdtv.tv-episodes',
+            $environment($releases)['NNTMUX_SPLIT_COLLECTION_TERMINAL_PAIR_REPAIR_GROUPS'] ?? null,
+        );
+        self::assertSame('3', $environment($releases)['NNTMUX_SPLIT_COLLECTION_TERMINAL_PAIR_REPAIR_ROOTS'] ?? null);
         self::assertSame(
             'alt.binaries.tvseries',
             $environment($releases)['NNTMUX_ORCHESTRATOR_BACKFILL_TV_COMPLETE_SERIES_GROUPS'] ?? null,
@@ -783,9 +1099,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
             '7200',
             $environment($orchestrator)['NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_LATEST_SAMPLE_SECONDS'] ?? null,
         );
-        $v166Image = 'docker.io/krickwix/nntmux:microservices-pods-20260717-responsive-backfill-v166@sha256:822468ce92daec60fb9e63d36be32ba58bc2c9ec3b45b32d405db516aeb23a9c';
+        $sustainableBackfillImage = 'docker.io/krickwix/nntmux:microservices-pods-20260720-sustainable-backfill-v188@sha256:9162bcefa4e5e0f7b6c0690d1e05c26ede86e938900dd2f8efda36dd20468a0a';
         self::assertSame(
-            $v166Image,
+            $sustainableBackfillImage,
             (string) ($deployments['nntmux-worker-backfill']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
@@ -793,9 +1109,14 @@ final class NntmuxDeploymentManifestTest extends TestCase
             (string) ($deployments['nntmux-worker-nzb-backlog']['spec']['template']['spec']['containers'][0]['image'] ?? ''),
         );
         self::assertSame(
-            'alt.binaries.dvd.movies:147218921,alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:66033468,alt.binaries.hdtv.tv-episodes:99610786',
+            'alt.binaries.dvd.movies:147218921,alt.binaries.tvseries:948528922,alt.binaries.movies.dvd:65143468,alt.binaries.hdtv.tv-episodes:99610786',
             $environment($deployments['nntmux-worker-backfill'])['NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS'] ?? null,
         );
+        self::assertSame(
+            'true',
+            $environment($deployments['nntmux-worker-backfill'])['NNTMUX_ORCHESTRATOR_REQUIRE_BACKFILL_PERMIT'] ?? null,
+        );
+        self::assertSame(0, $deployments['nntmux-worker-per-group']['spec']['replicas'] ?? null);
         self::assertArrayNotHasKey('serviceAccountName', $orchestrator['spec']['template']['spec'] ?? []);
 
         foreach ($deployments as $name => $deployment) {

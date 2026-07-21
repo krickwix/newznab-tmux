@@ -57,12 +57,14 @@ class PredbImportSrrdbCrcs extends Command
             if (! $response->successful()) {
                 $this->warn(sprintf('srrDB details failed for %s: HTTP %d', $pre->title, $response->status()));
                 $this->sleepBetweenRequests($sleepMs);
+
                 continue;
             }
 
             $files = $response->json('files');
             if (! is_array($files)) {
                 $this->sleepBetweenRequests($sleepMs);
+
                 continue;
             }
 

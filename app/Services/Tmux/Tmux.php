@@ -6,6 +6,7 @@ namespace App\Services\Tmux;
 
 use App\Models\Category;
 use App\Models\Settings;
+use App\Services\Movies\MovieLookupState;
 use App\Services\NameFixing\NameFixingService;
 use App\Services\NfoService;
 use Illuminate\Support\Carbon;
@@ -313,7 +314,8 @@ class Tmux
 
         switch ((int) $qry) {
             case 1:
-                $movieLookupSql = imdb_id_needs_lookup_sql('imdbid');
+                $movieLookupSql = '('.imdb_id_needs_lookup_sql('imdbid').' OR '.movieinfo_needs_repair_sql('imdbid', 'movieinfo_id').')'
+                    .' AND '.app(MovieLookupState::class)->eligibilitySql('releases');
                 $lookupMovies = (int) Settings::settingValue('lookupimdb');
 
                 if ($lookupMovies <= 0) {

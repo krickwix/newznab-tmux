@@ -42,6 +42,15 @@ class TmuxMonitorService
         'orchestrator_nzb_limit' => 'orchestrator_nzb_limit',
     ];
 
+    /** @var array<string, string> */
+    private const array RELEASE_CONTROL_SETTINGS = [
+        'releases_run' => 'releases_run',
+        'orchestrator_mode' => 'orchestrator_mode',
+        'orchestrator_lease_until' => 'orchestrator_lease_until',
+        'orchestrator_rel_timer' => 'orchestrator_rel_timer',
+        'exit' => 'exit',
+    ];
+
     protected Tmux $tmux;
 
     /**
@@ -233,6 +242,27 @@ class TmuxMonitorService
 
         $this->runVar['settings'] = array_replace($this->runVar['settings'] ?? [], $settings);
         $this->runVar['nzb_controls_fresh'] = count($settings) === count(self::NZB_CONTROL_SETTINGS);
+
+        return $this->runVar;
+    }
+
+    /**
+     * Refresh only the controls that can shorten or stop release-worker sleep.
+     *
+     * @return array<string, mixed>
+     */
+    public function refreshReleaseControlSettings(): array
+    {
+        $settings = Settings::query()
+            ->whereIn('name', array_keys(self::RELEASE_CONTROL_SETTINGS))
+            ->get()
+            ->mapWithKeys(static fn (Settings $setting): array => [
+                self::RELEASE_CONTROL_SETTINGS[$setting->name] => Settings::convertValue($setting->getRawOriginal('value')),
+            ])
+            ->toArray();
+
+        $this->runVar['settings'] = array_replace($this->runVar['settings'] ?? [], $settings);
+        $this->runVar['release_controls_fresh'] = \count($settings) === \count(self::RELEASE_CONTROL_SETTINGS);
 
         return $this->runVar;
     }

@@ -8,6 +8,7 @@ use App\Models\Settings;
 use App\Services\Distributed\CurrentForwardPermitGate;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 class WorkerOrchestrator
@@ -26,6 +27,7 @@ class WorkerOrchestrator
         private readonly DistributedWorkerTelemetry $workerTelemetry = new DistributedWorkerTelemetry,
         private readonly AdaptiveWorkerControlPlanner $adaptiveControls = new AdaptiveWorkerControlPlanner,
         private readonly ?CurrentForwardPermitGate $currentForwardPermits = null,
+        private readonly ?CurrentForwardRefreshSettlement $currentForwardSettlement = null,
     ) {}
 
     /** @return array<string, mixed> */
@@ -40,6 +42,13 @@ class WorkerOrchestrator
         $delayedAttributionQueued = false;
         $delayedAttributionSettled = null;
         $delayedAttributionEarlyQualityLock = false;
+        $currentForwardSettlement = [
+            'status' => 'none',
+            'reason' => $shadow ? 'shadow_mode' : 'not_evaluated',
+            'generation' => 0,
+            'ready_nzbs' => 0,
+        ];
+        $currentForwardSettlementTransitioned = false;
         $currentForward = [
             'granted' => false,
             'reason' => $requestCurrentForward ? 'current_forward_not_evaluated' : 'not_requested',
@@ -57,6 +66,16 @@ class WorkerOrchestrator
             $acquired = true;
             $previous = $this->store->previousSnapshot();
             $snapshot = $this->snapshots->capture($previous);
+            if (! $shadow) {
+                $currentForwardSettlement = ($this->currentForwardSettlement
+                    ?? new CurrentForwardRefreshSettlement($this->snapshots))
+                    ->settle($snapshot, time());
+                $currentForwardSettlementTransitioned = in_array(
+                    (string) ($currentForwardSettlement['status'] ?? 'none'),
+                    ['productive', 'quarantined', 'continuation'],
+                    true,
+                );
+            }
             $permitObservation = $this->store->permitObservation();
             if (! $shadow
                 && $permitObservation === null
@@ -93,6 +112,8 @@ class WorkerOrchestrator
             $permitCompleted = $permitClaimed
                 && $hasCohortBaseline
                 && (int) Settings::settingValue('orchestrator_bf_completed') === (int) $permitObservation['generation'];
+            $permitFailed = $permitClaimed
+                && (int) Settings::settingValue('orchestrator_bf_failed') === (int) $permitObservation['generation'];
             if ($permitCompleted && ! isset($permitObservation['completed_observed_at'])) {
                 $permitObservation = $this->store->observePermitCompletion(
                     (int) $permitObservation['generation'],
@@ -250,7 +271,8 @@ class WorkerOrchestrator
                 $queuedContextQualityFailure = $delayedAttributionQueued
                     && ($pendingContextContinuation || $rootAttributionReplay || $continuationAttributionReplay)
                     && $cohortQuality['failure'] !== null;
-                $closeObservation = $cohortQuality['failure'] !== null
+                $closeObservation = $permitFailed
+                    || $cohortQuality['failure'] !== null
                     || (! $cohortQuality['hold'] && (
                         $observationExpired
                         || ($permitCompleted && $cursorMoved && $cohortQuality['productive'] > 0 && $snapshot->eligibleNzbs === 0)
@@ -284,7 +306,7 @@ class WorkerOrchestrator
                         ? $this->applier->revokePermit()
                         : $this->applier->qualityLockBackfillTarget($observedGroup, $cohortQuality['failure']);
                 }
-                if ($closeObservation && ! $shadow && ! $abandonedPermit && ! $delayedAttributionQueued && $permitClaimed && $hasCohortBaseline) {
+                if ($closeObservation && ! $permitFailed && ! $shadow && ! $abandonedPermit && ! $delayedAttributionQueued && $permitClaimed && $hasCohortBaseline) {
                     if ($this->shouldRememberIncompleteReleaseCohort(
                         $permitObservation,
                         $permitCompleted,
@@ -337,6 +359,7 @@ class WorkerOrchestrator
                     }
                 }
                 if ($closeObservation
+                    && ! $permitFailed
                     && ! $shadow
                     && ! $abandonedPermit
                     && (! $delayedAttributionQueued || $queuedContextProgress || $queuedContextQualityFailure)
@@ -364,13 +387,16 @@ class WorkerOrchestrator
                 backfillAttributionPending: $this->store->pendingBackfillDelayedAttributionGroups() !== [],
             );
             $generation = null;
+            $backfillPermitGranted = false;
             $autoGrant = ! $shadow
                 && (bool) config('nntmux.orchestrator.auto_backfill', false)
                 && $decision->backfillPermitted
                 && $permitObservation === null
                 && $delayedAttributionSettled === null
                 && (int) Settings::settingValue('orchestrator_bf_permit') === 0;
-            $issuePermit = ($grantPermit || $autoGrant) && $delayedAttributionSettled === null;
+            $issuePermit = ($grantPermit || $autoGrant)
+                && $delayedAttributionSettled === null
+                && ! $currentForwardSettlementTransitioned;
             $backfillQuantity = $decision->profile->quantityForYield(
                 $snapshot->backfillYieldNzbsPer10k,
                 $snapshot->backfillRemainingArticles,
@@ -404,7 +430,12 @@ class WorkerOrchestrator
                         $snapshot->backfillGroup,
                         $preserveUnclaimedPermit,
                     );
-                if ($issuePermit && $decision->backfillPermitted) {
+                $backfillPermitGranted = $issuePermit
+                    && $decision->backfillPermitted
+                    && (int) $generation > 0
+                    && (! Schema::hasTable('current_forward_windows')
+                        || (int) Settings::settingValue('orchestrator_bf_permit') === (int) $generation);
+                if ($backfillPermitGranted) {
                     $this->store->beginPermitObservation(
                         $snapshot,
                         $generation,
@@ -417,7 +448,9 @@ class WorkerOrchestrator
                     }
                 }
                 if ($requestCurrentForward) {
-                    if ($decision->transitioned) {
+                    if ($currentForwardSettlementTransitioned) {
+                        $currentForward['reason'] = 'current_forward_settlement_transition_hold';
+                    } elseif ($decision->transitioned) {
                         $currentForward['reason'] = 'controller_profile_settling';
                     } elseif ($permitObservation !== null || $this->store->pendingBackfillDelayedAttributionGroups() !== []) {
                         $currentForward['reason'] = 'backfill_attribution_in_progress';
@@ -447,8 +480,9 @@ class WorkerOrchestrator
                     'nzb_batch_size' => $decision->profile->nzbBatchSize,
                 ],
                 'backfill_permitted' => $decision->backfillPermitted,
-                'permit_granted' => ! $shadow && $issuePermit && $decision->backfillPermitted,
+                'permit_granted' => ! $shadow && $backfillPermitGranted,
                 'current_forward' => $currentForward,
+                'current_forward_settlement' => $currentForwardSettlement,
                 'reasons' => [
                     ...$decision->reasons,
                     ...($preserveUnclaimedPermit ? ['backfill_permit_claim_grace'] : []),
@@ -466,6 +500,20 @@ class WorkerOrchestrator
                     'recovery_sources' => $snapshot->bodyRecoverySourceBacklog,
                     'releases' => $snapshot->releasesBacklog,
                     'nzbs' => $snapshot->nzbsBacklog,
+                ],
+                'schedulable_backlogs' => [
+                    'parts' => $snapshot->schedulablePartsBacklog(),
+                    'binaries' => $snapshot->schedulableBinariesBacklog(),
+                    'collections' => $snapshot->schedulableCollectionsBacklog(),
+                    'releases' => $snapshot->releasesBacklog,
+                    'nzbs' => $snapshot->eligibleNzbs,
+                ],
+                'qualified_supply' => [
+                    'starved' => $decision->nextState->qualifiedSupplyStarved,
+                    'candidate_since' => $decision->nextState->qualifiedSupplyCandidateSince,
+                    'starved_since' => $decision->nextState->qualifiedSupplyStarvedSince,
+                    'recovery_samples' => $decision->nextState->qualifiedSupplyRecoverySamples,
+                    'release_yield_per_minute' => $snapshot->releaseYieldPerMinute,
                 ],
                 'collection_backlogs' => [
                     'total' => $snapshot->physicalCollectionsBacklog(),
@@ -502,7 +550,7 @@ class WorkerOrchestrator
                     'group' => $snapshot->backfillGroup,
                     'cursor' => $snapshot->backfillCursor,
                     'yield_nzbs_per_10k' => $snapshot->backfillYieldNzbsPer10k,
-                    'quantity' => $issuePermit && $decision->backfillPermitted ? $backfillQuantity : 0,
+                    'quantity' => $backfillPermitGranted ? $backfillQuantity : 0,
                     'safe_quantity' => $snapshot->backfillSafeQuantity,
                 ],
                 'delayed_attribution' => [

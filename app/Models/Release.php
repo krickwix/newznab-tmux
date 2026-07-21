@@ -190,7 +190,7 @@ class Release extends Model
      *
      * @throws \Exception
      */
-    public static function insertRelease(array $parameters = [])
+    public static function insertRelease(array $parameters = [], bool $syncSearch = true)
     {
         $passwordStatus = config('nntmux_settings.check_passworded_rars') === true ? -1 : 0;
         $parameters['id'] = self::query()
@@ -218,7 +218,9 @@ class Release extends Model
                 ]
             );
 
-        Search::updateRelease($parameters['id']);
+        if ($syncSearch) {
+            Search::updateRelease($parameters['id']);
+        }
 
         return $parameters['id'];
     }

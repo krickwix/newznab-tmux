@@ -134,7 +134,7 @@
                                 @if($guid)
                                     <a href="{{ url('/details/' . $guid) }}" class="block">
                                         @if(!empty($result->cover))
-                                            <img src="{{ url('/covers/music/' . $result->cover) }}"
+                                            <img src="{{ url('/covers/music/' . $result->id . '.jpg') }}"
                                                  alt="{{ $result->artist ?? '' }} - {{ $result->title ?? '' }}"
                                                  class="w-32 h-48 object-cover"
                                                  data-fallback-src="{{ url('/images/no-cover.png') }}">
@@ -268,4 +268,3 @@
 
 {{-- NFO modal is included globally via layouts.main --}}
 @endsection
-

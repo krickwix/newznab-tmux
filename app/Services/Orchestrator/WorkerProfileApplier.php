@@ -6,6 +6,7 @@ namespace App\Services\Orchestrator;
 
 use App\Models\Settings;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class WorkerProfileApplier
 {
@@ -22,10 +23,24 @@ class WorkerProfileApplier
         ?int $backfillQuantity = null,
     ): int {
         return DB::transaction(function () use ($decision, $now, $grantPermit, $backfillGroup, $preserveUnclaimedPermit, $backfillQuantity): int {
-            $generation = (int) Settings::query()
-                ->where('name', 'orchestrator_generation')
+            $lockedSettings = Settings::query()
+                ->whereIn('name', [
+                    'orchestrator_generation',
+                    'orchestrator_bf_permit',
+                    'orchestrator_bf_claimed',
+                    'orchestrator_bf_completed',
+                    'orchestrator_bf_failed',
+                    'orchestrator_bf_group',
+                    'orchestrator_bf_qty',
+                    'orchestrator_bf_stop',
+                ])
+                ->orderBy('name')
                 ->lockForUpdate()
-                ->value('value') + 1;
+                ->get()
+                ->mapWithKeys(fn (Settings $setting): array => [
+                    $setting->name => $setting->getRawOriginal('value'),
+                ]);
+            $generation = (int) $lockedSettings->get('orchestrator_generation', 0) + 1;
 
             $profile = $decision->profile;
             $hardRecoveryCooldownSatisfied = in_array(
@@ -39,34 +54,26 @@ class WorkerProfileApplier
                     || $hardRecoveryCooldownSatisfied);
             $acceleratedRecovery = $safeHighPressureRecovery
                 && in_array('core_pipeline_draining', $decision->reasons, true);
-            $existingPermit = (int) Settings::query()
-                ->where('name', 'orchestrator_bf_permit')
-                ->lockForUpdate()
-                ->value('value');
-            $existingClaimed = (int) Settings::query()
-                ->where('name', 'orchestrator_bf_claimed')
-                ->lockForUpdate()
-                ->value('value');
-            $existingCompleted = (int) Settings::query()
-                ->where('name', 'orchestrator_bf_completed')
-                ->lockForUpdate()
-                ->value('value');
-            $existingGroup = (string) Settings::query()
-                ->where('name', 'orchestrator_bf_group')
-                ->lockForUpdate()
-                ->value('value');
-            $existingPinnedQuantity = (int) Settings::query()
-                ->where('name', 'orchestrator_bf_qty')
-                ->lockForUpdate()
-                ->value('value');
-            $existingPinnedStop = (int) Settings::query()
-                ->where('name', 'orchestrator_bf_stop')
-                ->lockForUpdate()
-                ->value('value');
+            $existingPermit = (int) $lockedSettings->get('orchestrator_bf_permit', 0);
+            $existingClaimed = (int) $lockedSettings->get('orchestrator_bf_claimed', 0);
+            $existingCompleted = (int) $lockedSettings->get('orchestrator_bf_completed', 0);
+            $existingFailed = (int) $lockedSettings->get('orchestrator_bf_failed', 0);
+            $existingGroup = (string) $lockedSettings->get('orchestrator_bf_group', '');
+            $existingPinnedQuantity = (int) $lockedSettings->get('orchestrator_bf_qty', 0);
+            $existingPinnedStop = (int) $lockedSettings->get('orchestrator_bf_stop', 0);
+            $currentForwardUnsettled = Schema::hasTable('current_forward_windows')
+                && DB::table('current_forward_windows')
+                    ->whereIn('state', ['OFFERED', 'CLAIMED', 'INGESTED', 'ATTRIBUTING', 'CONTINUATION_PENDING'])
+                    ->exists();
+            if ($currentForwardUnsettled) {
+                $grantPermit = false;
+                $preserveUnclaimedPermit = false;
+            }
+            $backfillAdmissionOpen = $decision->backfillPermitted && ! $currentForwardUnsettled;
             $backfillStop = $grantPermit && $backfillGroup !== null
                 ? ((new BackfillStopCursorPolicy)->stopCursor($backfillGroup) ?? 0)
                 : $existingPinnedStop;
-            $permit = ($decision->backfillPermitted || $preserveUnclaimedPermit)
+            $permit = ($backfillAdmissionOpen || $preserveUnclaimedPermit)
                 ? ($grantPermit ? $generation : $existingPermit)
                 : 0;
             $values = [
@@ -85,10 +92,11 @@ class WorkerProfileApplier
                 'orchestrator_rel_timer' => (string) $profile->releasesSleepSeconds,
                 'orchestrator_nzb_timer' => (string) $profile->nzbSleepSeconds,
                 'orchestrator_nzb_limit' => (string) $profile->nzbBatchSize,
-                'orchestrator_bf_paused' => $decision->backfillPermitted ? '0' : '1',
+                'orchestrator_bf_paused' => $backfillAdmissionOpen ? '0' : '1',
                 'orchestrator_bf_permit' => (string) $permit,
                 'orchestrator_bf_claimed' => $grantPermit ? '0' : (string) $existingClaimed,
                 'orchestrator_bf_completed' => $grantPermit ? '0' : (string) $existingCompleted,
+                'orchestrator_bf_failed' => $grantPermit ? '0' : (string) $existingFailed,
                 'orchestrator_bf_group' => $grantPermit ? (string) $backfillGroup : $existingGroup,
                 'orchestrator_bf_qty' => (string) ($grantPermit
                     ? max(10000, $backfillQuantity ?? $profile->backfillQuantity)

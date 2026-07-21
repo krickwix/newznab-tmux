@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Distributed\BackfillExecutionGuard;
 use App\Services\ForkingService;
 use Illuminate\Console\Command;
 
@@ -15,7 +16,8 @@ class ProcessSafe extends Command
      * @var string
      */
     protected $signature = 'multiprocessing:safe
-                            {type : Type: binaries or backfill}';
+                            {type : Type: binaries or backfill}
+                            {--backfill-generation= : Claimed orchestrator backfill generation}';
 
     /**
      * The console command description.
@@ -42,10 +44,20 @@ class ProcessSafe extends Command
 
         try {
             $service = new ForkingService;
+            $generationOption = $this->option('backfill-generation');
+            $generation = is_numeric($generationOption) && (int) $generationOption > 0
+                ? (int) $generationOption
+                : null;
+            if ($type === 'backfill'
+                && (new BackfillExecutionGuard)->enforcementEnabled()
+                && $generation === null
+            ) {
+                (new BackfillExecutionGuard)->assertLegacyCommandAllowed('multiprocessing:safe backfill');
+            }
 
             match ($type) {
                 'binaries' => $service->safeBinaries(),
-                'backfill' => $service->safeBackfill(),
+                'backfill' => $service->safeBackfill($generation),
             };
 
             return self::SUCCESS;

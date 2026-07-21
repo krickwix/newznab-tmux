@@ -74,6 +74,11 @@ final readonly class PipelineSnapshot
         public int $databaseRowLockHardBreachAt = 0,
         public int $databaseCurrentWaitStartedAt = 0,
         public bool $databaseAdmissionSafe = true,
+        public ?int $schedulablePartsBacklog = null,
+        public ?int $schedulableBinariesBacklog = null,
+        public ?int $schedulableCollectionsBacklog = null,
+        public float $releaseYieldPerMinute = 0.0,
+        public int $releaseCreatedTotal = 0,
     ) {}
 
     public function withPermitOutcome(
@@ -152,6 +157,11 @@ final readonly class PipelineSnapshot
             databaseRowLockHardBreachAt: $this->databaseRowLockHardBreachAt,
             databaseCurrentWaitStartedAt: $this->databaseCurrentWaitStartedAt,
             databaseAdmissionSafe: $this->databaseAdmissionSafe,
+            schedulablePartsBacklog: $this->schedulablePartsBacklog,
+            schedulableBinariesBacklog: $this->schedulableBinariesBacklog,
+            schedulableCollectionsBacklog: $this->schedulableCollectionsBacklog,
+            releaseYieldPerMinute: $this->releaseYieldPerMinute,
+            releaseCreatedTotal: $this->releaseCreatedTotal,
         );
     }
 
@@ -183,11 +193,45 @@ final readonly class PipelineSnapshot
             && $this->backfillSafeQuantity >= 10_000;
     }
 
+    /**
+     * Backfill safety gates for the qualified-supply cold-start probe. This is
+     * the same as backfillGatesPassed() EXCEPT it omits currentGroupsAvailable,
+     * which is a current-forward freshness signal (are there >10k unfetched NEW
+     * server articles). Backfill fetches OLDER missing parts of already-indexed
+     * collections, so it must not be blocked by the absence of fresh forward
+     * content. All real safety gates (DB admission, provider/cursor, eligible
+     * backfill supply, safe quantity) are still enforced.
+     */
+    public function backfillColdStartGatesPassed(): bool
+    {
+        return $this->databaseAdmissionSafe
+            && $this->databaseCurrentWaits === 0
+            && $this->providerAvailable
+            && $this->cursorAvailable
+            && $this->eligibleBackfillSupply
+            && $this->backfillSafeQuantity >= 10_000;
+    }
+
     public function physicalCollectionsBacklog(): int
     {
         return $this->collectionsTotalBacklog > 0
             ? $this->collectionsTotalBacklog
             : $this->collectionsBacklog;
+    }
+
+    public function schedulablePartsBacklog(): int
+    {
+        return $this->schedulablePartsBacklog ?? $this->partsBacklog;
+    }
+
+    public function schedulableBinariesBacklog(): int
+    {
+        return $this->schedulableBinariesBacklog ?? $this->binariesBacklog;
+    }
+
+    public function schedulableCollectionsBacklog(): int
+    {
+        return $this->schedulableCollectionsBacklog ?? $this->collectionsBacklog;
     }
 
     private function hasNegativeBacklog(): bool
@@ -196,6 +240,10 @@ final readonly class PipelineSnapshot
             || $this->binariesBacklog < 0
             || $this->collectionsBacklog < 0
             || $this->collectionsTotalBacklog < 0
+            || ($this->schedulablePartsBacklog !== null && $this->schedulablePartsBacklog < 0)
+            || ($this->schedulableBinariesBacklog !== null && $this->schedulableBinariesBacklog < 0)
+            || ($this->schedulableCollectionsBacklog !== null && $this->schedulableCollectionsBacklog < 0)
+            || $this->releaseYieldPerMinute < 0
             || $this->bodyRecoverySourceBacklog < 0
             || $this->releasesBacklog < 0
             || $this->nzbsBacklog < 0;

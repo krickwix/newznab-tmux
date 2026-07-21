@@ -74,6 +74,30 @@ final class BackfillRunnerTest extends TestCase
         ], $queues);
     }
 
+    public function test_permit_quantity_is_a_total_generation_budget_not_a_per_thread_multiplier(): void
+    {
+        $runner = new class extends BackfillRunner
+        {
+            /** @return array{0: array<string, string>, 1: array<string, string>} */
+            public function queues(object $group): array
+            {
+                return $this->buildSafeBackfillQueues([$group], 20_000, 10_000, 3, 10_000);
+            }
+        };
+
+        [$queues] = $runner->queues((object) [
+            'name' => 'alt.permitted',
+            'our_first' => 100_000,
+            'their_first' => 1,
+            'their_last' => 1_000_000,
+        ]);
+
+        self::assertSame([
+            'alt.permitted#1' => 'get_range  backfill  alt.permitted  90000  99999  1',
+            'alt.permitted#2' => 'get_range  backfill  alt.permitted  80000  89999  2',
+        ], $queues);
+    }
+
     public function test_safe_backfill_execution_cannot_cross_a_configured_source_stop_cursor(): void
     {
         config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.tv:948528922');

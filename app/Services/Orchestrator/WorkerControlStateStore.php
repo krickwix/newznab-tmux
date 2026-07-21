@@ -63,6 +63,12 @@ class WorkerControlStateStore
             recoveryDrainSamples: max(0, (int) ($data['recovery_drain_samples'] ?? 0)),
             recoveryDrainHoldSamples: max(0, (int) ($data['recovery_drain_hold_samples'] ?? 0)),
             processedBackfillPermitGenerations: $this->processedPermitGenerations($data['processed_permit_generations'] ?? []),
+            qualifiedSupplyStarved: (bool) ($data['qualified_supply_starved'] ?? false),
+            qualifiedSupplyCandidateSince: max(0, (int) ($data['qualified_supply_candidate_since'] ?? 0)),
+            qualifiedSupplyStarvedSince: max(0, (int) ($data['qualified_supply_starved_since'] ?? 0)),
+            qualifiedSupplyLastObservedAt: max(0, (int) ($data['qualified_supply_last_observed_at'] ?? 0)),
+            qualifiedSupplyRecoverySamples: max(0, (int) ($data['qualified_supply_recovery_samples'] ?? 0)),
+            qualifiedSupplyColdStartAt: max(0, (int) ($data['qualified_supply_cold_start_at'] ?? 0)),
         );
     }
 
@@ -83,6 +89,12 @@ class WorkerControlStateStore
             'recovery_drain_samples' => $state->recoveryDrainSamples,
             'recovery_drain_hold_samples' => $state->recoveryDrainHoldSamples,
             'processed_permit_generations' => array_slice($state->processedBackfillPermitGenerations, -64),
+            'qualified_supply_starved' => $state->qualifiedSupplyStarved,
+            'qualified_supply_candidate_since' => $state->qualifiedSupplyCandidateSince,
+            'qualified_supply_starved_since' => $state->qualifiedSupplyStarvedSince,
+            'qualified_supply_last_observed_at' => $state->qualifiedSupplyLastObservedAt,
+            'qualified_supply_recovery_samples' => $state->qualifiedSupplyRecoverySamples,
+            'qualified_supply_cold_start_at' => $state->qualifiedSupplyColdStartAt,
         ]);
     }
 
@@ -137,14 +149,20 @@ class WorkerControlStateStore
     public function storeSnapshot(PipelineSnapshot $snapshot): void
     {
         $value = [
-            'schema_version' => 3,
-            'parts' => $snapshot->partsBacklog,
-            'binaries' => $snapshot->binariesBacklog,
-            'collections' => $snapshot->collectionsBacklog,
+            'schema_version' => 5,
+            'parts' => $snapshot->schedulablePartsBacklog(),
+            'binaries' => $snapshot->schedulableBinariesBacklog(),
+            'collections' => $snapshot->schedulableCollectionsBacklog(),
             'collections_total' => $snapshot->physicalCollectionsBacklog(),
             'recovery_sources' => $snapshot->bodyRecoverySourceBacklog,
             'releases' => $snapshot->releasesBacklog,
             'nzbs' => $snapshot->nzbsBacklog,
+            'physical_parts' => $snapshot->partsBacklog,
+            'physical_binaries' => $snapshot->binariesBacklog,
+            'physical_collections' => $snapshot->physicalCollectionsBacklog(),
+            'release_total' => $snapshot->releaseTotal,
+            'release_created_total' => $snapshot->releaseCreatedTotal,
+            'release_yield_per_minute' => $snapshot->releaseYieldPerMinute,
             'database_deadlocks' => $snapshot->databaseDeadlocks,
             'database_current_waits' => $snapshot->databaseCurrentWaits,
             'database_row_lock_waits' => $snapshot->databaseRowLockWaits,

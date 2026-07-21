@@ -7,10 +7,11 @@ namespace App\Console\Commands;
 use App\Models\Settings;
 use App\Models\UsenetGroup;
 use App\Services\Binaries\BinariesService;
+use App\Services\Distributed\BackfillExecutionGuard;
 use App\Services\Distributed\CurrentForwardPermitGate;
 use App\Services\NNTP\NntpArticleDate;
 use App\Services\NNTP\NNTPService;
-use App\Services\Orchestrator\CurrentForwardStopCursorPolicy;
+use App\Services\Orchestrator\CurrentForwardRefreshTrustPolicy;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -27,6 +28,7 @@ class GetArticleRange extends Command
                             {group : Group name}
                             {first : First article number}
                             {last : Last article number}
+                            {--backfill-generation= : Claim one exact orchestrator backfill range}
                             {--current-forward-generation= : Claim one exact orchestrator current-forward permit}';
 
     /**
@@ -47,15 +49,21 @@ class GetArticleRange extends Command
         $lastArticle = (int) $this->argument('last');
         $generationOption = $this->option('current-forward-generation');
         $currentForward = is_numeric($generationOption) && (int) $generationOption > 0;
+        $backfillGenerationOption = $this->option('backfill-generation');
+        $managedBackfillGeneration = is_numeric($backfillGenerationOption) && (int) $backfillGenerationOption > 0
+            ? (int) $backfillGenerationOption
+            : null;
         $claimedGeneration = null;
         $permitGate = null;
+        $backfillGuard = null;
+        $backfillReceiptId = 0;
 
         if (! \in_array($mode, ['binaries', 'backfill'], true)) {
             $this->error('Mode must be either "binaries" or "backfill".');
 
             return self::FAILURE;
         }
-        if ((new CurrentForwardStopCursorPolicy)->protects((string) $groupName) && ! $currentForward) {
+        if ((new CurrentForwardRefreshTrustPolicy)->protects((string) $groupName) && ! $currentForward) {
             $this->error("Group {$groupName} requires an exact current-forward permit.");
 
             return self::FAILURE;
@@ -65,8 +73,27 @@ class GetArticleRange extends Command
 
             return self::FAILURE;
         }
+        if ($mode !== 'backfill' && $backfillGenerationOption !== null) {
+            $this->error('Backfill generation may be used only in backfill mode.');
+
+            return self::FAILURE;
+        }
 
         try {
+            if ($mode === 'backfill') {
+                $backfillGuard = app(BackfillExecutionGuard::class);
+                if ($backfillGuard->enforcementEnabled() && $managedBackfillGeneration === null) {
+                    $backfillGuard->assertLegacyCommandAllowed('articles:get-range backfill');
+                }
+                if ($managedBackfillGeneration !== null) {
+                    $backfillReceiptId = $backfillGuard->claimRange(
+                        $managedBackfillGeneration,
+                        (string) $groupName,
+                        $firstArticle,
+                        $lastArticle,
+                    );
+                }
+            }
             if ($currentForward) {
                 if ($mode !== 'binaries') {
                     throw new \RuntimeException('Current-forward permits require binaries mode.');
@@ -100,6 +127,9 @@ class GetArticleRange extends Command
             if ($currentForward && $selectedRange !== [$firstArticle, $lastArticle]) {
                 throw new \RuntimeException('Provider range would clamp or omit the exact current-forward window.');
             }
+            if ($managedBackfillGeneration !== null && $selectedRange !== [$firstArticle, $lastArticle]) {
+                throw new \RuntimeException('Provider range would clamp or omit the exact managed backfill interval.');
+            }
             if ($selectedRange === null) {
                 $this->info("Requested range {$firstArticle}-{$lastArticle} is outside the selected provider range");
 
@@ -115,11 +145,16 @@ class GetArticleRange extends Command
                 $lastArticle,
                 ((int) Settings::settingValue('safepartrepair') === 1 ? 'update' : 'backfill'),
                 currentForwardPermit: $currentForward,
+                currentForwardGeneration: $claimedGeneration,
+                failOnStorageError: $currentForward || $managedBackfillGeneration !== null,
             );
 
             if (empty($return)) {
                 if ($currentForward) {
                     throw new \RuntimeException('Provider returned no usable headers for the exact current-forward window.');
+                }
+                if ($managedBackfillGeneration !== null) {
+                    throw new \RuntimeException('Provider returned no usable headers for the exact managed backfill interval.');
                 }
 
                 return self::SUCCESS;
@@ -135,11 +170,17 @@ class GetArticleRange extends Command
             if ($currentForward && ! $permitGate->complete((int) $claimedGeneration)) {
                 throw new \RuntimeException('Current-forward cursor completion receipt could not be recorded.');
             }
+            if ($backfillReceiptId > 0 && ! $backfillGuard?->completeRange($backfillReceiptId)) {
+                throw new \RuntimeException('Backfill range completion receipt could not be recorded.');
+            }
 
             return self::SUCCESS;
         } catch (\Throwable $e) {
             if ($claimedGeneration !== null && $permitGate !== null) {
                 $permitGate->fail($claimedGeneration, $e->getMessage());
+            }
+            if ($backfillReceiptId > 0 && $backfillGuard !== null) {
+                $backfillGuard->failRange($backfillReceiptId, $e->getMessage());
             }
             Log::error($e->getTraceAsString());
             $this->error($e->getMessage());

@@ -8,7 +8,7 @@ use App\Models\Settings;
 use App\Models\UsenetGroup;
 use App\Services\NNTP\NntpArticleDate;
 use App\Services\NNTP\NNTPService;
-use App\Services\Orchestrator\CurrentForwardStopCursorPolicy;
+use App\Services\Orchestrator\CurrentForwardRefreshTrustPolicy;
 use DariusIII\NetNntp\Error;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -333,9 +333,11 @@ class BinariesService
         string $type = 'update',
         ?array $missingParts = null,
         bool $currentForwardPermit = false,
+        ?int $currentForwardGeneration = null,
+        bool $failOnStorageError = false,
     ): array {
         $groupName = trim((string) ($groupMySQL['name'] ?? ''));
-        if ((new CurrentForwardStopCursorPolicy)->protects($groupName) && ! $currentForwardPermit) {
+        if ((new CurrentForwardRefreshTrustPolicy)->protects($groupName) && ! $currentForwardPermit) {
             throw new \RuntimeException("Group {$groupName} requires an exact current-forward permit.");
         }
         $this->startLoop = Carbon::now();
@@ -417,8 +419,12 @@ class BinariesService
                     $parseResult['headers'],
                     $groupMySQL,
                     $addToPartRepair || $partRepair,
+                    $currentForwardGeneration,
                 );
             } catch (\Throwable $e) {
+                if ($currentForwardGeneration !== null || $failOnStorageError) {
+                    throw $e;
+                }
                 $storageSucceeded = false;
                 $headersNotInserted = array_values(array_filter(array_map(
                     static fn (array $header): mixed => $header['Number'] ?? null,

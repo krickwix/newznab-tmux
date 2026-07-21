@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Services\Orchestrator;
 
 use App\Services\NNTP\NNTPService;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 use Throwable;
 
@@ -96,11 +98,12 @@ final readonly class CurrentForwardRefreshAuditor
 
         $providerFirst = (int) ($summary['first'] ?? 0);
         $providerHigh = (int) ($summary['last'] ?? 0);
-        if ($providerFirst <= 0
-            || $providerFirst > $proposal['first']
-            || $proposal['last'] > PHP_INT_MAX - 20_000
-            || $providerHigh < $proposal['last'] + 20_000
-        ) {
+        if (! CurrentForwardProviderCoverage::covers(
+            $providerFirst,
+            $providerHigh,
+            $proposal['first'],
+            $proposal['last'],
+        )) {
             throw new RuntimeException('provider_range_drift');
         }
 
@@ -108,7 +111,13 @@ final readonly class CurrentForwardRefreshAuditor
         if (NNTPService::isError($headers) || ! is_array($headers)) {
             throw new RuntimeException('provider_xover_failed');
         }
-        $evidence = $this->windowAudit->analyze($headers, $proposal['first'], $proposal['last']);
+        $continuationAudit = $this->isPendingContinuationProposal($proposal);
+        $evidence = $this->windowAudit->analyze(
+            $headers,
+            $proposal['first'],
+            $proposal['last'],
+            requireCompleteBinary: ! $continuationAudit,
+        );
         $auditedProposal = array_replace($proposal, [
             'provider_first' => $providerFirst,
             'provider_high' => $providerHigh,
@@ -116,7 +125,11 @@ final readonly class CurrentForwardRefreshAuditor
         ]);
 
         $ledgerId = $record
-            ? $this->ledger->recordAudit($auditedProposal, $evidence, 'exact-xover-v1')
+            ? $this->ledger->recordAudit(
+                $auditedProposal,
+                $evidence,
+                $continuationAudit ? 'exact-xover-continuation-v1' : 'exact-xover-v1',
+            )
             : null;
 
         return $auditedProposal + $evidence + [
@@ -124,5 +137,35 @@ final readonly class CurrentForwardRefreshAuditor
             'recorded' => $record,
             'ledger_id' => $ledgerId,
         ];
+    }
+
+    /**
+     * @param  array{group:string,source_id:int,first:int,last:int,provider_first:int,provider_high:int,provider_observed_at:string}  $proposal
+     */
+    private function isPendingContinuationProposal(array $proposal): bool
+    {
+        if (! config('nntmux.orchestrator.current_forward_continuation_enabled', false)
+            || ! Schema::hasColumn('current_forward_windows', 'chain_root_id')
+            || ! Schema::hasColumn('current_forward_windows', 'continuation_deadline_at')
+        ) {
+            return false;
+        }
+
+        $root = DB::table('current_forward_windows')
+            ->where('source_id', $proposal['source_id'])
+            ->where('state', 'CONTINUATION_PENDING')
+            ->whereColumn('id', 'chain_root_id')
+            ->first();
+        $deadline = strtotime((string) ($root->continuation_deadline_at ?? ''));
+        if ($root === null || $deadline === false || time() >= $deadline) {
+            return false;
+        }
+
+        $latestLast = DB::table('current_forward_windows')
+            ->where('chain_root_id', $root->id)
+            ->whereIn('state', ['CONTINUATION_PENDING', 'CHAINED'])
+            ->max('last_article');
+
+        return $latestLast !== null && (int) $latestLast + 1 === $proposal['first'];
     }
 }

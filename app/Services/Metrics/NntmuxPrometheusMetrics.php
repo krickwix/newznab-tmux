@@ -50,6 +50,7 @@ class NntmuxPrometheusMetrics
     public function __construct(
         private readonly DistributedWorkerTelemetry $workerTelemetry = new DistributedWorkerTelemetry,
         private readonly DistributedJobCatalog $jobCatalog = new DistributedJobCatalog,
+        private readonly SplitCollectionTelemetry $splitCollectionTelemetry = new SplitCollectionTelemetry,
     ) {}
 
     public function render(): string
@@ -75,6 +76,7 @@ class NntmuxPrometheusMetrics
                 $this->timerMetrics(),
                 $this->orchestratorMetrics(),
                 $this->workerTelemetryMetrics(),
+                $this->splitCollectionTelemetryMetrics(),
                 $this->lockMetrics(),
             );
             $lines[] = 'nntmux_metric_scrape_success 1';
@@ -255,7 +257,7 @@ class NntmuxPrometheusMetrics
             $this->metric('nntmux_groups_total', $active, ['state' => 'active']),
             $this->metric('nntmux_groups_total', $activeBackfill, ['state' => 'active_backfill']),
             $this->metric('nntmux_groups_total', $backfill, ['state' => 'backfill']),
-            '# HELP nntmux_backfill_oldest_cursor_age_seconds Age of the oldest backfill first-record cursor.',
+            '# HELP nntmux_backfill_oldest_cursor_age_seconds Historical coverage depth of the oldest backfill first-record cursor; this is not queue latency.',
             '# TYPE nntmux_backfill_oldest_cursor_age_seconds gauge',
             $this->metric('nntmux_backfill_oldest_cursor_age_seconds', $oldest === null ? 0 : max(0, time() - strtotime((string) $oldest))),
             '# HELP nntmux_group_first_record_postdate_timestamp First-record postdate timestamp for backfill groups.',
@@ -438,19 +440,23 @@ class NntmuxPrometheusMetrics
         $hour = (int) DB::table('releases')->where('adddate', '>=', now()->subHour())->count();
         $day = (int) DB::table('releases')->where('adddate', '>=', now()->subDay())->count();
         $hasLegacyHashedColumn = Schema::hasColumn('releases', 'ishashed');
-        $hashed = $hasLegacyHashedColumn ? (int) DB::table('releases')->where('ishashed', 1)->count() : 0;
-        $hashedCategory = (int) DB::table('releases')->where('categories_id', Category::OTHER_HASHED)->count();
-        $hashedEffectiveQuery = DB::table('releases');
-        if ($hasLegacyHashedColumn) {
-            $hashedEffectiveQuery->where(static function ($query): void {
-                $query->where('ishashed', 1)
-                    ->orWhere('categories_id', Category::OTHER_HASHED);
-            });
-        } else {
-            $hashedEffectiveQuery->where('categories_id', Category::OTHER_HASHED);
-        }
-        $hashedEffective = (int) $hashedEffectiveQuery->count();
-        $renamed = (int) DB::table('releases')->where('isrenamed', 1)->count();
+        $stateCounts = DB::table('releases')->selectRaw(sprintf(
+            '%s AS hashed, '
+            .'SUM(CASE WHEN categories_id = %d THEN 1 ELSE 0 END) AS hashed_category, '
+            .'%s AS hashed_effective, '
+            .'SUM(CASE WHEN isrenamed = 1 THEN 1 ELSE 0 END) AS renamed',
+            $hasLegacyHashedColumn
+                ? 'SUM(CASE WHEN ishashed = 1 THEN 1 ELSE 0 END)'
+                : '0',
+            Category::OTHER_HASHED,
+            $hasLegacyHashedColumn
+                ? sprintf('SUM(CASE WHEN ishashed = 1 OR categories_id = %d THEN 1 ELSE 0 END)', Category::OTHER_HASHED)
+                : sprintf('SUM(CASE WHEN categories_id = %d THEN 1 ELSE 0 END)', Category::OTHER_HASHED),
+        ))->first();
+        $hashed = (int) ($stateCounts->hashed ?? 0);
+        $hashedCategory = (int) ($stateCounts->hashed_category ?? 0);
+        $hashedEffective = (int) ($stateCounts->hashed_effective ?? 0);
+        $renamed = (int) ($stateCounts->renamed ?? 0);
 
         return [
             '# HELP nntmux_releases_recent_total Releases added in a recent time window.',
@@ -606,7 +612,13 @@ class NntmuxPrometheusMetrics
             $backfillYieldHistory = [];
             $targetIneffectivePermits = [];
         }
-        if (is_array($decision) && $mode !== 'failsafe') {
+        $decisionAge = is_array($decision)
+            ? max(0, time() - (int) ($decision['observed_at'] ?? 0))
+            : 0;
+        $decisionFresh = is_array($decision)
+            && (int) ($decision['observed_at'] ?? 0) > 0
+            && $decisionAge <= max(1, (int) config('nntmux.orchestrator.snapshot_max_age_seconds', 180));
+        if ($decisionFresh && $mode !== 'failsafe') {
             $mode = (string) ($decision['mode'] ?? $mode);
             $profile = (string) ($decision['profile'] ?? $profile);
         }
@@ -662,19 +674,37 @@ class NntmuxPrometheusMetrics
         }
         $lines = array_merge($lines, $this->currentForwardRefreshMetrics());
 
+        $lines[] = '# HELP nntmux_orchestrator_snapshot_fresh Whether the cached controller observation is within the configured maximum age.';
+        $lines[] = '# TYPE nntmux_orchestrator_snapshot_fresh gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_snapshot_fresh', $decisionFresh ? 1 : 0);
+        $lines[] = '# HELP nntmux_orchestrator_snapshot_age_seconds Age of the last controller observation.';
+        $lines[] = '# TYPE nntmux_orchestrator_snapshot_age_seconds gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_snapshot_age_seconds', $decisionAge);
         if (! is_array($decision)) {
             return $lines;
         }
-
-        $lines[] = '# HELP nntmux_orchestrator_snapshot_age_seconds Age of the last controller observation.';
-        $lines[] = '# TYPE nntmux_orchestrator_snapshot_age_seconds gauge';
-        $lines[] = $this->metric('nntmux_orchestrator_snapshot_age_seconds', max(0, time() - (int) ($decision['observed_at'] ?? 0)));
+        if (! $decisionFresh) {
+            return $lines;
+        }
         $lines[] = '# HELP nntmux_orchestrator_backfill_policy_permitted Whether all deterministic backfill gates are green.';
         $lines[] = '# TYPE nntmux_orchestrator_backfill_policy_permitted gauge';
         $lines[] = $this->metric('nntmux_orchestrator_backfill_policy_permitted', ($decision['backfill_permitted'] ?? false) ? 1 : 0);
         $lines[] = '# HELP nntmux_orchestrator_eligible_nzbs Exact actionable NZBs in the bounded selector frontier.';
         $lines[] = '# TYPE nntmux_orchestrator_eligible_nzbs gauge';
         $lines[] = $this->metric('nntmux_orchestrator_eligible_nzbs', (int) ($decision['eligible_nzbs'] ?? 0));
+        $qualifiedSupply = is_array($decision['qualified_supply'] ?? null) ? $decision['qualified_supply'] : [];
+        $lines[] = '# HELP nntmux_orchestrator_qualified_supply_starved Whether schedulable input has grown through the dwell period without qualified output.';
+        $lines[] = '# TYPE nntmux_orchestrator_qualified_supply_starved gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_qualified_supply_starved', ($qualifiedSupply['starved'] ?? false) ? 1 : 0);
+        $lines[] = '# HELP nntmux_orchestrator_release_yield_per_minute Committed release creations per minute from monotonic worker telemetry between fresh controller observations.';
+        $lines[] = '# TYPE nntmux_orchestrator_release_yield_per_minute gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_release_yield_per_minute', (float) ($qualifiedSupply['release_yield_per_minute'] ?? 0.0));
+        $lines[] = '# HELP nntmux_orchestrator_schedulable_backlog Pending rows attached to enabled groups and eligible pipeline states.';
+        $lines[] = '# TYPE nntmux_orchestrator_schedulable_backlog gauge';
+        $schedulableBacklogs = is_array($decision['schedulable_backlogs'] ?? null) ? $decision['schedulable_backlogs'] : [];
+        foreach (['parts', 'binaries', 'collections', 'releases', 'nzbs'] as $stage) {
+            $lines[] = $this->metric('nntmux_orchestrator_schedulable_backlog', (int) ($schedulableBacklogs[$stage] ?? 0), ['stage' => $stage]);
+        }
         $lines[] = '# HELP nntmux_orchestrator_body_recovery_queue Current actionable BODY recovery queue across configured groups.';
         $lines[] = '# TYPE nntmux_orchestrator_body_recovery_queue gauge';
         $lines[] = $this->metric('nntmux_orchestrator_body_recovery_queue', (int) ($decision['body_recovery_queue'] ?? 0));
@@ -786,6 +816,18 @@ class NntmuxPrometheusMetrics
                 'nntmux_orchestrator_current_forward_refresh_enabled',
                 config('nntmux.orchestrator.current_forward_refresh_enabled', false) ? 1 : 0,
             ),
+            '# HELP nntmux_orchestrator_current_forward_ledger_issuance_enabled Whether fresh audited ledger windows may be offered to the exact current-forward worker.',
+            '# TYPE nntmux_orchestrator_current_forward_ledger_issuance_enabled gauge',
+            $this->metric(
+                'nntmux_orchestrator_current_forward_ledger_issuance_enabled',
+                config('nntmux.orchestrator.current_forward_ledger_issuance_enabled', false) ? 1 : 0,
+            ),
+            '# HELP nntmux_orchestrator_current_forward_continuation_enabled Whether exact-lineage adjacent-window continuation is enabled.',
+            '# TYPE nntmux_orchestrator_current_forward_continuation_enabled gauge',
+            $this->metric(
+                'nntmux_orchestrator_current_forward_continuation_enabled',
+                config('nntmux.orchestrator.current_forward_continuation_enabled', false) ? 1 : 0,
+            ),
             '# HELP nntmux_orchestrator_current_forward_refresh_schema_ready Whether both additive refresh ledger tables exist.',
             '# TYPE nntmux_orchestrator_current_forward_refresh_schema_ready gauge',
             $this->metric('nntmux_orchestrator_current_forward_refresh_schema_ready', $schemaReady ? 1 : 0),
@@ -796,23 +838,47 @@ class NntmuxPrometheusMetrics
 
         $lines[] = '# HELP nntmux_orchestrator_current_forward_refresh_sources Explicit trusted sources by lifecycle state.';
         $lines[] = '# TYPE nntmux_orchestrator_current_forward_refresh_sources gauge';
+        $sourceCounts = DB::table('current_forward_sources')
+            ->selectRaw('state, COUNT(*) AS aggregate')
+            ->groupBy('state')
+            ->pluck('aggregate', 'state');
         foreach (['PROBATION', 'READY', 'HALTED', 'QUALITY_LOCKED'] as $state) {
             $lines[] = $this->metric(
                 'nntmux_orchestrator_current_forward_refresh_sources',
-                DB::table('current_forward_sources')->where('state', $state)->count(),
+                (int) ($sourceCounts[$state] ?? 0),
                 ['state' => strtolower($state)],
             );
         }
 
         $lines[] = '# HELP nntmux_orchestrator_current_forward_refresh_windows Immutable windows by lifecycle state.';
         $lines[] = '# TYPE nntmux_orchestrator_current_forward_refresh_windows gauge';
-        foreach (['AUDITED', 'OFFERED', 'CLAIMED', 'INGESTED', 'ATTRIBUTING', 'PRODUCTIVE', 'QUARANTINED'] as $state) {
+        $windowCounts = DB::table('current_forward_windows')
+            ->selectRaw('state, COUNT(*) AS aggregate')
+            ->groupBy('state')
+            ->pluck('aggregate', 'state');
+        foreach (['AUDITED', 'OFFERED', 'CLAIMED', 'INGESTED', 'ATTRIBUTING', 'CONTINUATION_PENDING', 'CHAINED', 'PRODUCTIVE', 'QUARANTINED'] as $state) {
             $lines[] = $this->metric(
                 'nntmux_orchestrator_current_forward_refresh_windows',
-                DB::table('current_forward_windows')->where('state', $state)->count(),
+                (int) ($windowCounts[$state] ?? 0),
                 ['state' => strtolower($state)],
             );
         }
+
+        $quarantineTimestampColumn = match (true) {
+            Schema::hasColumn('current_forward_windows', 'settled_at') => 'settled_at',
+            Schema::hasColumn('current_forward_windows', 'updated_at') => 'updated_at',
+            default => 'created_at',
+        };
+        $lastQuarantinedAt = DB::table('current_forward_windows')
+            ->where('state', 'QUARANTINED')
+            ->max($quarantineTimestampColumn);
+        $lastQuarantinedTimestamp = is_string($lastQuarantinedAt) ? strtotime($lastQuarantinedAt) : false;
+        $lines[] = '# HELP nntmux_orchestrator_current_forward_last_quarantined_timestamp_seconds Unix timestamp of the most recent exact current-forward quarantine event.';
+        $lines[] = '# TYPE nntmux_orchestrator_current_forward_last_quarantined_timestamp_seconds gauge';
+        $lines[] = $this->metric(
+            'nntmux_orchestrator_current_forward_last_quarantined_timestamp_seconds',
+            $lastQuarantinedTimestamp === false ? 0 : $lastQuarantinedTimestamp,
+        );
 
         $lastAuditedAt = DB::table('current_forward_sources')->max('last_audited_at');
         $lastAuditedTimestamp = is_string($lastAuditedAt) ? strtotime($lastAuditedAt) : false;
@@ -822,6 +888,68 @@ class NntmuxPrometheusMetrics
             'nntmux_orchestrator_current_forward_refresh_last_audit_age_seconds',
             $lastAuditedTimestamp === false ? 0 : max(0, time() - $lastAuditedTimestamp),
         );
+
+        $oldestUnresolvedTimestamp = null;
+        foreach (DB::table('current_forward_windows')
+            ->whereIn('state', ['OFFERED', 'CLAIMED', 'INGESTED', 'ATTRIBUTING'])
+            ->get() as $window
+        ) {
+            $candidate = match ((string) $window->state) {
+                'OFFERED' => $window->offered_at ?? $window->updated_at,
+                'CLAIMED' => $window->claimed_at ?? $window->updated_at,
+                'INGESTED' => $window->ingested_at ?? $window->updated_at,
+                'ATTRIBUTING' => $window->attribution_started_at ?? $window->ingested_at ?? $window->updated_at,
+                default => $window->updated_at,
+            };
+            $timestamp = strtotime((string) $candidate);
+            if ($timestamp !== false
+                && ($oldestUnresolvedTimestamp === null || $timestamp < $oldestUnresolvedTimestamp)
+            ) {
+                $oldestUnresolvedTimestamp = $timestamp;
+            }
+        }
+        $lines[] = '# HELP nntmux_orchestrator_current_forward_refresh_unresolved_age_seconds Age of the oldest non-terminal audited-ledger window.';
+        $lines[] = '# TYPE nntmux_orchestrator_current_forward_refresh_unresolved_age_seconds gauge';
+        $lines[] = $this->metric(
+            'nntmux_orchestrator_current_forward_refresh_unresolved_age_seconds',
+            $oldestUnresolvedTimestamp === null ? 0 : max(0, time() - $oldestUnresolvedTimestamp),
+        );
+
+        $lines[] = '# HELP nntmux_orchestrator_current_forward_refresh_verifications Append-only exact-XOVER verification records.';
+        $lines[] = '# TYPE nntmux_orchestrator_current_forward_refresh_verifications gauge';
+        $lines[] = $this->metric(
+            'nntmux_orchestrator_current_forward_refresh_verifications',
+            Schema::hasTable('current_forward_window_verifications')
+                ? DB::table('current_forward_window_verifications')->count()
+                : 0,
+        );
+
+        $openRoot = Schema::hasColumn('current_forward_windows', 'chain_root_id')
+            ? DB::table('current_forward_windows')->where('state', 'CONTINUATION_PENDING')->orderBy('id')->first()
+            : null;
+        $deadline = strtotime((string) ($openRoot->continuation_deadline_at ?? ''));
+        $lines[] = '# HELP nntmux_orchestrator_current_forward_continuation_deadline_remaining_seconds Remaining absolute time for the open exact-lineage chain.';
+        $lines[] = '# TYPE nntmux_orchestrator_current_forward_continuation_deadline_remaining_seconds gauge';
+        $lines[] = $this->metric(
+            'nntmux_orchestrator_current_forward_continuation_deadline_remaining_seconds',
+            $deadline === false ? 0 : max(0, $deadline - time()),
+        );
+        $lines[] = '# HELP nntmux_orchestrator_current_forward_continuation_objects Exact objects linked to the open continuation chain.';
+        $lines[] = '# TYPE nntmux_orchestrator_current_forward_continuation_objects gauge';
+        foreach (['COLLECTION' => 'collections', 'BINARY' => 'binaries', 'RELEASE' => 'releases'] as $type => $item) {
+            $count = $openRoot !== null && Schema::hasTable('current_forward_window_objects')
+                ? DB::table('current_forward_window_objects')
+                    ->where('chain_root_id', $openRoot->id)
+                    ->where('object_type', $type)
+                    ->distinct()
+                    ->count('object_id')
+                : 0;
+            $lines[] = $this->metric(
+                'nntmux_orchestrator_current_forward_continuation_objects',
+                $count,
+                ['item' => $item],
+            );
+        }
 
         return $lines;
     }
@@ -853,6 +981,8 @@ class NntmuxPrometheusMetrics
             '# TYPE nntmux_worker_in_progress gauge',
             '# HELP nntmux_worker_in_progress_age_seconds Age of the currently executing worker cycle.',
             '# TYPE nntmux_worker_in_progress_age_seconds gauge',
+            '# HELP nntmux_worker_in_progress_stale Whether an in-progress marker exceeded its maximum distributed-lock lifetime and was suppressed.',
+            '# TYPE nntmux_worker_in_progress_stale gauge',
         ];
 
         // Do not turn a Redis outage into apparent counter resets. Prometheus
@@ -878,6 +1008,15 @@ class NntmuxPrometheusMetrics
 
         foreach ($workers as $worker) {
             $workerSnapshot = $snapshot['workers'][$worker] ?? $emptyWorker;
+            $staleAfterSeconds = $worker === 'nzb-backlog'
+                ? max(1, (int) config('nntmux.distributed_nzb_lock_seconds', 7200))
+                : max(
+                    1,
+                    (int) config('nntmux.distributed_lock_seconds', 900),
+                    (int) config('nntmux.distributed_long_lock_seconds', 3600),
+                );
+            $staleInProgress = $workerSnapshot['in_progress']
+                && $workerSnapshot['in_progress_age_seconds'] > $staleAfterSeconds;
             foreach (DistributedWorkerTelemetry::RUN_OUTCOMES as $outcome) {
                 $lines[] = $this->metric('nntmux_worker_runs_total', $workerSnapshot['runs'][$outcome], [
                     'worker' => $worker,
@@ -902,13 +1041,18 @@ class NntmuxPrometheusMetrics
             $lines[] = $this->metric('nntmux_worker_last_completed_timestamp_seconds', $workerSnapshot['last_completed_timestamp_seconds'], [
                 'worker' => $worker,
             ]);
-            $lines[] = $this->metric('nntmux_worker_last_success_timestamp_seconds', $workerSnapshot['last_success_timestamp_seconds'], [
+            if ($workerSnapshot['last_success_timestamp_seconds'] > 0) {
+                $lines[] = $this->metric('nntmux_worker_last_success_timestamp_seconds', $workerSnapshot['last_success_timestamp_seconds'], [
+                    'worker' => $worker,
+                ]);
+            }
+            $lines[] = $this->metric('nntmux_worker_in_progress', $workerSnapshot['in_progress'] && ! $staleInProgress ? 1 : 0, [
                 'worker' => $worker,
             ]);
-            $lines[] = $this->metric('nntmux_worker_in_progress', $workerSnapshot['in_progress'] ? 1 : 0, [
+            $lines[] = $this->metric('nntmux_worker_in_progress_age_seconds', $staleInProgress ? 0 : $workerSnapshot['in_progress_age_seconds'], [
                 'worker' => $worker,
             ]);
-            $lines[] = $this->metric('nntmux_worker_in_progress_age_seconds', $workerSnapshot['in_progress_age_seconds'], [
+            $lines[] = $this->metric('nntmux_worker_in_progress_stale', $staleInProgress ? 1 : 0, [
                 'worker' => $worker,
             ]);
         }
@@ -917,7 +1061,10 @@ class NntmuxPrometheusMetrics
         $lines[] = '# TYPE nntmux_nzb_selector_in_progress_age_seconds gauge';
         $lines[] = $this->metric(
             'nntmux_nzb_selector_in_progress_age_seconds',
-            $snapshot['workers']['nzb-backlog']['in_progress_age_seconds'] ?? 0,
+            (($snapshot['workers']['nzb-backlog']['in_progress_age_seconds'] ?? 0)
+                > max(1, (int) config('nntmux.distributed_nzb_lock_seconds', 7200)))
+                ? 0
+                : ($snapshot['workers']['nzb-backlog']['in_progress_age_seconds'] ?? 0),
         );
         $lines[] = '# HELP nntmux_nzb_selector_last_duration_seconds Duration of the most recent dedicated NZB candidate selection, excluding NZB writes.';
         $lines[] = '# TYPE nntmux_nzb_selector_last_duration_seconds gauge';
@@ -925,6 +1072,41 @@ class NntmuxPrometheusMetrics
             'nntmux_nzb_selector_last_duration_seconds',
             $snapshot['nzb_selector_last_duration_seconds'],
         );
+
+        return $lines;
+    }
+
+    /** @return list<string> */
+    private function splitCollectionTelemetryMetrics(): array
+    {
+        $groups = array_values(array_unique(array_filter(array_map(
+            static fn (mixed $group): string => trim((string) $group),
+            (array) config('nntmux.split_collection_reconcile_groups', []),
+        ))));
+        if (count($groups) > 16) {
+            $groups = [];
+        }
+        $snapshot = $this->splitCollectionTelemetry->snapshot($groups);
+        $lines = [
+            '# HELP nntmux_split_collection_pair_xref_telemetry_available Whether the resettable Redis-backed split-pair decision counters were readable.',
+            '# TYPE nntmux_split_collection_pair_xref_telemetry_available gauge',
+            $this->metric('nntmux_split_collection_pair_xref_telemetry_available', $snapshot['available'] ? 1 : 0),
+            '# HELP nntmux_split_collection_pair_xref_decisions_total Initial split-pair Xref decisions by bounded group and fixed result since the Redis telemetry cache was created.',
+            '# TYPE nntmux_split_collection_pair_xref_decisions_total counter',
+        ];
+        if (! $snapshot['available']) {
+            return $lines;
+        }
+
+        foreach ($groups as $group) {
+            foreach (SplitCollectionTelemetry::DECISIONS as $decision) {
+                $lines[] = $this->metric(
+                    'nntmux_split_collection_pair_xref_decisions_total',
+                    $snapshot['groups'][$group][$decision] ?? 0,
+                    ['group' => $group, 'result' => $decision],
+                );
+            }
+        }
 
         return $lines;
     }
@@ -993,6 +1175,7 @@ class NntmuxPrometheusMetrics
      */
     private function scanRedisKeys(string $connectionName, string $pattern, int $count = 1000): array
     {
+        /** @var PhpRedisConnection $connection */
         $connection = Redis::connection($connectionName);
         $defaultCursor = $this->defaultRedisScanCursor($connection);
         $cursor = $defaultCursor;

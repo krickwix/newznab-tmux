@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Enums\CollectionFileCheckStatus;
+use App\Facades\Search;
 use App\Models\Category;
 use App\Models\Collection;
 use App\Models\Predb;
@@ -14,6 +15,8 @@ use App\Models\ReleasesGroups;
 use App\Models\UsenetGroup;
 use App\Services\Categorization\CategorizationService;
 use App\Services\Nzb\NzbService;
+use App\Services\Orchestrator\CurrentForwardTerminalSplitRepair;
+use App\Services\Orchestrator\CurrentForwardWindowLineage;
 use App\Services\Releases\ReleaseDuplicateFinder;
 use App\Support\Utf8;
 use Illuminate\Support\Facades\DB;
@@ -37,6 +40,48 @@ class ReleaseCreationService
      */
     public function createReleases(int|string|null $groupID, int $limit, bool $echoCLI): array
     {
+        return $this->createReleasesFromSelection($groupID, $limit, $echoCLI);
+    }
+
+    /**
+     * Create releases only for the cohort that survived bounded filtering.
+     *
+     * @param  list<int>  $collectionIds
+     * @return array{added:int,dupes:int}
+     */
+    public function createReleasesForCollectionIds(
+        int|string|null $groupID,
+        array $collectionIds,
+        bool $echoCLI,
+        ?float $deadlineAt = null,
+    ): array {
+        $collectionIds = array_values(array_unique(array_map('intval', $collectionIds)));
+        if ($collectionIds === []) {
+            return ['added' => 0, 'dupes' => 0];
+        }
+
+        return $this->createReleasesFromSelection(
+            $groupID,
+            \count($collectionIds),
+            $echoCLI,
+            $collectionIds,
+            $deadlineAt,
+        );
+    }
+
+    /**
+     * @param  list<int>|null  $collectionIds
+     * @return array{added:int,dupes:int}
+     *
+     * @throws \Throwable
+     */
+    private function createReleasesFromSelection(
+        int|string|null $groupID,
+        int $limit,
+        bool $echoCLI,
+        ?array $collectionIds = null,
+        ?float $deadlineAt = null,
+    ): array {
         $startTime = now()->toImmutable();
         $categorize = new CategorizationService;
         $returnCount = 0;
@@ -49,11 +94,15 @@ class ReleaseCreationService
         $collectionsQuery = Collection::query()
             ->where('collections.filecheck', CollectionFileCheckStatus::Sized->value)
             ->where('collections.filesize', '>', 0);
+        if ($collectionIds !== null) {
+            $collectionsQuery->whereIn('collections.id', $collectionIds);
+        }
         if (! empty($groupID)) {
             $collectionsQuery->where('collections.groups_id', $groupID);
         }
         $collectionsQuery->select(['collections.*', 'usenet_groups.name as gname'])
             ->join('usenet_groups', 'usenet_groups.id', '=', 'collections.groups_id')
+            ->orderBy('collections.id')
             ->limit($limit);
         $collections = $collectionsQuery->get();
 
@@ -62,6 +111,9 @@ class ReleaseCreationService
         }
 
         foreach ($collections as $collection) {
+            if ($deadlineAt !== null && microtime(true) >= $deadlineAt) {
+                break;
+            }
             $cleanRelName = Utf8::clean(str_replace(['#', '@', '$', '%', '^', '§', '¨', '©', 'Ö'], '', $collection->subject));
             $fromName = Utf8::clean(trim($collection->fromname, "'"));
 
@@ -108,29 +160,67 @@ class ReleaseCreationService
             if ($dupeCheck === null) {
                 $determinedCategory = $categorize->determineCategory($collection->groups_id, $cleanedName, $fromName);
 
-                $releaseID = Release::insertRelease([
-                    'name' => $cleanRelName,
-                    'searchname' => $searchName,
-                    'totalpart' => $collection->totalfiles,
-                    'groups_id' => $collection->groups_id,
-                    'guid' => Str::uuid()->toString(),
-                    'postdate' => $collection->date,
-                    'fromname' => $fromName,
-                    'size' => $collection->filesize,
-                    'categories_id' => $determinedCategory['categories_id'] ?? Category::OTHER_MISC,
-                    'isrenamed' => $properName === true ? 1 : 0,
-                    'predb_id' => $predbIdInt,
-                    'nzbstatus' => NzbService::NZB_NONE,
-                ]);
+                $releaseID = DB::transaction(function () use (
+                    $cleanRelName,
+                    $searchName,
+                    $collection,
+                    $fromName,
+                    $determinedCategory,
+                    $properName,
+                    $predbIdInt,
+                    $groupID,
+                ): ?int {
+                    $eligibleCollection = Collection::query()
+                        ->whereKey($collection->id)
+                        ->where('filecheck', CollectionFileCheckStatus::Sized->value)
+                        ->where('filesize', '>', 0)
+                        ->where(function ($query): void {
+                            $query->whereNull('releases_id')->orWhere('releases_id', 0);
+                        })
+                        ->when(! empty($groupID), static fn ($q) => $q->where('groups_id', $groupID))
+                        ->lockForUpdate()
+                        ->first();
+                    if ($eligibleCollection === null) {
+                        return null;
+                    }
+
+                    $releaseID = Release::insertRelease([
+                        'name' => $cleanRelName,
+                        'searchname' => $searchName,
+                        'totalpart' => $eligibleCollection->totalfiles,
+                        'groups_id' => $eligibleCollection->groups_id,
+                        'guid' => Str::uuid()->toString(),
+                        'postdate' => $eligibleCollection->date,
+                        'fromname' => $fromName,
+                        'size' => $eligibleCollection->filesize,
+                        'categories_id' => $determinedCategory['categories_id'] ?? Category::OTHER_MISC,
+                        'isrenamed' => $properName === true ? 1 : 0,
+                        'predb_id' => $predbIdInt,
+                        'nzbstatus' => NzbService::NZB_NONE,
+                    ], false);
+                    if ($releaseID === null) {
+                        return null;
+                    }
+
+                    Collection::query()->where('id', $eligibleCollection->id)->update([
+                        'filecheck' => CollectionFileCheckStatus::Inserted->value,
+                        'releases_id' => $releaseID,
+                    ]);
+                    if (! (new CurrentForwardTerminalSplitRepair)->recordReleaseAttribution(
+                        (int) $eligibleCollection->id,
+                        (int) $releaseID,
+                    )) {
+                        (new CurrentForwardWindowLineage)->recordReleaseForCollection(
+                            (int) $eligibleCollection->id,
+                            (int) $releaseID,
+                        );
+                    }
+
+                    return (int) $releaseID;
+                }, 10);
 
                 if ($releaseID !== null) {
-                    DB::transaction(static function () use ($collection, $releaseID) {
-                        Collection::query()->where('id', $collection->id)->update([
-                            'filecheck' => CollectionFileCheckStatus::Inserted->value,
-                            'releases_id' => $releaseID,
-                        ]);
-                    }, 10);
-
+                    Search::updateRelease($releaseID);
                     ReleaseRegex::insertOrIgnore([
                         'releases_id' => $releaseID,
                         'collection_regex_id' => $collection->collection_regexes_id,

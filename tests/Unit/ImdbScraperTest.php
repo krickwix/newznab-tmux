@@ -37,9 +37,10 @@ class ImdbScraperTest extends ImdbScraperTestCase
 
     public function test_fetch_by_id_detects_waf_challenge_and_marks_temporary_block(): void
     {
+        config(['nntmux_api.imdbapi_dev_enabled' => false]);
+
         $scraper = $this->makeScraperWithResponses([
             new Response(202, ['Content-Type' => 'text/html; charset=UTF-8'], '<html><script>window.awsWafCookieDomainList=[];window.gokuProps={};</script></html>'),
-            new Response(404, ['Content-Type' => 'application/json; charset=UTF-8'], '{"code":5,"message":"NOT_FOUND"}'),
         ]);
 
         $data = $scraper->fetchById('1234567');
@@ -47,13 +48,41 @@ class ImdbScraperTest extends ImdbScraperTestCase
         $this->assertFalse($data);
         $this->assertTrue($scraper->wasBlockedByWaf());
         $this->assertSame('waf_block', $scraper->getLastFailureReason());
-        $this->assertSame('fallback_http_failure', $scraper->getLastFallbackFailureReason());
+        $this->assertSame('fallback_disabled', $scraper->getLastFallbackFailureReason());
         $this->assertNull($scraper->getLastFetchSource());
-        $this->assertSame(1, Cache::get('metrics:imdb_lookup:outcome:failed:reason:waf_block:fallback:fallback_http_failure:source:none'));
+        $this->assertSame(1, Cache::get('metrics:imdb_lookup:outcome:failed:reason:waf_block:fallback:fallback_disabled:source:none'));
+    }
+
+    public function test_cached_negative_restores_concrete_failure_diagnostics(): void
+    {
+        config(['nntmux_api.imdbapi_dev_enabled' => false]);
+
+        $scraper = $this->makeScraperWithResponses([
+            new Response(202, ['Content-Type' => 'text/html; charset=UTF-8'], '<html><script>window.awsWafCookieDomainList=[];window.gokuProps={};</script></html>'),
+        ]);
+
+        $this->assertFalse($scraper->fetchById('1234567'));
+        $this->assertFalse($scraper->fetchById('1234567'));
+        $this->assertTrue($scraper->wasBlockedByWaf());
+        $this->assertSame('waf_block', $scraper->getLastFailureReason());
+        $this->assertSame('fallback_disabled', $scraper->getLastFallbackFailureReason());
+        $this->assertNull($scraper->getLastFetchSource());
+    }
+
+    public function test_legacy_cached_negative_uses_a_stable_reason(): void
+    {
+        Cache::put('imdb_scrape_id_1234567', false, now()->addMinutes(30));
+
+        $scraper = $this->makeScraperWithResponses([]);
+
+        $this->assertFalse($scraper->fetchById('1234567'));
+        $this->assertSame('cached_negative_legacy', $scraper->getLastFailureReason());
     }
 
     public function test_fetch_by_id_falls_back_to_imdbapi_dev_when_title_page_is_blocked(): void
     {
+        config(['nntmux_api.imdbapi_dev_enabled' => true]);
+
         $scraper = $this->makeScraperWithResponses([
             new Response(202, ['Content-Type' => 'text/html; charset=UTF-8'], '<html><script>window.awsWafCookieDomainList=[];window.gokuProps={};</script></html>'),
             new Response(200, ['Content-Type' => 'application/json; charset=UTF-8'], json_encode([
@@ -106,6 +135,8 @@ class ImdbScraperTest extends ImdbScraperTestCase
 
     public function test_fetch_by_id_returns_false_when_imdbapi_dev_payload_lacks_title(): void
     {
+        config(['nntmux_api.imdbapi_dev_enabled' => true]);
+
         $scraper = $this->makeScraperWithResponses([
             new Response(202, ['Content-Type' => 'text/html; charset=UTF-8'], '<html><script>window.awsWafCookieDomainList=[];window.gokuProps={};</script></html>'),
             new Response(200, ['Content-Type' => 'application/json; charset=UTF-8'], json_encode([
@@ -123,6 +154,7 @@ class ImdbScraperTest extends ImdbScraperTestCase
     public function test_fetch_by_id_skips_imdbapi_dev_when_minimum_interval_is_active(): void
     {
         config([
+            'nntmux_api.imdbapi_dev_enabled' => true,
             'nntmux_api.imdbapi_dev_min_interval_seconds' => 60,
             'nntmux_api.imdbapi_dev_cooldown_seconds' => 300,
         ]);
@@ -153,6 +185,7 @@ class ImdbScraperTest extends ImdbScraperTestCase
     public function test_fetch_by_id_skips_imdbapi_dev_when_cooldown_is_active_after_rate_limit(): void
     {
         config([
+            'nntmux_api.imdbapi_dev_enabled' => true,
             'nntmux_api.imdbapi_dev_min_interval_seconds' => 0,
             'nntmux_api.imdbapi_dev_cooldown_seconds' => 300,
         ]);
@@ -184,9 +217,17 @@ class ImdbScraperTest extends ImdbScraperTestCase
         $results = $scraper->search('Inception');
 
         $this->assertNotEmpty($results);
+        $this->assertCount(2, $results);
         $this->assertSame('1375666', $results[0]['imdbid']);
         $this->assertSame('Inception', $results[0]['title']);
         $this->assertSame('2010', $results[0]['year']);
+        $this->assertSame('movie', $results[0]['type']);
+        $this->assertSame('short', $results[1]['type']);
+    }
+
+    public function test_imdbapi_dev_fallback_is_disabled_by_default(): void
+    {
+        $this->assertFalse(config('nntmux_api.imdbapi_dev_enabled'));
     }
 
     public function test_search_empty_returns_empty_array(): void

@@ -23,8 +23,14 @@ final readonly class ControlState
         public int $recoveryDrainHoldSamples = 0,
         /** @var list<int> */
         public array $processedBackfillPermitGenerations = [],
+        public bool $qualifiedSupplyStarved = false,
+        public int $qualifiedSupplyCandidateSince = 0,
+        public int $qualifiedSupplyStarvedSince = 0,
+        public int $qualifiedSupplyLastObservedAt = 0,
+        public int $qualifiedSupplyRecoverySamples = 0,
+        public int $qualifiedSupplyColdStartAt = 0,
     ) {
-        if ($consecutiveHigh < 0 || $consecutiveLow < 0 || $consecutiveIneffectiveBackfillPermits < 0 || $failSafeRecoverySamples < 0 || $failSafeLastObservedAt < 0 || $recoveryDrainSamples < 0 || $recoveryDrainHoldSamples < 0) {
+        if ($consecutiveHigh < 0 || $consecutiveLow < 0 || $consecutiveIneffectiveBackfillPermits < 0 || $failSafeRecoverySamples < 0 || $failSafeLastObservedAt < 0 || $recoveryDrainSamples < 0 || $recoveryDrainHoldSamples < 0 || $qualifiedSupplyCandidateSince < 0 || $qualifiedSupplyStarvedSince < 0 || $qualifiedSupplyLastObservedAt < 0 || $qualifiedSupplyRecoverySamples < 0 || $qualifiedSupplyColdStartAt < 0) {
             throw new \InvalidArgumentException('Control state counters cannot be negative.');
         }
         foreach ($ineffectiveBackfillPermitsByTarget as $group => $count) {

@@ -31,6 +31,7 @@ final class CurrentForwardRefreshPlannerTest extends TestCase
             $table->string('group_name')->unique();
             $table->string('state', 32);
             $table->unsignedBigInteger('audited_last');
+            $table->unsignedTinyInteger('strikes')->default(0);
         });
         Schema::create('usenet_groups', function (Blueprint $table): void {
             $table->unsignedInteger('id')->primary();
@@ -48,9 +49,38 @@ final class CurrentForwardRefreshPlannerTest extends TestCase
         Schema::create('current_forward_windows', function (Blueprint $table): void {
             $table->id();
             $table->unsignedBigInteger('source_id');
+            $table->unsignedBigInteger('generation')->nullable();
             $table->unsignedBigInteger('first_article');
             $table->unsignedBigInteger('last_article');
             $table->string('state', 32);
+            $table->unsignedSmallInteger('attempt_ordinal')->default(1);
+            $table->unsignedBigInteger('retry_of_window_id')->nullable();
+            $table->string('failure_reason')->nullable();
+            $table->dateTime('claimed_at')->nullable();
+            $table->dateTime('ingested_at')->nullable();
+            $table->dateTime('settled_at')->nullable();
+            $table->unsignedBigInteger('chain_root_id')->nullable();
+            $table->unsignedInteger('outcome_releases')->nullable();
+            $table->unsignedInteger('outcome_ready_nzbs')->nullable();
+        });
+        Schema::create('current_forward_window_objects', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('window_id');
+            $table->unsignedBigInteger('chain_root_id');
+        });
+        Schema::create('current_forward_object_owners', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('chain_root_id');
+        });
+        Schema::create('current_forward_continuation_observations', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('chain_root_id');
+        });
+        Schema::create('current_forward_window_verifications', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('window_id');
+            $table->dateTime('provider_observed_at');
+            $table->dateTime('verified_at');
         });
 
         DB::table('current_forward_sources')->insert([
@@ -88,23 +118,109 @@ final class CurrentForwardRefreshPlannerTest extends TestCase
             'provider_first' => 1,
             'provider_high' => 50_100,
             'provider_observed_at' => '2026-07-17 12:00:00',
+            'mode' => 'NEW',
+            'window_id' => 0,
+            'retry_of_window_id' => 0,
+            'attempt_ordinal' => 1,
         ]], $plan['proposals']);
         self::assertSame([], $plan['rejections']);
     }
 
     public function test_does_not_reaudit_an_immutable_window_waiting_for_issuance(): void
     {
-        DB::table('current_forward_windows')->insert([
+        $windowId = DB::table('current_forward_windows')->insertGetId([
             'source_id' => 1,
+            'generation' => null,
             'first_article' => 10_101,
             'last_article' => 20_100,
             'state' => 'AUDITED',
+        ]);
+        DB::table('current_forward_sources')->where('id', 1)->update(['audited_last' => 20_100]);
+        DB::table('current_forward_window_verifications')->insert([
+            'window_id' => $windowId,
+            'provider_observed_at' => '2026-07-17 12:00:00',
+            'verified_at' => '2026-07-17 12:04:00',
         ]);
 
         $plan = (new CurrentForwardRefreshPlanner)->plan(strtotime('2026-07-17 12:05:00'));
 
         self::assertSame([], $plan['proposals']);
         self::assertSame(['alt.test' => 'audited_window_pending'], $plan['rejections']);
+    }
+
+    public function test_stale_pending_window_is_reverified_before_ledger_cursor_drift(): void
+    {
+        $windowId = DB::table('current_forward_windows')->insertGetId([
+            'source_id' => 1,
+            'generation' => null,
+            'first_article' => 10_101,
+            'last_article' => 20_100,
+            'state' => 'AUDITED',
+        ]);
+        DB::table('current_forward_sources')->where('id', 1)->update(['audited_last' => 20_100]);
+        DB::table('current_forward_window_verifications')->insert([
+            'window_id' => $windowId,
+            'provider_observed_at' => '2026-07-17 11:00:00',
+            'verified_at' => '2026-07-17 11:00:00',
+        ]);
+
+        $plan = (new CurrentForwardRefreshPlanner)->plan(strtotime('2026-07-17 12:05:00'));
+
+        self::assertSame('proposal_available', $plan['reason']);
+        self::assertSame('REVERIFY', $plan['proposals'][0]['mode']);
+        self::assertSame($windowId, $plan['proposals'][0]['window_id']);
+        self::assertSame(10_101, $plan['proposals'][0]['first']);
+        self::assertSame([], $plan['rejections']);
+    }
+
+    public function test_quarantined_pre_ingest_window_is_proposed_for_one_exact_retry(): void
+    {
+        $windowId = DB::table('current_forward_windows')->insertGetId([
+            'source_id' => 1,
+            'generation' => 41,
+            'first_article' => 10_101,
+            'last_article' => 20_100,
+            'state' => 'QUARANTINED',
+            'failure_reason' => 'Current-forward object is already owned by another lineage root.',
+            'claimed_at' => '2026-07-17 12:00:00',
+            'settled_at' => '2026-07-17 12:01:00',
+        ]);
+        DB::table('current_forward_windows')->where('id', $windowId)->update(['chain_root_id' => $windowId]);
+        DB::table('current_forward_sources')->where('id', 1)->update([
+            'audited_last' => 20_100,
+            'strikes' => 1,
+        ]);
+
+        $plan = (new CurrentForwardRefreshPlanner)->plan(strtotime('2026-07-17 12:05:00'));
+
+        self::assertSame('proposal_available', $plan['reason']);
+        self::assertSame('RETRY', $plan['proposals'][0]['mode']);
+        self::assertSame($windowId, $plan['proposals'][0]['window_id']);
+        self::assertSame(10_101, $plan['proposals'][0]['first']);
+    }
+
+    public function test_quarantined_window_that_reached_ingested_state_is_not_retryable(): void
+    {
+        $windowId = DB::table('current_forward_windows')->insertGetId([
+            'source_id' => 1,
+            'generation' => 41,
+            'first_article' => 10_101,
+            'last_article' => 20_100,
+            'state' => 'QUARANTINED',
+            'failure_reason' => 'current_forward_pipeline_settlement_timeout',
+            'claimed_at' => '2026-07-17 12:00:00',
+            'ingested_at' => '2026-07-17 12:00:30',
+            'settled_at' => '2026-07-17 12:01:00',
+        ]);
+        DB::table('current_forward_windows')->where('id', $windowId)->update(['chain_root_id' => $windowId]);
+        DB::table('current_forward_sources')->where('id', 1)->update([
+            'audited_last' => 20_100,
+            'strikes' => 1,
+        ]);
+        $plan = (new CurrentForwardRefreshPlanner)->plan(strtotime('2026-07-17 12:05:00'));
+
+        self::assertSame([], $plan['proposals']);
+        self::assertSame(['alt.test' => 'window_retry_unsafe'], $plan['rejections']);
     }
 
     public function test_refresh_is_fail_closed_by_default(): void
@@ -121,6 +237,30 @@ final class CurrentForwardRefreshPlannerTest extends TestCase
     public function test_rejects_provider_coverage_without_the_full_twenty_thousand_reserve(): void
     {
         DB::table('short_groups')->where('name', 'alt.test')->update(['last_record' => 40_099]);
+
+        $plan = (new CurrentForwardRefreshPlanner)->plan(strtotime('2026-07-17 12:05:00'));
+
+        self::assertSame([], $plan['proposals']);
+        self::assertSame(['alt.test' => 'provider_range_drift'], $plan['rejections']);
+    }
+
+    public function test_accepts_a_provider_range_at_the_configured_nineteen_thousand_reserve(): void
+    {
+        config()->set('nntmux.orchestrator.current_forward_provider_reserve', 19_000);
+        DB::table('short_groups')->where('name', 'alt.test')->update(['last_record' => 39_100]);
+
+        $plan = (new CurrentForwardRefreshPlanner)->plan(strtotime('2026-07-17 12:05:00'));
+
+        self::assertSame('proposal_available', $plan['reason']);
+        self::assertSame(20_100, $plan['proposals'][0]['last']);
+        self::assertSame(39_100, $plan['proposals'][0]['provider_high']);
+        self::assertSame([], $plan['rejections']);
+    }
+
+    public function test_rejects_one_article_below_the_configured_reserve(): void
+    {
+        config()->set('nntmux.orchestrator.current_forward_provider_reserve', 19_000);
+        DB::table('short_groups')->where('name', 'alt.test')->update(['last_record' => 39_099]);
 
         $plan = (new CurrentForwardRefreshPlanner)->plan(strtotime('2026-07-17 12:05:00'));
 

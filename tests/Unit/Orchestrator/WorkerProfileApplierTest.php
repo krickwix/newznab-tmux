@@ -33,6 +33,11 @@ final class WorkerProfileApplierTest extends TestCase
             $table->string('name')->primary();
             $table->string('value');
         });
+        Schema::create('current_forward_windows', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('generation')->nullable()->unique();
+            $table->string('state', 32);
+        });
         Settings::query()->insert([
             ['name' => 'orchestrator_generation', 'value' => '4'],
             ['name' => 'orchestrator_bf_permit', 'value' => '3'],
@@ -265,6 +270,24 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
         self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
         self::assertSame(5, Settings::settingValue('orchestrator_generation'));
+    }
+
+    public function test_it_refuses_to_publish_backfill_while_current_forward_is_unsettled(): void
+    {
+        DB::table('current_forward_windows')->insert([
+            'generation' => 42,
+            'state' => 'INGESTED',
+        ]);
+
+        (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::Fill, true),
+            1_000,
+            true,
+            'alt.test',
+        );
+
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
     }
 
     public function test_quality_lock_disables_only_the_named_source_and_preserves_its_cursor(): void

@@ -121,6 +121,45 @@ final class AuditCurrentForwardRefreshCommandTest extends TestCase
         self::assertSame(0, DB::table('current_forward_windows')->whereNotNull('generation')->count());
     }
 
+    public function test_record_option_uses_the_configured_provider_reserve_end_to_end(): void
+    {
+        config()->set('nntmux.orchestrator.current_forward_provider_reserve', 19_000);
+        DB::table('short_groups')->where('name', 'alt.test')->update(['last_record' => 39_100]);
+        $this->nntp->providerHigh = 39_100;
+
+        $exitCode = Artisan::call('orchestrator:audit-current-forward', [
+            'group' => 'alt.test',
+            '--record' => true,
+            '--json' => true,
+        ]);
+
+        self::assertSame(0, $exitCode, Artisan::output());
+        $this->assertDatabaseHas('current_forward_windows', [
+            'first_article' => 10_101,
+            'last_article' => 20_100,
+            'provider_high' => 39_100,
+            'state' => 'AUDITED',
+        ]);
+    }
+
+    public function test_live_audit_rejects_one_article_below_the_configured_reserve_without_mutation(): void
+    {
+        config()->set('nntmux.orchestrator.current_forward_provider_reserve', 19_000);
+        DB::table('short_groups')->where('name', 'alt.test')->update(['last_record' => 39_100]);
+        $this->nntp->providerHigh = 39_099;
+
+        $exitCode = Artisan::call('orchestrator:audit-current-forward', [
+            'group' => 'alt.test',
+            '--record' => true,
+            '--json' => true,
+        ]);
+        $output = Artisan::output();
+
+        self::assertSame(1, $exitCode, $output);
+        self::assertStringContainsString('provider_range_drift', $output);
+        self::assertSame(0, DB::table('current_forward_windows')->count());
+    }
+
     public function test_explicit_rejected_group_returns_failure_without_mutation(): void
     {
         DB::table('short_groups')->where('name', 'alt.test')->update(['last_record' => 40_099]);
@@ -186,6 +225,102 @@ final class AuditCurrentForwardRefreshCommandTest extends TestCase
         ]);
     }
 
+    public function test_scheduled_record_run_auto_registers_at_most_one_configured_source_without_issuing_a_permit(): void
+    {
+        config()->set(
+            'nntmux.orchestrator.current_forward_refresh_sources',
+            'alt.second:201-10200,alt.third:301-10300',
+        );
+        DB::table('usenet_groups')->insert([
+            [
+                'id' => 2,
+                'name' => 'alt.second',
+                'active' => 0,
+                'backfill' => 1,
+                'last_record' => 10_200,
+            ],
+            [
+                'id' => 3,
+                'name' => 'alt.third',
+                'active' => 0,
+                'backfill' => 1,
+                'last_record' => 10_300,
+            ],
+        ]);
+        DB::table('short_groups')->insert([
+            [
+                'name' => 'alt.second',
+                'first_record' => 1,
+                'last_record' => 50_200,
+                'updated' => now(),
+            ],
+            [
+                'name' => 'alt.third',
+                'first_record' => 1,
+                'last_record' => 50_300,
+                'updated' => now(),
+            ],
+        ]);
+        DB::table('settings')->insert(['name' => 'orchestrator_cf_permit', 'value' => '0']);
+
+        $exitCode = Artisan::call('orchestrator:audit-current-forward', [
+            '--record' => true,
+            '--json' => true,
+        ]);
+        $output = Artisan::output();
+
+        self::assertSame(0, $exitCode, $output);
+        self::assertStringContainsString('"registration"', $output);
+        self::assertStringContainsString('"group": "alt.second"', $output);
+        $this->assertDatabaseHas('current_forward_sources', [
+            'group_name' => 'alt.second',
+            'anchor_first' => 201,
+        ]);
+        $this->assertDatabaseMissing('current_forward_sources', ['group_name' => 'alt.third']);
+        self::assertSame('0', DB::table('settings')->where('name', 'orchestrator_cf_permit')->value('value'));
+        self::assertSame(0, DB::table('current_forward_windows')->whereNotNull('generation')->count());
+    }
+
+    public function test_scheduled_registration_is_idempotent_and_never_registers_an_unconfigured_group(): void
+    {
+        config()->set('nntmux.orchestrator.current_forward_refresh_sources', 'alt.second:201-10200');
+        DB::table('usenet_groups')->insert([
+            [
+                'id' => 2,
+                'name' => 'alt.second',
+                'active' => 0,
+                'backfill' => 1,
+                'last_record' => 10_200,
+            ],
+            [
+                'id' => 3,
+                'name' => 'alt.unconfigured',
+                'active' => 0,
+                'backfill' => 1,
+                'last_record' => 10_300,
+            ],
+        ]);
+        DB::table('short_groups')->insert([
+            'name' => 'alt.second',
+            'first_record' => 1,
+            'last_record' => 50_200,
+            'updated' => now(),
+        ]);
+
+        self::assertSame(0, Artisan::call('orchestrator:audit-current-forward', [
+            '--record' => true,
+            '--json' => true,
+        ]), Artisan::output());
+        self::assertSame(0, Artisan::call('orchestrator:audit-current-forward', [
+            '--record' => true,
+            '--json' => true,
+        ]), Artisan::output());
+
+        self::assertSame(1, DB::table('current_forward_sources')->where('group_name', 'alt.second')->count());
+        $this->assertDatabaseMissing('current_forward_sources', ['group_name' => 'alt.unconfigured']);
+        self::assertSame(2, DB::table('current_forward_sources')->count());
+    }
+
     public function test_disabled_global_shadow_inspection_is_successful_and_performs_zero_writes_or_nntp_calls(): void
     {
         config()->set('nntmux.orchestrator.current_forward_refresh_enabled', false);
@@ -208,6 +343,8 @@ final class CurrentForwardAuditNntpFake extends NNTPService
 {
     public int $connections = 0;
 
+    public int $providerHigh = 50_100;
+
     public function __construct() {}
 
     public function __destruct() {}
@@ -226,7 +363,7 @@ final class CurrentForwardAuditNntpFake extends NNTPService
 
     public function selectGroup(string $group, mixed $articles = false, bool $force = false): mixed
     {
-        return ['group' => $group, 'first' => 1, 'last' => 50_100];
+        return ['group' => $group, 'first' => 1, 'last' => $this->providerHigh];
     }
 
     public function getXOVER(string $range): array|string|NNTPService|NntpError

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Services\Binaries;
 
+use App\Services\Orchestrator\CurrentForwardWindowLineage;
+
 /**
  * Orchestrates the header storage process.
  *
@@ -22,6 +24,8 @@ final class HeaderStorageService
 
     private BinariesConfig $config;
 
+    private CurrentForwardWindowLineage $lineage;
+
     /** @var array<int> Article numbers that failed to insert */
     private array $failedInserts = [];
 
@@ -29,7 +33,8 @@ final class HeaderStorageService
         ?CollectionHandler $collectionHandler = null,
         ?BinaryHandler $binaryHandler = null,
         ?PartHandler $partHandler = null,
-        ?BinariesConfig $config = null
+        ?BinariesConfig $config = null,
+        ?CurrentForwardWindowLineage $lineage = null,
     ) {
         $this->config = $config ?? BinariesConfig::fromSettings();
         $this->collectionHandler = $collectionHandler ?? new CollectionHandler;
@@ -38,6 +43,7 @@ final class HeaderStorageService
             $this->config->partsChunkSize,
             true
         );
+        $this->lineage = $lineage ?? new CurrentForwardWindowLineage;
     }
 
     /**
@@ -48,8 +54,12 @@ final class HeaderStorageService
      * @param  bool  $addToPartRepair  Whether to track failed inserts
      * @return list<int> Article numbers that failed to insert
      */
-    public function store(array $headers, array $groupMySQL, bool $addToPartRepair = true): array
-    {
+    public function store(
+        array $headers,
+        array $groupMySQL,
+        bool $addToPartRepair = true,
+        ?int $currentForwardGeneration = null,
+    ): array {
         if (empty($headers)) {
             return [];
         }
@@ -69,7 +79,7 @@ final class HeaderStorageService
         $headers = array_values($headers);
         for ($offset = 0; $offset < $total; $offset += $chunkSize) {
             $chunk = \array_slice($headers, $offset, $chunkSize);
-            $this->storeChunk($chunk, $groupMySQL, $addToPartRepair);
+            $this->storeChunk($chunk, $groupMySQL, $addToPartRepair, $currentForwardGeneration);
             unset($chunk);
         }
 
@@ -82,8 +92,12 @@ final class HeaderStorageService
      * @param  array<int, array<string, mixed>>  $headers
      * @param  array<string, mixed>  $groupMySQL
      */
-    private function storeChunk(array $headers, array $groupMySQL, bool $addToPartRepair): void
-    {
+    private function storeChunk(
+        array $headers,
+        array $groupMySQL,
+        bool $addToPartRepair,
+        ?int $currentForwardGeneration,
+    ): void {
         $chunkNumbers = array_values(array_filter(array_map(
             static fn (array $header): mixed => $header['Number'] ?? null,
             $headers
@@ -93,7 +107,13 @@ final class HeaderStorageService
 
         for ($attempt = 1; $attempt <= self::MAX_CHUNK_ATTEMPTS; $attempt++) {
             try {
-                if ($this->storeChunkOnce($headers, $groupMySQL, $addToPartRepair, $chunkNumbers)) {
+                if ($this->storeChunkOnce(
+                    $headers,
+                    $groupMySQL,
+                    $addToPartRepair,
+                    $chunkNumbers,
+                    $currentForwardGeneration,
+                )) {
                     return;
                 }
 
@@ -129,12 +149,20 @@ final class HeaderStorageService
      * @param  array<string, mixed>  $groupMySQL
      * @param  list<int>  $chunkNumbers
      */
-    private function storeChunkOnce(array $headers, array $groupMySQL, bool $addToPartRepair, array $chunkNumbers): bool
-    {
+    private function storeChunkOnce(
+        array $headers,
+        array $groupMySQL,
+        bool $addToPartRepair,
+        array $chunkNumbers,
+        ?int $currentForwardGeneration,
+    ): bool {
         $this->collectionHandler->reset();
         $this->binaryHandler->reset();
         $this->partHandler->reset();
         $this->partHandler->setAddToPartRepair($addToPartRepair);
+        $this->partHandler->setTrackInsertedParts(
+            $currentForwardGeneration !== null && $this->lineage->enabled(),
+        );
 
         // Create transaction
         $transaction = new HeaderStorageTransaction(
@@ -146,13 +174,24 @@ final class HeaderStorageService
         try {
             $transaction->begin();
 
-            $this->processHeaderChunk($headers, $groupMySQL, $transaction, $addToPartRepair);
+            $objects = $this->processHeaderChunk($headers, $groupMySQL, $transaction, $addToPartRepair);
 
             // Flush remaining parts
             if ($this->partHandler->hasPending()) {
                 if (! $this->partHandler->flush()) {
                     $transaction->markError();
                 }
+            }
+
+            if ($currentForwardGeneration !== null && $this->lineage->enabled()) {
+                $this->lineage->recordHeaderChunk(
+                    $currentForwardGeneration,
+                    $objects['collections'],
+                    $this->collectionHandler->getInsertedIds(),
+                    $objects['binaries'],
+                    $this->binaryHandler->getInsertedIds(),
+                    $this->partHandler->getInsertedParts(),
+                );
             }
 
             // Finish transaction
@@ -184,9 +223,14 @@ final class HeaderStorageService
     /**
      * @param  array<int, array<string, mixed>>  $headers
      * @param  array<string, mixed>  $groupMySQL
+     * @return array{collections:list<int>,binaries:list<int>}
      */
-    private function processHeaderChunk(array $headers, array $groupMySQL, HeaderStorageTransaction $transaction, bool $addToPartRepair): void
-    {
+    private function processHeaderChunk(
+        array $headers,
+        array $groupMySQL,
+        HeaderStorageTransaction $transaction,
+        bool $addToPartRepair,
+    ): array {
         $totalFilesByIndex = [];
         $fileNumbersByIndex = [];
 
@@ -227,7 +271,7 @@ final class HeaderStorageService
         if (! $this->binaryHandler->flushUpdates($this->config->binariesUpdateChunkSize)) {
             $transaction->markError();
 
-            return;
+            return ['collections' => [], 'binaries' => []];
         }
 
         foreach ($binaryRecords as $index => $record) {
@@ -242,6 +286,11 @@ final class HeaderStorageService
                 $this->markHeaderFailed($header, $transaction, $addToPartRepair);
             }
         }
+
+        return [
+            'collections' => array_values(array_unique(array_map('intval', $collectionIds))),
+            'binaries' => array_values(array_unique(array_map('intval', $binaryIds))),
+        ];
     }
 
     /**

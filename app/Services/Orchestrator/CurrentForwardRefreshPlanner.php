@@ -5,12 +5,11 @@ declare(strict_types=1);
 namespace App\Services\Orchestrator;
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 final class CurrentForwardRefreshPlanner
 {
     private const int WINDOW_SIZE = 10_000;
-
-    private const int PROVIDER_RESERVE = 20_000;
 
     private const int PROVIDER_MAX_AGE_SECONDS = 600;
 
@@ -18,7 +17,7 @@ final class CurrentForwardRefreshPlanner
      * @return array{
      *     enabled:bool,
      *     reason:string,
-     *     proposals:list<array{group:string,source_id:int,first:int,last:int,provider_first:int,provider_high:int,provider_observed_at:string}>,
+     *     proposals:list<array{group:string,source_id:int,first:int,last:int,provider_first:int,provider_high:int,provider_observed_at:string,mode:string,window_id:int,retry_of_window_id:int,attempt_ordinal:int}>,
      *     rejections:array<string,string>
      * }
      */
@@ -28,7 +27,7 @@ final class CurrentForwardRefreshPlanner
             return $this->result(false, 'refresh_disabled');
         }
 
-        $policy = new CurrentForwardStopCursorPolicy;
+        $policy = new CurrentForwardRefreshTrustPolicy;
         if (! $policy->isValid() || $policy->groups() === []) {
             return $this->result(true, 'invalid_window_policy');
         }
@@ -40,7 +39,7 @@ final class CurrentForwardRefreshPlanner
 
         foreach ($sources as $source) {
             $groupName = trim((string) $source->group_name);
-            $corridor = $policy->window($groupName);
+            $corridor = $policy->anchor($groupName);
             if ($corridor === null) {
                 $rejections[$groupName] = 'untrusted_source';
 
@@ -63,11 +62,6 @@ final class CurrentForwardRefreshPlanner
             }
 
             $cursor = (int) $group->last_record;
-            if ((int) $source->audited_last !== $cursor) {
-                $rejections[$groupName] = 'ledger_cursor_drift';
-
-                continue;
-            }
             $anchorCursor = $corridor['first'] - 1;
             if ($cursor < $anchorCursor || ($cursor - $anchorCursor) % self::WINDOW_SIZE !== 0) {
                 $rejections[$groupName] = 'cursor_drift';
@@ -86,11 +80,41 @@ final class CurrentForwardRefreshPlanner
                 ->where('source_id', (int) $source->id)
                 ->where('first_article', $first)
                 ->where('last_article', $last)
+                ->when(
+                    Schema::hasColumn('current_forward_windows', 'attempt_ordinal'),
+                    static fn ($query) => $query->orderByDesc('attempt_ordinal'),
+                )
+                ->orderByDesc('id')
                 ->first();
+            $mode = 'NEW';
+            $attemptOrdinal = 1;
+            $retryOfWindowId = 0;
             if ($existingWindow !== null) {
-                $rejections[$groupName] = (string) $existingWindow->state === 'AUDITED'
-                    ? 'audited_window_pending'
-                    : 'window_already_recorded';
+                if ((string) $existingWindow->state === 'QUARANTINED') {
+                    if (! (new CurrentForwardWindowRetryPolicy)->eligible($existingWindow, $source, $group)) {
+                        $rejections[$groupName] = 'window_retry_unsafe';
+
+                        continue;
+                    }
+                    $mode = 'RETRY';
+                    $attemptOrdinal = (int) ($existingWindow->attempt_ordinal ?? 1) + 1;
+                    $retryOfWindowId = (int) $existingWindow->id;
+                } elseif ((string) $existingWindow->state !== 'AUDITED'
+                    || $existingWindow->generation !== null
+                ) {
+                    $rejections[$groupName] = 'window_already_recorded';
+
+                    continue;
+                } elseif ($this->verificationIsFresh($existingWindow, $source, $now)) {
+                    $rejections[$groupName] = 'audited_window_pending';
+
+                    continue;
+                } else {
+                    $mode = 'REVERIFY';
+                    $attemptOrdinal = (int) ($existingWindow->attempt_ordinal ?? 1);
+                }
+            } elseif ((int) $source->audited_last !== $cursor) {
+                $rejections[$groupName] = 'ledger_cursor_drift';
 
                 continue;
             }
@@ -117,11 +141,7 @@ final class CurrentForwardRefreshPlanner
 
             $providerFirst = (int) $provider->first_record;
             $providerHigh = (int) $provider->last_record;
-            if ($providerFirst <= 0
-                || $providerFirst > $first
-                || $last > PHP_INT_MAX - self::PROVIDER_RESERVE
-                || $providerHigh < $last + self::PROVIDER_RESERVE
-            ) {
+            if (! CurrentForwardProviderCoverage::covers($providerFirst, $providerHigh, $first, $last)) {
                 $rejections[$groupName] = 'provider_range_drift';
 
                 continue;
@@ -135,6 +155,10 @@ final class CurrentForwardRefreshPlanner
                 'provider_first' => $providerFirst,
                 'provider_high' => $providerHigh,
                 'provider_observed_at' => $providerObservedAt,
+                'mode' => $mode,
+                'window_id' => (int) ($existingWindow->id ?? 0),
+                'retry_of_window_id' => $retryOfWindowId,
+                'attempt_ordinal' => $attemptOrdinal,
             ];
         }
 
@@ -144,6 +168,41 @@ final class CurrentForwardRefreshPlanner
             'proposals' => $proposals,
             'rejections' => $rejections,
         ];
+    }
+
+    private function verificationIsFresh(object $window, object $source, int $now): bool
+    {
+        if (($window->failure_reason ?? null) === 'unclaimed_timeout_reaudit_required') {
+            return false;
+        }
+        $maxAge = (int) config('nntmux.orchestrator.current_forward_audit_max_age_seconds', 900);
+        if (Schema::hasTable('current_forward_window_verifications')) {
+            $verification = DB::table('current_forward_window_verifications')
+                ->where('window_id', $window->id)
+                ->orderByDesc('verified_at')
+                ->orderByDesc('id')
+                ->first();
+            if ($verification === null) {
+                return false;
+            }
+            $verifiedAt = strtotime((string) $verification->verified_at);
+            $providerAt = strtotime((string) $verification->provider_observed_at);
+
+            return $verifiedAt !== false
+                && $providerAt !== false
+                && $verifiedAt <= $now + 60
+                && $providerAt <= $now + 60
+                && $now - $verifiedAt <= $maxAge
+                && $now - $providerAt <= $maxAge;
+        }
+
+        $providerAt = strtotime((string) $window->provider_observed_at);
+        $sourceAt = strtotime((string) $source->last_audited_at);
+
+        return $providerAt !== false
+            && $sourceAt !== false
+            && $now - $providerAt <= $maxAge
+            && $now - $sourceAt <= $maxAge;
     }
 
     /**

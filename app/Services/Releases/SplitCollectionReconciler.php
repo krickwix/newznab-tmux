@@ -4,20 +4,40 @@ declare(strict_types=1);
 
 namespace App\Services\Releases;
 
+use App\Services\Metrics\SplitCollectionTelemetry;
+use App\Services\Orchestrator\CurrentForwardTerminalSplitRepair;
+use App\Services\Orchestrator\CurrentForwardWindowLineage;
+use Illuminate\Database\Query\Builder;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Throwable;
 
 final class SplitCollectionReconciler
 {
-    private const int MAX_COLLECTIONS_PER_GROUP = 200;
+    private const int ROTATING_COLLECTIONS_PER_GROUP = 100;
+
+    private const int NEWEST_COLLECTIONS_PER_GROUP = 100;
+
+    private const int DISCOVERY_EDGE_OVERLAP = 20;
 
     private const int MAX_PAIRS_PER_PASS = 20;
+
+    private const int MAX_SOURCE_COLLECTIONS_PER_PASS = 100;
 
     private const int MAX_TOTAL_FILES = 200;
 
     private const int MAX_POSTING_GAP_SECONDS = 120;
 
     private const int MAX_XREF_ARTICLE_GAP = 1000;
+
+    private const int MAX_DYNAMIC_PAIR_ARTICLE_GAP = 12000;
+
+    private const int MAX_DYNAMIC_PAIR_TOTAL_PARTS = 12000;
+
+    private const int MIN_DYNAMIC_PAIR_RESIDUAL = -3;
+
+    private const int MAX_DYNAMIC_PAIR_RESIDUAL = 0;
 
     private const int MAX_MATCHING_COLLECTIONS = 20;
 
@@ -26,34 +46,101 @@ final class SplitCollectionReconciler
     /** @var array<int, string> */
     private array $groupNamesById = [];
 
+    private readonly CurrentForwardWindowLineage $currentForwardLineage;
+
+    private readonly CurrentForwardTerminalSplitRepair $terminalSplitRepair;
+
+    private readonly SplitCollectionTelemetry $telemetry;
+
+    /** @var array<string,array<string,int>> */
+    private array $pairXrefDecisionCounts = [];
+
+    public function __construct(
+        ?CurrentForwardWindowLineage $currentForwardLineage = null,
+        ?SplitCollectionTelemetry $telemetry = null,
+        ?CurrentForwardTerminalSplitRepair $terminalSplitRepair = null,
+    ) {
+        $this->currentForwardLineage = $currentForwardLineage ?? new CurrentForwardWindowLineage;
+        $this->telemetry = $telemetry ?? new SplitCollectionTelemetry;
+        $this->terminalSplitRepair = $terminalSplitRepair ?? new CurrentForwardTerminalSplitRepair(
+            $this->currentForwardLineage,
+        );
+    }
+
     public function reconcile(?int $groupId): int
     {
+        $this->pairXrefDecisionCounts = [];
         $groupIds = $this->allowedGroupIds($groupId);
         if ($groupIds === []) {
             return 0;
         }
 
-        $merged = 0;
-        foreach ($groupIds as $allowedGroupId) {
-            foreach ($this->uniqueFanoutCohorts($allowedGroupId) as $cohort) {
-                if ($merged >= self::MAX_PAIRS_PER_PASS) {
-                    return $merged;
-                }
-                if ($this->mergeFanout($allowedGroupId, $cohort['anchor_id'], $cohort['companion_ids'])) {
-                    $merged++;
+        try {
+            $merged = 0;
+            $sourceCollectionsMerged = 0;
+            $cutoff = now()->subHours($this->lookbackHours())->toDateTimeString();
+            foreach ($groupIds as $allowedGroupId) {
+                $collectionIds = $this->expandCandidateCohorts(
+                    $allowedGroupId,
+                    $this->candidateCollectionIds($allowedGroupId, $cutoff),
+                    $cutoff,
+                );
+                $pairs = $this->uniquePairs($allowedGroupId, $collectionIds);
+                $fanouts = $this->uniqueFanoutCohorts($allowedGroupId, $collectionIds);
+                foreach ($this->interleavedCandidates($pairs, $fanouts) as $candidate) {
+                    $sourceCount = count($candidate['companion_ids']);
+                    if ($merged >= self::MAX_PAIRS_PER_PASS
+                        || $sourceCollectionsMerged + $sourceCount > self::MAX_SOURCE_COLLECTIONS_PER_PASS
+                    ) {
+                        return $merged;
+                    }
+                    $didMerge = $candidate['type'] === 'pair'
+                        ? $this->mergePair($allowedGroupId, $candidate['anchor_id'], $candidate['companion_ids'][0])
+                        : $this->mergeFanout($allowedGroupId, $candidate['anchor_id'], $candidate['companion_ids']);
+                    if ($didMerge) {
+                        $merged++;
+                        $sourceCollectionsMerged += $sourceCount;
+                    }
                 }
             }
-            foreach ($this->uniquePairs($allowedGroupId) as $pair) {
-                if ($merged >= self::MAX_PAIRS_PER_PASS) {
-                    return $merged;
-                }
-                if ($this->mergePair($allowedGroupId, $pair['anchor_id'], $pair['companion_id'])) {
-                    $merged++;
-                }
+
+            return $merged;
+        } finally {
+            $this->telemetry->record($this->pairXrefDecisionCounts);
+        }
+    }
+
+    /**
+     * Alternate pair and fanout work so either shape can make progress under
+     * a sustained backlog. Pairs go first because previous versions always
+     * gave fanouts the entire success budget.
+     *
+     * @param  list<array{anchor_id:int,companion_id:int}>  $pairs
+     * @param  list<array{anchor_id:int,companion_ids:list<int>}>  $fanouts
+     * @return list<array{type:'pair'|'fanout',anchor_id:int,companion_ids:list<int>}>
+     */
+    private function interleavedCandidates(array $pairs, array $fanouts): array
+    {
+        $candidates = [];
+        $length = max(count($pairs), count($fanouts));
+        for ($index = 0; $index < $length; $index++) {
+            if (isset($pairs[$index])) {
+                $candidates[] = [
+                    'type' => 'pair',
+                    'anchor_id' => $pairs[$index]['anchor_id'],
+                    'companion_ids' => [$pairs[$index]['companion_id']],
+                ];
+            }
+            if (isset($fanouts[$index])) {
+                $candidates[] = [
+                    'type' => 'fanout',
+                    'anchor_id' => $fanouts[$index]['anchor_id'],
+                    'companion_ids' => $fanouts[$index]['companion_ids'],
+                ];
             }
         }
 
-        return $merged;
+        return $candidates;
     }
 
     /** @return list<int> */
@@ -80,20 +167,237 @@ final class SplitCollectionReconciler
         return $groups->map(static fn (object $group): int => (int) $group->id)->all();
     }
 
-    /** @return list<array{anchor_id:int,companion_id:int}> */
-    private function uniquePairs(int $groupId): array
+    /**
+     * Keep discovery bounded while giving new posts low latency and rotating
+     * through the complete retained horizon. Edge overlap keeps common
+     * cohorts together; exact cohort expansion below makes boundaries safe.
+     *
+     * @return list<int>
+     */
+    private function candidateCollectionIds(int $groupId, string $cutoff): array
     {
-        $collectionIds = DB::table('collections')
+        $base = DB::table('collections')
             ->where('groups_id', $groupId)
             ->where('filecheck', 0)
             ->whereNull('releases_id')
             ->whereBetween('totalfiles', [2, self::MAX_TOTAL_FILES])
-            ->where('dateadded', '>=', now()->subDay())
+            ->where('dateadded', '>=', $cutoff);
+
+        $cursor = $this->discoveryCursor($groupId);
+        $rotatingIds = $this->candidateIdsAfter($base, $cursor);
+        if ($rotatingIds === [] && $cursor !== null) {
+            $rotatingIds = $this->candidateIdsAfter($base, null);
+        }
+        if ($rotatingIds === []) {
+            $this->forgetDiscoveryCursor($groupId);
+
+            return [];
+        }
+
+        $first = $rotatingIds[0];
+        $last = $rotatingIds[array_key_last($rotatingIds)];
+        $this->storeDiscoveryCursor($groupId, $last);
+
+        $previousIds = (clone $base)
+            ->where(static fn (Builder $query) => $query
+                ->where('dateadded', '<', $first['dateadded'])
+                ->orWhere(static fn (Builder $sameDate) => $sameDate
+                    ->where('dateadded', $first['dateadded'])
+                    ->where('id', '<', $first['id'])))
+            ->orderByDesc('dateadded')
             ->orderByDesc('id')
-            ->limit(self::MAX_COLLECTIONS_PER_GROUP)
+            ->limit(self::DISCOVERY_EDGE_OVERLAP)
             ->pluck('id')
             ->map(static fn (mixed $id): int => (int) $id)
             ->all();
+        $followingIds = (clone $base)
+            ->where(static fn (Builder $query) => $query
+                ->where('dateadded', '>', $last['dateadded'])
+                ->orWhere(static fn (Builder $sameDate) => $sameDate
+                    ->where('dateadded', $last['dateadded'])
+                    ->where('id', '>', $last['id'])))
+            ->orderBy('dateadded')
+            ->orderBy('id')
+            ->limit(self::DISCOVERY_EDGE_OVERLAP)
+            ->pluck('id')
+            ->map(static fn (mixed $id): int => (int) $id)
+            ->all();
+        $newestIds = (clone $base)
+            ->orderByDesc('dateadded')
+            ->orderByDesc('id')
+            ->limit(self::NEWEST_COLLECTIONS_PER_GROUP)
+            ->pluck('id')
+            ->map(static fn (mixed $id): int => (int) $id)
+            ->all();
+
+        $collectionIds = array_values(array_unique([
+            ...$previousIds,
+            ...array_column($rotatingIds, 'id'),
+            ...$followingIds,
+            ...$newestIds,
+        ]));
+        sort($collectionIds, SORT_NUMERIC);
+
+        return $collectionIds;
+    }
+
+    /**
+     * @param  array{dateadded:string,id:int}|null  $cursor
+     * @return list<array{dateadded:string,id:int}>
+     */
+    private function candidateIdsAfter(Builder $base, ?array $cursor): array
+    {
+        $rows = (clone $base)
+            ->when($cursor !== null, static fn (Builder $query) => $query
+                ->where(static fn (Builder $after) => $after
+                    ->where('dateadded', '>', $cursor['dateadded'])
+                    ->orWhere(static fn (Builder $sameDate) => $sameDate
+                        ->where('dateadded', $cursor['dateadded'])
+                        ->where('id', '>', $cursor['id']))))
+            ->orderBy('dateadded')
+            ->orderBy('id')
+            ->limit(self::ROTATING_COLLECTIONS_PER_GROUP)
+            ->get(['dateadded', 'id']);
+
+        return $rows->map(static fn (object $row): array => [
+            'dateadded' => (string) $row->dateadded,
+            'id' => (int) $row->id,
+        ])->all();
+    }
+
+    /**
+     * Include the exact bounded identity cohort for every structural sample.
+     * This makes page edges safe even when unrelated collection IDs are
+     * interleaved between an anchor and its PAR2 companion(s).
+     *
+     * @param  list<int>  $collectionIds
+     * @return list<int>
+     */
+    private function expandCandidateCohorts(int $groupId, array $collectionIds, string $cutoff): array
+    {
+        if ($collectionIds === []) {
+            return [];
+        }
+
+        $expandedIds = $collectionIds;
+        $seenCohorts = [];
+        foreach ($this->collectionData($collectionIds) as $collection) {
+            if (! $this->isAnchor($collection)
+                && ! $this->isCompanion($collection)
+                && ! $this->isFanoutCompanion($collection)
+            ) {
+                continue;
+            }
+            $timestamp = strtotime((string) $collection['date']);
+            if ($timestamp === false) {
+                continue;
+            }
+            $cohortKey = implode('|', [
+                (string) $collection['fromname'],
+                (string) $collection['totalfiles'],
+                (string) $timestamp,
+            ]);
+            if (isset($seenCohorts[$cohortKey])) {
+                continue;
+            }
+            $seenCohorts[$cohortKey] = true;
+
+            $cohortIds = DB::table('collections')
+                ->where('groups_id', $groupId)
+                ->where('fromname', (string) $collection['fromname'])
+                ->where('totalfiles', (int) $collection['totalfiles'])
+                ->where('filecheck', 0)
+                ->whereNull('releases_id')
+                ->where('dateadded', '>=', $cutoff)
+                ->whereBetween('date', [
+                    date('Y-m-d H:i:s', $timestamp - self::MAX_POSTING_GAP_SECONDS),
+                    date('Y-m-d H:i:s', $timestamp + self::MAX_POSTING_GAP_SECONDS),
+                ])
+                ->orderBy('id')
+                ->limit(self::MAX_MATCHING_COLLECTIONS + 1)
+                ->pluck('id')
+                ->map(static fn (mixed $id): int => (int) $id)
+                ->all();
+            $expandedIds = [...$expandedIds, ...$cohortIds];
+        }
+
+        $expandedIds = array_values(array_unique($expandedIds));
+        sort($expandedIds, SORT_NUMERIC);
+
+        return $expandedIds;
+    }
+
+    /** @return array{dateadded:string,id:int}|null */
+    private function discoveryCursor(int $groupId): ?array
+    {
+        try {
+            $cursor = Cache::store($this->cursorStore())->get($this->cursorKey($groupId));
+        } catch (Throwable $error) {
+            Log::warning('Split collection discovery cursor could not be read; using bounded oldest/newest sampling.', [
+                'group_id' => $groupId,
+                'error' => $error->getMessage(),
+            ]);
+
+            return null;
+        }
+        if (! is_array($cursor)
+            || ! is_string($cursor['dateadded'] ?? null)
+            || strtotime($cursor['dateadded']) === false
+            || (int) ($cursor['id'] ?? 0) <= 0
+        ) {
+            return null;
+        }
+
+        return ['dateadded' => $cursor['dateadded'], 'id' => (int) $cursor['id']];
+    }
+
+    /** @param array{dateadded:string,id:int} $cursor */
+    private function storeDiscoveryCursor(int $groupId, array $cursor): void
+    {
+        try {
+            Cache::store($this->cursorStore())->put($this->cursorKey($groupId), $cursor, now()->addDays(7));
+        } catch (Throwable $error) {
+            Log::warning('Split collection discovery cursor could not be persisted.', [
+                'group_id' => $groupId,
+                'error' => $error->getMessage(),
+            ]);
+        }
+    }
+
+    private function forgetDiscoveryCursor(int $groupId): void
+    {
+        try {
+            Cache::store($this->cursorStore())->forget($this->cursorKey($groupId));
+        } catch (Throwable) {
+            // Cursor persistence is an optimization; safe bounded sampling remains.
+        }
+    }
+
+    private function cursorStore(): string
+    {
+        return trim((string) config('nntmux.split_collection_reconcile_cursor_store', 'array')) ?: 'array';
+    }
+
+    private function cursorKey(int $groupId): string
+    {
+        return sprintf(
+            'nntmux:split-collection:discovery-cursor:v1:%dh:%d',
+            $this->lookbackHours(),
+            $groupId,
+        );
+    }
+
+    private function lookbackHours(): int
+    {
+        return min(72, max(24, (int) config('nntmux.split_collection_reconcile_lookback_hours', 24)));
+    }
+
+    /**
+     * @param  list<int>  $collectionIds
+     * @return list<array{anchor_id:int,companion_id:int}>
+     */
+    private function uniquePairs(int $groupId, array $collectionIds): array
+    {
         if ($collectionIds === []) {
             return [];
         }
@@ -106,7 +410,7 @@ final class SplitCollectionReconciler
 
         foreach ($anchors as $anchorId => $anchor) {
             foreach ($companions as $companionId => $companion) {
-                if (! $this->pairMetadataMatches($anchor, $companion)) {
+                if (! $this->pairMetadataMatches($anchor, $companion, true)) {
                     continue;
                 }
                 $matchesByAnchor[$anchorId][] = $companionId;
@@ -134,20 +438,12 @@ final class SplitCollectionReconciler
         return array_slice($pairs, 0, self::MAX_PAIRS_PER_PASS);
     }
 
-    /** @return list<array{anchor_id:int,companion_ids:list<int>}> */
-    private function uniqueFanoutCohorts(int $groupId): array
+    /**
+     * @param  list<int>  $collectionIds
+     * @return list<array{anchor_id:int,companion_ids:list<int>}>
+     */
+    private function uniqueFanoutCohorts(int $groupId, array $collectionIds): array
     {
-        $collectionIds = DB::table('collections')
-            ->where('groups_id', $groupId)
-            ->where('filecheck', 0)
-            ->whereNull('releases_id')
-            ->whereBetween('totalfiles', [2, self::MAX_FANOUT_FILES])
-            ->where('dateadded', '>=', now()->subDay())
-            ->orderByDesc('id')
-            ->limit(self::MAX_COLLECTIONS_PER_GROUP)
-            ->pluck('id')
-            ->map(static fn (mixed $id): int => (int) $id)
-            ->all();
         if ($collectionIds === []) {
             return [];
         }
@@ -287,24 +583,130 @@ final class SplitCollectionReconciler
      * @param  array<string, mixed>  $anchor
      * @param  array<string, mixed>  $companion
      */
-    private function pairMetadataMatches(array $anchor, array $companion): bool
+    private function pairMetadataMatches(array $anchor, array $companion, bool $observe = false): bool
     {
         $anchorTimestamp = strtotime((string) $anchor['date']);
         $companionTimestamp = strtotime((string) $companion['date']);
         $groupName = $this->groupName((int) $anchor['groups_id']);
-        $anchorXrefMax = $this->xrefArticleMax((string) $anchor['xref'], $groupName);
-        $companionXrefMin = $this->xrefArticleMin((string) $companion['xref'], $groupName);
+        if ((int) $anchor['id'] === (int) $companion['id']
+            || (int) $anchor['groups_id'] !== (int) $companion['groups_id']
+            || ! hash_equals((string) $anchor['fromname'], (string) $companion['fromname'])
+            || (int) $anchor['totalfiles'] !== (int) $companion['totalfiles']
+            || $anchorTimestamp === false
+            || $companionTimestamp === false
+            || abs($anchorTimestamp - $companionTimestamp) > self::MAX_POSTING_GAP_SECONDS
+        ) {
+            return false;
+        }
 
-        return (int) $anchor['id'] !== (int) $companion['id']
-            && (int) $anchor['groups_id'] === (int) $companion['groups_id']
-            && hash_equals((string) $anchor['fromname'], (string) $companion['fromname'])
-            && (int) $anchor['totalfiles'] === (int) $companion['totalfiles']
-            && $anchorTimestamp !== false
-            && $companionTimestamp !== false
-            && abs($anchorTimestamp - $companionTimestamp) <= self::MAX_POSTING_GAP_SECONDS
-            && $anchorXrefMax > 0
-            && $companionXrefMin > $anchorXrefMax
-            && $companionXrefMin - $anchorXrefMax <= $this->xrefArticleGapLimit($groupName);
+        $decision = $this->pairXrefDecision($anchor, $companion, $groupName);
+        if ($observe) {
+            $this->pairXrefDecisionCounts[$groupName][$decision['result']] =
+                ($this->pairXrefDecisionCounts[$groupName][$decision['result']] ?? 0) + 1;
+        }
+
+        return $decision['accepted'];
+    }
+
+    /**
+     * @param  array<string,mixed>  $anchor
+     * @param  array<string,mixed>  $companion
+     * @return array{accepted:bool,result:string}
+     */
+    private function pairXrefDecision(array $anchor, array $companion, string $groupName): array
+    {
+        $anchorArticles = $this->xrefArticles((string) $anchor['xref'], $groupName);
+        $companionArticles = $this->xrefArticles((string) $companion['xref'], $groupName);
+        if ($anchorArticles === [] || $companionArticles === []) {
+            return ['accepted' => false, 'result' => 'reject_missing_or_malformed'];
+        }
+
+        $anchorMin = min($anchorArticles);
+        $anchorMax = max($anchorArticles);
+        $companionMin = min($companionArticles);
+        if ($companionMin <= $anchorMax) {
+            return ['accepted' => false, 'result' => 'reject_direction'];
+        }
+
+        $gap = $companionMin - $anchorMax;
+        if ($gap <= $this->xrefArticleGapLimit($groupName)) {
+            return ['accepted' => true, 'result' => 'static_accept'];
+        }
+
+        $parts = (int) ($anchor['binaries'][0]['totalparts'] ?? 0);
+        if ($parts < 1 || $parts > self::MAX_DYNAMIC_PAIR_TOTAL_PARTS) {
+            return ['accepted' => false, 'result' => 'reject_parts_cap'];
+        }
+        $span = $anchorMax - $anchorMin + 1;
+        if ($span < 1 || $span >= $parts) {
+            return ['accepted' => false, 'result' => 'reject_span'];
+        }
+        if ($gap > self::MAX_DYNAMIC_PAIR_ARTICLE_GAP) {
+            return ['accepted' => false, 'result' => 'reject_gap_cap'];
+        }
+
+        $expectedGap = max(1, $parts - $span);
+        $residual = $gap - $expectedGap;
+        if ($residual < self::MIN_DYNAMIC_PAIR_RESIDUAL || $residual > self::MAX_DYNAMIC_PAIR_RESIDUAL) {
+            return ['accepted' => false, 'result' => 'reject_residual'];
+        }
+        if (! $this->dynamicPairGapEnabled($groupName)) {
+            return ['accepted' => false, 'result' => 'dynamic_eligible_shadow'];
+        }
+
+        return ['accepted' => true, 'result' => 'dynamic_accept'];
+    }
+
+    /**
+     * @param  array<string,mixed>  $anchor
+     * @param  array<string,mixed>  $companion
+     * @return array{group:string,totalparts:int,span:int,gap:int,residual:int}|null
+     */
+    private function dynamicPairFacts(array $anchor, array $companion, string $groupName): ?array
+    {
+        $anchorArticles = $this->xrefArticles((string) $anchor['xref'], $groupName);
+        $companionArticles = $this->xrefArticles((string) $companion['xref'], $groupName);
+        if ($anchorArticles === [] || $companionArticles === []) {
+            return null;
+        }
+
+        $anchorMin = min($anchorArticles);
+        $anchorMax = max($anchorArticles);
+        $companionMin = min($companionArticles);
+        $parts = (int) ($anchor['binaries'][0]['totalparts'] ?? 0);
+        $span = $anchorMax - $anchorMin + 1;
+        $gap = $companionMin - $anchorMax;
+        $residual = $gap - max(1, $parts - $span);
+        if ($companionMin <= $anchorMax
+            || $parts < 1
+            || $parts > self::MAX_DYNAMIC_PAIR_TOTAL_PARTS
+            || $span < 1
+            || $span >= $parts
+            || $gap <= $this->xrefArticleGapLimit($groupName)
+            || $gap > self::MAX_DYNAMIC_PAIR_ARTICLE_GAP
+            || $residual < self::MIN_DYNAMIC_PAIR_RESIDUAL
+            || $residual > self::MAX_DYNAMIC_PAIR_RESIDUAL
+        ) {
+            return null;
+        }
+
+        return [
+            'group' => $groupName,
+            'totalparts' => $parts,
+            'span' => $span,
+            'gap' => $gap,
+            'residual' => $residual,
+        ];
+    }
+
+    private function dynamicPairGapEnabled(string $groupName): bool
+    {
+        $groups = array_values(array_unique(array_filter(array_map(
+            static fn (mixed $group): string => trim((string) $group),
+            (array) config('nntmux.split_collection_dynamic_pair_gap_groups', []),
+        ))));
+
+        return count($groups) <= 16 && in_array($groupName, $groups, true);
     }
 
     /**
@@ -500,6 +902,28 @@ final class SplitCollectionReconciler
                 return false;
             }
 
+            $groupName = $this->groupName($groupId);
+            $decision = $this->pairXrefDecision($anchor, $companion, $groupName);
+            $terminalContext = null;
+            if ($decision['result'] === 'dynamic_accept') {
+                $facts = $this->dynamicPairFacts($anchor, $companion, $groupName);
+                if ($facts === null) {
+                    throw new \RuntimeException('Dynamic split collection evidence changed during reconciliation.');
+                }
+                $terminalContext = $this->terminalSplitRepair->beginPairRepair(
+                    $companionId,
+                    $anchorId,
+                    $facts,
+                );
+            }
+            if ($terminalContext === null) {
+                $this->currentForwardLineage->recordCollectionHandoffsForMerge(
+                    [$companionId],
+                    $anchorId,
+                    'split collection merge',
+                );
+            }
+
             $updated = DB::table('binaries')
                 ->where('collections_id', $companionId)
                 ->update(['collections_id' => $anchorId]);
@@ -521,6 +945,9 @@ final class SplitCollectionReconciler
                 ->delete();
             if ($deleted !== 1) {
                 throw new \RuntimeException('Split collection companion could not be removed safely.');
+            }
+            if ($terminalContext !== null) {
+                $this->terminalSplitRepair->finishPairRepair($terminalContext);
             }
 
             Log::notice('Reconciled split main and PAR2 collections', [
@@ -572,6 +999,12 @@ final class SplitCollectionReconciler
 
                 $mergedXref = $this->mergedXref($mergedXref, (string) $companion['xref']);
             }
+
+            $this->currentForwardLineage->recordCollectionHandoffsForMerge(
+                $companionIds,
+                $anchorId,
+                'split collection fanout merge',
+            );
 
             foreach ($companionIds as $companionId) {
                 $updated = DB::table('binaries')
@@ -641,13 +1074,6 @@ final class SplitCollectionReconciler
         return $this->groupNamesById[$groupId];
     }
 
-    private function xrefArticleMin(string $xref, string $groupName): int
-    {
-        $articles = $this->xrefArticles($xref, $groupName);
-
-        return $articles === [] ? 0 : min($articles);
-    }
-
     private function xrefArticleMax(string $xref, string $groupName): int
     {
         $articles = $this->xrefArticles($xref, $groupName);
@@ -666,10 +1092,23 @@ final class SplitCollectionReconciler
             return [];
         }
 
-        $articles = array_values(array_unique(array_filter(
-            array_map('intval', $matches[1]),
-            static fn (int $article): bool => $article > 0,
-        )));
+        $articles = [];
+        $maximum = (string) PHP_INT_MAX;
+        foreach ($matches[1] as $digits) {
+            $normalized = ltrim((string) $digits, '0');
+            if ($normalized === ''
+                || strlen($normalized) > strlen($maximum)
+                || (strlen($normalized) === strlen($maximum) && strcmp($normalized, $maximum) > 0)
+            ) {
+                return [];
+            }
+            $article = (int) $normalized;
+            if ($article < 1 || (string) $article !== $normalized) {
+                return [];
+            }
+            $articles[] = $article;
+        }
+        $articles = array_values(array_unique($articles));
         sort($articles, SORT_NUMERIC);
 
         return $articles;

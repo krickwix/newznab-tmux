@@ -10,6 +10,7 @@ use App\Models\Category;
 use App\Models\MovieInfo;
 use App\Models\Release;
 use App\Models\Settings;
+use App\Services\Movies\MovieLookupState;
 use App\Services\Releases\ReleaseBrowseService;
 use App\Services\TvProcessing\Providers\TraktProvider;
 use App\Support\ReleaseSearchIndexSync;
@@ -33,11 +34,23 @@ class MovieService
 
     protected const YEAR_MATCH_PERCENT = 80;
 
+    protected const IDENTITY_MOVIE = 'movie';
+
+    protected const IDENTITY_NON_MOVIE = 'non_movie';
+
+    protected const IDENTITY_MISMATCH = 'mismatch';
+
+    protected const IDENTITY_UNKNOWN = 'unknown';
+
     protected string $currentTitle = '';
 
     protected string $currentYear = '';
 
     protected string $currentRelID = '';
+
+    protected ?string $activeMovieClaimToken = null;
+
+    protected bool $movieIdentityQualified = false;
 
     protected string $showPasswords;
 
@@ -341,6 +354,14 @@ class MovieService
         $omdb = $this->fetchOmdbAPIProperties($imdbId);
 
         if (! $imdb && ! $tmdb && ! $trakt && ! $omdb) {
+            return false;
+        }
+
+        if (! $this->movieIdentityQualified && ! $this->hasMovieQualifiedMetadata($tmdb, $imdb, $trakt, $omdb)) {
+            Log::warning('Movie metadata was not persisted because no provider positively identified a movie.', [
+                'imdb_id' => $imdbId,
+            ]);
+
             return false;
         }
 
@@ -719,7 +740,25 @@ class MovieService
         $cacheKey = 'imdb_movie_'.md5($imdbId);
         $expiresAt = now()->addDays(7);
         if (Cache::has($cacheKey)) {
-            return Cache::get($cacheKey);
+            $cached = Cache::get($cacheKey);
+            if ($cached === false) {
+                if ($this->echooutput) {
+                    cli()->warning('IMDb fetch failed [cached_negative_legacy] for tt'.$imdbId);
+                }
+
+                return false;
+            }
+            if (is_array($cached) && ($cached['kind'] ?? null) === 'negative') {
+                if ($this->echooutput) {
+                    $reason = (string) ($cached['reason'] ?? 'cached_negative');
+                    $fallbackReason = $cached['fallback_reason'] ?? null;
+                    cli()->warning('IMDb fetch failed ['.$reason.(is_string($fallbackReason) ? ' -> '.$fallbackReason : '').'] for tt'.$imdbId);
+                }
+
+                return false;
+            }
+
+            return is_array($cached) ? $cached : false;
         }
         try {
             $scraper = app(ImdbScraper::class);
@@ -760,21 +799,27 @@ class MovieService
                     cli()->warning($message);
                 }
 
-                Cache::put($cacheKey, false, $ttl);
+                $this->cacheImdbMovieFailure($cacheKey, $failureReason, $fallbackFailureReason, $ttl);
+
+                return false;
+            }
+            $scrapedType = (string) ($scraped['type'] ?? 'unknown');
+            if ($this->isExplicitNonMovieMediaType($scrapedType)) {
+                $this->cacheImdbMovieFailure($cacheKey, 'non_movie_media_type', null, now()->addHours(6));
 
                 return false;
             }
             if (! empty($this->currentTitle)) {
                 $percent = $this->similarityPercent($this->currentTitle, $scraped['title']);
                 if ($percent < self::MATCH_PERCENT) {
-                    Cache::put($cacheKey, false, now()->addHours(6));
+                    $this->cacheImdbMovieFailure($cacheKey, 'title_mismatch', null, now()->addHours(6));
 
                     return false;
                 }
                 if (! empty($this->currentYear) && ! empty($scraped['year'])) {
                     $yearPercent = $this->similarityPercent($this->currentYear, $scraped['year']);
                     if ($yearPercent < self::YEAR_MATCH_PERCENT) {
-                        Cache::put($cacheKey, false, now()->addHours(6));
+                        $this->cacheImdbMovieFailure($cacheKey, 'year_mismatch', null, now()->addHours(6));
 
                         return false;
                     }
@@ -794,10 +839,23 @@ class MovieService
             return $scraped;
         } catch (\Throwable $e) {
             Log::warning('IMDb scrape error for '.$imdbId.': '.$e->getMessage());
-            Cache::put($cacheKey, false, now()->addHours(6));
+            $this->cacheImdbMovieFailure($cacheKey, 'scrape_exception', null, now()->addHours(6));
 
             return false;
         }
+    }
+
+    private function cacheImdbMovieFailure(
+        string $cacheKey,
+        string $reason,
+        ?string $fallbackReason,
+        \DateTimeInterface|\DateInterval|int|null $ttl,
+    ): void {
+        Cache::put($cacheKey, [
+            'kind' => 'negative',
+            'reason' => $reason,
+            'fallback_reason' => $fallbackReason,
+        ], $ttl);
     }
 
     /**
@@ -908,6 +966,12 @@ class MovieService
                 return false;
             }
 
+            if ($this->isExplicitNonMovieMediaType((string) ($resp->data->Type ?? 'unknown'))) {
+                Cache::put($cacheKey, false, now()->addHours(6));
+
+                return false;
+            }
+
             if (! empty($this->currentTitle)) {
                 $percent = $this->similarityPercent($this->currentTitle, $resp->data->Title);
                 if ($percent < self::MATCH_PERCENT) {
@@ -933,6 +997,7 @@ class MovieService
 
             $movieData = [
                 'title' => $resp->data->Title ?? '',
+                'type' => $resp->data->Type ?? 'unknown',
                 'cover' => $resp->data->Poster ?? '',
                 'genre' => $resp->data->Genre ?? '',
                 'year' => $resp->data->Year ?? '',
@@ -986,14 +1051,7 @@ class MovieService
                     cli()->info($this->service.' found IMDBid: tt'.$imdbId);
                 }
 
-                $movieInfoId = MovieInfo::query()->where('imdbid', $imdbId)->first(['id']);
-
-                Release::query()->where('id', $id)->update([
-                    'imdbid' => $imdbId,
-                    'movieinfo_id' => $movieInfoId !== null ? $movieInfoId['id'] : null,
-                ]);
-
-                Search::updateRelease($id);
+                $movieInfo = MovieInfo::query()->where('imdbid', $imdbId)->first(['id', 'title', 'year', 'type', 'updated_at']);
 
                 if ($processImdb === 1) {
                     $movCheck = $this->getMovieInfo($imdbId);
@@ -1005,17 +1063,23 @@ class MovieService
 
                         $info = $this->updateMovieInfo($imdbId);
 
-                        if ($info === true) {
-                            $freshMovieInfo = MovieInfo::query()->where('imdbid', $imdbId)->first(['id']);
-
-                            Release::query()->where('id', $id)->update([
-                                'movieinfo_id' => $freshMovieInfo !== null ? $freshMovieInfo['id'] : null,
-                            ]);
-
-                            Search::updateRelease($id);
+                        if ($info !== true) {
+                            return false;
                         }
+
+                        $movieInfo = MovieInfo::query()->where('imdbid', $imdbId)->first(['id', 'title', 'year', 'type', 'updated_at']);
                     }
                 }
+
+                if ($movieInfo === null || ! $this->movieInfoMatchesCurrentRelease($movieInfo)) {
+                    return false;
+                }
+
+                if (! $this->commitMovieLink($id, $imdbId, (int) $movieInfo['id'])) {
+                    return false;
+                }
+
+                Search::updateRelease($id);
 
                 return $imdbId;
             } catch (\Exception $e) {
@@ -1057,6 +1121,7 @@ class MovieService
                         });
                 });
             });
+        app(MovieLookupState::class)->applyEligibility($query);
 
         if ($groupID !== '') {
             $query->where('groups_id', $groupID);
@@ -1081,58 +1146,88 @@ class MovieService
             }
 
             foreach ($res as $arr) {
-                if (movieinfo_needs_repair($arr['imdbid'] ?? null, $arr['movieinfo_id'] ?? null)) {
-                    $this->repairMovieInfoLink((int) $arr['id'], $arr['imdbid'] ?? null);
-
+                $lookupState = app(MovieLookupState::class);
+                $claimToken = $lookupState->claim((int) $arr['id']);
+                if ($claimToken === null) {
                     continue;
                 }
 
-                if (! $this->parseMovieSearchName($arr['searchname'])) {
-                    $failedIDs[] = $arr['id'];
+                $this->activeMovieClaimToken = $claimToken;
+                try {
 
-                    continue;
-                }
-
-                $this->currentRelID = (string) $arr['id'];
-                $movieName = $this->formatMovieName();
-
-                if ($this->echooutput) {
-                    cli()->info('Looking up: '.$movieName);
-                }
-
-                $foundIMDB = $this->searchLocalDatabase($arr['id']) ||
-                    $this->searchIMDb($arr['id']) ||
-                    $this->searchOMDbAPI($arr['id']) ||
-                    $this->searchTraktTV($arr['id'], $movieName) ||
-                    $this->searchTMDB($arr['id']) ||
-                    $this->searchReleaseNameTitleCandidates($arr['id'], $arr['searchname']) ||
-                    $this->searchReleaseFileTitleCandidates($arr['id']);
-
-                if ($foundIMDB) {
-                    if ($this->echooutput) {
-                        cli()->primary('Successfully updated release with IMDB ID');
-                    }
-
-                    continue;
-                } else {
-                    $releaseCheck = Release::query()
-                        ->where('id', $arr['id'])
-                        ->where(function ($query): void {
-                            $query->whereNotNull('imdbid')
-                                ->where('imdbid', '<>', '')
-                                ->whereNotIn('imdbid', imdb_id_pending_values());
-                        })
-                        ->exists();
-                    if ($releaseCheck) {
-                        if ($this->echooutput) {
-                            cli()->info('Release already has IMDB ID, skipping');
+                    if (movieinfo_needs_repair($arr['imdbid'] ?? null, $arr['movieinfo_id'] ?? null)) {
+                        if ($this->repairMovieInfoLink((int) $arr['id'], $arr['imdbid'] ?? null)) {
+                            $lookupState->complete((int) $arr['id'], $claimToken);
+                        } else {
+                            $failureState = $lookupState->fail(
+                                (int) $arr['id'],
+                                $claimToken,
+                                $this->lastRepairFailureReason,
+                                $this->lastRepairFailureTerminal,
+                            );
+                            if (($failureState['status'] ?? null) === MovieLookupState::STATUS_QUARANTINED) {
+                                Search::updateRelease((int) $arr['id']);
+                            }
                         }
 
                         continue;
                     }
-                }
 
-                $failedIDs[] = $arr['id'];
+                    if (! $this->parseMovieSearchName($arr['searchname'])) {
+                        if ($lookupState->markNoMatch((int) $arr['id'], $claimToken)) {
+                            $failedIDs[] = $arr['id'];
+                        }
+
+                        continue;
+                    }
+
+                    $this->currentRelID = (string) $arr['id'];
+                    $movieName = $this->formatMovieName();
+
+                    if ($this->echooutput) {
+                        cli()->info('Looking up: '.$movieName);
+                    }
+
+                    $foundIMDB = $this->searchLocalDatabase($arr['id']) ||
+                        $this->searchIMDb($arr['id']) ||
+                        $this->searchOMDbAPI($arr['id']) ||
+                        $this->searchTraktTV($arr['id'], $movieName) ||
+                        $this->searchTMDB($arr['id']) ||
+                        $this->searchReleaseNameTitleCandidates($arr['id'], $arr['searchname']) ||
+                        $this->searchReleaseFileTitleCandidates($arr['id']);
+
+                    if ($foundIMDB) {
+                        $lookupState->complete((int) $arr['id'], $claimToken);
+                        if ($this->echooutput) {
+                            cli()->primary('Successfully updated release with IMDB ID');
+                        }
+
+                        continue;
+                    } else {
+                        $releaseCheck = Release::query()
+                            ->where('id', $arr['id'])
+                            ->where(function ($query): void {
+                                $query->whereNotNull('imdbid')
+                                    ->where('imdbid', '<>', '')
+                                    ->whereNotIn('imdbid', imdb_id_pending_values());
+                            })
+                            ->exists();
+                        if ($releaseCheck) {
+                            $lookupState->complete((int) $arr['id'], $claimToken);
+                            if ($this->echooutput) {
+                                cli()->info('Release already has IMDB ID, skipping');
+                            }
+
+                            continue;
+                        }
+                    }
+
+                    if ($lookupState->markNoMatch((int) $arr['id'], $claimToken)) {
+                        $failedIDs[] = $arr['id'];
+                    }
+                } finally {
+                    $this->activeMovieClaimToken = null;
+                }
             }
 
             if (! empty($failedIDs)) {
@@ -1148,16 +1243,16 @@ class MovieService
                     }
                 }
 
-                foreach (array_chunk($failedIDs, 100) as $chunk) {
-                    Release::query()->whereIn('id', $chunk)->update(['imdbid' => '']);
-                    ReleaseSearchIndexSync::forIds($chunk);
-                }
+                ReleaseSearchIndexSync::forIds($failedIDs);
             }
         }
     }
 
     private function repairMovieInfoLink(int $releaseId, int|string|null $imdbId): bool
     {
+        $this->lastRepairFailureReason = 'metadata_unresolved';
+        $this->lastRepairFailureTerminal = false;
+
         if (! imdb_id_is_valid($imdbId)) {
             return false;
         }
@@ -1167,44 +1262,153 @@ class MovieService
             return false;
         }
 
-        $movieInfo = MovieInfo::query()->where('imdbid', $sanitized)->first(['id']);
-        if ($movieInfo === null) {
-            $previousTitle = $this->currentTitle;
-            $previousYear = $this->currentYear;
+        $previousTitle = $this->currentTitle;
+        $previousYear = $this->currentYear;
+        $releaseSearchName = (string) Release::query()->whereKey($releaseId)->value('searchname');
+        if (! $this->parseMovieSearchName($releaseSearchName)) {
             $this->currentTitle = '';
             $this->currentYear = '';
-            $this->forgetMovieProviderCaches($sanitized);
+        }
 
-            try {
-                if ($this->updateMovieInfo($sanitized) !== true) {
+        try {
+            $movieInfo = MovieInfo::query()->where('imdbid', $sanitized)->first(['id', 'title', 'year', 'type']);
+            if ($movieInfo !== null) {
+                if ($this->isExplicitNonMovieMediaType((string) $movieInfo['type'])) {
+                    $this->lastRepairFailureReason = 'non_movie_identity';
+                    $this->lastRepairFailureTerminal = true;
+
                     return false;
                 }
-            } finally {
-                $this->currentTitle = $previousTitle;
-                $this->currentYear = $previousYear;
-            }
+                if ($this->currentTitle !== '' && ! $this->isImdbSearchMatchAcceptable(
+                    (string) $movieInfo['title'],
+                    $movieInfo['year'],
+                )) {
+                    $this->lastRepairFailureReason = 'identity_mismatch';
+                    $this->lastRepairFailureTerminal = true;
 
-            $movieInfo = MovieInfo::query()->where('imdbid', $sanitized)->first(['id']);
+                    return false;
+                }
+            } else {
+                $identity = $this->validateStoredImdbSuggestionIdentity($sanitized);
+                if ($identity === self::IDENTITY_NON_MOVIE || $identity === self::IDENTITY_MISMATCH) {
+                    $this->lastRepairFailureReason = $identity === self::IDENTITY_NON_MOVIE
+                        ? 'non_movie_identity'
+                        : 'identity_mismatch';
+                    $this->lastRepairFailureTerminal = true;
+
+                    return false;
+                }
+
+                $previousQualification = $this->movieIdentityQualified;
+                $this->movieIdentityQualified = $identity === self::IDENTITY_MOVIE;
+                try {
+                    $updated = $this->updateMovieInfo($sanitized);
+                } finally {
+                    $this->movieIdentityQualified = $previousQualification;
+                }
+                if ($updated !== true) {
+                    return false;
+                }
+
+                $movieInfo = MovieInfo::query()->where('imdbid', $sanitized)->first(['id', 'title', 'year', 'type']);
+                if ($movieInfo === null || ! $this->movieInfoMatchesCurrentRelease($movieInfo)) {
+                    return false;
+                }
+            }
+        } finally {
+            $this->currentTitle = $previousTitle;
+            $this->currentYear = $previousYear;
         }
 
-        if ($movieInfo === null) {
+        if (! $this->commitMovieLink($releaseId, $sanitized, (int) $movieInfo['id'])) {
             return false;
         }
-
-        Release::query()->where('id', $releaseId)->update([
-            'movieinfo_id' => $movieInfo['id'],
-        ]);
 
         Search::updateRelease($releaseId);
 
         return true;
     }
 
-    private function forgetMovieProviderCaches(string $imdbId): void
+    protected string $lastRepairFailureReason = 'metadata_unresolved';
+
+    protected bool $lastRepairFailureTerminal = false;
+
+    protected function validateStoredImdbSuggestionIdentity(string $imdbId): string
     {
-        foreach (['tmdb_movie_', 'imdb_movie_', 'trakt_movie_', 'omdb_movie_'] as $prefix) {
-            Cache::forget($prefix.md5($imdbId));
-            Cache::forget($prefix.md5('tt'.$imdbId));
+        try {
+            foreach (app(ImdbScraper::class)->search('tt'.$imdbId) as $match) {
+                if ((string) ($match['imdbid'] ?? '') !== $imdbId) {
+                    continue;
+                }
+                $type = (string) ($match['type'] ?? 'unknown');
+                if ($this->isExplicitNonMovieMediaType($type)) {
+                    return self::IDENTITY_NON_MOVIE;
+                }
+                if (! $this->isMovieMediaType($type)) {
+                    return self::IDENTITY_UNKNOWN;
+                }
+                if (! $this->isImdbSearchMatchAcceptable(
+                    (string) ($match['title'] ?? ''),
+                    $match['year'] ?? null,
+                )) {
+                    return self::IDENTITY_MISMATCH;
+                }
+
+                return self::IDENTITY_MOVIE;
+            }
+        } catch (\Throwable $e) {
+            Log::debug('IMDb identity validation unavailable for tt'.$imdbId.': '.$e->getMessage());
+        }
+
+        return self::IDENTITY_UNKNOWN;
+    }
+
+    private function commitMovieLink(int $releaseId, string $imdbId, int $movieInfoId): bool
+    {
+        if ($this->activeMovieClaimToken !== null) {
+            return app(MovieLookupState::class)->link($releaseId, $this->activeMovieClaimToken, $imdbId, $movieInfoId);
+        }
+
+        return Release::query()->whereKey($releaseId)->update([
+            'imdbid' => $imdbId,
+            'movieinfo_id' => $movieInfoId,
+        ]) === 1;
+    }
+
+    private function movieInfoMatchesCurrentRelease(MovieInfo $movieInfo): bool
+    {
+        if ($this->isExplicitNonMovieMediaType((string) $movieInfo->type)) {
+            return false;
+        }
+
+        return $this->currentTitle === '' || $this->isImdbSearchMatchAcceptable(
+            (string) $movieInfo->title,
+            $movieInfo->year,
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>|false  $tmdb
+     * @param  array<string, mixed>|false  $imdb
+     * @param  array<string, mixed>|false  $trakt
+     * @param  array<string, mixed>|false  $omdb
+     */
+    private function hasMovieQualifiedMetadata(array|false $tmdb, array|false $imdb, array|false $trakt, array|false $omdb): bool
+    {
+        return $tmdb !== false
+            || $trakt !== false
+            || ($imdb !== false && $this->isMovieMediaType((string) ($imdb['type'] ?? 'unknown')))
+            || ($omdb !== false && $this->isMovieMediaType((string) ($omdb['type'] ?? 'unknown')));
+    }
+
+    private function doMovieUpdateWithMovieQualification(string $buffer, string $service, int $releaseId): string|false
+    {
+        $previousQualification = $this->movieIdentityQualified;
+        $this->movieIdentityQualified = true;
+        try {
+            return $this->doMovieUpdate($buffer, $service, $releaseId);
+        } finally {
+            $this->movieIdentityQualified = $previousQualification;
         }
     }
 
@@ -1238,11 +1442,15 @@ class MovieService
             foreach ($matches as $rank => $match) {
                 $title = $match['title'] ?? '';
 
+                if (! $this->isMovieMediaType((string) ($match['type'] ?? 'unknown'))) {
+                    continue;
+                }
+
                 if (! $this->isImdbSearchMatchAcceptable((string) $title, $match['year'] ?? null, (int) $rank)) {
                     continue;
                 }
 
-                $imdbId = $this->doMovieUpdate('tt'.$match['imdbid'], 'IMDb(scrape)', $releaseId);
+                $imdbId = $this->doMovieUpdateWithMovieQualification('tt'.$match['imdbid'], 'IMDb(scrape)', $releaseId);
                 if ($imdbId !== false) {
                     return true;
                 }
@@ -1254,9 +1462,30 @@ class MovieService
         return false;
     }
 
+    private function isMovieMediaType(string $type): bool
+    {
+        $type = strtolower(preg_replace('/[^a-z]+/i', '', $type) ?? '');
+
+        return in_array($type, ['feature', 'film', 'movie', 'tvmovie'], true);
+    }
+
+    protected function isExplicitNonMovieMediaType(string $type): bool
+    {
+        $type = strtolower(preg_replace('/[^a-z]+/i', '', $type) ?? '');
+
+        return in_array($type, [
+            'episode', 'game', 'musicvideo', 'podcast', 'series', 'short', 'shortfilm', 'tvepisode', 'tvminiseries',
+            'tvseries', 'tvspecial', 'video', 'videogame',
+        ], true);
+    }
+
     protected function isImdbSearchMatchAcceptable(string $candidateTitle, int|string|null $candidateYear, int $rank = 0): bool
     {
         if ($candidateTitle === '') {
+            return false;
+        }
+
+        if ($this->isGenericZeroSignalSearchTitle($this->currentTitle)) {
             return false;
         }
 
@@ -1282,6 +1511,17 @@ class MovieService
         }
 
         return true;
+    }
+
+    private function isGenericZeroSignalSearchTitle(string $title): bool
+    {
+        if ($this->significantSearchTitleTokens($title) !== []) {
+            return false;
+        }
+
+        $normalized = strtolower(preg_replace('/[^a-z0-9]+/i', '', $title) ?? '');
+
+        return in_array($normalized, ['f1', 'mlb', 'nba', 'nfl', 'nhl', 'ufc', 'wwe'], true);
     }
 
     private function imdbSearchYearMatches(int|string|null $candidateYear): bool
@@ -1377,7 +1617,11 @@ class MovieService
             }
 
             $getIMDBid = $buffer->data->Search[0]->imdbID;
-            $imdbId = $this->doMovieUpdate($getIMDBid, 'OMDbAPI', $releaseId);
+            if (! $this->isMovieMediaType((string) ($buffer->data->Search[0]->Type ?? 'unknown'))) {
+                return false;
+            }
+
+            $imdbId = $this->doMovieUpdateWithMovieQualification($getIMDBid, 'OMDbAPI', $releaseId);
 
             return $imdbId !== false;
 
@@ -1401,7 +1645,7 @@ class MovieService
             }
 
             $this->parseTraktTv($data);
-            $imdbId = $this->doMovieUpdate($data['ids']['imdb'], 'Trakt', $releaseId);
+            $imdbId = $this->doMovieUpdateWithMovieQualification($data['ids']['imdb'], 'Trakt', $releaseId);
 
             return $imdbId !== false;
 
@@ -1457,7 +1701,7 @@ class MovieService
                     continue;
                 }
 
-                $imdbId = $this->doMovieUpdate('tt'.$ret['imdbid'], 'TMDB', $releaseId);
+                $imdbId = $this->doMovieUpdateWithMovieQualification('tt'.$ret['imdbid'], 'TMDB', $releaseId);
                 if ($imdbId !== false) {
                     return true;
                 }

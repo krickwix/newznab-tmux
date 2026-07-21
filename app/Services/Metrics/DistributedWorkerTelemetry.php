@@ -30,6 +30,7 @@ class DistributedWorkerTelemetry
     /** @var array<string, list<string>> */
     public const ITEMS_BY_WORKER = [
         'nzb-backlog' => ['nzb'],
+        'releases' => ['release'],
     ];
 
     /** @var list<string> */
@@ -45,7 +46,7 @@ class DistributedWorkerTelemetry
 
     private const KEY_PREFIX = 'metrics:distributed_worker:';
 
-    public function startRun(string $worker, ?float $now = null): float
+    public function startRun(string $worker, ?float $now = null, ?int $ttlSeconds = null): float
     {
         $startedAt = $now ?? microtime(true);
         if (! $this->validWorker($worker)) {
@@ -54,7 +55,15 @@ class DistributedWorkerTelemetry
 
         try {
             $store = $this->store();
-            $store->forever($this->key($worker, 'in_progress_started_at'), $startedAt);
+            if ($ttlSeconds !== null) {
+                $store->put(
+                    $this->key($worker, 'in_progress_started_at'),
+                    $startedAt,
+                    max(1, $ttlSeconds),
+                );
+            } else {
+                $store->forever($this->key($worker, 'in_progress_started_at'), $startedAt);
+            }
             $store->forever($this->key($worker, 'last_started_timestamp_seconds'), $startedAt);
         } catch (Throwable) {
             // Telemetry is deliberately non-blocking.

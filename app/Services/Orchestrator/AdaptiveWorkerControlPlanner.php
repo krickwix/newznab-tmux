@@ -24,12 +24,15 @@ final class AdaptiveWorkerControlPlanner
             return $decision;
         }
 
-        $partsPressure = $this->pressure('parts', $snapshot->partsBacklog, $snapshot);
-        $binariesPressure = $this->pressure('binaries', $snapshot->binariesBacklog, $snapshot);
-        $collectionsPressure = max(
-            $this->pressure('collections', $snapshot->collectionsBacklog, $snapshot),
-            $this->pressure('collections_total', $snapshot->physicalCollectionsBacklog(), $snapshot),
-        );
+        $partsPressure = $this->pressure('parts', $snapshot->schedulablePartsBacklog(), $snapshot);
+        $binariesPressure = $this->pressure('binaries', $snapshot->schedulableBinariesBacklog(), $snapshot);
+        $collectionsPressure = $this->pressure('collections', $snapshot->schedulableCollectionsBacklog(), $snapshot);
+        if ($snapshot->schedulableCollectionsBacklog === null) {
+            $collectionsPressure = max(
+                $collectionsPressure,
+                $this->pressure('collections_total', $snapshot->physicalCollectionsBacklog(), $snapshot),
+            );
+        }
         $downstreamPressure = max($binariesPressure, $collectionsPressure);
         $inputPressure = max($partsPressure, $downstreamPressure);
 
@@ -39,6 +42,12 @@ final class AdaptiveWorkerControlPlanner
             $inputPressure >= 0.30 => max($base->binariesSleepSeconds, 40),
             default => $base->binariesSleepSeconds,
         };
+        if ($decision->nextState->qualifiedSupplyStarved) {
+            $binariesSleep = max(
+                $binariesSleep,
+                (int) config('nntmux.orchestrator.qualified_supply_binaries_sleep_seconds', 300),
+            );
+        }
 
         $releaseDemand = $snapshot->readyCollections > 0
             || $snapshot->releasesBacklog > 0
@@ -78,6 +87,9 @@ final class AdaptiveWorkerControlPlanner
             $reasons[] = 'adaptive_binaries_steady';
         } else {
             $reasons[] = 'adaptive_binaries_fill';
+        }
+        if ($decision->nextState->qualifiedSupplyStarved) {
+            $reasons[] = 'qualified_supply_growth_throttle';
         }
         $reasons[] = $releaseDemand ? 'adaptive_releases_drain' : 'adaptive_releases_idle';
         $reasons[] = $nzbDemand ? 'adaptive_nzb_drain' : 'adaptive_nzb_idle';

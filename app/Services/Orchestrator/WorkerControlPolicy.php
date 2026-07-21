@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Services\Orchestrator;
 
+use Illuminate\Container\Container;
+
 final class WorkerControlPolicy
 {
     public const int HIGH_SAMPLES_TO_DRAIN = 3;
@@ -29,6 +31,14 @@ final class WorkerControlPolicy
     public const int RECOVERY_DRAIN_MAX_HOLD_SAMPLES = 3;
 
     public const int RECOVERY_DRAIN_HOLD_MAX_SPACING_SECONDS = 90;
+
+    public function __construct(
+        private readonly ?bool $qualifiedSupplyStarvationEnabled = null,
+        private readonly ?int $qualifiedSupplyStarvationDwellSeconds = null,
+        private readonly ?int $qualifiedSupplyRecoverySamples = null,
+        private readonly ?float $qualifiedSupplyGrowthMinPerMinute = null,
+        private readonly ?int $qualifiedSupplyColdStartCooldownSeconds = null,
+    ) {}
 
     public function decide(PipelineSnapshot $snapshot, ControlState $state, int $now): ControlDecision
     {
@@ -78,6 +88,11 @@ final class WorkerControlPolicy
                 failSafeCause: $cause,
                 failSafeLastObservedAt: max($state->failSafeLastObservedAt, $snapshot->observedAt),
                 processedBackfillPermitGenerations: $processedPermitGenerations,
+                qualifiedSupplyStarved: $state->qualifiedSupplyStarved,
+                qualifiedSupplyCandidateSince: $state->qualifiedSupplyCandidateSince,
+                qualifiedSupplyStarvedSince: $state->qualifiedSupplyStarvedSince,
+                qualifiedSupplyLastObservedAt: $state->qualifiedSupplyLastObservedAt,
+                qualifiedSupplyRecoverySamples: $state->qualifiedSupplyRecoverySamples,
             );
 
             return new ControlDecision(
@@ -94,6 +109,7 @@ final class WorkerControlPolicy
         }
 
         [$highSamples, $lowSamples, $pressureReason] = $this->pressureSamples($snapshot, $state);
+        [$qualifiedSupply, $qualifiedSupplyReasons] = $this->qualifiedSupplyState($snapshot, $state);
         $profile = $state->profile;
         $transitioned = false;
         $reasons = [$pressureReason];
@@ -109,6 +125,8 @@ final class WorkerControlPolicy
                 $effectivenessReasons,
                 $pressureReason,
                 $processedPermitGenerations,
+                $qualifiedSupply,
+                $qualifiedSupplyReasons,
             );
         }
 
@@ -145,6 +163,11 @@ final class WorkerControlPolicy
             failSafeCause: $profile === ControlProfile::FailSafe ? FailSafeCause::Telemetry : null,
             failSafeLastObservedAt: $profile === ControlProfile::FailSafe ? $snapshot->observedAt : 0,
             processedBackfillPermitGenerations: $processedPermitGenerations,
+            qualifiedSupplyStarved: $qualifiedSupply['starved'],
+            qualifiedSupplyCandidateSince: $qualifiedSupply['candidate_since'],
+            qualifiedSupplyStarvedSince: $qualifiedSupply['starved_since'],
+            qualifiedSupplyLastObservedAt: $qualifiedSupply['last_observed_at'],
+            qualifiedSupplyRecoverySamples: $qualifiedSupply['recovery_samples'],
         );
         $workerProfile = WorkerControlProfile::for($profile);
         $targetLocked = $snapshot->backfillGroup !== ''
@@ -153,24 +176,80 @@ final class WorkerControlPolicy
         if ($snapshot->backfillTargetLockRetryDue) {
             $reasons[] = 'backfill_target_lock_retry_due';
         }
-        $backfillPermitted = $workerProfile->backfillEnabled
+        // All health gates except the self-referential starvation gate. When
+        // these are green but supply is starved, the pipeline is otherwise
+        // healthy and only lacks a permit to produce the qualified output that
+        // would clear starvation.
+        $backfillHealthyCommon = $workerProfile->backfillEnabled
             && ! $transitioned
             && ! $snapshot->highPressure
             && $snapshot->lowPressure
             && ! $backfillLocked
-            && ! $targetLocked
-            && $snapshot->backfillGatesPassed();
+            && ! $targetLocked;
+        $backfillHealthy = $backfillHealthyCommon && $snapshot->backfillGatesPassed();
+        // Cold-start uses the same gates minus currentGroupsAvailable (a
+        // current-forward freshness signal that must not block backward-fill of
+        // older missing parts).
+        $coldStartHealthy = $backfillHealthyCommon && $snapshot->backfillColdStartGatesPassed();
+
+        // Cold-start probe: break the self-referential starvation deadlock by
+        // granting ONE bounded backfill permit per cooldown window while starved
+        // but otherwise healthy. Every real safeguard (pressure, DB admission,
+        // provider/cursor, eligible supply, locks) is still enforced via
+        // $coldStartHealthy.
+        $coldStartCooldown = $this->qualifiedSupplyColdStartCooldownSeconds
+            ?? (int) $this->orchestratorConfig('qualified_supply_cold_start_cooldown_seconds', 900);
+        $coldStartAt = $state->qualifiedSupplyColdStartAt;
+        $coldStartPermit = false;
+        if ($qualifiedSupply['starved'] && $coldStartHealthy && $coldStartCooldown > 0) {
+            $lastColdStart = $state->qualifiedSupplyColdStartAt;
+            if ($lastColdStart <= 0 || ($snapshot->observedAt - $lastColdStart) >= $coldStartCooldown) {
+                $coldStartPermit = true;
+                $coldStartAt = $snapshot->observedAt;
+            }
+        } elseif (! $qualifiedSupply['starved']) {
+            // Reset the cold-start clock once starvation clears so the next
+            // episode can probe immediately.
+            $coldStartAt = 0;
+        }
+
+        $backfillPermitted = ($backfillHealthy && ! $qualifiedSupply['starved'])
+            || $coldStartPermit;
+
+        $nextState = new ControlState(
+            profile: $nextState->profile,
+            consecutiveHigh: $nextState->consecutiveHigh,
+            consecutiveLow: $nextState->consecutiveLow,
+            lastTransitionAt: $nextState->lastTransitionAt,
+            cooldownUntil: $nextState->cooldownUntil,
+            consecutiveIneffectiveBackfillPermits: $nextState->consecutiveIneffectiveBackfillPermits,
+            backfillLocked: $nextState->backfillLocked,
+            ineffectiveBackfillPermitsByTarget: $nextState->ineffectiveBackfillPermitsByTarget,
+            failSafeCause: $nextState->failSafeCause,
+            failSafeLastObservedAt: $nextState->failSafeLastObservedAt,
+            processedBackfillPermitGenerations: $nextState->processedBackfillPermitGenerations,
+            qualifiedSupplyStarved: $nextState->qualifiedSupplyStarved,
+            qualifiedSupplyCandidateSince: $nextState->qualifiedSupplyCandidateSince,
+            qualifiedSupplyStarvedSince: $nextState->qualifiedSupplyStarvedSince,
+            qualifiedSupplyLastObservedAt: $nextState->qualifiedSupplyLastObservedAt,
+            qualifiedSupplyRecoverySamples: $nextState->qualifiedSupplyRecoverySamples,
+            qualifiedSupplyColdStartAt: $coldStartAt,
+        );
 
         if ($transitioned) {
             $reasons[] = 'backfill_profile_settling';
+        } elseif ($coldStartPermit) {
+            $reasons[] = 'backfill_qualified_supply_cold_start';
         } elseif (! $backfillPermitted) {
-            $reasons[] = $this->backfillDenialReason($workerProfile, $snapshot, $backfillLocked, $targetLocked);
+            $reasons[] = $qualifiedSupply['starved']
+                ? 'backfill_qualified_supply_starved'
+                : $this->backfillDenialReason($workerProfile, $snapshot, $backfillLocked, $targetLocked);
         }
 
         return new ControlDecision(
             profile: $workerProfile,
             backfillPermitted: $backfillPermitted,
-            reasons: [...$reasons, ...$effectivenessReasons],
+            reasons: [...$reasons, ...$qualifiedSupplyReasons, ...$effectivenessReasons],
             nextState: $nextState,
             transitioned: $transitioned,
         );
@@ -180,6 +259,8 @@ final class WorkerControlPolicy
      * @param  array<string, int>  $targetIneffectivePermits
      * @param  list<string>  $effectivenessReasons
      * @param  list<int>  $processedPermitGenerations
+     * @param  array{starved:bool,candidate_since:int,starved_since:int,last_observed_at:int,recovery_samples:int}  $qualifiedSupply
+     * @param  list<string>  $qualifiedSupplyReasons
      */
     private function recoverFromFailSafe(
         PipelineSnapshot $snapshot,
@@ -191,6 +272,8 @@ final class WorkerControlPolicy
         array $effectivenessReasons,
         string $pressureReason,
         array $processedPermitGenerations,
+        array $qualifiedSupply,
+        array $qualifiedSupplyReasons,
     ): ControlDecision {
         $cause = $state->failSafeCause ?? FailSafeCause::Unknown;
         $distinctSample = $snapshot->observedAt - $state->failSafeLastObservedAt >= self::RECOVERY_SAMPLE_MIN_SPACING_SECONDS;
@@ -243,6 +326,11 @@ final class WorkerControlPolicy
             recoveryDrainSamples: $recoveryDrainSamples,
             recoveryDrainHoldSamples: $recoveryDrainHoldSamples,
             processedBackfillPermitGenerations: $processedPermitGenerations,
+            qualifiedSupplyStarved: $qualifiedSupply['starved'],
+            qualifiedSupplyCandidateSince: $qualifiedSupply['candidate_since'],
+            qualifiedSupplyStarvedSince: $qualifiedSupply['starved_since'],
+            qualifiedSupplyLastObservedAt: $qualifiedSupply['last_observed_at'],
+            qualifiedSupplyRecoverySamples: $qualifiedSupply['recovery_samples'],
         );
 
         return new ControlDecision(
@@ -251,6 +339,7 @@ final class WorkerControlPolicy
             reasons: [
                 ...$reasons,
                 ...$effectivenessReasons,
+                ...$qualifiedSupplyReasons,
                 ...($snapshot->databaseCurrentWaits > 0 ? ['backfill_database_busy'] : []),
                 'backfill_disabled_by_profile',
             ],
@@ -454,6 +543,107 @@ final class WorkerControlPolicy
         }
 
         return [0, 0, 'neutral_pressure'];
+    }
+
+    /**
+     * @return array{array{starved:bool,candidate_since:int,starved_since:int,last_observed_at:int,recovery_samples:int}, list<string>}
+     */
+    private function qualifiedSupplyState(PipelineSnapshot $snapshot, ControlState $state): array
+    {
+        if (! $this->qualifiedSupplyStarvationEnabled()) {
+            return [[
+                'starved' => false,
+                'candidate_since' => 0,
+                'starved_since' => 0,
+                'last_observed_at' => 0,
+                'recovery_samples' => 0,
+            ], []];
+        }
+
+        $current = [
+            'starved' => $state->qualifiedSupplyStarved,
+            'candidate_since' => $state->qualifiedSupplyCandidateSince,
+            'starved_since' => $state->qualifiedSupplyStarvedSince,
+            'last_observed_at' => $state->qualifiedSupplyLastObservedAt,
+            'recovery_samples' => $state->qualifiedSupplyRecoverySamples,
+        ];
+        if ($snapshot->observedAt <= $state->qualifiedSupplyLastObservedAt) {
+            return [$current, $state->qualifiedSupplyStarved ? ['qualified_supply_starved'] : []];
+        }
+
+        // Queued collections and NZBs are unsettled work, not proof that opening
+        // the raw-input valve produces useful output. Recover only from an
+        // observed release yield or an effective, completed permit cohort.
+        $productive = $snapshot->releaseYieldPerMinute > 0.0
+            || ($snapshot->backfillPermitCompleted && $snapshot->backfillPermitEffective);
+        $minimumGrowth = max(0.0, $this->qualifiedSupplyGrowthMinPerMinute
+            ?? (float) $this->orchestratorConfig('qualified_supply_growth_min_per_minute', 1.0));
+        $growing = max(
+            (float) ($snapshot->backlogEwmaPerMinute['parts'] ?? 0.0),
+            (float) ($snapshot->backlogEwmaPerMinute['binaries'] ?? 0.0),
+        ) >= $minimumGrowth
+            && ($snapshot->schedulablePartsBacklog() > 0 || $snapshot->schedulableBinariesBacklog() > 0);
+
+        $current['last_observed_at'] = $snapshot->observedAt;
+        if ($state->qualifiedSupplyStarved) {
+            if (! $productive) {
+                $current['recovery_samples'] = 0;
+
+                return [$current, ['qualified_supply_starved']];
+            }
+
+            $required = max(1, $this->qualifiedSupplyRecoverySamples
+                ?? (int) $this->orchestratorConfig('qualified_supply_recovery_samples', 2));
+            $current['recovery_samples'] = min($required, $state->qualifiedSupplyRecoverySamples + 1);
+            if ($current['recovery_samples'] < $required) {
+                return [$current, ['qualified_supply_recovery_pending']];
+            }
+
+            return [[
+                'starved' => false,
+                'candidate_since' => 0,
+                'starved_since' => 0,
+                'last_observed_at' => $snapshot->observedAt,
+                'recovery_samples' => 0,
+            ], ['qualified_supply_recovered']];
+        }
+
+        if ($productive || ! $growing) {
+            $current['candidate_since'] = 0;
+            $current['recovery_samples'] = 0;
+
+            return [$current, []];
+        }
+
+        $candidateSince = $state->qualifiedSupplyCandidateSince > 0
+            ? $state->qualifiedSupplyCandidateSince
+            : $snapshot->observedAt;
+        $current['candidate_since'] = $candidateSince;
+        $dwell = max(300, $this->qualifiedSupplyStarvationDwellSeconds
+            ?? (int) $this->orchestratorConfig('qualified_supply_starvation_dwell_seconds', 900));
+        if ($snapshot->observedAt - $candidateSince < $dwell) {
+            return [$current, ['qualified_supply_starvation_candidate']];
+        }
+
+        $current['starved'] = true;
+        $current['starved_since'] = $snapshot->observedAt;
+
+        return [$current, ['qualified_supply_starved']];
+    }
+
+    private function qualifiedSupplyStarvationEnabled(): bool
+    {
+        return $this->qualifiedSupplyStarvationEnabled
+            ?? (bool) $this->orchestratorConfig('qualified_supply_starvation_enabled', false);
+    }
+
+    private function orchestratorConfig(string $key, mixed $default): mixed
+    {
+        $container = Container::getInstance();
+
+        return $container->bound('config')
+            ? config('nntmux.orchestrator.'.$key, $default)
+            : $default;
     }
 
     private function mayTransition(ControlState $state, int $now): bool

@@ -67,7 +67,7 @@ class DistributedJobWorker
                     return 0;
                 }
 
-                $this->sleep($sleep, $output);
+                $this->sleep($sleep, $output, $sleepOverride === null ? $job : null);
                 $this->monitorService->incrementIteration();
 
                 continue;
@@ -88,7 +88,7 @@ class DistributedJobWorker
                 );
             }
 
-            $this->sleep($sleep, $output);
+            $this->sleep($sleep, $output, $sleepOverride === null ? $job : null);
             $this->monitorService->incrementIteration();
         } while ($this->shouldContinue());
 
@@ -173,11 +173,23 @@ class DistributedJobWorker
 
                 return $result(0);
             }
+            if ((bool) config('nntmux.orchestrator.require_backfill_permit', false)) {
+                foreach ($plan['commands'] as &$command) {
+                    if ($command['command'] === 'multiprocessing:safe'
+                        && ($command['arguments']['type'] ?? null) === 'backfill'
+                    ) {
+                        $command['arguments']['--backfill-generation'] = $claimedBackfillGeneration;
+                    }
+                }
+                unset($command);
+            }
         }
 
         $nzbBatchBefore = $this->nzbBatchCounts($plan['name']);
 
-        $startedAt = $this->workerTelemetry->startRun($plan['name']);
+        // The in-progress marker must not outlive the distributed lock after
+        // an abrupt pod/process loss. Completed runs still clear it eagerly.
+        $startedAt = $this->workerTelemetry->startRun($plan['name'], ttlSeconds: $lockSeconds);
         $runOutcome = 'failure';
         $restoreSignalHandlers = $this->registerLockTerminationHandlers(
             $lock,
@@ -214,6 +226,29 @@ class DistributedJobWorker
                 }
             }
 
+            if ($backfillPermitGate !== null && $claimedBackfillGeneration !== null) {
+                try {
+                    if (! $backfillPermitGate->complete($claimedBackfillGeneration)) {
+                        $output->writeln(sprintf(
+                            '[%s] failing backfill generation %d because one or more exact range receipts are absent or failed',
+                            now()->toDateTimeString(),
+                            $claimedBackfillGeneration,
+                        ));
+
+                        return $result(1);
+                    }
+                } catch (Throwable $error) {
+                    $output->writeln(sprintf(
+                        '[%s] failing backfill generation %d because completion persistence failed: %s',
+                        now()->toDateTimeString(),
+                        $claimedBackfillGeneration,
+                        $error->getMessage(),
+                    ));
+
+                    return $result(1);
+                }
+            }
+
             $output->writeln(sprintf('[%s] completed %s', now()->toDateTimeString(), $plan['name']));
             $runOutcome = 'success';
 
@@ -228,12 +263,12 @@ class DistributedJobWorker
                 pcntl_alarm(0);
             }
             $this->workerTelemetry->finishRun($plan['name'], $runOutcome, $startedAt);
-            if ($runOutcome === 'success' && $backfillPermitGate !== null && $claimedBackfillGeneration !== null) {
+            if ($runOutcome === 'failure' && $backfillPermitGate !== null && $claimedBackfillGeneration !== null) {
                 try {
-                    $backfillPermitGate->complete($claimedBackfillGeneration);
+                    $backfillPermitGate->fail($claimedBackfillGeneration, 'Managed backfill command or child range failed.');
                 } catch (Throwable $error) {
                     $output->writeln(sprintf(
-                        '[%s] could not mark backfill generation %d complete: %s',
+                        '[%s] could not fail backfill generation %d: %s',
                         now()->toDateTimeString(),
                         $claimedBackfillGeneration,
                         $error->getMessage(),
@@ -377,10 +412,55 @@ class DistributedJobWorker
         return trim(implode(' ', $parts));
     }
 
-    private function sleep(int $seconds, OutputInterface $output): void
+    private function sleep(int $seconds, OutputInterface $output, ?string $responsiveJob = null): void
     {
+        $seconds = max(1, $seconds);
         $output->writeln(sprintf('[%s] sleeping for %d seconds', now()->toDateTimeString(), $seconds));
-        sleep(max(1, $seconds));
+        if ($responsiveJob !== 'releases') {
+            sleep($seconds);
+
+            return;
+        }
+
+        $elapsed = 0;
+        $target = $seconds;
+        $sliceSeconds = max(1, min(5, (int) config('nntmux.distributed_control_sleep_slice_seconds', 5)));
+        while ($elapsed < $target) {
+            $slice = min($sliceSeconds, $target - $elapsed);
+            sleep($slice);
+            $elapsed += $slice;
+
+            try {
+                $runVar = $this->monitorService->refreshReleaseControlSettings();
+                $target = $this->responsiveSleepSeconds('releases', $target, $runVar);
+            } catch (Throwable) {
+                // A refresh failure retains the already-selected conservative timer.
+            }
+
+            if ($target === 0 || $elapsed >= $target) {
+                return;
+            }
+        }
+    }
+
+    /** @param array<string, mixed> $runVar */
+    private function responsiveSleepSeconds(string $job, int $original, array $runVar): int
+    {
+        if ($job !== 'releases' || ($runVar['release_controls_fresh'] ?? false) !== true) {
+            return $original;
+        }
+
+        $settings = $runVar['settings'] ?? [];
+        $freshActiveLease = (string) ($settings['orchestrator_mode'] ?? '') === 'active'
+            && (int) ($settings['orchestrator_lease_until'] ?? 0) >= time();
+        if (! $freshActiveLease) {
+            return $original;
+        }
+        if ((int) ($settings['exit'] ?? 0) === 1 || (int) ($settings['releases_run'] ?? 1) === 0) {
+            return 0;
+        }
+
+        return min($original, max(1, (int) ($settings['orchestrator_rel_timer'] ?? $original)));
     }
 
     /**

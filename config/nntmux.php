@@ -1,5 +1,10 @@
 <?php
 
+$currentForwardProviderReserve = (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_PROVIDER_RESERVE', 20_000);
+if ($currentForwardProviderReserve < 19_000 || $currentForwardProviderReserve > 20_000) {
+    $currentForwardProviderReserve = 20_000;
+}
+
 return [
     'db_name' => env('DB_DATABASE', 'nntmux'),
     'items_per_page' => env('ITEMS_PER_PAGE', 50),
@@ -26,10 +31,28 @@ return [
     'distributed_nzb_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS', 7200),
     'distributed_nzb_terminal_stale_hours' => max(168, (int) env('NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_HOURS', 168)),
     'distributed_nzb_terminal_stale_enabled' => filter_var(env('NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED', false), FILTER_VALIDATE_BOOL),
+    'distributed_release_pump_deadline_seconds' => min(30, max(5, (int) env('NNTMUX_DISTRIBUTED_RELEASE_PUMP_DEADLINE_SECONDS', 25))),
+    'distributed_release_pump_batch_size' => min(500, max(25, (int) env('NNTMUX_DISTRIBUTED_RELEASE_PUMP_BATCH_SIZE', 200))),
+    'distributed_release_sweep_groups' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_RELEASE_SWEEP_GROUPS', 1))),
+    'distributed_control_sleep_slice_seconds' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_CONTROL_SLEEP_SLICE_SECONDS', 5))),
     'split_collection_reconcile_groups' => array_values(array_unique(array_filter(array_map(
         'trim',
         explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_RECONCILE_GROUPS', '')),
     )))),
+    'split_collection_reconcile_lookback_hours' => min(72, max(24, (int) env('NNTMUX_SPLIT_COLLECTION_RECONCILE_LOOKBACK_HOURS', 24))),
+    'split_collection_reconcile_cursor_store' => env('NNTMUX_SPLIT_COLLECTION_RECONCILE_CURSOR_STORE', 'array'),
+    'split_collection_dynamic_pair_gap_groups' => array_values(array_unique(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_DYNAMIC_PAIR_GAP_GROUPS', '')),
+    )))),
+    'split_collection_terminal_pair_repair_groups' => array_values(array_unique(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_TERMINAL_PAIR_REPAIR_GROUPS', '')),
+    )))),
+    'split_collection_terminal_pair_repair_roots' => array_values(array_unique(array_filter(array_map(
+        'intval',
+        explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_TERMINAL_PAIR_REPAIR_ROOTS', '')),
+    ), static fn (int $rootId): bool => $rootId > 0))),
     'split_collection_xref_gap_overrides' => array_reduce(
         array_filter(array_map('trim', explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_XREF_GAP_OVERRIDES', '')))),
         static function (array $overrides, string $entry): array {
@@ -46,8 +69,30 @@ return [
         'lock_store' => env('NNTMUX_ORCHESTRATOR_LOCK_STORE', 'redis'),
         'state_store' => env('NNTMUX_ORCHESTRATOR_STATE_STORE', 'redis'),
         'auto_backfill' => filter_var(env('NNTMUX_ORCHESTRATOR_AUTO_BACKFILL', false), FILTER_VALIDATE_BOOL),
+        'require_backfill_permit' => in_array(
+            strtolower((string) env('NNTMUX_ORCHESTRATOR_REQUIRE_BACKFILL_PERMIT', 'false')),
+            ['1', 'true', 'yes', 'on'],
+            true,
+        ),
         'auto_current_forward' => filter_var(env('NNTMUX_ORCHESTRATOR_AUTO_CURRENT_FORWARD', false), FILTER_VALIDATE_BOOL),
         'current_forward_refresh_enabled' => filter_var(env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_ENABLED', false), FILTER_VALIDATE_BOOL),
+        'current_forward_refresh_sources' => (string) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_REFRESH_SOURCES', ''),
+        'current_forward_ledger_issuance_enabled' => filter_var(env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_LEDGER_ISSUANCE_ENABLED', false), FILTER_VALIDATE_BOOL),
+        'current_forward_audit_max_age_seconds' => min(3600, max(600, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_AUDIT_MAX_AGE_SECONDS', 900))),
+        'current_forward_provider_reserve' => $currentForwardProviderReserve,
+        'current_forward_settlement_grace_seconds' => min(600, max(30, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_SETTLEMENT_GRACE_SECONDS', 120))),
+        'current_forward_zero_output_grace_seconds' => min(1800, max(300, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_ZERO_OUTPUT_GRACE_SECONDS', 600))),
+        'current_forward_incomplete_grace_seconds' => min(3600, max(600, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_INCOMPLETE_GRACE_SECONDS', 900))),
+        'current_forward_continuation_enabled' => filter_var(env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_ENABLED', false), FILTER_VALIDATE_BOOL),
+        'current_forward_terminal_max_retries' => min(1, max(0, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_TERMINAL_MAX_RETRIES', 1))),
+        'current_forward_continuation_max_windows' => min(3, max(2, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_MAX_WINDOWS', 3))),
+        'current_forward_continuation_max_parts' => min(30_000, max(10_000, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_MAX_PARTS', 30_000))),
+        'current_forward_continuation_max_binaries' => min(1_500, max(1, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_MAX_BINARIES', 1_500))),
+        'current_forward_continuation_max_collections' => min(300, max(1, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_MAX_COLLECTIONS', 300))),
+        'current_forward_continuation_projected_binaries' => min(1_500, max(1, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_PROJECTED_BINARIES', 500))),
+        'current_forward_continuation_projected_collections' => min(300, max(1, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_PROJECTED_COLLECTIONS', 100))),
+        'current_forward_continuation_deadline_seconds' => min(7200, max(900, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_DEADLINE_SECONDS', 7200))),
+        'current_forward_continuation_min_progress_parts' => min(1_000, max(100, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CONTINUATION_MIN_PROGRESS_PARTS', 100))),
         'permit_observation_seconds' => max(300, (int) env('NNTMUX_ORCHESTRATOR_PERMIT_OBSERVATION_SECONDS', 1200)),
         'permit_claim_grace_seconds' => max(120, (int) env('NNTMUX_ORCHESTRATOR_PERMIT_CLAIM_GRACE_SECONDS', 120)),
         'backfill_probe_groups' => array_values(array_filter(array_map(
@@ -108,6 +153,17 @@ return [
         'prometheus_retry_attempts' => min(5, max(1, (int) env('NNTMUX_ORCHESTRATOR_PROMETHEUS_RETRY_ATTEMPTS', 3))),
         'prometheus_sample_max_age_seconds' => min(600, max(30, (int) env('NNTMUX_ORCHESTRATOR_PROMETHEUS_SAMPLE_MAX_AGE_SECONDS', 120))),
         'snapshot_max_age_seconds' => min(600, max(60, (int) env('NNTMUX_ORCHESTRATOR_SNAPSHOT_MAX_AGE_SECONDS', 180))),
+        'qualified_supply_starvation_enabled' => filter_var(env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_STARVATION_ENABLED', false), FILTER_VALIDATE_BOOL),
+        'qualified_supply_starvation_dwell_seconds' => min(7200, max(300, (int) env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_STARVATION_DWELL_SECONDS', 900))),
+        'qualified_supply_recovery_samples' => min(10, max(1, (int) env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_RECOVERY_SAMPLES', 2))),
+        'qualified_supply_growth_min_per_minute' => max(0.0, (float) env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_GROWTH_MIN_PER_MINUTE', 1.0)),
+        // Cold-start probe permit: when supply is starved but every other health
+        // gate is green (not high pressure, low pressure, admission safe, no
+        // locks, gates passed, no in-flight transition), grant ONE bounded
+        // backfill permit per cooldown window to seed qualified output and break
+        // the self-referential starvation deadlock. 0 disables the cold-start.
+        'qualified_supply_cold_start_cooldown_seconds' => max(0, (int) env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_COLD_START_COOLDOWN_SECONDS', 900)),
+        'qualified_supply_binaries_sleep_seconds' => min(1800, max(60, (int) env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_BINARIES_SLEEP_SECONDS', 300))),
         'database_memory_limit_bytes' => (int) env('NNTMUX_ORCHESTRATOR_DB_MEMORY_LIMIT_BYTES', 4456448000),
         'database_cpu_limit_cores' => (float) env('NNTMUX_ORCHESTRATOR_DB_CPU_LIMIT_CORES', 3),
         'database_row_lock_window_seconds' => min(600, max(60, (int) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_WINDOW_SECONDS', 120))),

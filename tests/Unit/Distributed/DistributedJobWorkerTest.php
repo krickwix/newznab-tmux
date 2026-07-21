@@ -58,7 +58,7 @@ class DistributedJobWorkerTest extends TestCase
         Artisan::shouldReceive('call')->once()->with('test:work', [], Mockery::type(BufferedOutput::class))->andReturn(0);
 
         $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
-        $telemetry->shouldReceive('startRun')->once()->with('releases')->andReturn(100.0);
+        $telemetry->shouldReceive('startRun')->once()->with('releases', null, 60)->andReturn(100.0);
         $telemetry->shouldReceive('finishRun')->once()->with('releases', 'success', 100.0);
 
         $worker = new DistributedJobWorker(
@@ -88,7 +88,7 @@ class DistributedJobWorkerTest extends TestCase
         Artisan::shouldReceive('call')->once()->with('test:work', [], Mockery::type(BufferedOutput::class))->andReturn(0);
 
         $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
-        $telemetry->shouldReceive('startRun')->once()->with('backfill')->andReturn(100.0);
+        $telemetry->shouldReceive('startRun')->once()->with('backfill', null, 60)->andReturn(100.0);
         $telemetry->shouldReceive('finishRun')->once()->with('backfill', 'success', 100.0);
         $gate = Mockery::mock(BackfillPermitGate::class);
         $gate->shouldReceive('claimGeneration')->once()->andReturn(17);
@@ -113,6 +113,76 @@ class DistributedJobWorkerTest extends TestCase
 
         self::assertSame(0, $result['exit_code']);
         self::assertTrue($result['completed']);
+    }
+
+    public function test_failed_backfill_marks_the_claimed_generation_failed(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'array']);
+        Cache::store('array')->flush();
+        Artisan::shouldReceive('call')->once()->andReturn(1);
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('startRun')->once()->with('backfill', null, 60)->andReturn(100.0);
+        $telemetry->shouldReceive('finishRun')->once()->with('backfill', 'failure', 100.0);
+        $gate = Mockery::mock(BackfillPermitGate::class);
+        $gate->shouldReceive('claimGeneration')->once()->andReturn(17);
+        $gate->shouldReceive('complete')->never();
+        $gate->shouldReceive('fail')->once()->with(17, Mockery::type('string'))->andReturnTrue();
+
+        $worker = new DistributedJobWorker(
+            new DistributedJobCatalog,
+            Mockery::mock(TmuxMonitorService::class),
+            $telemetry,
+            $gate,
+        );
+        $method = new ReflectionMethod($worker, 'runLockedPlan');
+
+        $result = $method->invoke($worker, [
+            'name' => 'backfill',
+            'description' => 'test failed backfill',
+            'enabled' => true,
+            'disabled_reason' => null,
+            'commands' => [['command' => 'test:work', 'arguments' => []]],
+            'sleep' => 60,
+        ], 60, new BufferedOutput);
+
+        self::assertSame(1, $result['exit_code']);
+        self::assertFalse($result['completed']);
+    }
+
+    public function test_successful_backfill_without_complete_receipts_fails_the_generation(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'array']);
+        Cache::store('array')->flush();
+        Artisan::shouldReceive('call')->once()->andReturn(0);
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('startRun')->once()->with('backfill', null, 60)->andReturn(100.0);
+        $telemetry->shouldReceive('finishRun')->once()->with('backfill', 'failure', 100.0);
+        $gate = Mockery::mock(BackfillPermitGate::class);
+        $gate->shouldReceive('claimGeneration')->once()->andReturn(17);
+        $gate->shouldReceive('complete')->once()->with(17)->andReturnFalse();
+        $gate->shouldReceive('fail')->once()->with(17, Mockery::type('string'))->andReturnTrue();
+
+        $worker = new DistributedJobWorker(
+            new DistributedJobCatalog,
+            Mockery::mock(TmuxMonitorService::class),
+            $telemetry,
+            $gate,
+        );
+        $method = new ReflectionMethod($worker, 'runLockedPlan');
+
+        $result = $method->invoke($worker, [
+            'name' => 'backfill',
+            'description' => 'test backfill without completed receipts',
+            'enabled' => true,
+            'disabled_reason' => null,
+            'commands' => [['command' => 'test:work', 'arguments' => []]],
+            'sleep' => 60,
+        ], 60, new BufferedOutput);
+
+        self::assertSame(1, $result['exit_code']);
+        self::assertFalse($result['completed']);
     }
 
     public function test_backfill_refreshes_control_settings_before_resolving_each_plan(): void
@@ -148,7 +218,7 @@ class DistributedJobWorkerTest extends TestCase
         $monitor->shouldReceive('refreshBackfillControlSettings')->twice()->andReturn($freshRunVar);
 
         $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
-        $telemetry->shouldReceive('startRun')->once()->with('backfill')->andReturn(100.0);
+        $telemetry->shouldReceive('startRun')->once()->with('backfill', null, 60)->andReturn(100.0);
         $telemetry->shouldReceive('finishRun')->once()->with('backfill', 'success', 100.0);
         $gate = Mockery::mock(BackfillPermitGate::class);
         $gate->shouldReceive('claimGeneration')->once()->andReturn(17);
@@ -224,7 +294,7 @@ class DistributedJobWorkerTest extends TestCase
         $monitor->shouldReceive('refreshBackfillControlSettings')->once()->andReturn($runVar)->ordered();
 
         $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
-        $telemetry->shouldReceive('startRun')->once()->with('backfill')->andReturn(100.0);
+        $telemetry->shouldReceive('startRun')->once()->with('backfill', null, 60)->andReturn(100.0);
         $telemetry->shouldReceive('finishRun')->once()->with('backfill', 'success', 100.0);
         $gate = Mockery::mock(BackfillPermitGate::class);
         $gate->shouldReceive('claimGeneration')->once()->andReturn(17);
@@ -310,7 +380,7 @@ class DistributedJobWorkerTest extends TestCase
         $monitor->shouldReceive('refreshCurrentForwardControlSettings')->once()->andReturn($freshRunVar);
 
         $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
-        $telemetry->shouldReceive('startRun')->once()->with('current-forward')->andReturn(100.0);
+        $telemetry->shouldReceive('startRun')->once()->with('current-forward', null, 60)->andReturn(100.0);
         $telemetry->shouldReceive('finishRun')->once()->with('current-forward', 'success', 100.0);
 
         $exitCode = (new DistributedJobWorker(

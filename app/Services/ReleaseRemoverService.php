@@ -1007,7 +1007,11 @@ class ReleaseRemoverService
         $deletedCount = 0;
         foreach ($this->result as $release) {
             if ($this->delete) {
-                $this->releaseManagement->deleteSingleWithService(['g' => $release->guid, 'i' => $release->id], $this->nzb, $this->releaseImage);
+                $this->releaseManagement->deleteSingleWithService([
+                    'g' => $release->guid,
+                    'i' => $release->id,
+                    'reason' => $this->method,
+                ], $this->nzb, $this->releaseImage);
                 if ($this->echoCLI) {
                     cli()->primary('Deleting: '.$this->method.': '.$release->searchname, true);
                 }

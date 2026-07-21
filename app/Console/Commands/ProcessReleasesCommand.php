@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\ReleaseProcessingService;
+use App\Services\Releases\ReleasePump;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
@@ -25,7 +27,9 @@ class ProcessReleasesCommand extends Command
     protected $description = 'Process releases for a specific group or all groups';
 
     public function __construct(
-        private readonly ReleaseProcessingService $releaseProcessingService
+        private readonly ReleaseProcessingService $releaseProcessingService,
+        private readonly ReleasePump $releasePump,
+        private readonly DistributedWorkerTelemetry $workerTelemetry,
     ) {
         parent::__construct();
     }
@@ -59,20 +63,14 @@ class ProcessReleasesCommand extends Command
      */
     private function processReleasesForGroup(string $groupID): void
     {
-        $limit = $this->releaseProcessingService->getReleaseCreationLimit();
-
-        $this->releaseProcessingService->processIncompleteCollections($groupID);
-        $this->releaseProcessingService->processCollectionSizes($groupID);
-        $this->releaseProcessingService->deleteUnwantedCollections($groupID);
-
-        do {
-            $result = $this->releaseProcessingService->createReleases($groupID);
-            $nzbFilesAdded = $this->releaseProcessingService->createNZBsIfEnabled($groupID);
-
-            $shouldContinue = $result->total() >= $limit || $nzbFilesAdded >= $limit;
-        } while ($shouldContinue);
-
-        $this->releaseProcessingService->deleteCollections($groupID);
+        $result = $this->releasePump->run(
+            $groupID,
+            (int) config('nntmux.distributed_release_pump_deadline_seconds', 25),
+            (int) config('nntmux.distributed_release_pump_batch_size', 200),
+        );
+        if ($result['created'] > 0) {
+            $this->workerTelemetry->recordItem('releases', 'release', 'created', $result['created']);
+        }
     }
 
     /**

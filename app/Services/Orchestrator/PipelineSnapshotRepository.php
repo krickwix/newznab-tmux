@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace App\Services\Orchestrator;
 
 use App\Models\Settings;
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Nzb\NzbBacklogCreationService;
 use Illuminate\Support\Facades\DB;
+use LogicException;
 
 class PipelineSnapshotRepository
 {
@@ -49,12 +51,15 @@ class PipelineSnapshotRepository
         $pipeline = DB::selectOne('SELECT
             (SELECT COUNT(*) FROM collections WHERE filecheck IN (0, 1, 2, 15, 16)) AS collections_backlog,
             (SELECT COUNT(*) FROM binaries WHERE partcheck = 0) AS binaries_backlog,
+            (SELECT COALESCE(SUM(b.currentparts), 0) FROM binaries b INNER JOIN collections c ON c.id = b.collections_id INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE b.partcheck = 0 AND c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS schedulable_parts_backlog,
+            (SELECT COUNT(*) FROM binaries b INNER JOIN collections c ON c.id = b.collections_id INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE b.partcheck = 0 AND c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS schedulable_binaries_backlog,
+            (SELECT COUNT(*) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS schedulable_collections_backlog,
             (SELECT COUNT(*) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS ready_collections,
             (SELECT COUNT(*) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS releases_backlog,
             (SELECT COUNT(*) FROM releases) AS release_total,
             (SELECT COUNT(*) FROM releases WHERE nzbstatus = 0) AS nzbs_backlog,
-            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM binaries b INNER JOIN collections c ON c.id = b.collections_id WHERE b.partcheck = 0) AS oldest_binary_age,
-            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(dateadded), NOW()), 0) FROM collections WHERE filecheck IN (0, 1, 2, 15, 16)) AS oldest_collection_age,
+            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM binaries b INNER JOIN collections c ON c.id = b.collections_id INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE b.partcheck = 0 AND c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS oldest_binary_age,
+            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS oldest_collection_age,
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS oldest_release_age,
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(adddate), NOW()), 0) FROM releases WHERE nzbstatus = 0) AS oldest_nzb_age,
             NOT EXISTS(SELECT 1 FROM usenet_groups g LEFT JOIN short_groups s ON s.name = g.name
@@ -73,16 +78,28 @@ class PipelineSnapshotRepository
         $recoverySourceCollections = (int) $recoverySources['backlog'];
         $ordinaryCollections = max(0, $totalCollections - $recoverySourceCollections);
         $splitConsistent = $recoverySourceCollections <= $totalCollections;
+        $physicalParts = (int) ($tables->parts_count ?? 0);
+        $physicalBinaries = (int) ($tables->binaries_count ?? $pipeline->binaries_backlog ?? 0);
+        $schedulableParts = (int) ($pipeline->schedulable_parts_backlog ?? 0);
+        $schedulableBinaries = (int) ($pipeline->schedulable_binaries_backlog ?? 0);
+        $schedulableCollections = (int) ($pipeline->schedulable_collections_backlog ?? 0);
         $backlogs = [
-            'parts' => (int) ($tables->parts_count ?? 0),
-            'binaries' => (int) ($pipeline->binaries_backlog ?? 0),
-            'collections' => $ordinaryCollections,
-            'collections_total' => $totalCollections,
-            'recovery_sources' => $recoverySourceCollections,
+            'parts' => $schedulableParts,
+            'binaries' => $schedulableBinaries,
+            'collections' => $schedulableCollections,
             'releases' => (int) ($pipeline->releases_backlog ?? 0),
             'nzbs' => (int) ($pipeline->nzbs_backlog ?? 0),
         ];
-        $safeBackfillCandidates = $this->safeBackfillCandidates($this->backfillCandidates(), $backlogs);
+        $capacityBacklogs = [
+            'parts' => $physicalParts,
+            'binaries' => $physicalBinaries,
+            'collections' => $ordinaryCollections,
+            'collections_total' => $totalCollections,
+            'recovery_sources' => $recoverySourceCollections,
+            'releases' => $backlogs['releases'],
+            'nzbs' => $backlogs['nzbs'],
+        ];
+        $safeBackfillCandidates = $this->safeBackfillCandidates($this->backfillCandidates(), $capacityBacklogs);
         $backfillTarget = $this->selectBackfillTarget(
             $safeBackfillCandidates,
             $yieldHistory,
@@ -108,21 +125,33 @@ class PipelineSnapshotRepository
         if ($eligibleNzbs === 0) {
             $ages['nzbs'] = 0;
         }
+        $now = time();
         [$rates, $ewma] = $this->rates($backlogs, $previous);
-        $high = $this->pressure->isHigh($backlogs, $ages, $ewma);
-        $low = $this->pressure->isLow($backlogs, $ewma);
+        $physicalCapacityHigh = $this->physicalCapacityHigh(
+            $physicalParts,
+            $physicalBinaries,
+            $ordinaryCollections,
+            $totalCollections,
+            $recoverySourceCollections,
+        );
+        $high = $physicalCapacityHigh || $this->pressure->isHigh($backlogs, $ages, $ewma);
+        $low = ! $physicalCapacityHigh && $this->pressure->isLow($backlogs, $ewma);
+        $workerTelemetry = (new DistributedWorkerTelemetry)->snapshot(['releases'], (float) $now);
+        $releaseCreatedTotal = $workerTelemetry['available']
+            ? (int) ($workerTelemetry['workers']['releases']['items']['release']['created'] ?? 0)
+            : 0;
+        $releaseYield = $this->releaseYieldPerMinute($releaseCreatedTotal, $previous, $now);
         $deadlocks = isset($status['Innodb_deadlocks']) ? (int) $status['Innodb_deadlocks'] : null;
         $waits = isset($status['Innodb_row_lock_current_waits']) ? (int) $status['Innodb_row_lock_current_waits'] : null;
         $rowLockWaits = isset($status['Innodb_row_lock_waits']) ? (int) $status['Innodb_row_lock_waits'] : null;
-        $now = time();
         $database = $this->databaseContentionTelemetry($deadlocks, $waits, $rowLockWaits, $previous, $now);
         $databaseAdmissionSafe = $database['database_admission_safe']
             && $this->databaseProfileStable($controlState, $now);
 
         return new PipelineSnapshot(
-            partsBacklog: $backlogs['parts'],
-            binariesBacklog: $backlogs['binaries'],
-            collectionsBacklog: $backlogs['collections'],
+            partsBacklog: $physicalParts,
+            binariesBacklog: $physicalBinaries,
+            collectionsBacklog: $ordinaryCollections,
             releasesBacklog: $backlogs['releases'],
             nzbsBacklog: $backlogs['nzbs'],
             telemetryFresh: $signals['fresh'],
@@ -177,6 +206,11 @@ class PipelineSnapshotRepository
             databaseRowLockHardBreachAt: $database['database_row_lock_hard_breach_at'],
             databaseCurrentWaitStartedAt: $database['database_current_wait_started_at'],
             databaseAdmissionSafe: $databaseAdmissionSafe,
+            schedulablePartsBacklog: $schedulableParts,
+            schedulableBinariesBacklog: $schedulableBinaries,
+            schedulableCollectionsBacklog: $schedulableCollections,
+            releaseYieldPerMinute: $releaseYield,
+            releaseCreatedTotal: $releaseCreatedTotal,
         );
     }
 
@@ -230,7 +264,7 @@ class PipelineSnapshotRepository
         }
 
         $previousObservedAt = (int) ($previous['observed_at'] ?? 0);
-        $hasV3Baseline = (int) ($previous['schema_version'] ?? 0) === 3
+        $hasV3Baseline = (int) ($previous['schema_version'] ?? 0) >= 3
             && array_key_exists('database_row_lock_waits', $previous ?? [])
             && $previousObservedAt > 0
             && $previousObservedAt < $now
@@ -400,13 +434,18 @@ class PipelineSnapshotRepository
     {
         if ($criteria === null) {
             return (int) DB::scalar('SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0)
-                FROM collections c WHERE c.filecheck IN (0, 1, 2, 15, 16)');
+                FROM collections c
+                INNER JOIN usenet_groups g ON g.id = c.groups_id
+                WHERE c.filecheck IN (0, 1, 2, 15, 16)
+                AND (g.active = 1 OR g.backfill = 1)');
         }
         $predicate = $criteria->identityPredicate();
 
         return (int) DB::scalar("SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0)
             FROM collections c
+            INNER JOIN usenet_groups g ON g.id = c.groups_id
             WHERE c.filecheck IN (0, 1, 2, 15, 16)
+            AND (g.active = 1 OR g.backfill = 1)
             AND NOT EXISTS (
                 SELECT 1 FROM binaries b FORCE INDEX (ix_binaries_collection_hash)
                 WHERE b.collections_id = c.id
@@ -960,6 +999,121 @@ class PipelineSnapshotRepository
         ];
     }
 
+    /**
+     * Apply the production backfill quality policy to an exact set of release
+     * IDs. This is shared by exact-lineage settlement so category 2999/5999,
+     * TV name exceptions, and minimum payload semantics cannot drift.
+     *
+     * @param  list<int>  $releaseIds
+     * @return array{
+     *   counts:array{target:int,non_target:int,uncategorized:int},
+     *   bytes:array{target:int,non_target:int,uncategorized:int}
+     * }
+     */
+    public function currentForwardReleaseQualityForIds(array $releaseIds, string $group): array
+    {
+        $releaseIds = array_values(array_unique(array_filter(
+            array_map('intval', $releaseIds),
+            static fn (int $id): bool => $id > 0,
+        )));
+        if ($releaseIds === []) {
+            return $this->emptyBackfillCategoryQuality();
+        }
+
+        $minimumBytes = max(1, (int) config(
+            'nntmux.orchestrator.backfill_min_payload_bytes',
+            104_857_600,
+        ));
+        $allowDateRange = in_array(
+            $group,
+            (array) config('nntmux.orchestrator.backfill_tv_date_range_groups', []),
+            true,
+        );
+        $allowCompleteSeries = in_array(
+            $group,
+            (array) config('nntmux.orchestrator.backfill_tv_complete_series_groups', []),
+            true,
+        );
+        $quality = $this->emptyBackfillCategoryQuality();
+        $rows = DB::table('releases as r')
+            ->leftJoin('categories as c', 'c.id', '=', 'r.categories_id')
+            ->whereIn('r.id', $releaseIds)
+            ->where('r.nzbstatus', 1)
+            ->orderBy('r.id')
+            ->get([
+                'r.id',
+                'r.name',
+                'r.searchname',
+                'r.size',
+                'r.categories_id',
+                'c.root_categories_id',
+            ]);
+        foreach ($rows as $row) {
+            $category = (int) ($row->categories_id ?? 0);
+            $root = $row->root_categories_id === null ? null : (int) $row->root_categories_id;
+            $size = max(0, (int) $row->size);
+            $miscQualified = ! in_array($category, [2999, 5999], true)
+                || $this->releaseNameMatchesBackfillTarget(
+                    (string) ($row->name ?? ''),
+                    (string) ($row->searchname ?? ''),
+                    $allowDateRange,
+                    $allowCompleteSeries,
+                );
+            if (in_array($root, [2000, 5000], true)
+                && $miscQualified
+                && $size >= $minimumBytes
+            ) {
+                $quality['counts']['target']++;
+                $quality['bytes']['target'] += $size;
+
+                continue;
+            }
+            if ($root !== null
+                && ! in_array($root, [1, 2000, 5000], true)
+                && ! in_array($category, [2999, 5999], true)
+            ) {
+                $quality['counts']['non_target']++;
+                $quality['bytes']['non_target'] += $size;
+
+                continue;
+            }
+            if (($category === 0
+                    || $root === null
+                    || $root === 1
+                    || (in_array($category, [2999, 5999], true) && ! $miscQualified))
+                && $size >= $minimumBytes
+            ) {
+                $quality['counts']['uncategorized']++;
+                $quality['bytes']['uncategorized'] += $size;
+            }
+        }
+
+        return $quality;
+    }
+
+    private function releaseNameMatchesBackfillTarget(
+        string $name,
+        string $searchName,
+        bool $allowDateRange,
+        bool $allowCompleteSeries,
+    ): bool {
+        foreach ([$name, $searchName] as $candidate) {
+            if ($this->matchesBackfillPattern(self::BACKFILL_TV_EPISODE_PATTERN, $candidate)
+                || ($allowDateRange && $this->matchesBackfillPattern(self::BACKFILL_TV_DATE_RANGE_PATTERN, $candidate))
+                || ($allowCompleteSeries && $this->matchesBackfillPattern(self::BACKFILL_TV_COMPLETE_SERIES_PATTERN, $candidate))
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function matchesBackfillPattern(string $pattern, string $value): bool
+    {
+        return preg_match('~'.$pattern.'~i', strtolower($value)) === 1;
+    }
+
     public function backfillPendingCollectionsForCohort(
         string $group,
         string $startPostdate,
@@ -1014,6 +1168,98 @@ class PipelineSnapshotRepository
             $collectionDelayHours,
             $completion,
             $completion,
+        ]);
+    }
+
+    /**
+     * Return one internally consistent observation for a current-forward cohort.
+     *
+     * @return array{
+     *   release_count:int,
+     *   release_high:int,
+     *   pending_collections:int,
+     *   counts:array{target:int,non_target:int,uncategorized:int},
+     *   bytes:array{target:int,non_target:int,uncategorized:int},
+     *   hash:string
+     * }
+     */
+    public function currentForwardCohortObservation(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): array {
+        $connection = DB::connection();
+        if ($connection->transactionLevel() !== 0) {
+            throw new LogicException('Current-forward cohort observations require a top-level consistent transaction.');
+        }
+        if (in_array($connection->getDriverName(), ['mysql', 'mariadb'], true)) {
+            $connection->statement('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+        }
+
+        return $connection->transaction(function () use ($group, $releaseHighWatermark, $startPostdate, $endPostdate): array {
+            $releaseCount = $this->backfillCreatedReleasesForCohort(
+                $group,
+                $releaseHighWatermark,
+                $startPostdate,
+                $endPostdate,
+            );
+            $quality = $this->backfillCreatedNzbCategoryQualityForCohort(
+                $group,
+                $releaseHighWatermark,
+                $startPostdate,
+                $endPostdate,
+            );
+            $pendingCollections = $this->backfillPendingCollectionsForCohort(
+                $group,
+                $startPostdate,
+                $endPostdate,
+            );
+            $releaseHigh = $this->backfillReleaseHighForCohort(
+                $group,
+                $releaseHighWatermark,
+                $startPostdate,
+                $endPostdate,
+            );
+            $canonical = [
+                'release_count' => $releaseCount,
+                'release_high' => $releaseHigh,
+                'pending_collections' => $pendingCollections,
+                'counts' => $quality['counts'],
+                'bytes' => $quality['bytes'],
+            ];
+
+            return [
+                ...$canonical,
+                'hash' => hash('sha256', (string) json_encode($canonical, JSON_THROW_ON_ERROR)),
+            ];
+        }, 3);
+    }
+
+    private function backfillReleaseHighForCohort(
+        string $group,
+        int $releaseHighWatermark,
+        string $startPostdate,
+        string $endPostdate,
+    ): int {
+        $postdateToleranceSeconds = (int) config('nntmux.orchestrator.backfill_cohort_postdate_tolerance_seconds', 3600);
+
+        return (int) DB::scalar('SELECT COALESCE(MAX(r.id), ?)
+            FROM releases r
+            INNER JOIN usenet_groups g ON g.id = r.groups_id
+            WHERE g.name = ?
+            AND r.id > ?
+            AND r.postdate BETWEEN DATE_SUB(LEAST(?, ?), INTERVAL ? SECOND)
+                AND DATE_ADD(GREATEST(?, ?), INTERVAL ? SECOND)', [
+            max(0, $releaseHighWatermark),
+            $group,
+            max(0, $releaseHighWatermark),
+            $startPostdate,
+            $endPostdate,
+            $postdateToleranceSeconds,
+            $startPostdate,
+            $endPostdate,
+            $postdateToleranceSeconds,
         ]);
     }
 
@@ -1129,13 +1375,45 @@ class PipelineSnapshotRepository
             && $elapsed >= 1
             && $elapsed <= (int) config('nntmux.orchestrator.snapshot_max_age_seconds', 180);
         foreach ($now as $stage => $value) {
-            $splitStage = in_array($stage, ['collections', 'collections_total', 'recovery_sources'], true);
-            $previousCompatible = $previousFresh && (! $splitStage || (int) ($previous['schema_version'] ?? 0) === 2);
+            $schedulableStage = in_array($stage, ['parts', 'binaries', 'collections', 'collections_total', 'recovery_sources'], true);
+            $previousCompatible = $previousFresh
+                && (! $schedulableStage || (int) ($previous['schema_version'] ?? 0) >= 4);
             $rate = ! $previousCompatible ? 0.0 : ($value - (int) ($previous[$stage] ?? $value)) * 60 / $elapsed;
             $rates[$stage] = $rate;
             $ewma[$stage] = ! $previousCompatible ? 0.0 : 0.3 * $rate + 0.7 * (float) ($previous['ewma_'.$stage] ?? 0.0);
         }
 
         return [$rates, $ewma];
+    }
+
+    private function physicalCapacityHigh(
+        int $parts,
+        int $binaries,
+        int $ordinaryCollections,
+        int $totalCollections,
+        int $recoverySources,
+    ): bool {
+        return $parts >= (int) config('nntmux.orchestrator.high_watermarks.parts', PHP_INT_MAX)
+            || $binaries >= (int) config('nntmux.orchestrator.high_watermarks.binaries', PHP_INT_MAX)
+            || $ordinaryCollections >= (int) config('nntmux.orchestrator.high_watermarks.collections', PHP_INT_MAX)
+            || $totalCollections >= (int) config('nntmux.orchestrator.high_watermarks.collections_total', PHP_INT_MAX)
+            || $recoverySources >= (int) config('nntmux.orchestrator.high_watermarks.recovery_sources', PHP_INT_MAX);
+    }
+
+    /** @param array<string, int|float>|null $previous */
+    private function releaseYieldPerMinute(int $releaseCreatedTotal, ?array $previous, int $now): float
+    {
+        $previousObservedAt = (int) ($previous['observed_at'] ?? 0);
+        $previousTotal = (int) ($previous['release_created_total'] ?? $releaseCreatedTotal);
+        $elapsed = $now - $previousObservedAt;
+        if ((int) ($previous['schema_version'] ?? 0) < 5
+            || $elapsed < 1
+            || $elapsed > (int) config('nntmux.orchestrator.snapshot_max_age_seconds', 180)
+            || $releaseCreatedTotal < $previousTotal
+        ) {
+            return 0.0;
+        }
+
+        return ($releaseCreatedTotal - $previousTotal) * 60 / $elapsed;
     }
 }

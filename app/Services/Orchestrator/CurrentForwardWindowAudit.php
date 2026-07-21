@@ -18,8 +18,12 @@ final class CurrentForwardWindowAudit
      * @param  array<mixed>  $headers
      * @return array{headers:int,yenc_headers:int,multipart_headers:int,complete_binary_files:int,evidence_hash:string}
      */
-    public function analyze(array $headers, int $first, int $last): array
-    {
+    public function analyze(
+        array $headers,
+        int $first,
+        int $last,
+        bool $requireCompleteBinary = true,
+    ): array {
         if ($first <= 0 || $last - $first + 1 !== self::WINDOW_SIZE) {
             throw new RuntimeException('Current-forward audit requires one exact 10,000-article window.');
         }
@@ -117,7 +121,7 @@ final class CurrentForwardWindowAudit
                 $completeBinaryFiles++;
             }
         }
-        if ($completeBinaryFiles < 1) {
+        if ($requireCompleteBinary && $completeBinaryFiles < 1) {
             throw new RuntimeException('Current-forward XOVER contains no complete multipart binary.');
         }
 

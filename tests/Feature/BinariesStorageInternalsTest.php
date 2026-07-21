@@ -882,6 +882,73 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(125, (int) $binary->partsize);
     }
 
+    public function test_current_forward_lineage_counts_only_new_parts_across_replay(): void
+    {
+        $this->createHeaderStorageTables();
+        $this->createCurrentForwardLineageTables();
+        config()->set('nntmux.orchestrator.current_forward_continuation_enabled', true);
+        DB::table('current_forward_windows')->insert([
+            'id' => 1,
+            'generation' => 42,
+            'state' => 'CLAIMED',
+            'chain_root_id' => 1,
+            'chain_ordinal' => 1,
+        ]);
+        $service = new HeaderStorageService(
+            $this->deterministicCollectionHandler(),
+            config: new BinariesConfig(partsChunkSize: 10),
+        );
+        $header = $this->parsedHeader(525, 1, 'Current.Forward.Replay', 125);
+
+        $this->assertSame([], $service->store([$header], ['id' => 1, 'name' => 'alt.test'], true, 42));
+        $this->assertSame([], $service->store([$header], ['id' => 1, 'name' => 'alt.test'], true, 42));
+
+        $this->assertSame(1, DB::table('parts')->count());
+        $this->assertSame(1, (int) DB::table('current_forward_window_objects')
+            ->where('object_type', 'BINARY')
+            ->sum('inserted_parts'));
+        $this->assertSame(1, DB::table('current_forward_window_objects')
+            ->where('object_type', 'COLLECTION')->count());
+        $this->assertSame(1, DB::table('current_forward_window_objects')
+            ->where('object_type', 'BINARY')->count());
+    }
+
+    public function test_current_forward_lineage_budget_breach_rolls_back_the_header_chunk(): void
+    {
+        $this->createHeaderStorageTables();
+        $this->createCurrentForwardLineageTables();
+        config([
+            'nntmux.orchestrator.current_forward_continuation_enabled' => true,
+            'nntmux.orchestrator.current_forward_continuation_max_parts' => 1,
+        ]);
+        DB::table('current_forward_windows')->insert([
+            'id' => 1,
+            'generation' => 42,
+            'state' => 'CLAIMED',
+            'chain_root_id' => 1,
+            'chain_ordinal' => 1,
+        ]);
+        $service = new HeaderStorageService(
+            $this->deterministicCollectionHandler(),
+            config: new BinariesConfig(partsChunkSize: 10),
+        );
+
+        try {
+            $service->store([
+                $this->parsedHeader(526, 1, 'Current.Forward.Budget', 125),
+                $this->parsedHeader(527, 2, 'Current.Forward.Budget', 175),
+            ], ['id' => 1, 'name' => 'alt.test'], true, 42);
+            $this->fail('The current-forward hard lineage budget was not enforced.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame('Current-forward continuation hard budget exceeded.', $exception->getMessage());
+        }
+
+        $this->assertSame(0, DB::table('collections')->count());
+        $this->assertSame(0, DB::table('binaries')->count());
+        $this->assertSame(0, DB::table('parts')->count());
+        $this->assertSame(0, DB::table('current_forward_window_objects')->count());
+    }
+
     public function test_header_storage_does_not_increment_binary_counts_for_duplicate_multipart_replay(): void
     {
         $this->createHeaderStorageTables();
@@ -1206,6 +1273,50 @@ class BinariesStorageInternalsTest extends TestCase
             regex VARCHAR(255),
             status INT DEFAULT 1,
             ordinal INT DEFAULT 0
+        )');
+    }
+
+    private function createCurrentForwardLineageTables(): void
+    {
+        DB::statement('CREATE TABLE current_forward_windows (
+            id INTEGER PRIMARY KEY,
+            generation INT UNIQUE,
+            state VARCHAR(32),
+            chain_root_id INT,
+            parent_window_id INT NULL,
+            chain_ordinal INT,
+            continuation_deadline_at DATETIME NULL
+        )');
+        DB::statement('CREATE TABLE current_forward_window_objects (
+            id INTEGER PRIMARY KEY,
+            window_id INT,
+            chain_root_id INT,
+            object_type VARCHAR(16),
+            object_id INT,
+            parent_object_id INT NULL,
+            inserted_parts INT DEFAULT 0,
+            created_in_window INT DEFAULT 0,
+            touched_in_window INT DEFAULT 1,
+            created_at DATETIME NULL,
+            updated_at DATETIME NULL,
+            UNIQUE(window_id, object_type, object_id)
+        )');
+        DB::statement('CREATE TABLE current_forward_object_owners (
+            id INTEGER PRIMARY KEY,
+            object_type VARCHAR(16),
+            object_id INT,
+            chain_root_id INT,
+            created_at DATETIME NULL,
+            updated_at DATETIME NULL,
+            UNIQUE(object_type, object_id)
+        )');
+        DB::statement('CREATE TABLE current_forward_continuation_observations (
+            id INTEGER PRIMARY KEY,
+            window_id INT,
+            chain_root_id INT,
+            chain_ordinal INT,
+            created_at DATETIME NULL,
+            updated_at DATETIME NULL
         )');
     }
 

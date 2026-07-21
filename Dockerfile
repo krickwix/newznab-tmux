@@ -46,7 +46,7 @@ COPY . /app
 
 RUN rm -Rf tests/
 
-RUN composer install --no-interaction --no-progress --no-plugins
+RUN COMPOSER_MAX_PARALLEL_HTTP=1 composer install --no-interaction --no-progress --no-plugins
 RUN npm install --no-audit --no-fund \
  && npx vite build \
  && rm -rf node_modules

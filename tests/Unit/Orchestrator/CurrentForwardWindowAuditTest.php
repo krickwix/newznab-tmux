@@ -134,4 +134,42 @@ final class CurrentForwardWindowAuditTest extends TestCase
 
         (new CurrentForwardWindowAudit)->analyze($headers, 101, 10_100);
     }
+
+    public function test_incomplete_multipart_window_requires_explicit_continuation_mode(): void
+    {
+        $headers = [];
+        for ($number = 101; $number <= 10_100; $number++) {
+            $headers[] = [
+                'Number' => $number,
+                'Subject' => sprintf('"fragment-%d.mkv" yEnc (1/2)', $number),
+                'Message-ID' => sprintf('<%d@example.test>', $number),
+            ];
+        }
+
+        $audit = (new CurrentForwardWindowAudit)->analyze(
+            $headers,
+            101,
+            10_100,
+            requireCompleteBinary: false,
+        );
+
+        self::assertSame(10_000, $audit['multipart_headers']);
+        self::assertSame(0, $audit['complete_binary_files']);
+    }
+
+    public function test_normal_audit_still_rejects_an_incomplete_multipart_window(): void
+    {
+        $headers = [];
+        for ($number = 101; $number <= 10_100; $number++) {
+            $headers[] = [
+                'Number' => $number,
+                'Subject' => sprintf('"fragment-%d.mkv" yEnc (1/2)', $number),
+            ];
+        }
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('no complete multipart binary');
+
+        (new CurrentForwardWindowAudit)->analyze($headers, 101, 10_100);
+    }
 }

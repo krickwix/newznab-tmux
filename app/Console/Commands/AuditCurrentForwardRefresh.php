@@ -25,6 +25,7 @@ final class AuditCurrentForwardRefresh extends Command
         $group = $this->argument('group');
         $group = $group === null ? null : trim((string) $group);
         $seedOnly = (bool) $this->option('seed-only');
+        $record = (bool) $this->option('record');
 
         try {
             if ((bool) $this->option('seed') || $seedOnly) {
@@ -54,7 +55,18 @@ final class AuditCurrentForwardRefresh extends Command
                 }
             }
 
-            $result = $auditor->audit($group, (bool) $this->option('record'));
+            $registration = null;
+            if ($group === null
+                && $record
+                && (bool) config('nntmux.orchestrator.current_forward_refresh_enabled', false)
+            ) {
+                $registration = $ledger->seedNextConfiguredSource();
+            }
+
+            $result = $auditor->audit($group, $record);
+            if ($registration !== null) {
+                $result['registration'] = $registration;
+            }
         } catch (Throwable $exception) {
             $this->error($exception->getMessage());
 

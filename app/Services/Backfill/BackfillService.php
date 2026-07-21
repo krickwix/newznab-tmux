@@ -6,6 +6,7 @@ namespace App\Services\Backfill;
 
 use App\Models\UsenetGroup;
 use App\Services\Binaries\BinariesService;
+use App\Services\Distributed\BackfillExecutionGuard;
 use App\Services\NNTP\NntpArticleDate;
 use App\Services\NNTP\NNTPService;
 use Illuminate\Support\Carbon;
@@ -51,6 +52,7 @@ final class BackfillService
      */
     public function backfillAllGroups(string $groupName = '', int|string $articles = '', string $type = ''): void
     {
+        (new BackfillExecutionGuard)->assertLegacyCommandAllowed('BackfillService::backfillAllGroups');
         $groups = $this->getGroupsToBackfill($groupName, $type);
 
         if ($groups === []) {
@@ -84,6 +86,7 @@ final class BackfillService
      */
     public function backfillGroup(array $groupArr, int $remainingGroups, int|string $articles = ''): void
     {
+        (new BackfillExecutionGuard)->assertLegacyCommandAllowed('BackfillService::backfillGroup');
         $startTime = now();
         $this->binaries->logIndexerStart();
 

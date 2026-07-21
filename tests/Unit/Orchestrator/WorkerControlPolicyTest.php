@@ -1103,6 +1103,254 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('backfill_permit_no_input', $decision->reasons);
     }
 
+    public function test_qualified_supply_starvation_activates_only_after_distinct_growth_dwell_samples(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyStarvationDwellSeconds: 600,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+        );
+        $snapshot = $this->snapshot(
+            observedAt: 1_000,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            releaseYieldPerMinute: 0.0,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+        );
+
+        $candidate = $policy->decide($snapshot, ControlState::initial(), 1_000);
+        self::assertFalse($candidate->nextState->qualifiedSupplyStarved);
+        self::assertSame(1_000, $candidate->nextState->qualifiedSupplyCandidateSince);
+        self::assertContains('qualified_supply_starvation_candidate', $candidate->reasons);
+
+        $duplicate = $policy->decide($snapshot, $candidate->nextState, 1_700);
+        self::assertFalse($duplicate->nextState->qualifiedSupplyStarved);
+
+        $active = $policy->decide(
+            $this->snapshot(
+                observedAt: 1_601,
+                schedulablePartsBacklog: 200,
+                schedulableBinariesBacklog: 30,
+                backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            ),
+            $duplicate->nextState,
+            1_601,
+        );
+        self::assertTrue($active->nextState->qualifiedSupplyStarved);
+        self::assertSame(1_601, $active->nextState->qualifiedSupplyStarvedSince);
+        self::assertContains('qualified_supply_starved', $active->reasons);
+    }
+
+    public function test_qualified_supply_starvation_requires_two_productive_samples_to_recover(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyRecoverySamples: 2,
+        );
+        $state = new ControlState(
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $first = $policy->decide($this->snapshot(observedAt: 1_700, releaseYieldPerMinute: 0.5), $state, 1_700);
+        self::assertTrue($first->nextState->qualifiedSupplyStarved);
+        self::assertSame(1, $first->nextState->qualifiedSupplyRecoverySamples);
+        self::assertContains('qualified_supply_recovery_pending', $first->reasons);
+
+        $second = $policy->decide($this->snapshot(observedAt: 1_800, releaseYieldPerMinute: 0.5), $first->nextState, 1_800);
+        self::assertFalse($second->nextState->qualifiedSupplyStarved);
+        self::assertSame(0, $second->nextState->qualifiedSupplyCandidateSince);
+    }
+
+    public function test_pending_ready_or_nzb_work_does_not_reopen_raw_input_without_settled_release_yield(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyRecoverySamples: 1,
+            qualifiedSupplyColdStartCooldownSeconds: 0,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $decision = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 1_700,
+            readyCollections: 1,
+            eligibleNzbs: 1,
+            releaseYieldPerMinute: 0.0,
+        ), $state, 1_700);
+
+        self::assertTrue($decision->nextState->qualifiedSupplyStarved);
+        self::assertFalse($decision->backfillPermitted);
+    }
+
+    public function test_qualified_supply_starvation_denies_new_raw_backfill_even_inside_a_green_pressure_envelope(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+            qualifiedSupplyColdStartCooldownSeconds: 0,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $decision = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 1_700,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $state, 1_700);
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertTrue($decision->nextState->qualifiedSupplyStarved);
+        self::assertContains('qualified_supply_starved', $decision->reasons);
+    }
+
+    public function test_cold_start_probe_grants_one_bounded_backfill_permit_while_starved_but_healthy(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+            qualifiedSupplyColdStartCooldownSeconds: 900,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        // First probe fires: starved but every other health gate is green.
+        $first = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 1_700,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $state, 1_700);
+
+        self::assertTrue($first->backfillPermitted, 'cold-start probe should grant one permit while starved but healthy');
+        self::assertContains('backfill_qualified_supply_cold_start', $first->reasons);
+        self::assertSame(1_700, $first->nextState->qualifiedSupplyColdStartAt);
+
+        // Second observation still within the cooldown window: no re-issue.
+        $second = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 2_000,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $first->nextState, 2_000);
+
+        self::assertFalse($second->backfillPermitted, 'cold-start must not re-fire within the cooldown window');
+        self::assertContains('backfill_qualified_supply_starved', $second->reasons);
+        self::assertSame(1_700, $second->nextState->qualifiedSupplyColdStartAt);
+
+        // After the cooldown elapses, a fresh probe may fire again.
+        $third = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 2_650,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $second->nextState, 2_650);
+
+        self::assertTrue($third->backfillPermitted, 'cold-start may re-fire after the cooldown elapses');
+        self::assertSame(2_650, $third->nextState->qualifiedSupplyColdStartAt);
+    }
+
+    public function test_cold_start_probe_fires_when_no_fresh_forward_content_is_available(): void
+    {
+        // Live regression: after draining a burst, currentGroupsAvailable is
+        // false (no >10k unfetched NEW server articles) so backfillGatesPassed()
+        // is false, but backward-fill of older missing parts is still possible.
+        // The cold-start must fire on the relaxed gate set.
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+            qualifiedSupplyColdStartCooldownSeconds: 900,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Fill,
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $decision = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 1_700,
+            currentGroupsAvailable: false,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $state, 1_700);
+
+        self::assertTrue($decision->backfillPermitted, 'cold-start must fire even without fresh forward content');
+        self::assertContains('backfill_qualified_supply_cold_start', $decision->reasons);
+        self::assertTrue($decision->nextState->qualifiedSupplyStarved, 'cold-start grants a probe permit but does not itself clear starvation');
+    }
+
+    public function test_cold_start_probe_disabled_when_cooldown_is_zero(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+            qualifiedSupplyColdStartCooldownSeconds: 0,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $decision = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 1_700,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $state, 1_700);
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertTrue($decision->nextState->qualifiedSupplyStarved);
+        self::assertContains('qualified_supply_starved', $decision->reasons);
+    }
+
     private function greenBackfillSnapshot(...$override): PipelineSnapshot
     {
         return $this->snapshot(...array_replace([

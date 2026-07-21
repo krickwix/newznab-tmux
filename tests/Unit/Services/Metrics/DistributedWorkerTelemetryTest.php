@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit\Services\Metrics;
 
 use App\Services\Metrics\DistributedWorkerTelemetry;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Cache;
 use Tests\TestCase;
 
@@ -25,6 +26,7 @@ final class DistributedWorkerTelemetryTest extends TestCase
         $startedAt = $telemetry->startRun('releases', 1_000.25);
         $telemetry->recordItem('nzb-backlog', 'nzb', 'created', 2);
         $telemetry->recordItem('nzb-backlog', 'nzb', 'failed');
+        $telemetry->recordItem('releases', 'release', 'created', 4);
         $telemetry->recordSelectorDuration(0.125);
         $telemetry->finishRun('releases', 'success', $startedAt, 1_003.75);
 
@@ -35,6 +37,7 @@ final class DistributedWorkerTelemetryTest extends TestCase
         self::assertSame(0, $snapshot['workers']['releases']['runs']['failure']);
         self::assertArrayNotHasKey('nzb', $snapshot['workers']['releases']['items']);
         self::assertSame(3.5, $snapshot['workers']['releases']['last_duration_seconds']);
+        self::assertSame(4, $snapshot['workers']['releases']['items']['release']['created']);
         self::assertSame(1_000.25, $snapshot['workers']['releases']['last_started_timestamp_seconds']);
         self::assertSame(1_003.75, $snapshot['workers']['releases']['last_completed_timestamp_seconds']);
         self::assertSame(1_003.75, $snapshot['workers']['releases']['last_success_timestamp_seconds']);
@@ -73,5 +76,21 @@ final class DistributedWorkerTelemetryTest extends TestCase
         self::assertSame(1, $snapshot['workers']['releases']['runs']['lock_contended']);
         self::assertTrue($snapshot['workers']['releases']['in_progress']);
         self::assertSame(10.0, $snapshot['workers']['releases']['in_progress_age_seconds']);
+    }
+
+    public function test_in_progress_marker_expires_with_the_distributed_lock_lifetime(): void
+    {
+        CarbonImmutable::setTestNow('2026-07-21 00:00:00');
+        try {
+            $telemetry = new DistributedWorkerTelemetry;
+            $telemetry->startRun('releases', 2_000.0, 30);
+
+            self::assertTrue($telemetry->snapshot(['releases'], 2_010.0)['workers']['releases']['in_progress']);
+
+            CarbonImmutable::setTestNow('2026-07-21 00:00:31');
+            self::assertFalse($telemetry->snapshot(['releases'], 2_031.0)['workers']['releases']['in_progress']);
+        } finally {
+            CarbonImmutable::setTestNow();
+        }
     }
 }

@@ -61,7 +61,7 @@ class BackfillRunner extends BaseRunner
         }
     }
 
-    public function safeBackfill(): void
+    public function safeBackfill(?int $generation = null): void
     {
         // make sure short_groups is up-to-date - Updated to use new script location (modernized)
         $this->executeCommand(PHP_BINARY.' app/Services/Tmux/Scripts/update_groups.php');
@@ -123,6 +123,7 @@ class BackfillRunner extends BaseRunner
             $threads,
             $orchestratorGroup === '' ? 0 : 10000,
             $orchestratorStopCursor,
+            $generation,
         );
 
         if ($queues === []) {
@@ -133,7 +134,7 @@ class BackfillRunner extends BaseRunner
         }
 
         // Streaming mode
-        if ((bool) config('nntmux.stream_fork_output', false) === true) {
+        if ($generation === null && (bool) config('nntmux.stream_fork_output', false) === true) {
             $commands = [];
             foreach ($queues as $idx => $queue) {
                 $commands[$idx] = $this->buildDnrCommand($queue);
@@ -152,7 +153,11 @@ class BackfillRunner extends BaseRunner
         }
 
         // Process using parallel commands with configurable timeout
-        $results = $this->runParallelCommands($commands, $threads);
+        $results = $this->runParallelCommands(
+            $commands,
+            $threads,
+            failOnError: $generation !== null,
+        );
 
         foreach ($results as $idx => $output) {
             echo $output;
@@ -171,6 +176,7 @@ class BackfillRunner extends BaseRunner
         int $threads,
         int $reserveArticles = 0,
         int $pinnedStopCursor = 0,
+        ?int $generation = null,
     ): array {
         if ($maxMessages < 1) {
             $maxMessages = 20000;
@@ -224,7 +230,7 @@ class BackfillRunner extends BaseRunner
             $available = max(0, $ourFirst - $floor);
             $requested = min(
                 $available,
-                $policy->clampQuantity((string) $group->name, $ourFirst, $backfillQty * $threads),
+                $policy->clampQuantity((string) $group->name, $ourFirst, $backfillQty),
             );
             if ($requested <= 0) {
                 continue;
@@ -239,7 +245,14 @@ class BackfillRunner extends BaseRunner
                 }
 
                 $key = $group->name.'#'.($i + 1);
-                $queuesByChunk[$i][$key] = sprintf('get_range  backfill  %s  %s  %s  %s', $group->name, $start, $end, $i + 1);
+                $queuesByChunk[$i][$key] = sprintf(
+                    'get_range  backfill  %s  %s  %s  %s%s',
+                    $group->name,
+                    $start,
+                    $end,
+                    $i + 1,
+                    $generation !== null ? '  '.$generation : '',
+                );
                 $queueGroupsByChunk[$i][$key] = $group->name;
             }
         }

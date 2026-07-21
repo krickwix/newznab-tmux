@@ -27,6 +27,11 @@ class BackfillPermitGateTest extends TestCase
             $table->string('name')->primary();
             $table->string('value');
         });
+        Schema::create('current_forward_windows', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('generation')->nullable()->unique();
+            $table->string('state', 32);
+        });
     }
 
     public function test_it_atomically_consumes_one_fresh_active_permit(): void
@@ -66,6 +71,86 @@ class BackfillPermitGateTest extends TestCase
         self::assertSame(60_000, Settings::settingValue('orchestrator_bfc_stop'));
     }
 
+    public function test_it_pins_the_provider_cursor_envelope_and_requires_completed_range_receipts(): void
+    {
+        config()->set('nntmux.orchestrator.require_backfill_permit', true);
+        Schema::create('usenet_groups', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name')->unique();
+            $table->unsignedBigInteger('first_record');
+        });
+        Schema::create('backfill_execution_ranges', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('generation');
+            $table->string('group_name');
+            $table->unsignedBigInteger('first_article');
+            $table->unsignedBigInteger('last_article');
+            $table->string('status', 16);
+            $table->dateTime('claimed_at');
+            $table->dateTime('completed_at')->nullable();
+            $table->text('error')->nullable();
+            $table->timestamps();
+        });
+        DB::table('usenet_groups')->insert([
+            'name' => 'alt.test',
+            'first_record' => 250_000,
+        ]);
+        $this->settings('active', time() + 60, 0, 17);
+
+        $gate = new BackfillPermitGate;
+        self::assertSame(17, $gate->claimGeneration());
+        self::assertSame(90_000, Settings::settingValue('orchestrator_bfc_first'));
+        self::assertSame(249_999, Settings::settingValue('orchestrator_bfc_last'));
+        self::assertFalse($gate->complete(17));
+
+        DB::table('backfill_execution_ranges')->insert([
+            'generation' => 17,
+            'group_name' => 'alt.test',
+            'first_article' => 90_000,
+            'last_article' => 249_999,
+            'status' => 'COMPLETED',
+            'claimed_at' => now(),
+            'completed_at' => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        self::assertTrue($gate->complete(17));
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_completed'));
+    }
+
+    public function test_receipt_table_is_backward_compatible_while_strict_enforcement_is_off(): void
+    {
+        Schema::create('backfill_execution_ranges', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('generation');
+            $table->string('group_name');
+            $table->unsignedBigInteger('first_article');
+            $table->unsignedBigInteger('last_article');
+            $table->string('status', 16);
+            $table->dateTime('claimed_at');
+            $table->dateTime('completed_at')->nullable();
+            $table->text('error')->nullable();
+            $table->timestamps();
+        });
+        config()->set('nntmux.orchestrator.require_backfill_permit', false);
+        $this->settings('active', time() + 60, 0, 17);
+
+        $gate = new BackfillPermitGate;
+        self::assertSame(17, $gate->claimGeneration());
+        self::assertTrue($gate->complete(17));
+    }
+
+    public function test_failed_generation_is_fenced_for_prompt_orchestrator_recovery(): void
+    {
+        $this->settings('active', time() + 60, 0, 17);
+        $gate = new BackfillPermitGate;
+        self::assertSame(17, $gate->claimGeneration());
+
+        self::assertTrue($gate->fail(17, 'provider failed'));
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_failed'));
+    }
+
     public function test_it_denies_a_permit_when_the_pinned_stop_does_not_match_runtime_policy(): void
     {
         config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.test:60000');
@@ -74,6 +159,31 @@ class BackfillPermitGateTest extends TestCase
 
         self::assertNull((new BackfillPermitGate)->claimGeneration());
         self::assertSame(17, Settings::settingValue('orchestrator_bf_permit'));
+    }
+
+    public function test_it_denies_backfill_while_a_current_forward_window_is_unsettled(): void
+    {
+        $this->settings('active', time() + 60, 0, 17);
+        DB::table('current_forward_windows')->insert([
+            'generation' => 42,
+            'state' => 'INGESTED',
+        ]);
+
+        self::assertNull((new BackfillPermitGate)->claimGeneration());
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_claimed'));
+    }
+
+    public function test_it_denies_backfill_while_a_current_forward_permit_is_offered(): void
+    {
+        $this->settings('active', time() + 60, 0, 17);
+        Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_permit'], ['value' => '42']);
+        Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_claimed'], ['value' => '0']);
+        Settings::query()->updateOrCreate(['name' => 'orchestrator_cf_completed'], ['value' => '0']);
+
+        self::assertNull((new BackfillPermitGate)->claimGeneration());
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_claimed'));
     }
 
     #[DataProvider('deniedStates')]

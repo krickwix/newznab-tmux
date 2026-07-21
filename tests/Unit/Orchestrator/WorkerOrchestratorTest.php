@@ -8,6 +8,7 @@ use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Orchestrator\ControlDecision;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlState;
+use App\Services\Orchestrator\CurrentForwardRefreshSettlement;
 use App\Services\Orchestrator\PipelineSnapshot;
 use App\Services\Orchestrator\PipelineSnapshotRepository;
 use App\Services\Orchestrator\WorkerControlPolicy;
@@ -159,6 +160,127 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertContains('low_pressure_step_up', $result['reasons']);
         self::assertSame('controller_profile_settling', $result['current_forward']['reason']);
         self::assertFalse($result['current_forward']['granted']);
+    }
+
+    public function test_current_forward_settlement_transition_holds_both_input_lanes_for_one_tick(): void
+    {
+        config([
+            'nntmux.orchestrator.current_forward_continuation_enabled' => false,
+            'nntmux.orchestrator.auto_backfill' => true,
+            'nntmux.orchestrator.auto_current_forward' => true,
+        ]);
+        Schema::create('current_forward_sources', function (Blueprint $table): void {
+            $table->id();
+            $table->string('state', 32);
+            $table->unsignedTinyInteger('strikes')->default(0);
+            $table->string('last_reason', 120)->nullable();
+            $table->timestamps();
+        });
+        Schema::create('current_forward_windows', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('source_id');
+            $table->unsignedBigInteger('generation')->nullable();
+            $table->string('state', 32);
+            $table->unsignedBigInteger('chain_root_id')->nullable();
+            $table->unsignedBigInteger('parent_window_id')->nullable();
+            $table->unsignedTinyInteger('chain_ordinal')->default(1);
+            $table->dateTime('continuation_deadline_at')->nullable();
+            $table->dateTime('ingested_at')->nullable();
+            $table->dateTime('settled_at')->nullable();
+            $table->string('failure_reason', 120)->nullable();
+            $table->timestamps();
+        });
+        Schema::create('current_forward_object_owners', function (Blueprint $table): void {
+            $table->id();
+            $table->string('object_type', 16);
+            $table->unsignedBigInteger('object_id');
+            $table->unsignedBigInteger('chain_root_id');
+            $table->timestamps();
+        });
+        Schema::create('current_forward_window_objects', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('window_id');
+            $table->unsignedBigInteger('chain_root_id');
+            $table->string('object_type', 16);
+            $table->unsignedBigInteger('object_id');
+            $table->timestamps();
+        });
+        Schema::create('current_forward_continuation_observations', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('window_id');
+            $table->unsignedBigInteger('chain_root_id');
+            $table->unsignedTinyInteger('chain_ordinal');
+            $table->timestamps();
+        });
+        DB::table('current_forward_sources')->insert([
+            'id' => 1,
+            'state' => 'READY',
+            'strikes' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('current_forward_windows')->insert([
+            'id' => 1,
+            'source_id' => 1,
+            'generation' => 41,
+            'state' => 'CONTINUATION_PENDING',
+            'chain_root_id' => 1,
+            'chain_ordinal' => 1,
+            'continuation_deadline_at' => now()->addHour(),
+            'ingested_at' => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $snapshot = new PipelineSnapshot(
+            0,
+            0,
+            0,
+            0,
+            0,
+            lowPressure: true,
+            databaseCurrentWaits: 0,
+            databaseAdmissionSafe: true,
+            eligibleNzbs: 0,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Fill,
+            lastTransitionAt: time() - WorkerControlPolicy::MINIMUM_DWELL_SECONDS,
+        );
+        $lock = Mockery::mock(Lock::class);
+        $lock->shouldReceive('get')->once()->andReturnTrue();
+        $lock->shouldReceive('release')->once();
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
+        $store->shouldReceive('leaderLock')->once()->andReturn($lock);
+        $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
+        $store->shouldReceive('permitObservation')->once()->andReturnNull();
+        $store->shouldReceive('pendingBackfillDelayedAttributionGroups')->andReturn([]);
+        $store->shouldReceive('loadState')->once()->andReturn($state);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->with(null)->andReturn($snapshot);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')
+            ->once()
+            ->withArgs(static fn (mixed $decision, mixed $now, mixed $issue): bool => $issue === false)
+            ->andReturn(42);
+        $settlement = new CurrentForwardRefreshSettlement($snapshots);
+
+        $result = (new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy,
+            $store,
+            $applier,
+            currentForwardSettlement: $settlement,
+        ))->runOnce(false, true, true);
+
+        self::assertFalse($result['permit_granted']);
+        self::assertFalse($result['current_forward']['granted']);
+        self::assertSame('current_forward_settlement_transition_hold', $result['current_forward']['reason']);
+        self::assertSame('quarantined', $result['current_forward_settlement']['status']);
+        $this->assertDatabaseHas('current_forward_windows', [
+            'id' => 1,
+            'state' => 'QUARANTINED',
+            'failure_reason' => 'current_forward_continuation_disabled',
+        ]);
     }
 
     public function test_stable_active_cycle_automatically_evaluates_current_forward_without_cli_grant(): void
@@ -3148,6 +3270,61 @@ final class WorkerOrchestratorTest extends TestCase
 
         self::assertNotContains('backfill_permit_effective', $result['reasons']);
         self::assertNotNull($store->permitObservation());
+        self::assertSame([], $store->backfillYieldHistory());
+    }
+
+    public function test_explicit_worker_failure_closes_a_claimed_observation_without_waiting_for_expiry(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.permit_observation_seconds' => 1200,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        Cache::store('array')->flush();
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '7'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '0'],
+            ['name' => 'orchestrator_bf_failed', 'value' => '7'],
+        ]);
+        $store = new WorkerControlStateStore;
+        $baseline = new PipelineSnapshot(1, 2, 3, 4, 5, backfillGroup: 'alt.test', backfillCursor: 20_000);
+        $store->beginPermitObservation($baseline, generation: 7, now: time() - 10, outcome: [
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+        ]);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn($baseline);
+        $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
+            'cursor' => 20_000,
+            'cursor_postdate' => '2026-01-02 03:04:05',
+            'ready_collections' => 0,
+            'releases' => 0,
+            'release_high_watermark' => 100,
+            'group_active' => 1,
+            'raw_collections' => 0,
+            'raw_binaries' => 0,
+            'partial_collections' => 0,
+            'complete_binaries' => 0,
+        ]);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('revokePermit')->once();
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertNull($store->permitObservation());
         self::assertSame([], $store->backfillYieldHistory());
     }
 

@@ -91,7 +91,19 @@ class ImdbScraper
 
         $cacheKey = 'imdb_scrape_id_'.$id;
         if (Cache::has($cacheKey)) {
-            return Cache::get($cacheKey);
+            $cached = Cache::get($cacheKey);
+            if ($cached === false) {
+                $this->lastFailureReason = 'cached_negative_legacy';
+
+                return false;
+            }
+            if (is_array($cached) && ($cached['kind'] ?? null) === 'negative') {
+                $this->restoreNegativeCacheEnvelope($cached);
+
+                return false;
+            }
+
+            return is_array($cached) ? $cached : false;
         }
 
         $url = 'https://www.imdb.com/title/tt'.$id.'/';
@@ -144,7 +156,7 @@ class ImdbScraper
             $ttl = $this->lastRequestWasBlocked
                 ? now()->addMinutes(self::SOFT_FAILURE_TTL_MINUTES)
                 : now()->addHours(self::HARD_FAILURE_TTL_HOURS);
-            Cache::put($cacheKey, false, $ttl);
+            $this->cacheNegativeResult($cacheKey, $ttl);
             $this->recordLookupMetric('failed');
 
             return false;
@@ -168,7 +180,7 @@ class ImdbScraper
             $ttl = $this->lastRequestWasBlocked
                 ? now()->addMinutes(self::SOFT_FAILURE_TTL_MINUTES)
                 : now()->addHours(self::HARD_FAILURE_TTL_HOURS);
-            Cache::put($cacheKey, false, $ttl);
+            $this->cacheNegativeResult($cacheKey, $ttl);
             $this->recordLookupMetric('failed');
 
             return false;
@@ -374,7 +386,7 @@ class ImdbScraper
 
     private function canUseImdbApiDev(): bool
     {
-        if (! (bool) config('nntmux_api.imdbapi_dev_enabled', true)) {
+        if (! (bool) config('nntmux_api.imdbapi_dev_enabled', false)) {
             $this->lastFallbackFailureReason = 'fallback_disabled';
 
             return false;
@@ -439,6 +451,34 @@ class ImdbScraper
         $value = preg_replace('/[^a-z0-9_]+/', '_', $value) ?: 'unknown';
 
         return trim($value, '_') ?: 'unknown';
+    }
+
+    private function cacheNegativeResult(string $cacheKey, \DateTimeInterface|\DateInterval|int|null $ttl): void
+    {
+        Cache::put($cacheKey, [
+            'kind' => 'negative',
+            'reason' => $this->lastFailureReason ?? 'unknown_failure',
+            'fallback_reason' => $this->lastFallbackFailureReason,
+            'waf_blocked' => $this->lastRequestWasBlocked,
+            'source' => $this->lastFetchSource,
+        ], $ttl);
+    }
+
+    /**
+     * @param  array<string, mixed>  $cached
+     */
+    private function restoreNegativeCacheEnvelope(array $cached): void
+    {
+        $this->lastFailureReason = is_string($cached['reason'] ?? null)
+            ? $cached['reason']
+            : 'cached_negative';
+        $this->lastFallbackFailureReason = is_string($cached['fallback_reason'] ?? null)
+            ? $cached['fallback_reason']
+            : null;
+        $this->lastRequestWasBlocked = (bool) ($cached['waf_blocked'] ?? false);
+        $this->lastFetchSource = is_string($cached['source'] ?? null)
+            ? $cached['source']
+            : null;
     }
 
     /**
@@ -883,7 +923,7 @@ class ImdbScraper
     }
 
     /**
-     * @return array<int, array{imdbid: string, title: string, year: string}>
+     * @return array<int, array{imdbid: string, title: string, year: string, type: string}>
      */
     private function parseSuggestionJson(string $body): array
     {
@@ -903,10 +943,12 @@ class ImdbScraper
                 continue;
             }
 
+            $type = $this->normalizeSuggestionType((string) ($row['qid'] ?? $row['q'] ?? ''));
             $results[] = [
                 'imdbid' => substr($row['id'], 2),
                 'title' => $title,
                 'year' => trim((string) ($row['y'] ?? '')),
+                'type' => $type,
             ];
 
             if (count($results) >= 25) {
@@ -917,8 +959,15 @@ class ImdbScraper
         return $results;
     }
 
+    private function normalizeSuggestionType(string $type): string
+    {
+        $type = strtolower(preg_replace('/[^a-z]+/i', '', $type) ?? '');
+
+        return in_array($type, ['feature', 'film', 'movie', 'tvmovie'], true) ? 'movie' : $type;
+    }
+
     /**
-     * @return array<int, array{imdbid: string, title: string, year: string}>
+     * @return array<int, array{imdbid: string, title: string, year: string, type: string}>
      */
     private function searchHtmlFallback(string $query): array
     {
@@ -954,7 +1003,7 @@ class ImdbScraper
     }
 
     /**
-     * @return array<int, array{imdbid: string, title: string, year: string}>
+     * @return array<int, array{imdbid: string, title: string, year: string, type: string}>
      */
     private function parseSearchHtml(string $html): array
     {
@@ -974,6 +1023,7 @@ class ImdbScraper
                     'imdbid' => $matches['id'][$index][0],
                     'title' => $title,
                     'year' => $this->extractYearFromText(strip_tags($context)),
+                    'type' => 'unknown',
                 ];
 
                 if (count($results) >= 25) {
@@ -1001,6 +1051,7 @@ class ImdbScraper
                         'imdbid' => $matches['id'],
                         'title' => $title,
                         'year' => $this->extractYearFromText($context),
+                        'type' => 'unknown',
                     ];
 
                     if (count($results) >= 25) {
