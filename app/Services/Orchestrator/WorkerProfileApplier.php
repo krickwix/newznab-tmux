@@ -149,10 +149,23 @@ class WorkerProfileApplier
     public function qualityLockBackfillTarget(string $group, string $reason = 'backfill_permit_wrong_category'): void
     {
         DB::transaction(function () use ($group, $reason): void {
-            DB::table('usenet_groups')
-                ->where('name', $group)
-                ->lockForUpdate()
-                ->update(['backfill' => 0]);
+            // Configured deep-backfill probe groups are intentionally backfilled
+            // regardless of per-cohort category yield. Disabling `backfill` on
+            // them (the default quality-lock penalty) drops them from
+            // short_groups and permanently stalls the backfill candidate query,
+            // so we skip the group-disable for probe groups and only pause the
+            // current permit so the orchestrator advances past the bad cohort.
+            $isProbeGroup = in_array(
+                $group,
+                (array) config('nntmux.orchestrator.backfill_probe_groups', []),
+                true,
+            );
+            if (! $isProbeGroup) {
+                DB::table('usenet_groups')
+                    ->where('name', $group)
+                    ->lockForUpdate()
+                    ->update(['backfill' => 0]);
+            }
             foreach ([
                 'orchestrator_bf_permit' => '0',
                 'orchestrator_bf_paused' => '1',
