@@ -23,6 +23,8 @@ final readonly class BackfillTargetSelector
 
     private float $terminalMinYield;
 
+    private bool $fairShareNewestCursor;
+
     /** @param list<string> $probeGroups */
     public function __construct(
         ?array $probeGroups = null,
@@ -32,6 +34,7 @@ final readonly class BackfillTargetSelector
         ?int $lockRetrySeconds = null,
         ?int $terminalMinAttempts = null,
         ?float $terminalMinYield = null,
+        ?bool $fairShareNewestCursor = null,
     ) {
         $configuredGroups = $probeGroups ?? config('nntmux.orchestrator.backfill_probe_groups', []);
         $this->probeGroups = array_values(array_filter(array_map(
@@ -73,6 +76,9 @@ final readonly class BackfillTargetSelector
                 ? (float) config('nntmux.orchestrator.backfill_terminal_min_yield', 1.0)
                 : 1.0),
         );
+        $this->fairShareNewestCursor = $fairShareNewestCursor ?? ($container->bound('config')
+            ? (bool) config('nntmux.orchestrator.backfill_fair_share_newest_cursor', false)
+            : false);
     }
 
     /**
@@ -137,6 +143,25 @@ final readonly class BackfillTargetSelector
         $byName = [];
         foreach ($candidates as $candidate) {
             $byName[$candidate['name']] = $candidate;
+        }
+
+        // Fair-share mode: pull every configured group backward together by
+        // always targeting the candidate whose cursor is the NEWEST (i.e. the
+        // one most behind in the backward walk / furthest from its 20y target).
+        // This overrides the yield-based exploit/explore policy so no single
+        // high-yield group can monopolize the single per-cycle backfill slot.
+        if ($this->fairShareNewestCursor && count($candidates) > 1) {
+            $ranked = $candidates;
+            usort($ranked, static function (array $left, array $right): int {
+                $leftTs = strtotime($left['cursor_postdate']) ?: 0;
+                $rightTs = strtotime($right['cursor_postdate']) ?: 0;
+                // Newest cursor first (largest timestamp = least-progressed backward).
+                $score = $rightTs <=> $leftTs;
+
+                return $score !== 0 ? $score : $left['name'] <=> $right['name'];
+            });
+
+            return $ranked[0];
         }
 
         $repeatGroup = trim((string) ($contextRepeat['group'] ?? ''));
