@@ -34,6 +34,13 @@ class MovieService
 
     protected const YEAR_MATCH_PERCENT = 80;
 
+    /**
+     * Title similarity at/above which a near-exact title match is trusted even
+     * when the release-name year disagrees with the catalog year (re-release /
+     * compilation year drift). Kept high to avoid false positives.
+     */
+    protected const TITLE_YEAR_OVERRIDE_PERCENT = 92;
+
     protected const IDENTITY_MOVIE = 'movie';
 
     protected const IDENTITY_NON_MOVIE = 'non_movie';
@@ -1502,6 +1509,18 @@ class MovieService
             return false;
         }
 
+        // A near-exact title match is a strong enough signal to accept even when
+        // the release-name year disagrees with the catalog year. Scene names often
+        // carry the original/theatrical year while the provider records a later
+        // re-release or compilation year (e.g. "Kill Bill The Whole Bloody Affair"
+        // named 2004 but catalogued 2011). Without this, the tight +/-2 year gate
+        // in imdbSearchYearMatches() rejects an otherwise-exact match.
+        if ($this->currentTitle !== ''
+            && $rank === 0
+            && $this->similarityPercent($candidateTitle, $this->currentTitle) >= self::TITLE_YEAR_OVERRIDE_PERCENT) {
+            return true;
+        }
+
         if ($this->currentTitle !== '' && $this->similarityPercent($candidateTitle, $this->currentTitle) < self::MATCH_PERCENT && ! $yearMatches) {
             return false;
         }
@@ -1841,6 +1860,25 @@ class MovieService
                 $decoded[] = Str::title(strrev(strtolower($token)));
             }
             $this->addMovieTitleCandidate($candidates, implode(' ', $decoded), '');
+        }
+
+        // Scene names sometimes prepend the director's (or another person's) name
+        // to the actual title, e.g. "Charles.Marquis.Warren.Trooper.Hook.1957".
+        // The primary parser keeps the whole leading run as the title, which then
+        // fails token-coverage against the real title. Emit progressively
+        // shorter trailing-token candidates (dropping 1..3 leading tokens) before
+        // the year so "Trooper Hook" (and "Hook") are also tried.
+        if (preg_match('/^(?P<title>[\pL\pN][\pL\pN\s\',.!:&;’`-]{2,}?)\s*\(?(?P<year>(?:19|20)\d{2})\)?\b/u', trim(str_replace(['.', '_'], ' ', $cleaned)), $match) === 1) {
+            $titleTokens = preg_split('/\s+/', trim($match['title'])) ?: [];
+            $tokenCount = count($titleTokens);
+            if ($tokenCount >= 3) {
+                for ($drop = 1; $drop <= min(3, $tokenCount - 1); $drop++) {
+                    $candidate = implode(' ', array_slice($titleTokens, $drop));
+                    if (mb_strlen($candidate) >= 3) {
+                        $this->addMovieTitleCandidate($candidates, $candidate, $match['year']);
+                    }
+                }
+            }
         }
 
         return array_values($candidates);
