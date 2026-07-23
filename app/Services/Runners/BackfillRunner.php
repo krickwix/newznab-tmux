@@ -67,7 +67,14 @@ class BackfillRunner extends BaseRunner
         $this->executeCommand(PHP_BINARY.' app/Services/Tmux/Scripts/update_groups.php');
 
         $backfill_qty = (int) Settings::settingValue('backfill_qty');
-        $backfill_days = (int) Settings::settingValue('backfill_days');
+        // backfill_days is an enum: 0=disabled, 1=use each group's backfill_target,
+        // 2=use the global safebackfilldate. It can be overridden declaratively via
+        // the NNTMUX_ORCHESTRATOR_BACKFILL_DAYS env so deployments (k8s manifests)
+        // don't depend on a mutable DB setting that may be unset on a fresh cluster.
+        $backfillDaysOverride = env('NNTMUX_ORCHESTRATOR_BACKFILL_DAYS');
+        $backfill_days = $backfillDaysOverride !== null && $backfillDaysOverride !== ''
+            ? (int) $backfillDaysOverride
+            : (int) Settings::settingValue('backfill_days');
         $backfill_groups = max(1, (int) Settings::settingValue('backfill_groups'));
         $maxMessages = (int) Settings::settingValue('maxmssgs');
         $threads = (int) Settings::settingValue('backfillthreads');
