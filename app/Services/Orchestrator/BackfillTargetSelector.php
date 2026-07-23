@@ -145,17 +145,25 @@ final readonly class BackfillTargetSelector
             $byName[$candidate['name']] = $candidate;
         }
 
-        // Fair-share mode: pull every configured group backward together by
-        // always targeting the candidate whose cursor is the NEWEST (i.e. the
-        // one most behind in the backward walk / furthest from its 20y target).
-        // This overrides the yield-based exploit/explore policy so no single
-        // high-yield group can monopolize the single per-cycle backfill slot.
+        // Fair-share mode: keep EVERY configured group's cursor moving backward
+        // together instead of letting one high-yield group monopolize the single
+        // per-cycle backfill slot. We round-robin by least-recently-attempted so
+        // each group gets a turn, and break ties by newest cursor so the group
+        // that is furthest behind in its backward walk (highest priority per the
+        // "prioritize the most recent cursor date" rule) is served first.
         if ($this->fairShareNewestCursor && count($candidates) > 1) {
             $ranked = $candidates;
-            usort($ranked, static function (array $left, array $right): int {
+            usort($ranked, static function (array $left, array $right) use ($history): int {
+                $leftAttempt = (int) ($history[$left['name']]['last_attempt_at'] ?? 0);
+                $rightAttempt = (int) ($history[$right['name']]['last_attempt_at'] ?? 0);
+                // Least-recently attempted first (round-robin across all groups).
+                if ($leftAttempt !== $rightAttempt) {
+                    return $leftAttempt <=> $rightAttempt;
+                }
+                // Tie-break: newest cursor first (largest timestamp = least
+                // progressed backward = furthest from its 20y target).
                 $leftTs = strtotime($left['cursor_postdate']) ?: 0;
                 $rightTs = strtotime($right['cursor_postdate']) ?: 0;
-                // Newest cursor first (largest timestamp = least-progressed backward).
                 $score = $rightTs <=> $leftTs;
 
                 return $score !== 0 ? $score : $left['name'] <=> $right['name'];
