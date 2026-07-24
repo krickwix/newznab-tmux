@@ -1328,9 +1328,19 @@ class PipelineSnapshotRepository
             $placeholders = implode(', ', array_fill(0, count($allowedGroups), '?'));
             $nameFilterSql = ' AND BINARY g.name IN ('.$placeholders.')';
             $bindings = $allowedGroups;
+            // Curated allowlist: preserve historical ordering (newest cursor
+            // postdate first) — the list is <= LIMIT so no group is truncated.
+            $orderBySql = 'g.first_record_postdate DESC, g.name ASC';
         } else {
             $nameFilterSql = '';
             $bindings = [];
+            // "all" mode can have more eligible groups than BACKFILL_CANDIDATE_LIMIT.
+            // Rotate the candidate window by least-recently-processed first
+            // (g.last_updated ASC) so no group is permanently starved out of the
+            // pool; NULLs (never processed) sort first so fresh groups bootstrap.
+            // The BackfillTargetSelector still applies yield/fairness within the
+            // returned window.
+            $orderBySql = 'g.last_updated IS NOT NULL, g.last_updated ASC, g.name ASC';
         }
 
         $rows = DB::select('SELECT
@@ -1358,7 +1368,7 @@ class PipelineSnapshotRepository
                 )
             )
             AND CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) > 10000
-            ORDER BY g.first_record_postdate DESC, g.name ASC
+            ORDER BY '.$orderBySql.'
             LIMIT '.self::BACKFILL_CANDIDATE_LIMIT, $bindings);
 
         return array_map(fn (object $row): array => [

@@ -207,6 +207,11 @@ final class ObfuscatedSubjectExtractor
         return $value;
     }
 
+    /**
+     * NOTE: this token list is intentionally mirrored by the ops monitor
+     * (bin/nntmux-rot13-count.py in the OpenClaw workspace) which counts
+     * rot13-rescuable releases. Keep the two in sync when tuning tokens.
+     */
     private function looksLikeRealRelease(string $value): bool
     {
         return preg_match('/\b(?:19|20)\d{2}\b/', $value) === 1
