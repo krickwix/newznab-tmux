@@ -1308,10 +1308,30 @@ class PipelineSnapshotRepository
         if ($allowedGroups === []) {
             return [];
         }
-        if (count($allowedGroups) > self::BACKFILL_CANDIDATE_LIMIT) {
-            return [];
+
+        // Sentinel "all" (case-insensitive): schedule every group whose DB flags
+        // opt it into backfill, instead of a hand-curated allowlist. The DB
+        // (g.backfill = 1 plus the active/inactive range guards below) becomes
+        // the single source of truth. The LIMIT still caps the per-cycle pool.
+        $scheduleAll = false;
+        foreach ($allowedGroups as $group) {
+            if (strcasecmp($group, 'all') === 0) {
+                $scheduleAll = true;
+                break;
+            }
         }
-        $placeholders = implode(', ', array_fill(0, count($allowedGroups), '?'));
+
+        if (! $scheduleAll) {
+            if (count($allowedGroups) > self::BACKFILL_CANDIDATE_LIMIT) {
+                return [];
+            }
+            $placeholders = implode(', ', array_fill(0, count($allowedGroups), '?'));
+            $nameFilterSql = ' AND BINARY g.name IN ('.$placeholders.')';
+            $bindings = $allowedGroups;
+        } else {
+            $nameFilterSql = '';
+            $bindings = [];
+        }
 
         $rows = DB::select('SELECT
             g.name,
@@ -1320,8 +1340,7 @@ class PipelineSnapshotRepository
             CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) AS remaining_articles
             FROM usenet_groups g
             INNER JOIN short_groups s ON s.name = g.name
-            WHERE g.backfill = 1
-            AND BINARY g.name IN ('.$placeholders.')
+            WHERE g.backfill = 1'.$nameFilterSql.'
             AND g.first_record IS NOT NULL
             AND g.first_record_postdate >= \'2000-01-01\'
             AND s.updated >= NOW() - INTERVAL 10 MINUTE
@@ -1340,7 +1359,7 @@ class PipelineSnapshotRepository
             )
             AND CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) > 10000
             ORDER BY g.first_record_postdate DESC, g.name ASC
-            LIMIT '.self::BACKFILL_CANDIDATE_LIMIT, $allowedGroups);
+            LIMIT '.self::BACKFILL_CANDIDATE_LIMIT, $bindings);
 
         return array_map(fn (object $row): array => [
             'name' => (string) $row->name,

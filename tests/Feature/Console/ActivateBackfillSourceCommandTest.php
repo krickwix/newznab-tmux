@@ -270,6 +270,34 @@ final class ActivateBackfillSourceCommandTest extends TestCase
             'last_record' => 100_000_001,
         ]);
     }
+
+    public function test_all_sentinel_allows_any_group_past_the_allowlist_gate(): void
+    {
+        config(['nntmux.orchestrator.backfill_probe_groups' => ['all']]);
+
+        $nntp = new BackfillSourceNntpFake;
+        $nntp->selectedGroup = 'alt.binaries.movie';
+        $this->app->instance(NNTPService::class, $nntp);
+
+        // alt.binaries.movie is NOT literally in the probe list (which is just
+        // "all") yet the dry run must still verify it: the "all" sentinel means
+        // the DB backfill flags are the source of truth, not a curated list.
+        $this->artisan('orchestrator:activate-backfill-source alt.binaries.movie')
+            ->expectsOutputToContain('Dry run passed; no database state was changed.')
+            ->assertSuccessful();
+    }
+
+    public function test_curated_list_still_rejects_group_not_in_allowlist(): void
+    {
+        config(['nntmux.orchestrator.backfill_probe_groups' => ['alt.binaries.other']]);
+
+        $nntp = new BackfillSourceNntpFake;
+        $this->app->instance(NNTPService::class, $nntp);
+
+        $this->artisan('orchestrator:activate-backfill-source alt.binaries.movie')
+            ->expectsOutputToContain('not in the configured backfill probe allowlist')
+            ->assertFailed();
+    }
 }
 
 final class BackfillSourceNntpFake extends NNTPService
