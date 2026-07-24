@@ -127,6 +127,7 @@ return [
         'backfill_fair_share_newest_cursor' => filter_var(env('NNTMUX_ORCHESTRATOR_BACKFILL_FAIR_SHARE_NEWEST_CURSOR', false), FILTER_VALIDATE_BOOL),
         'backfill_fill_groups' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_FILL_GROUPS', 1)),
         'backfill_fill_threads' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_FILL_THREADS', 1)),
+        'backfill_fill_quantity' => max(10000, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_FILL_QUANTITY', 10000)),
         'backfill_context_max_chain_windows' => min(4, max(2, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_MAX_CHAIN_WINDOWS', 3))),
         'backfill_aggressive_explore_below_yield' => max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_AGGRESSIVE_EXPLORE_BELOW_YIELD', 0.0)),
         'backfill_scale_min_yield' => max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_SCALE_MIN_YIELD', 1.0)),
