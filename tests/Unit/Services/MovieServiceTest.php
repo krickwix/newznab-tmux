@@ -755,6 +755,32 @@ class MovieServiceTest extends ImdbScraperTestCase
     }
 
     #[Test]
+    public function it_accepts_provider_years_within_two_year_tolerance(): void
+    {
+        $service = new class extends MovieService
+        {
+            public function yearOk(string $currentYear, int|string|null $candidateYear): bool
+            {
+                return $this->providerYearWithinTolerance($currentYear, $candidateYear);
+            }
+        };
+        $service->echooutput = false;
+
+        // premiere-vs-release / region off-by-one (e.g. All Through the Night
+        // release-named 1941, catalogued 1942) must be accepted.
+        $this->assertTrue($service->yearOk('1941', 1942));
+        $this->assertTrue($service->yearOk('1941', '1942'));
+        $this->assertTrue($service->yearOk('2007', 2007));
+        $this->assertTrue($service->yearOk('1985', 1983));
+        // OMDb-style year ranges take the first year.
+        $this->assertTrue($service->yearOk('1942', '1942-1943'));
+        // Beyond +/-2 must reject; empty current year is permissive.
+        $this->assertFalse($service->yearOk('1990', 1995));
+        $this->assertFalse($service->yearOk('1990', ''));
+        $this->assertTrue($service->yearOk('', 1990));
+    }
+
+    #[Test]
     public function it_rejects_generic_zero_signal_imdb_search_titles(): void
     {
         $service = new class extends MovieService

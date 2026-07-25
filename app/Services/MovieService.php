@@ -640,8 +640,7 @@ class MovieService
             if ($this->currentYear !== '' && ! empty($releaseDate)) {
                 $tmdbYear = Carbon::parse($releaseDate)->year;
 
-                $percent = $this->similarityPercent($this->currentYear, $tmdbYear);
-                if ($percent < self::YEAR_MATCH_PERCENT) {
+                if (! $this->providerYearWithinTolerance($this->currentYear, $tmdbYear)) {
                     Cache::put($cacheKey, false, $expiresAt);
 
                     return false;
@@ -827,8 +826,7 @@ class MovieService
                     return false;
                 }
                 if (! empty($this->currentYear) && ! empty($scraped['year'])) {
-                    $yearPercent = $this->similarityPercent($this->currentYear, $scraped['year']);
-                    if ($yearPercent < self::YEAR_MATCH_PERCENT) {
+                    if (! $this->providerYearWithinTolerance($this->currentYear, $scraped['year'])) {
                         $this->cacheImdbMovieFailure($cacheKey, 'year_mismatch', null, now()->addHours(6));
 
                         return false;
@@ -908,8 +906,7 @@ class MovieService
             }
 
             if (! empty($this->currentYear) && ! empty($resp['year'])) {
-                $percent = $this->similarityPercent($this->currentYear, $resp['year']);
-                if ($percent < self::YEAR_MATCH_PERCENT) {
+                if (! $this->providerYearWithinTolerance($this->currentYear, $resp['year'])) {
                     Cache::put($cacheKey, false, now()->addHours(6));
 
                     return false;
@@ -993,8 +990,7 @@ class MovieService
                 }
 
                 if (! empty($this->currentYear)) {
-                    $percent = $this->similarityPercent($this->currentYear, $resp->data->Year);
-                    if ($percent < self::YEAR_MATCH_PERCENT) {
+                    if (! $this->providerYearWithinTolerance($this->currentYear, (string) $resp->data->Year)) {
                         Cache::put($cacheKey, false, now()->addHours(6));
 
                         return false;
@@ -1548,6 +1544,36 @@ class MovieService
         $normalized = strtolower(preg_replace('/[^a-z0-9]+/i', '', $title) ?? '');
 
         return in_array($normalized, ['f1', 'mlb', 'nba', 'nfl', 'nhl', 'ufc', 'wwe'], true);
+    }
+
+    /**
+     * Numeric year tolerance check for provider metadata gates (TMDB/OMDb/
+     * Trakt/IMDb-scrape). Scene/DVD release names frequently record a year that
+     * is off by one from the catalogue year because of premiere-vs-release or
+     * region-release differences (e.g. "All Through the Night" premiered Dec
+     * 1941 but is catalogued 1942). The previous string-similarity gate
+     * (similarityPercent("1941","1942") == 75% < 80%) wrongly rejected these.
+     * Mirror the +/-2 tolerance already used by imdbSearchYearMatches().
+     */
+    protected function providerYearWithinTolerance(int|string|null $currentYear, int|string|null $candidateYear): bool
+    {
+        if ($currentYear === null || $currentYear === '') {
+            return true;
+        }
+
+        // Candidate years may arrive as a range (e.g. "1942-1943"); take the
+        // first 4-digit year.
+        $candidate = 0;
+        if (preg_match('/(19|20)\d{2}/', (string) $candidateYear, $m) === 1) {
+            $candidate = (int) $m[0];
+        }
+        if ($candidate <= 0) {
+            return false;
+        }
+
+        $current = (int) $currentYear;
+
+        return $current > 0 && abs($current - $candidate) <= 2;
     }
 
     private function imdbSearchYearMatches(int|string|null $candidateYear): bool
