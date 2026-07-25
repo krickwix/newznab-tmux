@@ -186,9 +186,21 @@ final class ObfuscatedSubjectExtractor
             return $value;
         }
 
-        return ($this->looksLikeRealRelease($decoded) && ! $this->looksLikeRealRelease($value))
-            ? $decoded
-            : $value;
+        if (! ($this->looksLikeRealRelease($decoded) && ! $this->looksLikeRealRelease($value))) {
+            return $value;
+        }
+
+        // Return the decoded TITLE STEM: strip the Usenet segment marker
+        // (" [46/56]") and any trailing quoted sidecar filename
+        // (- "bd-foo.part270.rar"), which otherwise derails categorization
+        // (the quoted .rar makes the categorizer bucket it as Misc). Fall back
+        // to the full decoded subject if the stem no longer looks like a real
+        // release.
+        $stem = preg_split('/\s*\[\d+\/\d+\]/', $decoded, 2)[0] ?? $decoded;
+        $stem = (string) preg_replace('/\s*-\s*"[^"]*"\s*.*$/', '', $stem);
+        $stem = trim($stem);
+
+        return ($stem !== '' && $this->looksLikeRealRelease($stem)) ? $stem : $decoded;
     }
 
     /**
@@ -251,7 +263,7 @@ final class ObfuscatedSubjectExtractor
     private function looksLikeRealRelease(string $value): bool
     {
         return preg_match('/\b(?:19|20)\d{2}\b/', $value) === 1
-            && preg_match('/\b(?:480p|576p|720p|1080p|2160p|x264|x265|h264|h265|hevc|xvid|divx|avc|bluray|bdrip|dvdrip|dvdr|dvd9|dvd5|webrip|web-dl|hdtv|remux|ntsc|pal|aac|ac3|dts|ddp|hdrip|brrip)\b/i', $value) === 1;
+            && preg_match('/(?:\b(?:480p|576p|720p|1080p|2160p|x264|x265|h264|h265|hevc|xvid|divx|avc|bluray|bdrip|dvdrip|dvdr|dvd9|dvd5|webrip|web-dl|hdtv|remux|ntsc|pal|aac|ac3|dts|ddp|hdrip|brrip)\b|blu[.\-\s]?ray)/i', $value) === 1;
     }
 
     private function countReadableWords(string $value): int
