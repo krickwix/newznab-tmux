@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Binaries;
 
 use App\Services\BlacklistService;
+use App\Services\NNTP\NntpArticleDate;
 
 /**
  * Parses and filters raw NNTP headers.
@@ -16,6 +17,8 @@ final class HeaderParser
     private int $notYEnc = 0;
 
     private int $blacklisted = 0;
+
+    private int $invalidDate = 0;
 
     public function __construct(?BlacklistService $blacklistService = null)
     {
@@ -29,6 +32,7 @@ final class HeaderParser
     {
         $this->notYEnc = 0;
         $this->blacklisted = 0;
+        $this->invalidDate = 0;
     }
 
     /**
@@ -69,6 +73,12 @@ final class HeaderParser
                 if (! isset($missingPartLookup[(string) $header['Number']])) {
                     continue;
                 }
+            }
+
+            if (NntpArticleDate::timestamp($header['Date'] ?? null) === null) {
+                $this->invalidDate++;
+
+                continue;
             }
 
             // Parse subject to get base name and part/total like "(12/45)"
@@ -112,6 +122,7 @@ final class HeaderParser
             'received' => $receivedNumbers,
             'notYEnc' => $this->notYEnc,
             'blacklisted' => $this->blacklisted,
+            'invalidDate' => $this->invalidDate,
         ];
     }
 
@@ -150,29 +161,46 @@ final class HeaderParser
      */
     public function getArticleRange(array $headers): array
     {
-        $result = [];
-        $count = \count($headers);
+        $numbered = array_values(array_filter(
+            $headers,
+            static fn (array $header): bool => isset($header['Number']) && is_numeric($header['Number'])
+        ));
 
-        if ($count === 0) {
-            return $result;
+        if ($numbered === []) {
+            return [];
         }
 
-        // Find first valid article
-        for ($i = 0; $i < $count; $i++) {
-            if (isset($headers[$i]['Number'])) {
-                $result['firstArticleNumber'] = $headers[$i]['Number'];
-                $result['firstArticleDate'] = $headers[$i]['Date'] ?? null;
+        usort(
+            $numbered,
+            static fn (array $left, array $right): int => (int) $left['Number'] <=> (int) $right['Number']
+        );
+
+        $first = $numbered[0];
+        $last = $numbered[array_key_last($numbered)];
+        $firstDate = null;
+        $lastDate = null;
+
+        foreach ($numbered as $header) {
+            if (NntpArticleDate::timestamp($header['Date'] ?? null) !== null) {
+                $firstDate = $header['Date'];
                 break;
             }
         }
 
-        // Find last valid article
-        for ($i = $count - 1; $i >= 0; $i--) {
-            if (isset($headers[$i]['Number'])) {
-                $result['lastArticleNumber'] = $headers[$i]['Number'];
-                $result['lastArticleDate'] = $headers[$i]['Date'] ?? null;
+        for ($index = \count($numbered) - 1; $index >= 0; $index--) {
+            if (NntpArticleDate::timestamp($numbered[$index]['Date'] ?? null) !== null) {
+                $lastDate = $numbered[$index]['Date'];
                 break;
             }
+        }
+
+        $result = ['firstArticleNumber' => $first['Number']];
+        if ($firstDate !== null) {
+            $result['firstArticleDate'] = $firstDate;
+        }
+        $result['lastArticleNumber'] = $last['Number'];
+        if ($lastDate !== null) {
+            $result['lastArticleDate'] = $lastDate;
         }
 
         return $result;

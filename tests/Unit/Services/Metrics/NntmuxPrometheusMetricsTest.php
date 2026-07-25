@@ -5,8 +5,14 @@ declare(strict_types=1);
 namespace Tests\Unit\Services\Metrics;
 
 use App\Models\Category;
+use App\Services\Distributed\DistributedJobCatalog;
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Metrics\NntmuxPrometheusMetrics;
+use App\Services\Metrics\SplitCollectionTelemetry;
+use App\Services\Orchestrator\ControlState;
+use App\Services\Orchestrator\WorkerControlStateStore;
 use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Mockery;
@@ -70,7 +76,8 @@ class NntmuxPrometheusMetricsTest extends TestCase
             adddate DATETIME NOT NULL,
             ishashed INTEGER DEFAULT 0,
             isrenamed INTEGER DEFAULT 0,
-            categories_id INTEGER NOT NULL
+            categories_id INTEGER NOT NULL,
+            nzbstatus INTEGER NOT NULL DEFAULT 0
         )');
 
         DB::statement('CREATE TABLE categories (
@@ -335,5 +342,575 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.binaries.lossless",filecheck="0"} 1', $output);
         $this->assertStringContainsString('nntmux_collections_pending_multifile_total{group="alt.binaries.blu-ray",collection_regexes_id="88"} 2', $output);
         $this->assertStringNotContainsString('alt.binaries.inactive', $output);
+    }
+
+    public function test_group_metrics_include_backfill_only_sources_without_counting_them_as_active(): void
+    {
+        DB::statement('CREATE TABLE usenet_groups (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            active INTEGER DEFAULT 0,
+            backfill INTEGER DEFAULT 0,
+            first_record INTEGER DEFAULT 0,
+            first_record_postdate DATETIME NULL
+        )');
+        DB::table('usenet_groups')->insert([
+            ['id' => 1, 'name' => 'alt.active', 'active' => 1, 'backfill' => 1, 'first_record' => 100, 'first_record_postdate' => '2026-07-01 00:00:00'],
+            ['id' => 2, 'name' => 'alt.backfill-only', 'active' => 0, 'backfill' => 1, 'first_record' => 200, 'first_record_postdate' => '2026-07-02 00:00:00'],
+            ['id' => 3, 'name' => 'alt.disabled', 'active' => 0, 'backfill' => 0, 'first_record' => 300, 'first_record_postdate' => '2026-07-03 00:00:00'],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('groupMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_groups_total{state="active"} 1', $output);
+        $this->assertStringContainsString('nntmux_groups_total{state="active_backfill"} 1', $output);
+        $this->assertStringContainsString('nntmux_groups_total{state="backfill"} 2', $output);
+        $this->assertStringContainsString('nntmux_group_first_record{group="alt.backfill-only"} 200', $output);
+        $this->assertStringNotContainsString('alt.disabled', $output);
+    }
+
+    public function test_collection_lifecycle_metrics_are_aggregate_and_zero_safe(): void
+    {
+        DB::statement('CREATE TABLE collections (
+            id INTEGER PRIMARY KEY,
+            groups_id INTEGER NOT NULL,
+            totalfiles INTEGER NOT NULL,
+            filecheck INTEGER NOT NULL,
+            collection_regexes_id INTEGER NOT NULL
+        )');
+
+        DB::table('collections')->insert([
+            ['id' => 1, 'groups_id' => 1, 'totalfiles' => 1, 'filecheck' => 0, 'collection_regexes_id' => 1],
+            ['id' => 2, 'groups_id' => 1, 'totalfiles' => 1, 'filecheck' => 0, 'collection_regexes_id' => 1],
+            ['id' => 3, 'groups_id' => 1, 'totalfiles' => 1, 'filecheck' => 4, 'collection_regexes_id' => 1],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('pipelineLifecycleMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_collections_filecheck_lifecycle_count{filecheck="0",state="new",lifecycle="backlog"} 2', $output);
+        $this->assertStringContainsString('nntmux_collections_filecheck_lifecycle_count{filecheck="3",state="ready_for_release",lifecycle="ready"} 0', $output);
+        $this->assertStringContainsString('nntmux_collections_filecheck_lifecycle_count{filecheck="4",state="inserted",lifecycle="nzb_pending"} 1', $output);
+    }
+
+    public function test_nzb_metrics_use_direct_status_and_inserted_proxy_counts(): void
+    {
+        DB::statement('CREATE TABLE collections (
+            id INTEGER PRIMARY KEY,
+            groups_id INTEGER NOT NULL,
+            totalfiles INTEGER NOT NULL,
+            filecheck INTEGER NOT NULL,
+            collection_regexes_id INTEGER NOT NULL
+        )');
+
+        DB::table('releases')->insert([
+            ['id' => 1, 'adddate' => now(), 'categories_id' => Category::MOVIE_HD, 'nzbstatus' => 0],
+            ['id' => 2, 'adddate' => now(), 'categories_id' => Category::MOVIE_HD, 'nzbstatus' => 0],
+            ['id' => 3, 'adddate' => now(), 'categories_id' => Category::MOVIE_HD, 'nzbstatus' => -1],
+            ['id' => 4, 'adddate' => now(), 'categories_id' => Category::MOVIE_HD, 'nzbstatus' => 1],
+        ]);
+        DB::table('collections')->insert([
+            ['id' => 1, 'groups_id' => 1, 'totalfiles' => 1, 'filecheck' => 4, 'collection_regexes_id' => 1],
+            ['id' => 2, 'groups_id' => 1, 'totalfiles' => 1, 'filecheck' => 3, 'collection_regexes_id' => 1],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('nzbBacklogMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_nzb_releases_count{state="pending"} 2', $output);
+        $this->assertStringContainsString('nntmux_nzb_releases_count{state="failed"} 1', $output);
+        $this->assertStringContainsString('nntmux_nzb_releases_count{state="added"} 1', $output);
+        $this->assertStringContainsString('nntmux_nzb_inserted_collections_count 1', $output);
+    }
+
+    public function test_worker_metrics_are_zero_safe_and_expose_selector_age_and_config(): void
+    {
+        config([
+            'nntmux.distributed_lock_store' => 'array',
+            'nntmux.inline_nzb_creation' => false,
+            'nntmux.distributed_nzb_limit' => 1,
+            'nntmux.distributed_nzb_sleep' => 60,
+            'nntmux.build_version' => '20260710-v8',
+            'app.env' => 'testing',
+        ]);
+        Cache::store('array')->flush();
+
+        $telemetry = new DistributedWorkerTelemetry;
+        $telemetry->startRun('nzb-backlog', 1_000.0);
+        $telemetry->recordItem('nzb-backlog', 'nzb', 'created', 3);
+        $telemetry->recordSelectorDuration(0.125);
+
+        $metrics = new NntmuxPrometheusMetrics($telemetry, new DistributedJobCatalog);
+        $method = (new ReflectionClass($metrics))->getMethod('workerTelemetryMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics, 1_025.0));
+
+        $this->assertStringContainsString('nntmux_worker_telemetry_available 1', $output);
+        $this->assertStringContainsString('nntmux_worker_runs_total{worker="releases",outcome="success"} 0', $output);
+        $this->assertStringContainsString('nntmux_worker_items_total{worker="nzb-backlog",item="nzb",result="created"} 3', $output);
+        $this->assertStringNotContainsString('nntmux_worker_items_total{worker="releases",item="nzb"', $output);
+        $this->assertStringContainsString('nntmux_worker_in_progress{worker="nzb-backlog"} 1', $output);
+        $this->assertStringContainsString('nntmux_worker_in_progress_age_seconds{worker="nzb-backlog"} 25', $output);
+        $this->assertStringContainsString('nntmux_worker_last_started_timestamp_seconds{worker="nzb-backlog"} 1000', $output);
+        $this->assertStringContainsString('nntmux_worker_last_completed_timestamp_seconds{worker="nzb-backlog"} 0', $output);
+        $this->assertStringContainsString('nntmux_nzb_selector_in_progress_age_seconds 25', $output);
+        $this->assertStringContainsString('nntmux_nzb_selector_last_duration_seconds 0.125', $output);
+        $this->assertStringNotContainsString('nntmux_worker_last_success_timestamp_seconds{worker="per-group"}', $output);
+        $this->assertStringContainsString('nntmux_worker_in_progress_stale{worker="nzb-backlog"} 0', $output);
+    }
+
+    public function test_worker_metrics_suppress_in_progress_markers_older_than_the_maximum_lock(): void
+    {
+        config([
+            'nntmux.distributed_lock_store' => 'array',
+            'nntmux.distributed_lock_seconds' => 900,
+            'nntmux.distributed_long_lock_seconds' => 3600,
+        ]);
+        Cache::store('array')->flush();
+        $telemetry = new DistributedWorkerTelemetry;
+        $telemetry->startRun('irc', 1_000.0);
+
+        $metrics = new NntmuxPrometheusMetrics($telemetry, new DistributedJobCatalog);
+        $method = (new ReflectionClass($metrics))->getMethod('workerTelemetryMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics, 5_000.0));
+
+        self::assertStringContainsString('nntmux_worker_in_progress{worker="irc"} 0', $output);
+        self::assertStringContainsString('nntmux_worker_in_progress_age_seconds{worker="irc"} 0', $output);
+        self::assertStringContainsString('nntmux_worker_in_progress_stale{worker="irc"} 1', $output);
+    }
+
+    public function test_worker_metrics_omit_redis_derived_samples_when_telemetry_is_unavailable(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'missing-worker-telemetry-store']);
+
+        $metrics = new NntmuxPrometheusMetrics(
+            new DistributedWorkerTelemetry,
+            new DistributedJobCatalog,
+        );
+        $method = (new ReflectionClass($metrics))->getMethod('workerTelemetryMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics, 1_025.0));
+
+        $this->assertStringContainsString('nntmux_worker_telemetry_available 0', $output);
+        $this->assertStringNotContainsString('nntmux_worker_runs_total{', $output);
+        $this->assertStringNotContainsString('nntmux_worker_items_total{', $output);
+        $this->assertStringNotContainsString('nntmux_worker_last_success_timestamp_seconds{', $output);
+        $this->assertDoesNotMatchRegularExpression('/^nntmux_nzb_selector_last_duration_seconds /m', $output);
+    }
+
+    public function test_split_collection_metrics_are_zero_safe_and_fixed_cardinality(): void
+    {
+        config([
+            'nntmux.distributed_lock_store' => 'array',
+            'nntmux.split_collection_reconcile_groups' => [
+                'alt.binaries.hdtv.tv-episodes',
+                'alt.binaries.movies.dvd',
+            ],
+        ]);
+        Cache::store('array')->flush();
+        $telemetry = new SplitCollectionTelemetry;
+        $telemetry->record([
+            'alt.binaries.hdtv.tv-episodes' => ['dynamic_eligible_shadow' => 3],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics(
+            new DistributedWorkerTelemetry,
+            new DistributedJobCatalog,
+            $telemetry,
+        );
+        $method = (new ReflectionClass($metrics))->getMethod('splitCollectionTelemetryMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        self::assertStringContainsString('nntmux_split_collection_pair_xref_telemetry_available 1', $output);
+        self::assertStringContainsString(
+            'nntmux_split_collection_pair_xref_decisions_total{group="alt.binaries.hdtv.tv-episodes",result="dynamic_eligible_shadow"} 3',
+            $output,
+        );
+        self::assertStringContainsString(
+            'nntmux_split_collection_pair_xref_decisions_total{group="alt.binaries.movies.dvd",result="dynamic_accept"} 0',
+            $output,
+        );
+        self::assertStringNotContainsString('collection_id=', $output);
+    }
+
+    public function test_build_and_nzb_worker_config_are_exported_without_dynamic_labels(): void
+    {
+        config([
+            'app.env' => 'production',
+            'nntmux.build_version' => '20260710-v8',
+            'nntmux.inline_nzb_creation' => false,
+            'nntmux.distributed_nzb_limit' => 2,
+            'nntmux.distributed_nzb_sleep' => 45,
+            'nntmux.distributed_nzb_scan_cap' => 5000,
+            'nntmux.distributed_nzb_lock_seconds' => 7200,
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('buildConfigMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_build_info{version="20260710-v8",environment="production"} 1', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_config_info{inline_creation="disabled"} 1', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_batch_limit 2', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_sleep_seconds 45', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_scan_cap 5000', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_lock_seconds 7200', $output);
+    }
+
+    public function test_orchestrator_metrics_export_the_zero_write_shadow_snapshot(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.high_watermarks.parts' => 1_000,
+        ]);
+        DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_bf_qty', 'value' => '200000'],
+            ['name' => 'orchestrator_cf_permit', 'value' => '0'],
+            ['name' => 'orchestrator_cf_claimed', 'value' => '17'],
+            ['name' => 'orchestrator_cf_completed', 'value' => '16'],
+            ['name' => 'orchestrator_cf_failed', 'value' => '0'],
+            ['name' => 'orchestrator_cf_issued_at', 'value' => (string) (time() - 100)],
+            ['name' => 'orchestrator_cf_blocks', 'value' => 'alt.one:1-10000,alt.two:1-10000'],
+            ['name' => 'orchestrator_cf_halt', 'value' => '0'],
+            ['name' => 'orchestrator_cf_group', 'value' => 'alt.test'],
+        ]);
+        Cache::store('array')->flush();
+        Cache::store('array')->forever(WorkerControlStateStore::DECISION_KEY, [
+            'mode' => 'shadow',
+            'profile' => 'balanced',
+            'observed_at' => time() - 10,
+            'backfill_permitted' => true,
+            'eligible_nzbs' => 0,
+            'qualified_supply' => ['starved' => true, 'release_yield_per_minute' => 0.25],
+            'schedulable_backlogs' => ['parts' => 8, 'binaries' => 9, 'collections' => 10, 'releases' => 4, 'nzbs' => 0],
+            'body_recovery_queue' => 17,
+            'collection_backlogs' => ['total' => 70, 'ordinary' => 30, 'body_recovery_sources' => 40],
+            'database_contention' => [
+                'row_lock_waits' => 1868,
+                'row_lock_delta' => 2,
+                'instant_rate_per_minute' => 2.6,
+                'window_rate_per_minute' => 1.5,
+                'admission_blocked' => false,
+                'hard_breach_at' => 0,
+                'current_wait_started_at' => 0,
+                'admission_safe' => true,
+            ],
+            'backlogs' => ['parts' => 100, 'binaries' => 20, 'collections' => 30, 'collections_total' => 70, 'recovery_sources' => 40, 'releases' => 4, 'nzbs' => 50],
+            'rates_per_minute' => ['parts' => 1.5, 'collections_total' => -2.0, 'recovery_sources' => -2.0],
+            'ewma_per_minute' => ['parts' => 0.5, 'collections_total' => -1.0, 'recovery_sources' => -1.0],
+            'oldest_age_seconds' => ['binaries' => 11, 'collections' => 12, 'recovery_sources' => 15, 'releases' => 13, 'nzbs' => 14],
+            'backfill_target' => ['group' => 'alt.test', 'cursor' => 12345, 'quantity' => 200000],
+        ]);
+        $store = new WorkerControlStateStore;
+        $store->recordBackfillYield('alt.test', 10_000, 5, time());
+        $store->storeState(new ControlState(ineffectiveBackfillPermitsByTarget: ['alt.test' => 1]));
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_orchestrator_mode_info{mode="shadow"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_profile_info{profile="balanced"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_backlog{stage="parts"} 100', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_rate_per_minute{stage="parts",estimator="ewma"} 0.5', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_projected_runway_minutes{stage="parts"} 1800', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_oldest_age_seconds{stage="nzbs"} 14', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_policy_permitted 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_body_recovery_queue 17', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_qualified_supply_starved 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_release_yield_per_minute 0.25', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_schedulable_backlog{stage="parts"} 8', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="total"} 70', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="ordinary"} 30', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="body_recovery_sources"} 40', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_database_row_lock_waits 1868', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_database_row_lock_delta 2', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_database_row_lock_instant_rate_per_minute 2.6', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_database_row_lock_window_rate_per_minute 1.5', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_database_admission_safe 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_backlog{stage="collections_total"} 70', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_backlog{stage="recovery_sources"} 40', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_rate_per_minute{stage="recovery_sources",estimator="instant"} -2', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_stage_oldest_age_seconds{stage="recovery_sources"} 15', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_permit_quantity 200000', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_target_info{group="alt.test"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_planned_quantity{group="alt.test"} 200000', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_yield_nzbs_per_10k{group="alt.test"} 5', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_yield_attempts{group="alt.test"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_target_ineffective_permits{group="alt.test"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_backfill_target_locked{group="alt.test"} 0', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_permit 0', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_claim_in_progress 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_claim_age_seconds 100', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_quarantined_windows 2', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_halted 0', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_target_info{group="alt.test"} 1', $output);
+    }
+
+    public function test_persisted_fail_safe_overrides_a_stale_redis_decision(): void
+    {
+        config(['nntmux.orchestrator.state_store' => 'array']);
+        DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_mode', 'value' => 'failsafe'],
+            ['name' => 'orchestrator_profile', 'value' => 'fail_safe'],
+        ]);
+        Cache::store('array')->flush();
+        Cache::store('array')->forever(WorkerControlStateStore::DECISION_KEY, [
+            'mode' => 'active',
+            'profile' => 'balanced',
+            'observed_at' => time() - 20,
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_orchestrator_mode_info{mode="failsafe"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_profile_info{profile="fail_safe"} 1', $output);
+    }
+
+    public function test_expired_cached_decision_does_not_publish_current_pipeline_gauges(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.snapshot_max_age_seconds' => 180,
+        ]);
+        DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        DB::table('settings')->insert([
+            ['name' => 'orchestrator_mode', 'value' => 'active'],
+            ['name' => 'orchestrator_profile', 'value' => 'drain'],
+        ]);
+        Cache::store('array')->flush();
+        Cache::store('array')->forever(WorkerControlStateStore::DECISION_KEY, [
+            'mode' => 'active',
+            'profile' => 'balanced',
+            'observed_at' => time() - 181,
+            'eligible_nzbs' => 42,
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        self::assertStringContainsString('nntmux_orchestrator_profile_info{profile="drain"} 1', $output);
+        self::assertStringContainsString('nntmux_orchestrator_snapshot_fresh 0', $output);
+        self::assertStringNotContainsString('nntmux_orchestrator_eligible_nzbs', $output);
+    }
+
+    public function test_orchestrator_metrics_export_shadow_refresh_ledger_state(): void
+    {
+        config([
+            'nntmux.orchestrator.current_forward_refresh_enabled' => true,
+            'nntmux.orchestrator.current_forward_ledger_issuance_enabled' => true,
+        ]);
+        DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        DB::statement('CREATE TABLE current_forward_sources (
+            id INTEGER PRIMARY KEY,
+            state VARCHAR(32) NOT NULL,
+            last_audited_at DATETIME NULL
+        )');
+        DB::statement('CREATE TABLE current_forward_windows (
+            id INTEGER PRIMARY KEY,
+            state VARCHAR(32) NOT NULL,
+            created_at DATETIME NOT NULL
+        )');
+        DB::statement('CREATE TABLE current_forward_window_verifications (
+            id INTEGER PRIMARY KEY,
+            window_id INTEGER NOT NULL
+        )');
+        DB::table('current_forward_sources')->insert([
+            ['id' => 1, 'state' => 'READY', 'last_audited_at' => now()->subSeconds(30)],
+            ['id' => 2, 'state' => 'PROBATION', 'last_audited_at' => null],
+        ]);
+        DB::table('current_forward_windows')->insert([
+            [
+                'id' => 1,
+                'state' => 'AUDITED',
+                'created_at' => now()->subSeconds(30),
+            ],
+            [
+                'id' => 2,
+                'state' => 'QUARANTINED',
+                'created_at' => now()->subSeconds(60),
+            ],
+        ]);
+        DB::table('current_forward_window_verifications')->insert([
+            'id' => 1,
+            'window_id' => 1,
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_enabled 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_ledger_issuance_enabled 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_schema_ready 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_sources{state="ready"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_sources{state="probation"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_windows{state="audited"} 1', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_windows{state="quarantined"} 1', $output);
+        $this->assertMatchesRegularExpression(
+            '/nntmux_orchestrator_current_forward_last_quarantined_timestamp_seconds [1-9][0-9]{9}/',
+            $output,
+        );
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_unresolved_age_seconds 0', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_current_forward_refresh_verifications 1', $output);
+    }
+
+    public function test_continuation_root_uses_deadline_metric_without_aging_generic_settlement_alert(): void
+    {
+        config(['nntmux.orchestrator.current_forward_continuation_enabled' => true]);
+        DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        DB::statement('CREATE TABLE current_forward_sources (
+            id INTEGER PRIMARY KEY,
+            state VARCHAR(32) NOT NULL,
+            last_audited_at DATETIME NULL
+        )');
+        DB::statement('CREATE TABLE current_forward_windows (
+            id INTEGER PRIMARY KEY,
+            state VARCHAR(32) NOT NULL,
+            chain_root_id INTEGER NULL,
+            offered_at DATETIME NULL,
+            claimed_at DATETIME NULL,
+            ingested_at DATETIME NULL,
+            attribution_started_at DATETIME NULL,
+            continuation_deadline_at DATETIME NULL,
+            updated_at DATETIME NOT NULL
+        )');
+        DB::table('current_forward_sources')->insert([
+            'id' => 1,
+            'state' => 'READY',
+            'last_audited_at' => now(),
+        ]);
+        DB::table('current_forward_windows')->insert([
+            'id' => 1,
+            'state' => 'CONTINUATION_PENDING',
+            'chain_root_id' => 1,
+            'attribution_started_at' => now()->subMinutes(40),
+            'continuation_deadline_at' => now()->addMinutes(80),
+            'updated_at' => now()->subMinutes(40),
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString(
+            'nntmux_orchestrator_current_forward_refresh_windows{state="continuation_pending"} 1',
+            $output,
+        );
+        $this->assertStringContainsString(
+            'nntmux_orchestrator_current_forward_refresh_unresolved_age_seconds 0',
+            $output,
+        );
+        $this->assertMatchesRegularExpression(
+            '/nntmux_orchestrator_current_forward_continuation_deadline_remaining_seconds 4[78][0-9]{2}/',
+            $output,
+        );
+    }
+
+    public function test_active_continuation_child_still_ages_generic_settlement_alert(): void
+    {
+        config(['nntmux.orchestrator.current_forward_continuation_enabled' => true]);
+        DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        DB::statement('CREATE TABLE current_forward_sources (
+            id INTEGER PRIMARY KEY,
+            state VARCHAR(32) NOT NULL,
+            last_audited_at DATETIME NULL
+        )');
+        DB::statement('CREATE TABLE current_forward_windows (
+            id INTEGER PRIMARY KEY,
+            state VARCHAR(32) NOT NULL,
+            chain_root_id INTEGER NULL,
+            offered_at DATETIME NULL,
+            claimed_at DATETIME NULL,
+            ingested_at DATETIME NULL,
+            attribution_started_at DATETIME NULL,
+            continuation_deadline_at DATETIME NULL,
+            updated_at DATETIME NOT NULL
+        )');
+        DB::table('current_forward_sources')->insert([
+            'id' => 1,
+            'state' => 'READY',
+            'last_audited_at' => now(),
+        ]);
+        DB::table('current_forward_windows')->insert([
+            [
+                'id' => 1,
+                'state' => 'CONTINUATION_PENDING',
+                'chain_root_id' => 1,
+                'attribution_started_at' => now()->subMinutes(40),
+                'continuation_deadline_at' => now()->addMinutes(80),
+                'updated_at' => now()->subMinutes(40),
+            ],
+            [
+                'id' => 2,
+                'state' => 'ATTRIBUTING',
+                'chain_root_id' => 1,
+                'attribution_started_at' => now()->subMinutes(31),
+                'continuation_deadline_at' => now()->addMinutes(80),
+                'updated_at' => now()->subMinutes(31),
+            ],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertMatchesRegularExpression(
+            '/nntmux_orchestrator_current_forward_refresh_unresolved_age_seconds 18[5-7][0-9]/',
+            $output,
+        );
+    }
+
+    public function test_body_recovery_claim_metrics_split_ready_claimed_expired_and_exhausted_rows(): void
+    {
+        DB::statement('CREATE TABLE usenet_groups (id INTEGER PRIMARY KEY, name VARCHAR NOT NULL)');
+        DB::statement('CREATE TABLE missed_parts (
+            id INTEGER PRIMARY KEY,
+            groups_id INTEGER NOT NULL,
+            attempts INTEGER NOT NULL,
+            recovery_kind VARCHAR(32) NULL,
+            claim_token VARCHAR(64) NULL,
+            claim_expires_at DATETIME NULL
+        )');
+        DB::table('usenet_groups')->insert(['id' => 5, 'name' => 'alt.binaries.lossless']);
+        DB::table('missed_parts')->insert([
+            ['id' => 1, 'groups_id' => 5, 'attempts' => 0, 'recovery_kind' => 'body_preamble', 'claim_token' => null, 'claim_expires_at' => null],
+            ['id' => 2, 'groups_id' => 5, 'attempts' => 1, 'recovery_kind' => 'body_preamble', 'claim_token' => 'active', 'claim_expires_at' => now()->addMinute()],
+            ['id' => 3, 'groups_id' => 5, 'attempts' => 2, 'recovery_kind' => 'body_preamble', 'claim_token' => 'expired', 'claim_expires_at' => now()->subMinute()],
+            ['id' => 4, 'groups_id' => 5, 'attempts' => 3, 'recovery_kind' => 'body_preamble', 'claim_token' => null, 'claim_expires_at' => null],
+            ['id' => 5, 'groups_id' => 5, 'attempts' => 1, 'recovery_kind' => 'body_preamble', 'claim_token' => null, 'claim_expires_at' => now()->addMinute()],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('bodyRecoveryClaimMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="ready"} 1', $output);
+        $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="cooling"} 1', $output);
+        $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="claimed"} 1', $output);
+        $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="expired"} 1', $output);
+        $this->assertStringContainsString('nntmux_body_recovery_rows{group="alt.binaries.lossless",state="exhausted"} 1', $output);
     }
 }

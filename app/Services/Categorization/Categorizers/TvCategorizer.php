@@ -7,6 +7,7 @@ namespace App\Services\Categorization\Categorizers;
 use App\Models\Category;
 use App\Services\Categorization\CategorizationResult;
 use App\Services\Categorization\ReleaseContext;
+use App\Support\ReleaseNames\CompactTvEpisode;
 
 /**
  * Categorizer for TV content including HD, SD, UHD, Anime, Sports, Documentaries, etc.
@@ -25,6 +26,28 @@ class TvCategorizer extends AbstractCategorizer
 
     protected int $priority = 20;
 
+    /** @var list<string> */
+    private array $completeSeriesGroups;
+
+    /** @var list<string> */
+    private array $seriesPackGroups;
+
+    /**
+     * @param  list<string>|null  $completeSeriesGroups
+     * @param  list<string>|null  $seriesPackGroups
+     */
+    public function __construct(?array $completeSeriesGroups = null, ?array $seriesPackGroups = null)
+    {
+        $this->completeSeriesGroups = $completeSeriesGroups
+            ?? (app()->bound('config')
+                ? array_values((array) config('nntmux.orchestrator.backfill_tv_complete_series_groups', []))
+                : []);
+        $this->seriesPackGroups = $seriesPackGroups
+            ?? (app()->bound('config')
+                ? array_values((array) config('nntmux.orchestrator.backfill_tv_series_pack_groups', []))
+                : []);
+    }
+
     public function getName(): string
     {
         return 'TV';
@@ -38,6 +61,7 @@ class TvCategorizer extends AbstractCategorizer
     public function categorize(ReleaseContext $context): CategorizationResult
     {
         $name = $context->releaseName;
+        $compactEpisode = CompactTvEpisode::match($name, $context->groupName);
 
         // High-signal anime checks first. These can match release names that
         // don't follow standard TV S01E01 naming conventions (e.g. anime
@@ -50,7 +74,13 @@ class TvCategorizer extends AbstractCategorizer
             return $this->noMatch();
         }
 
-        if (! $this->looksLikeTV($name)) {
+        if ($this->isCompleteSeriesInDedicatedTvGroup($name, $context)) {
+            return $this->matched(Category::TV_OTHER, 0.85, 'tv_dedicated_group_complete_series');
+        }
+
+        if (! $this->isSeriesPackInDedicatedTvGroup($name, $context)
+            && ! $this->looksLikeTV($name)
+            && $compactEpisode === null) {
             return $this->noMatch();
         }
 
@@ -64,6 +94,9 @@ class TvCategorizer extends AbstractCategorizer
             return $result;
         }
         if ($result = $this->checkForeign($context)) {
+            return $result;
+        }
+        if ($result = $this->checkCompactSceneEpisode($compactEpisode, $context)) {
             return $result;
         }
         if ($result = $this->checkX265($name)) {
@@ -86,6 +119,30 @@ class TvCategorizer extends AbstractCategorizer
         }
 
         return $this->noMatch();
+    }
+
+    private function isCompleteSeriesInDedicatedTvGroup(string $name, ReleaseContext $context): bool
+    {
+        if (! in_array($context->groupName, $this->completeSeriesGroups, true)) {
+            return false;
+        }
+
+        return preg_match(
+            '/\bkomplett[ ._-]+abenteuerserie[ ._-]+(?:19|20)\d{2}\b.*\b(?:avi|mkv|mp4|mpeg|xvid|divx|h\.?26[45])\b/iu',
+            $name,
+        ) === 1;
+    }
+
+    private function isSeriesPackInDedicatedTvGroup(string $name, ReleaseContext $context): bool
+    {
+        if (! in_array($context->groupName, $this->seriesPackGroups, true)) {
+            return false;
+        }
+
+        return preg_match(
+            '/\bs\d{1,3}[ ._-]+[\p{L}]*serie(?:n)?[ ._-]+(?:19|20)\d{2}\b.*\b(?:avi|mkv|mp4|mpeg|xvid|divx|h\.?26[45])\b.*\b(?:480p|720p|1080[pi]|2160p)\b/iu',
+            $name,
+        ) === 1;
     }
 
     protected function looksLikeClassicMoviePost(string $name, ReleaseContext $context): bool
@@ -147,6 +204,28 @@ class TvCategorizer extends AbstractCategorizer
         }
 
         return false;
+    }
+
+    /** @param array{season:int,episode:int,quality:'sd'|'hd'|'uhd',source:string}|null $episode */
+    private function checkCompactSceneEpisode(?array $episode, ReleaseContext $context): ?CategorizationResult
+    {
+        if ($episode === null) {
+            return null;
+        }
+
+        if ($episode['quality'] === 'uhd') {
+            return $this->matched(Category::TV_UHD, 0.9, 'tv_compact_scene_episode_uhd');
+        }
+
+        if ($context->catWebDL && str_starts_with($episode['source'], 'web')) {
+            return $this->matched(Category::TV_WEBDL, 0.89, 'tv_compact_scene_episode_web');
+        }
+
+        if ($episode['quality'] === 'hd') {
+            return $this->matched(Category::TV_HD, 0.88, 'tv_compact_scene_episode_hd');
+        }
+
+        return $this->matched(Category::TV_SD, 0.82, 'tv_compact_scene_episode_sd');
     }
 
     /**

@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Services\Distributed;
 
 use App\Models\Settings;
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Tmux\TmuxMonitorService;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -16,6 +18,8 @@ class DistributedJobWorker
     public function __construct(
         private readonly DistributedJobCatalog $catalog,
         private readonly TmuxMonitorService $monitorService,
+        private readonly DistributedWorkerTelemetry $workerTelemetry,
+        private readonly ?BackfillPermitGate $backfillPermitGate = null,
     ) {}
 
     public function run(
@@ -29,11 +33,30 @@ class DistributedJobWorker
         $this->monitorService->initializeMonitor();
 
         do {
-            $runVar = $this->monitorService->collectStatistics();
-            $plan = $this->catalog->resolve($job, $runVar);
+            if ($job === 'backfill') {
+                $runVar = $this->monitorService->refreshBackfillControlSettings();
+                $plan = $this->catalog->resolve($job, $runVar);
+
+                if ($plan['enabled'] || ! ($plan['lightweight_poll'] ?? false)) {
+                    // Keep idle permit polling cheap, but retain the full
+                    // statistics/killswitch view before any backfill work.
+                    // Re-read the narrow controls afterward so a permit
+                    // revoked during collection cannot reach the claim gate.
+                    $runVar = $this->monitorService->collectStatistics();
+                    $runVar = $this->monitorService->refreshBackfillControlSettings();
+                    $plan = $this->catalog->resolve($job, $runVar);
+                }
+            } else {
+                $runVar = $this->monitorService->collectStatistics();
+                if ($job === 'current-forward') {
+                    $runVar = $this->monitorService->refreshCurrentForwardControlSettings();
+                }
+                $plan = $this->catalog->resolve($job, $runVar);
+            }
             $sleep = $sleepOverride ?? (int) $plan['sleep'];
 
             if (! $plan['enabled']) {
+                $this->workerTelemetry->recordRunOutcome($job, 'disabled');
                 $output->writeln(sprintf(
                     '[%s] disabled: %s',
                     now()->toDateTimeString(),
@@ -44,19 +67,28 @@ class DistributedJobWorker
                     return 0;
                 }
 
-                $this->sleep($sleep, $output);
+                $this->sleep($sleep, $output, $sleepOverride === null ? $job : null);
                 $this->monitorService->incrementIteration();
 
                 continue;
             }
 
-            $exitCode = $this->runLockedPlan($plan, $lockSeconds, $output);
+            $runResult = $this->runLockedPlan($plan, $lockSeconds, $output);
+            $exitCode = $runResult['exit_code'];
 
             if ($once) {
                 return $exitCode;
             }
 
-            $this->sleep($sleep, $output);
+            if ($sleepOverride === null) {
+                $sleep = $this->sleepAfterSaturatedNzbPass(
+                    $plan,
+                    $runResult,
+                    $sleep,
+                );
+            }
+
+            $this->sleep($sleep, $output, $sleepOverride === null ? $job : null);
             $this->monitorService->incrementIteration();
         } while ($this->shouldContinue());
 
@@ -71,22 +103,45 @@ class DistributedJobWorker
      *     description: string,
      *     enabled: bool,
      *     disabled_reason: string|null,
+     *     lightweight_poll: bool,
      *     commands: list<array{command: string, arguments: array<string, mixed>}>,
      *     sleep: int
      * }  $plan
+     * @return array{
+     *     exit_code: int,
+     *     completed: bool,
+     *     nzb_batch_before: array{selected: int, created: int}|null,
+     *     nzb_batch_after: array{selected: int, created: int}|null
+     * }
      */
-    private function runLockedPlan(array $plan, int $lockSeconds, OutputInterface $output): int
+    private function runLockedPlan(array $plan, int $lockSeconds, OutputInterface $output): array
     {
+        $result = static fn (int $exitCode, bool $completed = false, ?array $before = null, ?array $after = null): array => [
+            'exit_code' => $exitCode,
+            'completed' => $completed,
+            'nzb_batch_before' => $before,
+            'nzb_batch_after' => $after,
+        ];
         $lockName = 'nntmux:distributed-worker:'.$plan['name'];
         $lockStore = (string) config('nntmux.distributed_lock_store', 'redis');
-        // Laravel exposes lock() on concrete cache repositories, but the facade
-        // contract does not currently declare it for static analysis.
-        /** @phpstan-ignore-next-line method.notFound */
-        $lock = Cache::store($lockStore)->lock($lockName, $lockSeconds);
+        $cacheStore = Cache::store($lockStore)->getStore();
+        if (! $cacheStore instanceof LockProvider) {
+            $this->workerTelemetry->recordRunOutcome($plan['name'], 'lock_error');
+            $output->writeln(sprintf(
+                '[%s] skipped %s: %s cache store does not support distributed locks',
+                now()->toDateTimeString(),
+                $plan['name'],
+                $lockStore,
+            ));
+
+            return $result(1);
+        }
+        $lock = $cacheStore->lock($lockName, $lockSeconds);
 
         try {
             $acquired = $lock->get();
         } catch (Throwable $e) {
+            $this->workerTelemetry->recordRunOutcome($plan['name'], 'lock_error');
             $output->writeln(sprintf(
                 '[%s] skipped %s: failed to acquire %s lock [%s]: %s',
                 now()->toDateTimeString(),
@@ -96,16 +151,57 @@ class DistributedJobWorker
                 $e->getMessage()
             ));
 
-            return 1;
+            return $result(1);
         }
 
         if (! $acquired) {
+            $this->workerTelemetry->recordRunOutcome($plan['name'], 'lock_contended');
             $output->writeln(sprintf('[%s] skipped %s: another worker holds %s', now()->toDateTimeString(), $plan['name'], $lockName));
 
-            return 0;
+            return $result(0);
         }
 
-        $restoreSignalHandlers = $this->registerLockTerminationHandlers($lock, $lockName, $plan['name'], $output);
+        $backfillPermitGate = null;
+        $claimedBackfillGeneration = null;
+        if ($plan['name'] === 'backfill') {
+            $backfillPermitGate = $this->backfillPermitGate ?? app(BackfillPermitGate::class);
+            $claimedBackfillGeneration = $backfillPermitGate->claimGeneration();
+            if ($claimedBackfillGeneration === null) {
+                $this->workerTelemetry->recordRunOutcome('backfill', 'disabled');
+                $output->writeln(sprintf('[%s] skipped backfill: adaptive permit was absent or stale', now()->toDateTimeString()));
+                $lock->release();
+
+                return $result(0);
+            }
+            if ((bool) config('nntmux.orchestrator.require_backfill_permit', false)) {
+                foreach ($plan['commands'] as &$command) {
+                    if ($command['command'] === 'multiprocessing:safe'
+                        && ($command['arguments']['type'] ?? null) === 'backfill'
+                    ) {
+                        $command['arguments']['--backfill-generation'] = $claimedBackfillGeneration;
+                    }
+                }
+                unset($command);
+            }
+        }
+
+        $nzbBatchBefore = $this->nzbBatchCounts($plan['name']);
+
+        // The in-progress marker must not outlive the distributed lock after
+        // an abrupt pod/process loss. Completed runs still clear it eagerly.
+        $startedAt = $this->workerTelemetry->startRun($plan['name'], ttlSeconds: $lockSeconds);
+        $runOutcome = 'failure';
+        $restoreSignalHandlers = $this->registerLockTerminationHandlers(
+            $lock,
+            $lockName,
+            $plan['name'],
+            $startedAt,
+            $output,
+        );
+        $alarmSeconds = $this->executionAlarmSeconds($plan['name']);
+        if ($alarmSeconds > 0 && function_exists('pcntl_alarm')) {
+            pcntl_alarm($alarmSeconds);
+        }
 
         try {
             $output->writeln(sprintf(
@@ -126,14 +222,59 @@ class DistributedJobWorker
                         $exitCode
                     ));
 
-                    return $exitCode;
+                    return $result($exitCode);
+                }
+            }
+
+            if ($backfillPermitGate !== null && $claimedBackfillGeneration !== null) {
+                try {
+                    if (! $backfillPermitGate->complete($claimedBackfillGeneration)) {
+                        $output->writeln(sprintf(
+                            '[%s] failing backfill generation %d because one or more exact range receipts are absent or failed',
+                            now()->toDateTimeString(),
+                            $claimedBackfillGeneration,
+                        ));
+
+                        return $result(1);
+                    }
+                } catch (Throwable $error) {
+                    $output->writeln(sprintf(
+                        '[%s] failing backfill generation %d because completion persistence failed: %s',
+                        now()->toDateTimeString(),
+                        $claimedBackfillGeneration,
+                        $error->getMessage(),
+                    ));
+
+                    return $result(1);
                 }
             }
 
             $output->writeln(sprintf('[%s] completed %s', now()->toDateTimeString(), $plan['name']));
+            $runOutcome = 'success';
 
-            return 0;
+            return $result(
+                0,
+                true,
+                $nzbBatchBefore,
+                $this->nzbBatchCounts($plan['name']),
+            );
         } finally {
+            if ($alarmSeconds > 0 && function_exists('pcntl_alarm')) {
+                pcntl_alarm(0);
+            }
+            $this->workerTelemetry->finishRun($plan['name'], $runOutcome, $startedAt);
+            if ($runOutcome === 'failure' && $backfillPermitGate !== null && $claimedBackfillGeneration !== null) {
+                try {
+                    $backfillPermitGate->fail($claimedBackfillGeneration, 'Managed backfill command or child range failed.');
+                } catch (Throwable $error) {
+                    $output->writeln(sprintf(
+                        '[%s] could not fail backfill generation %d: %s',
+                        now()->toDateTimeString(),
+                        $claimedBackfillGeneration,
+                        $error->getMessage(),
+                    ));
+                }
+            }
             $restoreSignalHandlers();
             $lock->release();
         }
@@ -149,6 +290,7 @@ class DistributedJobWorker
         mixed $lock,
         string $lockName,
         string $job,
+        float $startedAt,
         OutputInterface $output,
     ): callable {
         if (! function_exists('pcntl_signal')) {
@@ -159,6 +301,7 @@ class DistributedJobWorker
             defined('SIGTERM') ? SIGTERM : null,
             defined('SIGINT') ? SIGINT : null,
             defined('SIGHUP') ? SIGHUP : null,
+            defined('SIGALRM') ? SIGALRM : null,
         ]));
 
         if ($signals === []) {
@@ -177,8 +320,9 @@ class DistributedJobWorker
                 ? pcntl_signal_get_handler($signal)
                 : SIG_DFL;
 
-            pcntl_signal($signal, function (int $receivedSignal) use ($lock, $lockName, $job, $output): void {
+            pcntl_signal($signal, function (int $receivedSignal) use ($lock, $lockName, $job, $startedAt, $output): void {
                 $output->writeln($this->formatTerminationSignalMessage($receivedSignal, $job, $lockName));
+                $this->workerTelemetry->finishRun($job, 'terminated', $startedAt);
 
                 try {
                     $lock->release();
@@ -216,6 +360,13 @@ class DistributedJobWorker
             $job,
             $lockName,
         );
+    }
+
+    private function executionAlarmSeconds(string $job): int
+    {
+        return $job === 'current-forward'
+            ? (int) config('nntmux.distributed_current_forward_max_run_seconds', 600)
+            : 0;
     }
 
     /**
@@ -261,10 +412,137 @@ class DistributedJobWorker
         return trim(implode(' ', $parts));
     }
 
-    private function sleep(int $seconds, OutputInterface $output): void
+    private function sleep(int $seconds, OutputInterface $output, ?string $responsiveJob = null): void
     {
+        $seconds = max(1, $seconds);
         $output->writeln(sprintf('[%s] sleeping for %d seconds', now()->toDateTimeString(), $seconds));
-        sleep(max(1, $seconds));
+        if ($responsiveJob !== 'releases') {
+            sleep($seconds);
+
+            return;
+        }
+
+        $elapsed = 0;
+        $target = $seconds;
+        $sliceSeconds = max(1, min(5, (int) config('nntmux.distributed_control_sleep_slice_seconds', 5)));
+        while ($elapsed < $target) {
+            $slice = min($sliceSeconds, $target - $elapsed);
+            sleep($slice);
+            $elapsed += $slice;
+
+            try {
+                $runVar = $this->monitorService->refreshReleaseControlSettings();
+                $target = $this->responsiveSleepSeconds('releases', $target, $runVar);
+            } catch (Throwable) {
+                // A refresh failure retains the already-selected conservative timer.
+            }
+
+            if ($target === 0 || $elapsed >= $target) {
+                return;
+            }
+        }
+    }
+
+    /** @param array<string, mixed> $runVar */
+    private function responsiveSleepSeconds(string $job, int $original, array $runVar): int
+    {
+        if ($job !== 'releases' || ($runVar['release_controls_fresh'] ?? false) !== true) {
+            return $original;
+        }
+
+        $settings = $runVar['settings'] ?? [];
+        $freshActiveLease = (string) ($settings['orchestrator_mode'] ?? '') === 'active'
+            && (int) ($settings['orchestrator_lease_until'] ?? 0) >= time();
+        if (! $freshActiveLease) {
+            return $original;
+        }
+        if ((int) ($settings['exit'] ?? 0) === 1 || (int) ($settings['releases_run'] ?? 1) === 0) {
+            return 0;
+        }
+
+        return min($original, max(1, (int) ($settings['orchestrator_rel_timer'] ?? $original)));
+    }
+
+    /**
+     * A full successful NZB batch proves that the pass stopped at its
+     * own limit. Under a fresh active controller lease, retry once at the
+     * controller's drain cadence instead of sleeping on the stale pre-pass
+     * idle value. Telemetry or lease uncertainty keeps the fail-safe timer.
+     *
+     * @param  array{
+     *     name: string,
+     *     description: string,
+     *     enabled: bool,
+     *     disabled_reason: string|null,
+     *     lightweight_poll: bool,
+     *     commands: list<array{command: string, arguments: array<string, mixed>}>,
+     *     sleep: int
+     * }  $plan
+     * @param  array{
+     *     exit_code: int,
+     *     completed: bool,
+     *     nzb_batch_before: array{selected: int, created: int}|null,
+     *     nzb_batch_after: array{selected: int, created: int}|null
+     * }  $runResult
+     */
+    private function sleepAfterSaturatedNzbPass(
+        array $plan,
+        array $runResult,
+        int $sleep,
+    ): int {
+        $batchBefore = $runResult['nzb_batch_before'];
+        $batchAfter = $runResult['nzb_batch_after'];
+        if ($plan['name'] !== 'nzb-backlog'
+            || ! $runResult['completed']
+            || $runResult['exit_code'] !== 0
+            || $batchBefore === null
+            || $batchAfter === null
+        ) {
+            return $sleep;
+        }
+
+        $limit = max(1, (int) ($plan['commands'][0]['arguments']['--limit'] ?? 0));
+        if ($limit > $batchAfter['selected'] - $batchBefore['selected']
+            || $limit > $batchAfter['created'] - $batchBefore['created']
+        ) {
+            return $sleep;
+        }
+
+        try {
+            $runVar = $this->monitorService->refreshNzbControlSettings();
+            $refreshedPlan = $this->catalog->resolve('nzb-backlog', $runVar);
+            $refreshedSleep = max(1, (int) $refreshedPlan['sleep']);
+            $settings = $runVar['settings'] ?? [];
+            if (($runVar['nzb_controls_fresh'] ?? false) !== true) {
+                return $sleep;
+            }
+            $freshActiveLease = (string) ($settings['orchestrator_mode'] ?? '') === 'active'
+                && (int) ($settings['orchestrator_lease_until'] ?? 0) >= time();
+        } catch (Throwable) {
+            return $sleep;
+        }
+
+        return $freshActiveLease
+            ? min($sleep, $refreshedSleep, 20)
+            : min($sleep, $refreshedSleep);
+    }
+
+    /** @return array{selected: int, created: int}|null */
+    private function nzbBatchCounts(string $job): ?array
+    {
+        if ($job !== 'nzb-backlog') {
+            return null;
+        }
+
+        $snapshot = $this->workerTelemetry->snapshot(['nzb-backlog']);
+        if (! ($snapshot['available'] ?? false)) {
+            return null;
+        }
+
+        return [
+            'selected' => (int) ($snapshot['workers']['nzb-backlog']['items']['nzb']['selected'] ?? 0),
+            'created' => (int) ($snapshot['workers']['nzb-backlog']['items']['nzb']['created'] ?? 0),
+        ];
     }
 
     private function shouldContinue(): bool

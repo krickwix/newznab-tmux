@@ -12,6 +12,7 @@ use App\Models\Release;
 use App\Models\UsenetGroup;
 use App\Services\Categorization\CategorizationService;
 use App\Services\ReleaseCleaningService;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 
@@ -217,7 +218,12 @@ class ReleaseUpdateService
                 }
 
                 if ($echo === true) {
-                    $this->performDatabaseUpdate($release, $newTitle, $type, $nameStatus, $preId, (int) $determinedCategory['categories_id']);
+                    $updated = $this->performDatabaseUpdate($release, $newTitle, $type, $nameStatus, $preId, (int) $determinedCategory['categories_id']);
+                    if (! $updated && $type === 'Fresh hashed files, ') {
+                        $this->matched = false;
+                        $this->relid = 0;
+                        $this->fixed--;
+                    }
                 }
             }
         }
@@ -403,8 +409,13 @@ class ReleaseUpdateService
         bool $nameStatus,
         int $preId,
         int $categoryId
-    ): void {
-        DB::transaction(function () use ($release, $newTitle, $type, $nameStatus, $preId, $categoryId): void {
+    ): bool {
+        $updated = DB::transaction(function () use ($release, $newTitle, $type, $nameStatus, $preId, $categoryId): bool {
+            $freshHashedRetry = $type === 'Fresh hashed files, ';
+            $guardedRetry = $freshHashedRetry && isset($release->fresh_hashed_retry_guard);
+            if ($freshHashedRetry && ! $guardedRetry) {
+                return false;
+            }
             if ($nameStatus === true) {
                 $status = $this->getStatusColumnsForType($type);
 
@@ -427,25 +438,33 @@ class ReleaseUpdateService
                     }
                 }
 
-                Release::query()
-                    ->where('id', $release->releases_id)
-                    ->update($updateColumns);
+                $query = Release::query()->where('id', $release->releases_id);
+                if ($guardedRetry) {
+                    $this->applyFreshHashedRetryGuard($query, (array) $release->fresh_hashed_retry_guard);
+                }
+                $affected = $query->update($updateColumns);
             } else {
-                Release::query()
-                    ->where('id', $release->releases_id)
-                    ->update([
-                        'videos_id' => 0,
-                        'tv_episodes_id' => 0,
-                        'imdbid' => null,
-                        'musicinfo_id' => null,
-                        'consoleinfo_id' => null,
-                        'bookinfo_id' => null,
-                        'anidbid' => null,
-                        'predb_id' => $preId,
-                        'searchname' => $newTitle,
-                        'categories_id' => $categoryId,
-                        'iscategorized' => 1,
-                    ]);
+                $query = Release::query()->where('id', $release->releases_id);
+                if ($guardedRetry) {
+                    $this->applyFreshHashedRetryGuard($query, (array) $release->fresh_hashed_retry_guard);
+                }
+                $affected = $query->update([
+                    'videos_id' => 0,
+                    'tv_episodes_id' => 0,
+                    'imdbid' => null,
+                    'musicinfo_id' => null,
+                    'consoleinfo_id' => null,
+                    'bookinfo_id' => null,
+                    'anidbid' => null,
+                    'predb_id' => $preId,
+                    'searchname' => $newTitle,
+                    'categories_id' => $categoryId,
+                    'iscategorized' => 1,
+                ]);
+            }
+
+            if ($guardedRetry && $affected !== 1) {
+                return false;
             }
 
             event(new ReleaseNameFixed(
@@ -456,10 +475,32 @@ class ReleaseUpdateService
                 $release->groups_id,
                 (string) ($release->fromname ?? '')
             ));
+
+            return true;
         });
 
-        // Update search index
-        Search::updateRelease($release->releases_id);
+        if ($updated) {
+            Search::updateRelease($release->releases_id);
+        }
+
+        return $updated;
+    }
+
+    /** @param Builder<Release> $query @param array<string, int|string|null> $guard */
+    private function applyFreshHashedRetryGuard(Builder $query, array $guard): void
+    {
+        $query
+            ->where('proc_files', NameFixingService::PROC_FILES_DONE)
+            ->where('categories_id', Category::OTHER_HASHED)
+            ->where('isrenamed', NameFixingService::IS_RENAMED_NONE)
+            ->where('predb_id', 0)
+            ->where('adddate', '>=', now()->subSeconds(600));
+
+        foreach (['name', 'searchname', 'groups_id', 'fromname', 'adddate'] as $column) {
+            if (array_key_exists($column, $guard)) {
+                $query->where($column, $guard[$column]);
+            }
+        }
     }
 
     /**
@@ -473,6 +514,7 @@ class ReleaseUpdateService
             'NFO, ' => ['isrenamed' => 1, 'iscategorized' => 1, 'proc_nfo' => 1],
             'PAR2, ' => ['isrenamed' => 1, 'iscategorized' => 1, 'proc_par2' => 1],
             'Filenames, ', 'file matched source: ' => ['isrenamed' => 1, 'iscategorized' => 1, 'proc_files' => 1],
+            'Fresh hashed files, ' => ['isrenamed' => 1, 'iscategorized' => 1, 'proc_files' => 2],
             'PreDB FT Exact, ' => ['isrenamed' => 1, 'iscategorized' => 1],
             'sorter, ' => ['isrenamed' => 1, 'iscategorized' => 1, 'proc_sorter' => 1],
             'UID, ', 'Mediainfo, ' => ['isrenamed' => 1, 'iscategorized' => 1, 'proc_uid' => 1],

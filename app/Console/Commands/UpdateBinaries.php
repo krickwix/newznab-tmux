@@ -8,6 +8,7 @@ use App\Models\Settings;
 use App\Models\UsenetGroup;
 use App\Services\Binaries\BinariesService;
 use App\Services\NNTP\NNTPService;
+use App\Services\Orchestrator\CurrentForwardRefreshTrustPolicy;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
@@ -40,6 +41,11 @@ class UpdateBinaries extends Command
 
         $groupName = $this->argument('group');
         $max = $this->argument('max');
+        if (is_string($groupName) && (new CurrentForwardRefreshTrustPolicy)->protects($groupName)) {
+            $this->error("Group {$groupName} requires an exact current-forward permit.");
+
+            return self::FAILURE;
+        }
 
         $maxHeaders = is_numeric($max) && $max > 0
             ? (int) $max

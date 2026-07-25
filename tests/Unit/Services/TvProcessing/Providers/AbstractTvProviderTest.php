@@ -78,6 +78,15 @@ class AbstractTvProviderTest extends ImdbScraperTestCase
         $this->assertStringContainsString("v.imdb = IF(v.imdb IN ('', '0'), '1176432', v.imdb)", $sql);
     }
 
+    #[Test]
+    public function it_parses_compact_scene_season_and_episode_tokens(): void
+    {
+        $this->assertSame(
+            ['season' => 1, 'episode' => 5],
+            $this->parseSeasonEpisode('Afo-Theotherbennetsister-0105-720-Web'),
+        );
+    }
+
     private function makeProvider(): TraktProvider
     {
         return new TraktProvider;
@@ -92,5 +101,14 @@ class AbstractTvProviderTest extends ImdbScraperTestCase
         $method = new \ReflectionMethod($provider, 'buildUpdateQuery');
 
         return $method->invoke($provider, 123, $show);
+    }
+
+    /** @return array<string, mixed> */
+    private function parseSeasonEpisode(string $name): array
+    {
+        $provider = $this->makeProvider();
+        $method = new \ReflectionMethod($provider, 'parseSeasonEp');
+
+        return $method->invoke($provider, $name);
     }
 }

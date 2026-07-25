@@ -110,6 +110,27 @@ class DistributedJobCatalogTest extends TestCase
         $this->assertTrue($catalog->resolve('per-group', $runVar)['enabled']);
     }
 
+    public function test_nzb_backlog_lane_stays_bounded_and_independent_of_sequential_mode(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 1,
+            'nntmux.distributed_nzb_sleep' => 60,
+        ]);
+
+        $plan = (new DistributedJobCatalog)->resolve(
+            'nzb-backlog',
+            $this->runVar(constants: ['sequential' => 2]),
+        );
+
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame(60, $plan['sleep']);
+        $this->assertSame('nntmux:nzb-create-backlog', $plan['commands'][0]['command']);
+        $this->assertSame([
+            '--limit' => 1,
+            '--order' => 'desc',
+        ], $plan['commands'][0]['arguments']);
+    }
+
     public function test_it_filters_postprocess_jobs_by_enabled_flags_and_work_counts(): void
     {
         $catalog = new DistributedJobCatalog;
@@ -171,10 +192,13 @@ class DistributedJobCatalogTest extends TestCase
 
         $this->assertTrue($plan['enabled']);
         $this->assertSame(
-            ['4', '6', '21', '18', '10', '14', '16', '20', '12', '8'],
+            ['22', '4', '6', '21', '18', '10', '14', '16', '20', '12', '8'],
             $this->argumentValues($plan, 'method'),
         );
-
+        $this->assertSame(100, $plan['commands'][0]['arguments']['--limit']);
+        foreach (array_slice($plan['commands'], 1) as $command) {
+            $this->assertArrayNotHasKey('--limit', $command['arguments']);
+        }
         foreach ($plan['commands'] as $command) {
             $this->assertSame('releases:fix-names', $command['command']);
             $this->assertSame('hashed', $command['arguments']['--category']);
@@ -334,6 +358,161 @@ class DistributedJobCatalogTest extends TestCase
             $this->assertStringNotContainsString('tmux', $command['command']);
             $this->assertStringNotContainsString('tee', $command['command']);
         }
+    }
+
+    public function test_orchestrator_active_profile_overrides_worker_timers_and_nzb_batch(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 20,
+            'nntmux.distributed_nzb_sleep' => 55,
+            'nntmux.distributed_nzb_terminal_stale_enabled' => true,
+        ]);
+        $settings = [
+            'binaries_run' => 1,
+            'releases_run' => 1,
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() + 300,
+            'orchestrator_bins_timer' => 40,
+            'orchestrator_rel_timer' => 30,
+            'orchestrator_nzb_timer' => 90,
+            'orchestrator_nzb_limit' => 10,
+        ];
+        $catalog = new DistributedJobCatalog;
+
+        self::assertSame(40, $catalog->resolve('binaries', $this->runVar($settings))['sleep']);
+        self::assertSame(30, $catalog->resolve('releases', $this->runVar($settings))['sleep']);
+        $nzb = $catalog->resolve('nzb-backlog', $this->runVar($settings));
+        self::assertSame(90, $nzb['sleep']);
+        self::assertSame(10, $nzb['commands'][0]['arguments']['--limit']);
+        self::assertTrue($nzb['commands'][0]['arguments']['--quarantine-terminal-stale']);
+    }
+
+    public function test_terminal_stale_quarantine_remains_off_by_default_with_a_fresh_lease(): void
+    {
+        config(['nntmux.distributed_nzb_terminal_stale_enabled' => false]);
+        $plan = (new DistributedJobCatalog)->resolve('nzb-backlog', $this->runVar([
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() + 300,
+        ]));
+
+        self::assertArrayNotHasKey('--quarantine-terminal-stale', $plan['commands'][0]['arguments']);
+    }
+
+    public function test_managed_backfill_requires_fresh_active_unpaused_permit(): void
+    {
+        $catalog = new DistributedJobCatalog;
+        $base = [
+            'backfill' => 4,
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() + 300,
+            'orchestrator_back_timer' => 20,
+            'orchestrator_bf_paused' => 0,
+        ];
+
+        $denied = $catalog->resolve('backfill', $this->runVar($base, ['backfill_groups_days' => 1]));
+        self::assertFalse($denied['enabled']);
+        self::assertStringContainsString('permit', (string) $denied['disabled_reason']);
+        self::assertSame(10, $denied['sleep']);
+        self::assertTrue($denied['lightweight_poll']);
+
+        $allowed = $catalog->resolve('backfill', $this->runVar(
+            $base + ['orchestrator_bf_permit' => 9],
+            ['backfill_groups_days' => 1],
+        ));
+        self::assertTrue($allowed['enabled']);
+        self::assertSame(20, $allowed['sleep']);
+        self::assertFalse($allowed['lightweight_poll']);
+    }
+
+    public function test_current_forward_emits_only_the_exact_generation_pinned_range(): void
+    {
+        $settings = [
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() + 60,
+            'orchestrator_cf_permit' => 17,
+            'orchestrator_cf_group' => 'alt.binaries.hdtv.tv-episodes',
+            'orchestrator_cf_first' => 99_730_786,
+            'orchestrator_cf_last' => 99_740_785,
+        ];
+
+        $plan = (new DistributedJobCatalog)->resolve('current-forward', $this->runVar($settings));
+
+        self::assertTrue($plan['enabled']);
+        self::assertSame([[
+            'command' => 'articles:get-range',
+            'arguments' => [
+                'mode' => 'binaries',
+                'group' => 'alt.binaries.hdtv.tv-episodes',
+                'first' => 99_730_786,
+                'last' => 99_740_785,
+                '--current-forward-generation' => 17,
+            ],
+        ]], $plan['commands']);
+    }
+
+    public function test_unmanaged_backfill_preserves_its_static_sleep(): void
+    {
+        $plan = (new DistributedJobCatalog)->resolve('backfill', $this->runVar([
+            'backfill' => 4,
+            'back_timer' => 600,
+        ], ['backfill_groups_days' => 1]));
+
+        self::assertTrue($plan['enabled']);
+        self::assertSame(600, $plan['sleep']);
+    }
+
+    public function test_stale_managed_profile_fails_closed(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 20,
+            'nntmux.distributed_nzb_sleep' => 55,
+        ]);
+        $settings = [
+            'binaries_run' => 1,
+            'releases_run' => 1,
+            'backfill' => 4,
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() - 1,
+            'orchestrator_bf_paused' => 0,
+            'orchestrator_bf_permit' => 1,
+        ];
+        $catalog = new DistributedJobCatalog;
+
+        self::assertSame(300, $catalog->resolve('binaries', $this->runVar($settings))['sleep']);
+        self::assertSame(180, $catalog->resolve('releases', $this->runVar($settings))['sleep']);
+        self::assertSame(180, $catalog->resolve('nzb-backlog', $this->runVar($settings))['sleep']);
+        self::assertArrayNotHasKey(
+            '--quarantine-terminal-stale',
+            $catalog->resolve('nzb-backlog', $this->runVar($settings))['commands'][0]['arguments'],
+        );
+        $backfill = $catalog->resolve('backfill', $this->runVar($settings, ['backfill_groups_days' => 1]));
+        self::assertFalse($backfill['enabled']);
+        self::assertSame(60, $backfill['sleep']);
+        self::assertTrue($backfill['lightweight_poll']);
+    }
+
+    public function test_shadow_mode_preserves_static_timers_but_denies_backfill(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 20,
+            'nntmux.distributed_nzb_sleep' => 55,
+        ]);
+        $settings = [
+            'binaries_run' => 1,
+            'releases_run' => 1,
+            'backfill' => 4,
+            'bins_timer' => 5,
+            'rel_timer' => 120,
+            'orchestrator_mode' => 'shadow',
+            'orchestrator_lease_until' => 0,
+            'orchestrator_bf_paused' => 1,
+        ];
+        $catalog = new DistributedJobCatalog;
+
+        self::assertSame(5, $catalog->resolve('binaries', $this->runVar($settings))['sleep']);
+        self::assertSame(120, $catalog->resolve('releases', $this->runVar($settings))['sleep']);
+        self::assertSame(55, $catalog->resolve('nzb-backlog', $this->runVar($settings))['sleep']);
+        self::assertFalse($catalog->resolve('backfill', $this->runVar($settings, ['backfill_groups_days' => 1]))['enabled']);
     }
 
     /**

@@ -16,7 +16,9 @@ class DistributedJobCatalog
         return [
             'binaries' => 'Download new headers for active groups',
             'backfill' => 'Backfill enabled groups',
+            'current-forward' => 'Consume one exact orchestrator current-forward permit',
             'releases' => 'Create and categorize releases',
+            'nzb-backlog' => 'Create missing NZB files in a bounded independent lane',
             'fixnames' => 'Run release name fixing passes',
             'hashed-fixnames' => 'Run full-history name fixing passes for Other > Hashed backlogs',
             'removecrap' => 'Remove configured unwanted releases',
@@ -42,6 +44,7 @@ class DistributedJobCatalog
      *     description: string,
      *     enabled: bool,
      *     disabled_reason: string|null,
+     *     lightweight_poll: bool,
      *     commands: list<array{command: string, arguments: array<string, mixed>}>,
      *     sleep: int
      * }
@@ -65,13 +68,29 @@ class DistributedJobCatalog
         return match ($job) {
             'binaries' => $this->binaries($settings, $killswitch),
             'backfill' => $this->backfill($settings, $counts, $killswitch),
+            'current-forward' => $this->currentForward($settings),
             'releases' => $this->simple(
                 $job,
                 (int) ($settings['releases_run'] ?? 0) > 0,
                 'disabled in settings',
                 'multiprocessing:releases',
                 [],
-                (int) ($settings['rel_timer'] ?? 60)
+                $this->timer($settings, 'rel_timer', 60)
+            ),
+            'nzb-backlog' => $this->simple(
+                $job,
+                true,
+                null,
+                'nntmux:nzb-create-backlog',
+                [
+                    '--limit' => $this->nzbLimit($settings),
+                    '--order' => 'desc',
+                    ...($this->hasFreshActiveLease($settings)
+                        && (bool) config('nntmux.distributed_nzb_terminal_stale_enabled', false)
+                        ? ['--quarantine-terminal-stale' => true]
+                        : []),
+                ],
+                $this->nzbSleep($settings)
             ),
             'fixnames' => $this->fixNames($settings, $counts),
             'hashed-fixnames' => $this->hashedFixNames($settings, $counts),
@@ -113,9 +132,11 @@ class DistributedJobCatalog
     private function disabledBySequentialMode(string $job, int $sequential, array $settings): ?array
     {
         $sleep = match ($job) {
-            'binaries' => (int) ($settings['bins_timer'] ?? 60),
+            'binaries' => $this->timer($settings, 'bins_timer', 60),
             'backfill' => $this->backfillSleep($settings, []),
-            'releases' => (int) ($settings['rel_timer'] ?? 60),
+            'current-forward' => 20,
+            'releases' => $this->timer($settings, 'rel_timer', 60),
+            'nzb-backlog' => $this->nzbSleep($settings),
             'fixnames', 'hashed-fixnames' => (int) ($settings['fix_timer'] ?? 300),
             'removecrap' => (int) ($settings['crap_timer'] ?? 300),
             'post-additional' => (int) ($settings['post_timer'] ?? 300),
@@ -126,7 +147,7 @@ class DistributedJobCatalog
             default => 300,
         };
 
-        if ($job === 'irc') {
+        if (in_array($job, ['irc', 'nzb-backlog', 'current-forward'], true)) {
             return null;
         }
 
@@ -155,11 +176,11 @@ class DistributedJobCatalog
         $enabled = (int) ($settings['binaries_run'] ?? 0);
 
         if ($enabled !== 1) {
-            return $this->disabled('binaries', 'disabled in settings', (int) ($settings['bins_timer'] ?? 60));
+            return $this->disabled('binaries', 'disabled in settings', $this->timer($settings, 'bins_timer', 60));
         }
 
         if (($killswitch['pp'] ?? false) === true) {
-            return $this->disabled('binaries', 'postprocess kill limit exceeded', (int) ($settings['bins_timer'] ?? 60));
+            return $this->disabled('binaries', 'postprocess kill limit exceeded', $this->timer($settings, 'bins_timer', 60));
         }
 
         return $this->simple(
@@ -168,7 +189,7 @@ class DistributedJobCatalog
             null,
             'multiprocessing:safe',
             ['type' => 'binaries'],
-            (int) ($settings['bins_timer'] ?? 60)
+            $this->timer($settings, 'bins_timer', 60)
         );
     }
 
@@ -183,6 +204,20 @@ class DistributedJobCatalog
         $enabled = (int) ($settings['backfill'] ?? 0);
         $sleep = $this->backfillSleep($settings, $counts);
 
+        if ($this->isOrchestratorManaged($settings) && ! $this->hasFreshActiveBackfillPermit($settings)) {
+            // A permit observation expires after 20 minutes. Polling the
+            // narrow disabled plan within ten seconds under a fresh active
+            // lease prevents a valid short-lived supply window from expiring
+            // before the worker can claim it. Stale/failsafe control retains
+            // the conservative one-minute ceiling.
+            return $this->disabled(
+                'backfill',
+                'adaptive orchestrator has not granted a fresh permit',
+                min($sleep, $this->hasFreshActiveLease($settings) ? 10 : 60),
+                lightweightPoll: true,
+            );
+        }
+
         if ($enabled === 0) {
             return $this->disabled('backfill', 'disabled in settings', $sleep);
         }
@@ -196,7 +231,49 @@ class DistributedJobCatalog
             return $this->disabled('backfill', 'no backfill groups to process', $sleep);
         }
 
-        return $this->simple('backfill', true, null, 'multiprocessing:safe', ['type' => 'backfill'], $sleep);
+        return $this->simple(
+            'backfill',
+            true,
+            null,
+            'multiprocessing:safe',
+            ['type' => 'backfill'],
+            $this->isOrchestratorManaged($settings) ? min($sleep, 60) : $sleep,
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>  $settings
+     * @return array{name:string,description:string,enabled:bool,disabled_reason:string|null,commands:list<array{command:string,arguments:array<string,mixed>}>,sleep:int}
+     */
+    private function currentForward(array $settings): array
+    {
+        $generation = (int) ($settings['orchestrator_cf_permit'] ?? 0);
+        $group = trim((string) ($settings['orchestrator_cf_group'] ?? ''));
+        $first = (int) ($settings['orchestrator_cf_first'] ?? 0);
+        $last = (int) ($settings['orchestrator_cf_last'] ?? 0);
+        if (! $this->hasFreshActiveLease($settings)
+            || $generation <= 0
+            || $group === ''
+            || $first <= 0
+            || $last - $first + 1 !== 10_000
+        ) {
+            return $this->disabled('current-forward', 'no fresh exact current-forward permit', 20);
+        }
+
+        return $this->simple(
+            'current-forward',
+            true,
+            null,
+            'articles:get-range',
+            [
+                'mode' => 'binaries',
+                'group' => $group,
+                'first' => $first,
+                'last' => $last,
+                '--current-forward-generation' => $generation,
+            ],
+            20,
+        );
     }
 
     /**
@@ -222,7 +299,7 @@ class DistributedJobCatalog
      */
     private function backfillSleep(array $settings, array $counts): int
     {
-        $baseSleep = (int) ($settings['back_timer'] ?? 600);
+        $baseSleep = $this->timer($settings, 'back_timer', 600);
         $collections = (int) ($counts['collections_table'] ?? 0);
         $progressive = (int) ($settings['progressive'] ?? 0);
 
@@ -231,6 +308,76 @@ class DistributedJobCatalog
         }
 
         return $baseSleep;
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function timer(array $settings, string $name, int $default): int
+    {
+        $static = max(1, (int) ($settings[$name] ?? $default));
+        if (! $this->hasFreshActiveLease($settings)) {
+            return $this->isOrchestratorTimerManaged($settings) ? $this->failSafeTimer($name) : $static;
+        }
+
+        return max(1, (int) ($settings['orchestrator_'.$name] ?? $static));
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function nzbSleep(array $settings): int
+    {
+        $static = max(1, (int) config('nntmux.distributed_nzb_sleep', 60));
+        if (! $this->hasFreshActiveLease($settings)) {
+            return $this->isOrchestratorTimerManaged($settings) ? 180 : $static;
+        }
+
+        return max(20, min(180, (int) ($settings['orchestrator_nzb_timer'] ?? $static)));
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function nzbLimit(array $settings): int
+    {
+        $static = max(1, (int) config('nntmux.distributed_nzb_limit', 1));
+        if (! $this->hasFreshActiveLease($settings)) {
+            return $this->isOrchestratorTimerManaged($settings) ? min(5, $static) : $static;
+        }
+
+        return max(5, min(20, (int) ($settings['orchestrator_nzb_limit'] ?? $static)));
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function hasFreshActiveBackfillPermit(array $settings): bool
+    {
+        return $this->hasFreshActiveLease($settings)
+            && (int) ($settings['orchestrator_bf_paused'] ?? 1) === 0
+            && (int) ($settings['orchestrator_bf_permit'] ?? 0) > 0;
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function hasFreshActiveLease(array $settings): bool
+    {
+        return (string) ($settings['orchestrator_mode'] ?? '') === 'active'
+            && (int) ($settings['orchestrator_lease_until'] ?? 0) >= time();
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function isOrchestratorManaged(array $settings): bool
+    {
+        return in_array((string) ($settings['orchestrator_mode'] ?? ''), ['shadow', 'active', 'failsafe'], true);
+    }
+
+    /** @param array<string, mixed> $settings */
+    private function isOrchestratorTimerManaged(array $settings): bool
+    {
+        return in_array((string) ($settings['orchestrator_mode'] ?? ''), ['active', 'failsafe'], true);
+    }
+
+    private function failSafeTimer(string $name): int
+    {
+        return match ($name) {
+            'bins_timer' => 300,
+            'back_timer' => 1800,
+            'rel_timer' => 180,
+            default => 300,
+        };
     }
 
     /**
@@ -346,6 +493,17 @@ class DistributedJobCatalog
         }
 
         $commands = [];
+        $commands[] = [
+            'command' => 'releases:fix-names',
+            'arguments' => [
+                'method' => '22',
+                '--update' => true,
+                '--category' => 'hashed',
+                '--set-status' => true,
+                '--limit' => 100,
+                '--show' => true,
+            ],
+        ];
         foreach ([4, 6, 21, 18, 10, 14, 16, 20, 12, 8] as $method) {
             $commands[] = [
                 'command' => 'releases:fix-names',
@@ -636,17 +794,23 @@ class DistributedJobCatalog
     /**
      * @return array<string, mixed>
      */
-    private function disabled(string $job, string $reason, int $sleep): array
+    private function disabled(string $job, string $reason, int $sleep, bool $lightweightPoll = false): array
     {
-        return $this->job($job, false, $reason, [], $sleep);
+        return $this->job($job, false, $reason, [], $sleep, $lightweightPoll);
     }
 
     /**
      * @param  list<array{command: string, arguments: array<string, mixed>}>  $commands
      * @return array<string, mixed>
      */
-    private function job(string $job, bool $enabled, ?string $disabledReason, array $commands, int $sleep): array
-    {
+    private function job(
+        string $job,
+        bool $enabled,
+        ?string $disabledReason,
+        array $commands,
+        int $sleep,
+        bool $lightweightPoll = false,
+    ): array {
         $jobs = $this->jobs();
 
         return [
@@ -654,6 +818,7 @@ class DistributedJobCatalog
             'description' => $jobs[$job],
             'enabled' => $enabled,
             'disabled_reason' => $disabledReason,
+            'lightweight_poll' => $lightweightPoll,
             'commands' => $commands,
             'sleep' => max(1, $sleep),
         ];

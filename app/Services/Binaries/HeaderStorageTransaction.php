@@ -45,6 +45,13 @@ final class HeaderStorageTransaction
      */
     public function begin(): void
     {
+        if (in_array(DB::getDriverName(), ['mysql', 'mariadb'], true)) {
+            // Latest committed part visibility is required after waiting for a
+            // parent-binary lock, and READ COMMITTED avoids missing-key gap
+            // locks before the subsequent INSERT IGNORE.
+            DB::statement('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+        }
+
         DB::beginTransaction();
         $this->hadErrors = false;
     }

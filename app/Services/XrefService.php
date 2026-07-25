@@ -9,9 +9,9 @@ class XrefService
     /**
      * Regex patterns to parse Xref tokens (e.g. alt.binaries.* optionally followed by :number).
      */
-    private const XREF_PATTERN_WITH_NUM = '/(^[a-zA-Z]{2,3}\\.(bin(aries|arios|aer))\\.[a-zA-Z0-9]?.+)(:\\d+)/';
+    private const XREF_PATTERN_WITH_NUM = '/(^[a-zA-Z]{2,3}\\.(bin(aries|arios|aer))\\.[a-zA-Z0-9]?.+)(:\\d+)/i';
 
-    private const XREF_PATTERN_NO_NUM = '/(^[a-zA-Z]{2,3}\\.(bin(aries|arios|aer))\\.[a-zA-Z0-9]?.+)/';
+    private const XREF_PATTERN_NO_NUM = '/(^[a-zA-Z]{2,3}\\.(bin(aries|arios|aer))\\.[a-zA-Z0-9]?.+)/i';
 
     /**
      * Extracts valid Xref tokens from a space-separated Xref string.
@@ -24,7 +24,7 @@ class XrefService
             return [];
         }
         $tokens = [];
-        foreach (explode(' ', $xref) as $token) {
+        foreach (preg_split('/\s+/', trim($xref)) ?: [] as $token) {
             if (preg_match(self::XREF_PATTERN_WITH_NUM, $token, $m) || preg_match(self::XREF_PATTERN_NO_NUM, $token, $m)) {
                 $tokens[] = $m[0];
             }
@@ -40,9 +40,26 @@ class XrefService
      */
     public function diffNewTokens(?string $existingXref, ?string $headerXref): array
     {
-        $existing = $this->extractTokens($existingXref);
-        $incoming = $this->extractTokens($headerXref);
+        $existingGroups = [];
+        foreach ($this->extractTokens($existingXref) as $token) {
+            $existingGroups[$this->groupForToken($token)] = true;
+        }
 
-        return array_values(array_diff($incoming, $existing));
+        $newTokens = [];
+        foreach ($this->extractTokens($headerXref) as $token) {
+            $group = $this->groupForToken($token);
+            if (isset($existingGroups[$group]) || isset($newTokens[$group])) {
+                continue;
+            }
+
+            $newTokens[$group] = $token;
+        }
+
+        return array_values($newTokens);
+    }
+
+    private function groupForToken(string $token): string
+    {
+        return strtolower((string) preg_replace('/:\d+$/', '', $token));
     }
 }

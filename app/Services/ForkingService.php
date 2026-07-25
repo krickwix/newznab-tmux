@@ -64,9 +64,9 @@ class ForkingService
     /**
      * Process safe backfill (ordered by oldest first).
      */
-    public function safeBackfill(): void
+    public function safeBackfill(?int $generation = null): void
     {
-        $this->runWithTiming('safe_backfill', fn () => $this->backfillRunner->safeBackfill());
+        $this->runWithTiming('safe_backfill', fn () => $this->backfillRunner->safeBackfill($generation));
     }
 
     /**

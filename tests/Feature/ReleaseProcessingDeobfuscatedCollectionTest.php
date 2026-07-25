@@ -119,6 +119,31 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
         $this->assertSame(2, (int) $collection->totalfiles);
     }
 
+    public function test_delayed_stage6_rejects_complete_fragments_with_sparse_collection_file_coverage(): void
+    {
+        DB::table('settings')->where('name', 'completionpercent')->update(['value' => '94']);
+
+        $dateAdded = now()->subHours(13)->format('Y-m-d H:i:s');
+        $this->seedCollection(9, 'two-complete-fragments-from-sixty-five-files', 2, $dateAdded, 10);
+        $this->seedBinary(9001, 9, 64, currentParts: 100, totalParts: 100);
+        $this->seedBinary(9002, 9, 65, currentParts: 100, totalParts: 100);
+
+        $this->seedCollection(10, 'dense-sixty-two-of-sixty-five-files', 65, $dateAdded, 10);
+        for ($fileNumber = 1; $fileNumber <= 62; $fileNumber++) {
+            $this->seedBinary(10000 + $fileNumber, 10, $fileNumber, currentParts: 100, totalParts: 100);
+        }
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        $service->processIncompleteCollections(null);
+
+        $this->assertSame(10, (int) DB::table('collections')->where('id', 9)->value('filecheck'));
+        $this->assertSame(
+            CollectionFileCheckStatus::CompleteParts->value,
+            (int) DB::table('collections')->where('id', 10)->value('filecheck')
+        );
+    }
+
     public function test_totalfiles_collection_uses_completion_threshold_before_promotion(): void
     {
         DB::table('settings')->where('name', 'completionpercent')->update(['value' => '75']);
@@ -206,6 +231,40 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
         $this->assertSame(
             CollectionFileCheckStatus::Default->value,
             (int) DB::table('collections')->where('id', 2600)->value('filecheck')
+        );
+    }
+
+    public function test_split_main_and_parity_pair_reconciles_before_completion_stages(): void
+    {
+        DB::table('usenet_groups')->insert(['id' => 5, 'name' => 'alt.binaries.movies.dvd']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.movies.dvd']);
+
+        $this->seedCollection(2700, '[01/03] - "Episode.S01E01.mkv" yEnc', 3);
+        $this->seedCollection(2701, '[02/03] - "hash.par2" yEnc', 3);
+        DB::table('collections')->where('id', 2700)->update([
+            'date' => '2026-07-13 02:18:15',
+            'xref' => 'alt.binaries.movies.dvd:2700',
+        ]);
+        DB::table('collections')->where('id', 2701)->update([
+            'date' => '2026-07-13 02:18:16',
+            'xref' => 'alt.binaries.movies.dvd:2701',
+        ]);
+        $this->seedBinary(27000, 2700, 1, currentParts: 10, totalParts: 10);
+        $this->seedBinary(27001, 2701, 2, currentParts: 1, totalParts: 1);
+        $this->seedBinary(27002, 2701, 3, currentParts: 1, totalParts: 1);
+        DB::table('binaries')->where('id', 27000)->update(['name' => 'Episode.S01E01.mkv']);
+        DB::table('binaries')->where('id', 27001)->update(['name' => 'hash.par2']);
+        DB::table('binaries')->where('id', 27002)->update(['name' => 'hash.vol001+001.par2']);
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        $service->processIncompleteCollections(5);
+
+        self::assertFalse(DB::table('collections')->where('id', 2701)->exists());
+        self::assertSame(3, DB::table('binaries')->where('collections_id', 2700)->count());
+        self::assertSame(
+            CollectionFileCheckStatus::CompleteParts->value,
+            (int) DB::table('collections')->where('id', 2700)->value('filecheck'),
         );
     }
 
@@ -326,6 +385,7 @@ final class ReleaseProcessingDeobfuscatedCollectionTest extends TestCase
 
     private function createTables(): void
     {
+        DB::statement('CREATE TABLE usenet_groups (id INTEGER PRIMARY KEY, name VARCHAR(255) UNIQUE)');
         DB::statement('CREATE TABLE settings (name VARCHAR(255) PRIMARY KEY, value TEXT)');
         DB::statement('CREATE TABLE collections (
             id INTEGER PRIMARY KEY,

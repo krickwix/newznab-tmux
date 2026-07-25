@@ -87,7 +87,11 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
         $releaseManagement
             ->shouldReceive('deleteSingleWithService')
             ->once()
-            ->with(['g' => 'par2-only-guid', 'i' => 1], Mockery::any(), Mockery::any());
+            ->with(
+                ['g' => 'par2-only-guid', 'i' => 1, 'reason' => 'Par2Only'],
+                Mockery::any(),
+                Mockery::any(),
+            );
 
         $service = new ReleaseRemoverService(
             releaseManagement: $releaseManagement,
@@ -174,7 +178,11 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
         $releaseManagement
             ->shouldReceive('deleteSingleWithService')
             ->once()
-            ->with(['g' => 'old-hashed-guid', 'i' => 4], Mockery::any(), Mockery::any());
+            ->with(
+                ['g' => 'old-hashed-guid', 'i' => 4, 'reason' => 'Hashed'],
+                Mockery::any(),
+                Mockery::any(),
+            );
 
         $service = new ReleaseRemoverService(
             releaseManagement: $releaseManagement,
@@ -225,11 +233,19 @@ final class ReleaseRemoverPar2OnlyTest extends TestCase
         $releaseManagement
             ->shouldReceive('deleteSingleWithService')
             ->once()
-            ->with(['g' => 'password-status-guid', 'i' => 5], Mockery::any(), Mockery::any());
+            ->with(
+                ['g' => 'password-status-guid', 'i' => 5, 'reason' => 'Passworded'],
+                Mockery::any(),
+                Mockery::any(),
+            );
         $releaseManagement
             ->shouldReceive('deleteSingleWithService')
             ->once()
-            ->with(['g' => 'password-file-guid', 'i' => 6], Mockery::any(), Mockery::any());
+            ->with(
+                ['g' => 'password-file-guid', 'i' => 6, 'reason' => 'Passworded'],
+                Mockery::any(),
+                Mockery::any(),
+            );
 
         $service = new ReleaseRemoverService(
             releaseManagement: $releaseManagement,

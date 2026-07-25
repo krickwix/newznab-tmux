@@ -4,14 +4,17 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Services;
 
+use aharen\OMDbAPI;
 use App\Models\MovieInfo;
 use App\Models\Release;
+use App\Services\ImdbScraper;
 use App\Services\MovieService;
 use App\Services\TmdbClient;
 use App\Services\TraktService;
 use App\Services\TvProcessing\Providers\TraktProvider;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use PHPUnit\Framework\Assert;
 use PHPUnit\Framework\Attributes\Test;
@@ -53,6 +56,24 @@ class MovieServiceTest extends ImdbScraperTestCase
             $table->unsignedInteger('categories_id')->default(0);
             $table->string('imdbid')->nullable();
             $table->unsignedBigInteger('movieinfo_id')->nullable();
+        });
+
+        Schema::dropIfExists('movie_lookup_states');
+        Schema::create('movie_lookup_states', function (Blueprint $table): void {
+            $table->unsignedBigInteger('release_id')->primary();
+            $table->string('status', 16);
+            $table->string('observed_imdbid', 100)->nullable();
+            $table->string('attempted_imdbid', 100)->nullable();
+            $table->string('observed_searchname');
+            $table->integer('observed_category_id');
+            $table->string('reason_code', 64)->nullable();
+            $table->unsignedSmallInteger('attempts')->default(0);
+            $table->unsignedSmallInteger('retry_count')->default(0);
+            $table->uuid('claim_token')->nullable();
+            $table->timestamp('claim_expires_at')->nullable();
+            $table->timestamp('next_attempt_at')->nullable();
+            $table->timestamp('quarantined_at')->nullable();
+            $table->timestamps();
         });
     }
 
@@ -162,7 +183,7 @@ class MovieServiceTest extends ImdbScraperTestCase
     }
 
     #[Test]
-    public function it_keeps_a_found_imdb_id_when_metadata_refresh_fails(): void
+    public function it_does_not_persist_a_found_imdb_id_when_metadata_validation_fails(): void
     {
         Cache::flush();
 
@@ -185,8 +206,8 @@ class MovieServiceTest extends ImdbScraperTestCase
 
         $result = $service->doMovieUpdate('tt0137523', 'IMDb(scrape)', 2);
 
-        $this->assertSame('0137523', $result);
-        $this->assertSame('0137523', Release::query()->whereKey(2)->value('imdbid'));
+        $this->assertFalse($result);
+        $this->assertNull(Release::query()->whereKey(2)->value('imdbid'));
         $this->assertNull(Release::query()->whereKey(2)->value('movieinfo_id'));
     }
 
@@ -206,6 +227,11 @@ class MovieServiceTest extends ImdbScraperTestCase
                 ]);
 
                 return true;
+            }
+
+            protected function validateStoredImdbSuggestionIdentity(string $imdbId): string
+            {
+                return self::IDENTITY_MOVIE;
             }
         };
         $service->echooutput = false;
@@ -228,7 +254,179 @@ class MovieServiceTest extends ImdbScraperTestCase
     }
 
     #[Test]
-    public function it_repairs_existing_imdb_ids_without_stale_title_constraints_or_negative_provider_cache(): void
+    public function it_quarantines_a_terminal_non_movie_identity_at_the_configured_cap(): void
+    {
+        config(['nntmux_api.movie_lookup_max_attempts' => 1]);
+        $service = new class extends MovieService
+        {
+            public bool $metadataUpdateCalled = false;
+
+            public function updateMovieInfo(string $imdbId): bool
+            {
+                $this->metadataUpdateCalled = true;
+
+                return true;
+            }
+
+            protected function validateStoredImdbSuggestionIdentity(string $imdbId): string
+            {
+                return self::IDENTITY_NON_MOVIE;
+            }
+        };
+        $service->echooutput = false;
+        $service->movieqty = 100;
+
+        Release::query()->insert([
+            'id' => 30,
+            'searchname' => 'MLB.2026.07.09',
+            'categories_id' => 2080,
+            'imdbid' => '43634457',
+            'movieinfo_id' => null,
+        ]);
+
+        $service->processMovieReleases();
+
+        $this->assertDatabaseHas('movie_lookup_states', [
+            'release_id' => 30,
+            'status' => 'quarantined',
+            'reason_code' => 'non_movie_identity',
+            'attempts' => 1,
+        ]);
+        $this->assertNull(Release::query()->whereKey(30)->value('imdbid'));
+        $this->assertFalse($service->metadataUpdateCalled);
+
+        $service->processMovieReleases();
+        $this->assertSame(1, DB::table('movie_lookup_states')->where('release_id', 30)->value('attempts'));
+    }
+
+    #[Test]
+    public function an_unknown_stored_identity_type_remains_transient(): void
+    {
+        app()->instance(ImdbScraper::class, new class extends ImdbScraper
+        {
+            public function search(string $query): array
+            {
+                // @phpstan-ignore return.type (the parent annotation is associative, but search returns a ranked list)
+                return [['imdbid' => '1234567', 'title' => 'Example Movie', 'year' => '2024', 'type' => 'unknown']];
+            }
+        });
+
+        $service = new class extends MovieService
+        {
+            public function validate(string $imdbId): string
+            {
+                return $this->validateStoredImdbSuggestionIdentity($imdbId);
+            }
+        };
+
+        $this->assertSame('unknown', $service->validate('1234567'));
+    }
+
+    #[Test]
+    public function common_provider_non_movie_types_are_explicitly_rejected(): void
+    {
+        $service = new class extends MovieService
+        {
+            public function rejects(string $type): bool
+            {
+                return $this->isExplicitNonMovieMediaType($type);
+            }
+        };
+
+        $this->assertTrue($service->rejects('series'));
+        $this->assertTrue($service->rejects('game'));
+        $this->assertTrue($service->rejects('TVEpisode'));
+        $this->assertTrue($service->rejects('ShortFilm'));
+    }
+
+    #[Test]
+    public function imdb_tv_episode_metadata_is_not_accepted_as_a_movie(): void
+    {
+        Cache::flush();
+        app()->instance(ImdbScraper::class, new class extends ImdbScraper
+        {
+            public function fetchById(string $imdbId): array
+            {
+                return [
+                    'imdbid' => $imdbId,
+                    'title' => 'Example Episode',
+                    'year' => '2024',
+                    'type' => 'TVEpisode',
+                ];
+            }
+        });
+
+        $service = new MovieService;
+        $service->echooutput = false;
+
+        $this->assertFalse($service->fetchIMDBProperties('1234567'));
+    }
+
+    #[Test]
+    public function omdb_series_metadata_is_not_accepted_as_a_movie(): void
+    {
+        Cache::flush();
+        $service = new MovieService;
+        $service->echooutput = false;
+        $service->omdbapikey = 'test-key';
+        $service->omdbApi = new class('test-key') extends OMDbAPI
+        {
+            /**
+             * @param  array<mixed>  $parameters
+             * @return array<mixed>
+             */
+            public function fetch($field, $keyword, array $parameters = [])
+            {
+                // @phpstan-ignore return.type (the vendor API declares array but returns its response envelope object)
+                return (object) [
+                    'message' => 'OK',
+                    'data' => (object) [
+                        'Response' => 'True',
+                        'Title' => 'Example Series',
+                        'Year' => '2024',
+                        'Type' => 'series',
+                    ],
+                ];
+            }
+        };
+
+        $this->assertFalse($service->fetchOmdbAPIProperties('1234568'));
+    }
+
+    #[Test]
+    public function unknown_only_metadata_is_not_persisted(): void
+    {
+        Cache::flush();
+        $service = new class extends MovieService
+        {
+            public function fetchTMDBProperties(string $imdbId, bool $text = false): array|false
+            {
+                return false;
+            }
+
+            public function fetchIMDBProperties(string $imdbId): array
+            {
+                return ['title' => 'Unknown Identity', 'year' => '2024', 'type' => 'unknown'];
+            }
+
+            public function fetchTraktTVProperties(string $imdbId): array|false
+            {
+                return false;
+            }
+
+            public function fetchOmdbAPIProperties(string $imdbId): array|false
+            {
+                return false;
+            }
+        };
+        $service->echooutput = false;
+
+        $this->assertFalse($service->updateMovieInfo('1234569'));
+        $this->assertDatabaseMissing('movieinfo', ['imdbid' => '1234569']);
+    }
+
+    #[Test]
+    public function it_repairs_existing_imdb_ids_with_fresh_release_constraints_without_flushing_provider_backoff(): void
     {
         Cache::flush();
         foreach (['tmdb_movie_', 'imdb_movie_', 'trakt_movie_', 'omdb_movie_'] as $prefix) {
@@ -241,11 +439,11 @@ class MovieServiceTest extends ImdbScraperTestCase
             public function updateMovieInfo(string $imdbId): bool
             {
                 foreach (['tmdb_movie_', 'imdb_movie_', 'trakt_movie_', 'omdb_movie_'] as $prefix) {
-                    Assert::assertFalse(Cache::has($prefix.md5($imdbId)));
-                    Assert::assertFalse(Cache::has($prefix.md5('tt'.$imdbId)));
+                    Assert::assertTrue(Cache::has($prefix.md5($imdbId)));
+                    Assert::assertTrue(Cache::has($prefix.md5('tt'.$imdbId)));
                 }
-                Assert::assertSame('', $this->currentTitle);
-                Assert::assertSame('', $this->currentYear);
+                Assert::assertSame('Example Movie', $this->currentTitle);
+                Assert::assertSame('2024', $this->currentYear);
 
                 MovieInfo::query()->create([
                     'imdbid' => $imdbId,
@@ -254,6 +452,11 @@ class MovieServiceTest extends ImdbScraperTestCase
                 ]);
 
                 return true;
+            }
+
+            protected function validateStoredImdbSuggestionIdentity(string $imdbId): string
+            {
+                return self::IDENTITY_MOVIE;
             }
 
             public function poisonCurrentLookupContext(): void
@@ -506,6 +709,61 @@ class MovieServiceTest extends ImdbScraperTestCase
         $this->assertFalse($service->acceptsFor('Fruehlingssinfonie', '1983', 'Spring Symphony', '1983', 1));
         $this->assertTrue($service->acceptsFor('Jim Croce - Live In Concert', '2003', 'Have You Heard: Jim Croce - Live', '2003'));
         $this->assertTrue($service->acceptsFor('Apocalypse Now Redux', '', 'Apocalypse Now', '1979'));
+    }
+
+    #[Test]
+    public function it_rejects_generic_zero_signal_imdb_search_titles(): void
+    {
+        $service = new class extends MovieService
+        {
+            public function acceptsFor(string $currentTitle, string $currentYear, string $candidateTitle, string $candidateYear): bool
+            {
+                $this->currentTitle = $currentTitle;
+                $this->currentYear = $currentYear;
+
+                return $this->isImdbSearchMatchAcceptable($candidateTitle, $candidateYear);
+            }
+        };
+        $service->echooutput = false;
+
+        $this->assertFalse($service->acceptsFor('MLB', '2026', '2026 MLB Home Run Derby', '2026'));
+        $this->assertTrue($service->acceptsFor('Up', '2009', 'Up', '2009'));
+    }
+
+    #[Test]
+    public function it_only_attempts_movie_media_types_from_imdb_suggestions(): void
+    {
+        app()->instance(ImdbScraper::class, new class extends ImdbScraper
+        {
+            public function search(string $query): array
+            {
+                return [
+                    ['imdbid' => '1000001', 'title' => 'Example Movie', 'year' => '2024', 'type' => 'tvseries'],
+                    ['imdbid' => '1000002', 'title' => 'Example Movie', 'year' => '2024', 'type' => 'movie'],
+                    ['imdbid' => '1000003', 'title' => 'Example Movie', 'year' => '2024', 'type' => 'musicvideo'],
+                ];
+            }
+        });
+
+        $service = new class extends MovieService
+        {
+            /** @var list<string> */
+            public array $attempted = [];
+
+            public function doMovieUpdate(string $buffer, string $service, int $id, int $processImdb = 1): string|false
+            {
+                $this->attempted[] = $buffer;
+
+                return false;
+            }
+        };
+        $service->echooutput = false;
+        $this->setMovieServiceProperty($service, 'currentTitle', 'Example Movie');
+        $this->setMovieServiceProperty($service, 'currentYear', '2024');
+
+        $search = new \ReflectionMethod($service, 'searchIMDb');
+        $this->assertFalse($search->invoke($service, 99));
+        $this->assertSame(['tt1000002'], $service->attempted);
     }
 
     #[Test]

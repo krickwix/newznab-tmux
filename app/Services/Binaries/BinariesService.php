@@ -6,7 +6,9 @@ namespace App\Services\Binaries;
 
 use App\Models\Settings;
 use App\Models\UsenetGroup;
+use App\Services\NNTP\NntpArticleDate;
 use App\Services\NNTP\NNTPService;
+use App\Services\Orchestrator\CurrentForwardRefreshTrustPolicy;
 use DariusIII\NetNntp\Error;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -63,6 +65,8 @@ class BinariesService
 
     private int $headersBlackListed = 0;
 
+    private int $invalidDate = 0;
+
     /**
      * @var array<string, mixed>
      */
@@ -72,6 +76,30 @@ class BinariesService
      * @var array<string, int|float>
      */
     private array $bodyPreambleStats = [];
+
+    /** @var array<string, true> */
+    private array $bodyPreambleProbeRequired = [];
+
+    /** @var array<string, true> */
+    private array $bodyPreambleApplied = [];
+
+    /** @var array<string, true> */
+    private array $bodyPreambleProbed = [];
+
+    /** @var array<int, true> */
+    private array $partRepairDeferredBodyNumbers = [];
+
+    /** @var array<string, true> */
+    private array $partRepairForcedBodyNumbers = [];
+
+    private ?string $partRepairClaimToken = null;
+
+    /** @var array<string, int> */
+    private array $partRepairClaimIdsByNumber = [];
+
+    private ?float $partRepairBodyProbeStartedAt = null;
+
+    private ?int $partRepairBodyProbesRemaining = null;
 
     public function __construct(
         ?BinariesConfig $config = null,
@@ -298,15 +326,30 @@ class BinariesService
      * @throws \Exception
      * @throws \Throwable
      */
-    public function scan(array $groupMySQL, int $first, int $last, string $type = 'update', ?array $missingParts = null): array
-    {
+    public function scan(
+        array $groupMySQL,
+        int $first,
+        int $last,
+        string $type = 'update',
+        ?array $missingParts = null,
+        bool $currentForwardPermit = false,
+        ?int $currentForwardGeneration = null,
+        bool $failOnStorageError = false,
+    ): array {
+        $groupName = trim((string) ($groupMySQL['name'] ?? ''));
+        if ((new CurrentForwardRefreshTrustPolicy)->protects($groupName) && ! $currentForwardPermit) {
+            throw new \RuntimeException("Group {$groupName} requires an exact current-forward permit.");
+        }
         $this->startLoop = Carbon::now();
         $this->groupMySQL = $groupMySQL;
         $this->last = $last;
         $this->first = $first;
-        $this->notYEnc = $this->headersBlackListed = 0;
+        $this->notYEnc = $this->headersBlackListed = $this->invalidDate = 0;
         $this->headersReceived = [];
         $this->bodyPreambleStats = [];
+        $this->bodyPreambleProbeRequired = [];
+        $this->bodyPreambleApplied = [];
+        $this->bodyPreambleProbed = [];
 
         $returnArray = [];
         $partRepair = ($type === 'partrepair');
@@ -315,7 +358,7 @@ class BinariesService
         // Download headers from NNTP
         $headers = $this->downloadHeaders($partRepair);
         if ($headers === null) {
-            if ($partRepair) {
+            if ($partRepair && $this->partRepairClaimToken === null) {
                 $this->missedPartHandler->incrementRangeAttempts($groupMySQL['id'], $first, $last);
             }
 
@@ -332,7 +375,11 @@ class BinariesService
 
         // Extract article range info
         $returnArray = $this->headerParser->getArticleRange($headers);
-        $headers = $this->deobfuscateBodyPreambleHeaders($headers, $groupMySQL['name']);
+        $headers = $this->deobfuscateBodyPreambleHeaders(
+            $headers,
+            $groupMySQL['name'],
+            $partRepair ? $missingParts : null,
+        );
 
         // Parse and filter headers
         $this->headerParser->reset();
@@ -341,6 +388,15 @@ class BinariesService
         $this->headersReceived = $parseResult['received'] ?? [];
         $this->notYEnc = $parseResult['notYEnc'];
         $this->headersBlackListed = $parseResult['blacklisted'];
+        $this->invalidDate = $parseResult['invalidDate'];
+
+        if ($partRepair && $this->bodyPreambleProbeRequired !== []) {
+            $parseResult['headers'] = array_filter(
+                $parseResult['headers'],
+                fn (array $header): bool => ! isset($this->bodyPreambleProbeRequired[(string) ($header['Number'] ?? '')])
+                    || isset($this->bodyPreambleApplied[(string) ($header['Number'] ?? '')]),
+            );
+        }
 
         // Update blacklist last_activity
         $this->headerParser->flushBlacklistUpdates();
@@ -356,10 +412,24 @@ class BinariesService
         $this->timeCleaning = $this->startUpdate->diffInSeconds($this->startCleaning, true);
 
         $headersNotInserted = [];
+        $storageSucceeded = true;
         if (! empty($parseResult['headers'])) {
             try {
-                $headersNotInserted = $this->headerStorage->store($parseResult['headers'], $groupMySQL, $addToPartRepair);
+                $headersNotInserted = $this->headerStorage->store(
+                    $parseResult['headers'],
+                    $groupMySQL,
+                    $addToPartRepair || $partRepair,
+                    $currentForwardGeneration,
+                );
             } catch (\Throwable $e) {
+                if ($currentForwardGeneration !== null || $failOnStorageError) {
+                    throw $e;
+                }
+                $storageSucceeded = false;
+                $headersNotInserted = array_values(array_filter(array_map(
+                    static fn (array $header): mixed => $header['Number'] ?? null,
+                    $parseResult['headers'],
+                )));
                 $this->logError('storeHeaders failed: '.$e->getMessage());
             }
         }
@@ -368,8 +438,24 @@ class BinariesService
         $this->timeInsert = $this->startPR->diffInSeconds($this->startUpdate, true);
 
         // Handle repaired parts
-        if ($partRepair && ! empty($parseResult['repaired'])) {
-            $this->missedPartHandler->removeRepairedParts($parseResult['repaired'], $groupMySQL['id']);
+        if ($partRepair && $storageSucceeded && ! empty($parseResult['repaired'])) {
+            $successfullyRepaired = array_values(array_diff($parseResult['repaired'], $headersNotInserted));
+            $successfullyRepaired = array_values(array_filter(
+                $successfullyRepaired,
+                fn (mixed $number): bool => ! isset($this->bodyPreambleProbeRequired[(string) $number])
+                    || isset($this->bodyPreambleApplied[(string) $number]),
+            ));
+            if ($successfullyRepaired !== []) {
+                if ($this->partRepairClaimToken !== null) {
+                    $claimedIds = array_values(array_filter(array_map(
+                        fn (mixed $number): ?int => $this->partRepairClaimIdsByNumber[(string) $number] ?? null,
+                        $successfullyRepaired,
+                    )));
+                    $this->missedPartHandler->removeRepairedClaimedParts($claimedIds, $this->partRepairClaimToken);
+                } else {
+                    $this->missedPartHandler->removeRepairedParts($successfullyRepaired, $groupMySQL['id']);
+                }
+            }
         }
 
         // Handle part repair tracking
@@ -379,14 +465,23 @@ class BinariesService
 
         $this->outputHeaderDuration();
 
+        if ($partRepair) {
+            foreach (array_diff_key($this->bodyPreambleProbeRequired, $this->bodyPreambleProbed) as $number => $_value) {
+                $this->partRepairDeferredBodyNumbers[(int) $number] = true;
+            }
+        }
+
         return $returnArray;
     }
 
     /**
      * @param  array<int, array<string, mixed>>  $headers
+     * @param  array<int, int|string>|null  $missingParts
      * @return array<int, array<string, mixed>>
+     *
+     * @phpstan-impure
      */
-    private function deobfuscateBodyPreambleHeaders(array $headers, string $groupName): array
+    private function deobfuscateBodyPreambleHeaders(array $headers, string $groupName, ?array $missingParts = null): array
     {
         if ($this->config->bodyPreambleDeobfuscateLimit <= 0 || ! $this->shouldDeobfuscateBodyPreambleGroup($groupName)) {
             return $headers;
@@ -404,23 +499,42 @@ class BinariesService
             'average_ms' => 0.0,
         ];
 
+        $missingPartLookup = $missingParts === null
+            ? null
+            : array_fill_keys(array_map(static fn (mixed $number): string => (string) $number, $missingParts), true);
+        foreach ($headers as $header) {
+            $number = (string) ($header['Number'] ?? '');
+            if (($missingPartLookup !== null && ! isset($missingPartLookup[$number]))
+                || (! isset($this->partRepairForcedBodyNumbers[$number]) && ! $this->shouldProbeBodyPreamble($header))
+            ) {
+                continue;
+            }
+            $this->bodyPreambleProbeRequired[$number] = true;
+            $this->bodyPreambleStats['eligible']++;
+        }
+
         $probed = 0;
-        $startedAt = microtime(true);
+        $probeLimit = $this->partRepairBodyProbesRemaining ?? $this->config->bodyPreambleDeobfuscateLimit;
+        $startedAt = $this->partRepairBodyProbeStartedAt ?? microtime(true);
         foreach ($headers as $index => $header) {
-            if ($probed >= $this->config->bodyPreambleDeobfuscateLimit) {
+            if ($probed >= $probeLimit || $this->bodyPreambleMaxSecondsReached($startedAt)) {
                 break;
             }
-            if (! $this->shouldProbeBodyPreamble($header)) {
+            $number = (string) ($header['Number'] ?? '');
+            if (! isset($this->bodyPreambleProbeRequired[$number])) {
                 continue;
             }
 
-            $this->bodyPreambleStats['eligible']++;
             $lines = $this->getNntp()->getYencBodyPreambleLines(
                 $groupName,
                 $header['Number'],
                 $this->config->bodyPreambleLineLimit
             );
             $probed++;
+            if ($this->partRepairBodyProbesRemaining !== null) {
+                $this->partRepairBodyProbesRemaining = max(0, $this->partRepairBodyProbesRemaining - 1);
+            }
+            $this->bodyPreambleProbed[$number] = true;
             $this->bodyPreambleStats['probed']++;
             $maxProbeSecondsReached = $this->bodyPreambleMaxSecondsReached($startedAt);
             if (NNTPService::isError($lines) || ! \is_array($lines)) {
@@ -454,6 +568,8 @@ class BinariesService
             $headers[$index]['Subject'] = $metadata->toSyntheticSubject();
             $headers[$index]['collection_file_number'] = $metadata->collectionFileNumber();
             $headers[$index]['collection_total_files'] = $metadata->collectionTotalFiles();
+            $headers[$index]['body_preamble_applied'] = true;
+            $this->bodyPreambleApplied[$number] = true;
             $this->bodyPreambleStats['applied']++;
 
             if ($maxProbeSecondsReached) {
@@ -506,6 +622,10 @@ class BinariesService
             return true;
         }
 
+        if (preg_match('/^\[PRiVATE\]\s+\S{8,512}\s+\[newzNZB\]\s+\[\d{1,5}\s*\/\s*\d{1,5}\]\s+-\s+yEnc$/i', $subject) === 1) {
+            return true;
+        }
+
         if (preg_match('/^\[\s*\d{1,5}\s*\/\s*\d{1,5}\s*\]\s*(?:-\s*)?"([^"]{8,255})"(?:\s+-\s*\d+(?:[.,]\d+)?\s*[kmg]b)?\s+yEnc(?:\s+\(\s*\d{1,5}\s*\/\s*\d{1,5}\s*\))?$/i', $subject, $match) !== 1) {
             return false;
         }
@@ -530,47 +650,183 @@ class BinariesService
      */
     public function partRepair(array $groupArr): void
     {
-        $missingParts = $this->missedPartHandler->getMissingParts($groupArr['id']);
-        $missingCount = \count($missingParts);
-
-        if ($missingCount === 0) {
-            $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
-
-            return;
-        }
-
-        if ($this->config->echoCli) {
-            cli()->primary('Attempting to repair '.number_format($missingCount).' parts.');
-        }
-
-        // Group into continuous ranges
-        $ranges = $this->groupMissingPartsIntoRanges($missingParts);
-
-        // Download missing parts in ranges
-        foreach ($ranges as $range) {
-            if ($this->config->echoCli) {
-                echo \chr(random_int(45, 46)).PHP_EOL;
+        $this->partRepairDeferredBodyNumbers = [];
+        $this->partRepairForcedBodyNumbers = [];
+        $this->partRepairBodyProbeStartedAt = microtime(true);
+        $this->partRepairBodyProbesRemaining = $this->config->bodyPreambleDeobfuscateLimit;
+        try {
+            $missingParts = $this->missedPartHandler->getMissingParts($groupArr['id']);
+            $missingCount = \count($missingParts);
+            $cohortIds = array_map(
+                static fn (object $part): int => (int) $part->id,
+                $missingParts,
+            );
+            foreach ($missingParts as $missingPart) {
+                if ((int) ($missingPart->attempts ?? 1) === 0
+                    || ($missingPart->recovery_kind ?? null) === 'body_preamble') {
+                    $this->partRepairForcedBodyNumbers[(string) $missingPart->numberid] = true;
+                }
             }
 
-            $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+            if ($missingCount === 0) {
+                $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
+
+                return;
+            }
+
+            if ($this->config->echoCli) {
+                cli()->primary('Attempting to repair '.number_format($missingCount).' parts.');
+            }
+
+            // Group into continuous ranges
+            $ranges = $this->groupMissingPartsIntoRanges($missingParts);
+
+            // Download missing parts in ranges
+            foreach ($ranges as $range) {
+                if ($this->config->echoCli) {
+                    echo \chr(random_int(45, 46)).PHP_EOL;
+                }
+
+                $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+            }
+
+            // Calculate parts repaired
+            $remainingCount = $this->missedPartHandler->countExistingIds($cohortIds, $groupArr['id']);
+            $partsRepaired = $missingCount - $remainingCount;
+
+            // Update attempts on remaining parts
+            if (isset($missingParts[$missingCount - 1]->id)) {
+                $this->missedPartHandler->incrementAttemptsForIds($cohortIds, $groupArr['id']);
+                $this->missedPartHandler->decrementAttempts(array_keys($this->partRepairDeferredBodyNumbers), $groupArr['id']);
+            }
+
+            if ($this->config->echoCli) {
+                cli()->primary(PHP_EOL.number_format($partsRepaired).' parts repaired.');
+            }
+
+            // Remove articles that exceeded max tries
+            $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
+        } finally {
+            $this->partRepairBodyProbeStartedAt = null;
+            $this->partRepairBodyProbesRemaining = null;
+            $this->partRepairForcedBodyNumbers = [];
+        }
+    }
+
+    /**
+     * Repair one token-owned BODY-preamble cohort without scanning the whole group.
+     *
+     * @param  array<string, mixed>  $groupArr
+     * @param  array<int, object>  $claimedParts
+     * @return array{claimed:int,repaired:int,deferred:int,failed:int,ownership_lost:int,group_available:bool}
+     */
+    public function partRepairClaimedCohort(
+        array $groupArr,
+        array $claimedParts,
+        string $claimToken,
+        int $leaseSeconds = 180,
+        int $deferSeconds = 20
+    ): array {
+        if ($claimedParts === []) {
+            return ['claimed' => 0, 'repaired' => 0, 'deferred' => 0, 'failed' => 0, 'ownership_lost' => 0, 'group_available' => true];
         }
 
-        // Calculate parts repaired
-        $lastPartNumber = $missingParts[$missingCount - 1]->numberid;
-        $remainingCount = $this->missedPartHandler->getCount($groupArr['id'], $lastPartNumber);
-        $partsRepaired = $missingCount - $remainingCount;
-
-        // Update attempts on remaining parts
-        if (isset($missingParts[$missingCount - 1]->id)) {
-            $this->missedPartHandler->incrementAttempts($groupArr['id'], $lastPartNumber);
+        $cohortIds = array_values(array_map(static fn (object $part): int => (int) $part->id, $claimedParts));
+        $this->partRepairClaimToken = $claimToken;
+        $this->partRepairClaimIdsByNumber = [];
+        $this->partRepairDeferredBodyNumbers = [];
+        $this->partRepairForcedBodyNumbers = [];
+        $this->partRepairBodyProbeStartedAt = microtime(true);
+        $this->partRepairBodyProbesRemaining = $this->config->bodyPreambleDeobfuscateLimit;
+        $processedIds = [];
+        foreach ($claimedParts as $part) {
+            $number = (string) $part->numberid;
+            $this->partRepairForcedBodyNumbers[$number] = true;
+            $this->partRepairClaimIdsByNumber[$number] = (int) $part->id;
         }
 
-        if ($this->config->echoCli) {
-            cli()->primary(PHP_EOL.number_format($partsRepaired).' parts repaired.');
-        }
+        try {
+            if ($this->selectNntpGroup($groupArr, $this->getNntp()) === null) {
+                $existing = $this->missedPartHandler->countExistingIds($cohortIds, (int) $groupArr['id']);
+                $ownedRemaining = $this->missedPartHandler->countExistingClaimedIds($cohortIds, $claimToken);
+                $this->missedPartHandler->deferClaimedParts(
+                    $cohortIds,
+                    $claimToken,
+                    now()->addSeconds(max(1, $deferSeconds)),
+                );
 
-        // Remove articles that exceeded max tries
-        $this->missedPartHandler->cleanupExhaustedParts($groupArr['id']);
+                return [
+                    'claimed' => count($cohortIds),
+                    'repaired' => count($cohortIds) - $existing,
+                    'deferred' => $ownedRemaining,
+                    'failed' => 0,
+                    'ownership_lost' => max(0, $existing - $ownedRemaining),
+                    'group_available' => false,
+                ];
+            }
+
+            foreach ($this->groupMissingPartsIntoRanges($claimedParts) as $range) {
+                // Renew before every provider round-trip. If any row is no
+                // longer ours, stop the stale pass; all following mutations
+                // are additionally fenced by token and unexpired lease.
+                $existingBeforeRange = $this->missedPartHandler->countExistingIds(
+                    $cohortIds,
+                    (int) $groupArr['id'],
+                );
+                if ($this->missedPartHandler->renewClaimedParts(
+                    $cohortIds,
+                    $claimToken,
+                    now()->addSeconds(max(90, $leaseSeconds)),
+                ) !== $existingBeforeRange) {
+                    break;
+                }
+                foreach ($range['partlist'] as $number) {
+                    $id = $this->partRepairClaimIdsByNumber[(string) $number] ?? null;
+                    if ($id !== null) {
+                        $processedIds[] = $id;
+                    }
+                }
+                $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+            }
+
+            $existing = $this->missedPartHandler->countExistingIds($cohortIds, (int) $groupArr['id']);
+            $ownedRemaining = $this->missedPartHandler->countExistingClaimedIds($cohortIds, $claimToken);
+            $ownershipLost = max(0, $existing - $ownedRemaining);
+            $deferredIds = array_values(array_filter(array_map(
+                fn (int $number): ?int => $this->partRepairClaimIdsByNumber[(string) $number] ?? null,
+                array_keys($this->partRepairDeferredBodyNumbers),
+            )));
+            $processedIds = array_values(array_unique($processedIds));
+            $unprocessedIds = array_values(array_diff($cohortIds, $processedIds));
+            $deferredCandidates = array_values(array_unique([...$deferredIds, ...$unprocessedIds]));
+            $deferredCount = $this->missedPartHandler->countExistingClaimedIds($deferredCandidates, $claimToken);
+            $attemptedIds = array_values(array_diff($processedIds, $deferredIds));
+            $this->missedPartHandler->incrementClaimedAttempts($attemptedIds, $claimToken);
+            $this->missedPartHandler->deferClaimedParts(
+                $deferredCandidates,
+                $claimToken,
+                now()->addSeconds(max(1, $deferSeconds)),
+            );
+            $this->missedPartHandler->releaseClaimedParts($attemptedIds, $claimToken);
+
+            return [
+                'claimed' => count($cohortIds),
+                'repaired' => count($cohortIds) - $existing,
+                'deferred' => $deferredCount,
+                'failed' => max(0, $ownedRemaining - $deferredCount),
+                'ownership_lost' => $ownershipLost,
+                'group_available' => true,
+            ];
+        } catch (\Throwable $error) {
+            $this->missedPartHandler->releaseClaimedParts($cohortIds, $claimToken);
+            throw $error;
+        } finally {
+            $this->partRepairClaimToken = null;
+            $this->partRepairClaimIdsByNumber = [];
+            $this->partRepairBodyProbeStartedAt = null;
+            $this->partRepairBodyProbesRemaining = null;
+            $this->partRepairForcedBodyNumbers = [];
+        }
     }
 
     /**
@@ -584,10 +840,23 @@ class BinariesService
      */
     public function postdate(int|string $post, array $groupData): int
     {
+        return $this->postdateOrNull($post, $groupData) ?? time();
+    }
+
+    /**
+     * Return a sane provider-backed timestamp, or null when bounded lookup finds no evidence.
+     *
+     * @param  int|string  $post  The article number to get the time from.
+     * @param  array<string, mixed>  $groupData  Usenet group info from NNTP selectGroup method.
+     *
+     * @throws \Exception
+     */
+    public function postdateOrNull(int|string $post, array $groupData): ?int
+    {
         $nntp = $this->getNntp();
         $currentPost = (int) $post;
         $attempts = 0;
-        $date = 0;
+        $timestamp = null;
 
         do {
             // Try to get the article date locally first.
@@ -611,15 +880,19 @@ class BinariesService
             );
 
             if (! empty($local)) {
-                $date = $local[0]->date;
-                break;
+                $timestamp = NntpArticleDate::timestamp($local[0]->date);
+                if ($timestamp !== null) {
+                    break;
+                }
             }
 
             // Try usenet
             $header = $nntp->getXOVER((string) $currentPost);
-            if (! NNTPService::isError($header) && isset($header[0]['Date']) && $header[0]['Date'] !== '') {
-                $date = $header[0]['Date'];
-                break;
+            if (! NNTPService::isError($header)) {
+                $timestamp = NntpArticleDate::timestamp($header[0]['Date'] ?? null);
+                if ($timestamp !== null) {
+                    break;
+                }
             }
 
             // Try a different article number
@@ -629,13 +902,7 @@ class BinariesService
             }
         } while ($attempts++ <= 20);
 
-        if (! $date) {
-            return time();
-        }
-
-        $timestamp = strtotime($date);
-
-        return $timestamp !== false ? $timestamp : time();
+        return $timestamp;
     }
 
     /**
@@ -838,10 +1105,9 @@ class BinariesService
             // New group - update first record
             if ($groupMySQL['first_record_postdate'] === null && (int) $groupMySQL['first_record'] === 0) {
                 $groupMySQL['first_record'] = $scanSummary['firstArticleNumber'];
-                $firstArticleTimestamp = isset($scanSummary['firstArticleDate'])
-                    ? strtotime($scanSummary['firstArticleDate'])
-                    : $this->postdate($groupMySQL['first_record'], $groupNNTP);
-                $groupMySQL['first_record_postdate'] = $firstArticleTimestamp !== false ? $firstArticleTimestamp : time();
+                $firstArticleTimestamp = NntpArticleDate::timestamp($scanSummary['firstArticleDate'] ?? null)
+                    ?? $this->postdate($groupMySQL['first_record'], $groupNNTP);
+                $groupMySQL['first_record_postdate'] = $firstArticleTimestamp;
 
                 UsenetGroup::query()->where('id', $groupMySQL['id'])->update([
                     'first_record' => $scanSummary['firstArticleNumber'],
@@ -849,10 +1115,8 @@ class BinariesService
                 ]);
             }
 
-            $lastArticleTimestamp = isset($scanSummary['lastArticleDate'])
-                ? strtotime($scanSummary['lastArticleDate'])
-                : $this->postdate($scanSummary['lastArticleNumber'], $groupNNTP);
-            $lastArticleDate = $lastArticleTimestamp !== false ? $lastArticleTimestamp : time();
+            $lastArticleDate = NntpArticleDate::timestamp($scanSummary['lastArticleDate'] ?? null)
+                ?? $this->postdate($scanSummary['lastArticleNumber'], $groupNNTP);
 
             UsenetGroup::query()
                 ->where('id', $groupMySQL['id'])
@@ -971,6 +1235,7 @@ class BinariesService
                 ' received='.\count($this->headersReceived).
                 ' not_yenc='.$this->notYEnc.
                 ' blacklisted='.$this->headersBlackListed.
+                ' invalid_date='.$this->invalidDate.
                 ' sample='.implode(',', $sample),
                 __FUNCTION__,
                 'warning'
@@ -1162,7 +1427,8 @@ class BinariesService
         cli()->primary(
             'Received '.\count($this->headersReceived).
             ' articles of '.number_format($this->last - $this->first + 1).' requested, '.
-            $this->headersBlackListed.' blacklisted, '.$this->notYEnc.' not yEnc.'
+            $this->headersBlackListed.' blacklisted, '.$this->notYEnc.' not yEnc, '.
+            $this->invalidDate.' invalid date.'
         );
 
         if ($this->bodyPreambleStats !== []) {

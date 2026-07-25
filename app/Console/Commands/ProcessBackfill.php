@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Distributed\BackfillExecutionGuard;
 use App\Services\ForkingService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -40,6 +41,7 @@ class ProcessBackfill extends Command
         }
 
         try {
+            (new BackfillExecutionGuard)->assertLegacyCommandAllowed('multiprocessing:backfill');
             (new ForkingService)->backfill($options); // @phpstan-ignore argument.type
 
             return self::SUCCESS;

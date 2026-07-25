@@ -1,0 +1,398 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Unit\Orchestrator;
+
+use App\Models\Settings;
+use App\Services\Distributed\DistributedJobCatalog;
+use App\Services\Orchestrator\ControlDecision;
+use App\Services\Orchestrator\ControlProfile;
+use App\Services\Orchestrator\ControlState;
+use App\Services\Orchestrator\FailSafeCause;
+use App\Services\Orchestrator\WorkerControlProfile;
+use App\Services\Orchestrator\WorkerProfileApplier;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Tests\TestCase;
+
+final class WorkerProfileApplierTest extends TestCase
+{
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        config([
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+            'database.connections.sqlite.foreign_key_constraints' => true,
+        ]);
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        Schema::create('current_forward_windows', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('generation')->nullable()->unique();
+            $table->string('state', 32);
+        });
+        Settings::query()->insert([
+            ['name' => 'orchestrator_generation', 'value' => '4'],
+            ['name' => 'orchestrator_bf_permit', 'value' => '3'],
+            ['name' => 'orchestrator_bf_claimed', 'value' => '0'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '4'],
+        ]);
+    }
+
+    public function test_it_atomically_advances_generation_and_applies_the_selected_profile(): void
+    {
+        $generation = (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::Balanced, true),
+            1_000,
+            true,
+            'alt.test',
+        );
+
+        self::assertSame(5, $generation);
+        self::assertSame(1, Settings::settingValue('orchestrator_recovery_ok'));
+        self::assertSame([
+            'orchestrator_generation' => 5,
+            'orchestrator_bf_permit' => 5,
+            'orchestrator_bf_claimed' => 0,
+            'orchestrator_bf_completed' => 0,
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => 1_600,
+            'orchestrator_bins_timer' => 40,
+            'orchestrator_back_timer' => 900,
+            'orchestrator_rel_timer' => 60,
+            'orchestrator_nzb_timer' => 55,
+            'orchestrator_nzb_limit' => 20,
+            'orchestrator_bf_paused' => 0,
+            'orchestrator_bf_group' => 'alt.test',
+            'orchestrator_bf_qty' => 10_000,
+            'backfill_groups' => 1,
+            'backfillthreads' => 1,
+            'backfill_qty' => 10_000,
+        ], Settings::query()->pluck('value', 'name')->only([
+            'orchestrator_generation',
+            'orchestrator_bf_permit',
+            'orchestrator_bf_claimed',
+            'orchestrator_bf_completed',
+            'orchestrator_mode',
+            'orchestrator_lease_until',
+            'orchestrator_bins_timer',
+            'orchestrator_back_timer',
+            'orchestrator_rel_timer',
+            'orchestrator_nzb_timer',
+            'orchestrator_nzb_limit',
+            'orchestrator_bf_paused',
+            'backfill_groups',
+            'backfillthreads',
+            'backfill_qty',
+            'orchestrator_bf_group',
+            'orchestrator_bf_qty',
+        ])->toArray());
+    }
+
+    public function test_persisted_nzb_control_matches_the_effective_worker_plan(): void
+    {
+        $profile = new WorkerControlProfile(
+            profile: ControlProfile::Fill,
+            binariesSleepSeconds: 60,
+            backfillSleepSeconds: 60,
+            releasesSleepSeconds: 20,
+            nzbSleepSeconds: 60,
+            nzbBatchSize: 5,
+            backfillEnabled: true,
+            backfillGroups: 1,
+            backfillThreads: 1,
+            backfillQuantity: 10_000,
+        );
+        $decision = new ControlDecision(
+            profile: $profile,
+            backfillPermitted: false,
+            reasons: ['adaptive_nzb_idle'],
+            nextState: new ControlState(profile: ControlProfile::Fill),
+            transitioned: false,
+        );
+
+        (new WorkerProfileApplier)->apply($decision, time(), false);
+        $settings = Settings::query()->pluck('value', 'name')->all();
+        $plan = (new DistributedJobCatalog)->resolve('nzb-backlog', [
+            'settings' => $settings,
+            'constants' => ['sequential' => 0],
+        ]);
+
+        self::assertSame(60, $plan['sleep']);
+        self::assertSame(5, $plan['commands'][0]['arguments']['--limit'] ?? null);
+        self::assertSame(5, Settings::settingValue('orchestrator_nzb_limit'));
+        self::assertSame(60, Settings::settingValue('orchestrator_back_timer'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+    }
+
+    public function test_attribution_poll_timer_is_applied_without_admitting_backfill(): void
+    {
+        $profile = new WorkerControlProfile(
+            profile: ControlProfile::Fill,
+            binariesSleepSeconds: 60,
+            backfillSleepSeconds: 20,
+            releasesSleepSeconds: 20,
+            nzbSleepSeconds: 60,
+            nzbBatchSize: 5,
+            backfillEnabled: true,
+            backfillGroups: 1,
+            backfillThreads: 1,
+            backfillQuantity: 10_000,
+        );
+        $decision = new ControlDecision(
+            profile: $profile,
+            backfillPermitted: false,
+            reasons: ['adaptive_backfill_attribution'],
+            nextState: new ControlState(profile: ControlProfile::Fill),
+            transitioned: false,
+        );
+
+        (new WorkerProfileApplier)->apply($decision, time(), false);
+
+        self::assertSame(20, Settings::settingValue('orchestrator_back_timer'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+    }
+
+    public function test_fail_safe_denies_recovery_without_an_explicit_high_pressure_admission(): void
+    {
+        (new WorkerProfileApplier)->apply($this->decision(ControlProfile::FailSafe, false), 1_000, false);
+
+        self::assertSame(0, Settings::settingValue('orchestrator_recovery_ok'));
+        self::assertSame(300, Settings::settingValue('orchestrator_bins_timer'));
+    }
+
+    public function test_safe_high_pressure_recovery_uses_the_measured_recovery_timer(): void
+    {
+        (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::FailSafe, false, ['high_pressure_sample'], FailSafeCause::Telemetry),
+            1_000,
+            false,
+        );
+
+        self::assertSame(1, Settings::settingValue('orchestrator_recovery_ok'));
+        self::assertSame(115, Settings::settingValue('orchestrator_bins_timer'));
+    }
+
+    public function test_safe_draining_pipeline_uses_the_accelerated_recovery_timer(): void
+    {
+        (new WorkerProfileApplier)->apply(
+            $this->decision(
+                ControlProfile::FailSafe,
+                false,
+                ['high_pressure_sample', 'core_pipeline_draining'],
+                FailSafeCause::Telemetry,
+            ),
+            1_000,
+            false,
+        );
+
+        self::assertSame(1, Settings::settingValue('orchestrator_recovery_ok'));
+        self::assertSame(20, Settings::settingValue('orchestrator_bins_timer'));
+    }
+
+    public function test_hard_or_unknown_fail_safe_cannot_use_the_recovery_lane_before_cooldown(): void
+    {
+        foreach ([FailSafeCause::Hard, FailSafeCause::Unknown] as $cause) {
+            $decision = $this->decision(
+                ControlProfile::FailSafe,
+                false,
+                ['high_pressure_sample', 'core_pipeline_draining'],
+                $cause,
+                2_000,
+            );
+            (new WorkerProfileApplier)->apply(
+                $decision,
+                1_000,
+                false,
+            );
+
+            self::assertSame(0, Settings::settingValue('orchestrator_recovery_ok'));
+            self::assertSame(300, Settings::settingValue('orchestrator_bins_timer'));
+        }
+    }
+
+    public function test_hard_or_unknown_fail_safe_uses_bounded_recovery_after_cooldown(): void
+    {
+        foreach ([FailSafeCause::Hard, FailSafeCause::Unknown] as $cause) {
+            $decision = $this->decision(ControlProfile::FailSafe, false, ['high_pressure_sample'], $cause, 900);
+            (new WorkerProfileApplier)->apply($decision, 1_000, false);
+
+            self::assertSame(1, Settings::settingValue('orchestrator_recovery_ok'));
+            self::assertSame(115, Settings::settingValue('orchestrator_bins_timer'));
+        }
+    }
+
+    public function test_it_preserves_an_unconsumed_permit_without_an_explicit_grant(): void
+    {
+        (new WorkerProfileApplier)->apply($this->decision(ControlProfile::Fill, true), 1_000, false);
+
+        self::assertSame(3, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(5, Settings::settingValue('orchestrator_generation'));
+    }
+
+    public function test_it_pins_scaled_quantity_to_the_granted_permit_and_preserves_it_without_a_new_grant(): void
+    {
+        $applier = new WorkerProfileApplier;
+        $applier->apply($this->decision(ControlProfile::Fill, true), 1_000, true, 'alt.proven', false, 200_000);
+
+        self::assertSame(200_000, Settings::settingValue('orchestrator_bf_qty'));
+        self::assertSame('alt.proven', Settings::settingValue('orchestrator_bf_group'));
+
+        $applier->apply($this->decision(ControlProfile::Fill, true), 1_001, false, 'alt.probe');
+
+        self::assertSame(200_000, Settings::settingValue('orchestrator_bf_qty'));
+        self::assertSame('alt.proven', Settings::settingValue('orchestrator_bf_group'));
+    }
+
+    public function test_it_pins_the_audited_stop_cursor_with_the_permit(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.proven:60000');
+        $applier = new WorkerProfileApplier;
+
+        $applier->apply($this->decision(ControlProfile::Fill, true), 1_000, true, 'alt.proven', false, 10_000);
+
+        self::assertSame(60_000, Settings::settingValue('orchestrator_bf_stop'));
+    }
+
+    public function test_it_revokes_the_permit_when_the_policy_closes_the_backfill_gate(): void
+    {
+        (new WorkerProfileApplier)->apply($this->decision(ControlProfile::Drain, false), 1_000, true);
+
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
+        self::assertSame(5, Settings::settingValue('orchestrator_generation'));
+    }
+
+    public function test_it_refuses_to_publish_backfill_while_current_forward_is_unsettled(): void
+    {
+        DB::table('current_forward_windows')->insert([
+            'generation' => 42,
+            'state' => 'INGESTED',
+        ]);
+
+        (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::Fill, true),
+            1_000,
+            true,
+            'alt.test',
+        );
+
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
+    }
+
+    public function test_quality_lock_disables_only_the_named_source_and_preserves_its_cursor(): void
+    {
+        Schema::create('usenet_groups', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name')->unique();
+            $table->boolean('backfill');
+            $table->unsignedBigInteger('first_record');
+        });
+        DB::table('usenet_groups')->insert([
+            ['name' => 'alt.console', 'backfill' => 1, 'first_record' => 47_973_297],
+            ['name' => 'alt.movie', 'backfill' => 1, 'first_record' => 12_345],
+        ]);
+
+        (new WorkerProfileApplier)->qualityLockBackfillTarget('alt.console');
+
+        self::assertSame([
+            'backfill' => 0,
+            'first_record' => 47_973_297,
+        ], (array) DB::table('usenet_groups')->where('name', 'alt.console')->first(['backfill', 'first_record']));
+        self::assertSame(1, DB::table('usenet_groups')->where('name', 'alt.movie')->value('backfill'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame('backfill_permit_wrong_category', Settings::settingValue('orchestrator_bf_quality'));
+    }
+
+    public function test_quality_lock_does_not_disable_configured_probe_groups(): void
+    {
+        Schema::create('usenet_groups', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name')->unique();
+            $table->boolean('backfill');
+            $table->unsignedBigInteger('first_record');
+        });
+        DB::table('usenet_groups')->insert([
+            ['name' => 'alt.binaries.movies.dvd', 'backfill' => 1, 'first_record' => 64_923_468],
+            ['name' => 'alt.console', 'backfill' => 1, 'first_record' => 12_345],
+        ]);
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['alt.binaries.movies.dvd']);
+
+        (new WorkerProfileApplier)->qualityLockBackfillTarget('alt.binaries.movies.dvd');
+
+        // Probe group keeps backfill enabled (so it stays in short_groups and
+        // remains a backfill candidate) even though its cohort failed quality.
+        self::assertSame(1, DB::table('usenet_groups')->where('name', 'alt.binaries.movies.dvd')->value('backfill'));
+        // But the current permit is still paused + the reason recorded, so the
+        // orchestrator advances past the bad cohort instead of re-picking it.
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
+        self::assertSame('backfill_permit_wrong_category', Settings::settingValue('orchestrator_bf_quality'));
+        // Non-probe groups are still hard-disabled by the quality lock.
+        (new WorkerProfileApplier)->qualityLockBackfillTarget('alt.console');
+        self::assertSame(0, DB::table('usenet_groups')->where('name', 'alt.console')->value('backfill'));
+    }
+
+    public function test_it_preserves_an_unclaimed_permit_during_the_claim_grace_period(): void
+    {
+        Settings::query()->insert([
+            ['name' => 'orchestrator_bf_paused', 'value' => '0'],
+            ['name' => 'orchestrator_bf_group', 'value' => 'alt.test'],
+        ]);
+
+        (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::Fill, false),
+            1_000,
+            false,
+            null,
+            true,
+        );
+
+        self::assertSame(3, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_paused'));
+        self::assertSame('alt.test', Settings::settingValue('orchestrator_bf_group'));
+    }
+
+    public function test_all_managed_setting_names_fit_the_live_varchar_25_schema(): void
+    {
+        (new WorkerProfileApplier)->apply($this->decision(ControlProfile::Balanced, true), 1_000, true, 'alt.test');
+
+        $names = Settings::query()->pluck('name')->all();
+
+        self::assertNotEmpty($names);
+        foreach ($names as $name) {
+            self::assertLessThanOrEqual(25, strlen((string) $name), (string) $name);
+        }
+    }
+
+    /** @param list<string> $reasons */
+    private function decision(
+        ControlProfile $profile,
+        bool $backfillPermitted,
+        array $reasons = ['test'],
+        ?FailSafeCause $failSafeCause = null,
+        int $cooldownUntil = 0,
+    ): ControlDecision {
+        return new ControlDecision(
+            profile: WorkerControlProfile::for($profile),
+            backfillPermitted: $backfillPermitted,
+            reasons: $reasons,
+            nextState: new ControlState(
+                profile: $profile,
+                cooldownUntil: $cooldownUntil,
+                failSafeCause: $failSafeCause,
+            ),
+            transitioned: false,
+        );
+    }
+}

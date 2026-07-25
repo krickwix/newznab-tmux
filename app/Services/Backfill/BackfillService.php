@@ -6,6 +6,8 @@ namespace App\Services\Backfill;
 
 use App\Models\UsenetGroup;
 use App\Services\Binaries\BinariesService;
+use App\Services\Distributed\BackfillExecutionGuard;
+use App\Services\NNTP\NntpArticleDate;
 use App\Services\NNTP\NNTPService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -50,6 +52,7 @@ final class BackfillService
      */
     public function backfillAllGroups(string $groupName = '', int|string $articles = '', string $type = ''): void
     {
+        (new BackfillExecutionGuard)->assertLegacyCommandAllowed('BackfillService::backfillAllGroups');
         $groups = $this->getGroupsToBackfill($groupName, $type);
 
         if ($groups === []) {
@@ -83,6 +86,7 @@ final class BackfillService
      */
     public function backfillGroup(array $groupArr, int $remainingGroups, int|string $articles = ''): void
     {
+        (new BackfillExecutionGuard)->assertLegacyCommandAllowed('BackfillService::backfillGroup');
         $startTime = now();
         $this->binaries->logIndexerStart();
 
@@ -295,14 +299,24 @@ final class BackfillService
      */
     private function updateGroupRecord(array $groupArr, int $first, ?array $scanResult): void
     {
-        $newDate = isset($scanResult['firstArticleDate'])
-            ? strtotime($scanResult['firstArticleDate'])
-            : $this->binaries->postdate($first, $this->nntp->selectGroup($groupArr['name']));
+        $newDate = NntpArticleDate::timestamp($scanResult['firstArticleDate'] ?? null);
 
-        DB::update(
-            'UPDATE usenet_groups SET first_record_postdate = FROM_UNIXTIME(?), first_record = ?, last_updated = NOW() WHERE id = ?',
-            [$newDate, $first, $groupArr['id']]
-        );
+        if ($newDate === null) {
+            $groupData = $this->nntp->selectGroup($groupArr['name']);
+            if (! NNTPService::isError($groupData) && is_array($groupData)) {
+                $newDate = $this->binaries->postdateOrNull($first, $groupData);
+            }
+        }
+
+        $updates = [
+            'first_record' => $first,
+            'last_updated' => now(),
+        ];
+        if ($newDate !== null) {
+            $updates['first_record_postdate'] = Carbon::createFromTimestamp($newDate, date_default_timezone_get());
+        }
+
+        DB::table('usenet_groups')->where('id', $groupArr['id'])->update($updates);
     }
 
     /**

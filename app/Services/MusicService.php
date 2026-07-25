@@ -168,7 +168,7 @@ class MusicService
         $releaseBrowseService = new ReleaseBrowseService;
         $showPasswords = $releaseBrowseService->showPasswords();
 
-        $baseWhere = "m.title != '' AND m.cover = 1 "
+        $baseWhere = "m.title != '' "
             ."AND r.passwordstatus {$showPasswords} "
             .$browseby.' '
             .$musicInClause.' '

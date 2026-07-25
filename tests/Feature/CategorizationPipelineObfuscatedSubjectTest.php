@@ -31,6 +31,7 @@ final class CategorizationPipelineObfuscatedSubjectTest extends TestCase
             ['id' => 2, 'name' => 'alt.binaries.blu-ray'],
             ['id' => 3, 'name' => 'alt.binaries.dvd.classics'],
             ['id' => 4, 'name' => 'alt.binaries.sounds.lossless'],
+            ['id' => 5, 'name' => 'alt.binaries.documentaries'],
         ]);
     }
 
@@ -140,5 +141,19 @@ final class CategorizationPipelineObfuscatedSubjectTest extends TestCase
 
         $this->assertSame(Category::PC_0DAY, $result['categories_id']);
         $this->assertFalse($result['debug']['locked_to_misc']);
+    }
+
+    public function test_compact_scene_tv_subject_is_unwrapped_without_a_base64_lock(): void
+    {
+        $result = app(CategorizationService::class)->determineCategory(
+            5,
+            '[01/11] - "afo-theotherbennetsister-0105-720-web.mkv" yEnc',
+            '',
+            true,
+        );
+
+        $this->assertSame(Category::TV_WEBDL, $result['categories_id']);
+        $this->assertFalse($result['debug']['locked_to_misc']);
+        $this->assertSame('tv_compact_scene_episode_web', $result['debug']['matched_by']);
     }
 }

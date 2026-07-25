@@ -95,6 +95,59 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(1, $this->countValueTuplesForTable($queries, 'parts'));
     }
 
+    public function test_part_handler_sorts_pending_inserts_by_composite_primary_key(): void
+    {
+        $handler = new PartHandler(100);
+        $this->assertTrue($handler->addPart(9, $this->parsedHeader(300, 1)));
+        $this->assertTrue($handler->addPart(2, $this->parsedHeader(700, 1)));
+        $this->assertTrue($handler->addPart(2, $this->parsedHeader(100, 2)));
+
+        DB::shouldReceive('getDriverName')->once()->andReturn('mysql');
+        DB::shouldReceive('affectingStatement')
+            ->once()
+            ->with(
+                'INSERT IGNORE INTO parts (binaries_id, number, messageid, partnumber, size) VALUES (?,?,?,?,?),(?,?,?,?,?),(?,?,?,?,?)',
+                [
+                    2, 100, '<msg100@example.com>', 2, 100,
+                    2, 700, '<msg700@example.com>', 1, 100,
+                    9, 300, '<msg300@example.com>', 1, 100,
+                ]
+            )
+            ->andReturn(3);
+
+        $this->assertTrue($handler->flush());
+        $this->assertSame([300, 700, 100], $handler->getInsertedNumbers());
+    }
+
+    public function test_part_handler_caps_each_insert_statement_at_one_hundred_rows(): void
+    {
+        DB::statement('CREATE TABLE parts (
+            binaries_id INT,
+            number INT,
+            messageid VARCHAR(255),
+            partnumber INT,
+            size INT,
+            UNIQUE(binaries_id, number)
+        )');
+
+        $handler = new PartHandler(5000);
+        for ($number = 201; $number >= 1; $number--) {
+            $this->assertTrue($handler->addPart(1, $this->parsedHeader($number, 1)));
+        }
+
+        $queries = $this->captureQueries(fn (): bool => $handler->flush());
+        $partInserts = array_values(array_filter(
+            $queries,
+            static fn (string $sql): bool => str_contains($sql, 'INSERT OR IGNORE INTO parts')
+        ));
+
+        $this->assertCount(3, $partInserts);
+        $this->assertSame([100, 100, 1], array_map(
+            static fn (string $sql): int => substr_count($sql, '(?,?,?,?,?)'),
+            $partInserts
+        ));
+    }
+
     public function test_binary_handler_flushes_cached_article_aggregate_updates(): void
     {
         DB::statement('CREATE TABLE binaries (
@@ -121,6 +174,114 @@ class BinariesStorageInternalsTest extends TestCase
         $binary = DB::table('binaries')->where('id', $binaryId)->first();
         $this->assertSame(2, (int) $binary->currentparts);
         $this->assertSame(150, (int) $binary->partsize);
+    }
+
+    public function test_binary_handler_prelocks_resolved_ids_in_primary_key_order_before_parts(): void
+    {
+        $handler = new BinaryHandler;
+
+        DB::shouldReceive('getDriverName')->once()->andReturn('mysql');
+        DB::shouldReceive('select')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FORCE INDEX (PRIMARY)')
+                    && str_contains($sql, 'ORDER BY id FOR UPDATE')),
+                [2, 9],
+            )
+            ->andReturn([(object) ['id' => 2], (object) ['id' => 9]]);
+
+        $handler->prelockForPartWrites([9, 2, 9]);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_binary_handler_prelocks_existing_ids_before_missing_binary_inserts(): void
+    {
+        $source = (string) file_get_contents(app_path('Services/Binaries/BinaryHandler.php'));
+        $method = strpos($source, 'private function bulkInsertAndResolve');
+        $prelock = strpos($source, '$this->prelockForPartWrites(array_values($idsByKey));', $method);
+        $insert = strpos($source, '$this->bulkInsertBinariesMysql($insertRows);', $method);
+
+        self::assertNotFalse($method);
+        self::assertNotFalse($prelock);
+        self::assertNotFalse($insert);
+        self::assertLessThan($insert, $prelock);
+    }
+
+    public function test_binary_handler_sorts_missing_inserts_by_stable_unique_key(): void
+    {
+        $handler = new BinaryHandler;
+        $method = new \ReflectionMethod($handler, 'sortBinaryInsertRows');
+        $rows = [
+            ['collections_id' => 2, 'filenumber' => 1, 'hash' => 'bbb'],
+            ['collections_id' => 1, 'filenumber' => 2, 'hash' => 'ccc'],
+            ['collections_id' => 1, 'filenumber' => 2, 'hash' => 'aaa'],
+        ];
+
+        $method->invokeArgs($handler, [&$rows]);
+
+        self::assertSame(['aaa', 'ccc', 'bbb'], array_column($rows, 'hash'));
+    }
+
+    public function test_header_storage_locks_and_updates_binaries_before_any_part_write(): void
+    {
+        $source = (string) file_get_contents(app_path('Services/Binaries/HeaderStorageService.php'));
+        $method = strpos($source, 'private function processHeaderChunk');
+        $resolve = strpos($source, '$this->binaryHandler->getOrCreateBinaries', $method);
+        $aggregate = strpos($source, '$this->binaryHandler->flushUpdates', $resolve);
+        $part = strpos($source, '$this->partHandler->addPart', $resolve);
+
+        self::assertNotFalse($method);
+        self::assertNotFalse($resolve);
+        self::assertNotFalse($aggregate);
+        self::assertNotFalse($part);
+        self::assertLessThan($aggregate, $resolve);
+        self::assertLessThan($part, $aggregate);
+    }
+
+    public function test_binary_part_existence_check_uses_plain_read_under_read_committed(): void
+    {
+        $handler = new BinaryHandler;
+        $method = new \ReflectionMethod($handler, 'existingPartKeysForResolvedRows');
+
+        DB::shouldReceive('select')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FROM parts')
+                    && ! str_contains($sql, 'FOR UPDATE')),
+                [7, 100],
+            )
+            ->andReturn([(object) ['binaries_id' => 7, 'number' => 100]]);
+
+        $existing = $method->invoke($handler, [
+            'article' => [
+                'hash' => 'abc',
+                'collections_id' => 1,
+                'filenumber' => 1,
+                'number' => 100,
+            ],
+        ], ['abc:hash:1' => 7]);
+
+        self::assertSame(['7:100' => true], $existing);
+    }
+
+    public function test_header_storage_transaction_uses_read_committed_on_mariadb(): void
+    {
+        $transaction = new HeaderStorageTransaction(
+            new CollectionHandler,
+            new BinaryHandler,
+            new PartHandler
+        );
+
+        DB::shouldReceive('getDriverName')->once()->andReturn('mariadb');
+        DB::shouldReceive('statement')
+            ->once()
+            ->with('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+            ->andReturnTrue();
+        DB::shouldReceive('beginTransaction')->once();
+
+        $transaction->begin();
+        $this->assertFalse($transaction->hasErrors());
     }
 
     public function test_sqlite_rollback_cleanup_keeps_unrelated_parts_with_same_article_number(): void
@@ -415,6 +576,115 @@ class BinariesStorageInternalsTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
+    public function test_collection_xref_updates_prelock_global_primary_key_order(): void
+    {
+        $handler = $this->deterministicCollectionHandler();
+        $method = new \ReflectionMethod($handler, 'bulkInsertCollectionsMysql');
+        $ids = new \ReflectionProperty($handler, 'existingIdsByHash');
+        $ids->setValue($handler, ['aaa' => 1, 'bbb' => 2]);
+
+        DB::shouldReceive('select')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FORCE INDEX (PRIMARY)')
+                    && str_contains($sql, 'SELECT id, xref')
+                    && str_contains($sql, 'ORDER BY id FOR UPDATE')),
+                [1, 2],
+            )
+            ->andReturn([(object) ['id' => 1, 'xref' => ''], (object) ['id' => 2, 'xref' => '']]);
+
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(Mockery::on(static fn (string $sql): bool => str_contains($sql, 'u.id = c.id')), [1, 'alt.binaries.a:1', 2, 'alt.binaries.b:2', "\n"])
+            ->andReturn(true);
+
+        $method->invoke($handler, [], ['aaa' => true, 'bbb' => true], [
+            'second' => ['collectionhash' => 'bbb', 'xref_append' => 'alt.binaries.b:2'],
+            'first' => ['collectionhash' => 'aaa', 'xref_append' => 'alt.binaries.a:1'],
+        ]);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_collection_xref_update_revalidates_missing_group_after_lock(): void
+    {
+        $handler = $this->deterministicCollectionHandler();
+        $method = new \ReflectionMethod($handler, 'bulkInsertCollectionsMysql');
+        $ids = new \ReflectionProperty($handler, 'existingIdsByHash');
+        $ids->setValue($handler, ['aaa' => 1]);
+
+        DB::shouldReceive('select')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FORCE INDEX (PRIMARY)')
+                    && str_contains($sql, 'ORDER BY id FOR UPDATE')),
+                [1],
+            )
+            ->andReturn([(object) ['id' => 1, 'xref' => 'alt.binaries.foo:100']]);
+
+        DB::shouldReceive('statement')->never();
+
+        $method->invoke($handler, [], ['aaa' => true], [
+            'first' => ['collectionhash' => 'aaa', 'xref_append' => 'alt.binaries.foo:900'],
+        ]);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_collection_xref_update_keeps_only_groups_still_missing_after_lock(): void
+    {
+        $handler = $this->deterministicCollectionHandler();
+        $method = new \ReflectionMethod($handler, 'bulkInsertCollectionsMysql');
+        $ids = new \ReflectionProperty($handler, 'existingIdsByHash');
+        $ids->setValue($handler, ['aaa' => 1]);
+
+        DB::shouldReceive('select')
+            ->once()
+            ->with(Mockery::type('string'), [1])
+            ->andReturn([(object) ['id' => 1, 'xref' => 'alt.binaries.foo:100']]);
+
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'u.id = c.id')),
+                [1, 'alt.binaries.bar:200', "\n"],
+            )
+            ->andReturn(true);
+
+        $method->invoke($handler, [], ['aaa' => true], [
+            'first' => [
+                'collectionhash' => 'aaa',
+                'xref_append' => 'alt.binaries.foo:900 alt.binaries.bar:200',
+            ],
+        ]);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_existing_collections_take_shared_parent_locks_without_xref_updates(): void
+    {
+        $handler = $this->deterministicCollectionHandler();
+        $method = new \ReflectionMethod($handler, 'bulkInsertCollectionsMysql');
+        $ids = new \ReflectionProperty($handler, 'existingIdsByHash');
+        $ids->setValue($handler, ['aaa' => 1]);
+
+        DB::shouldReceive('select')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, 'LOCK IN SHARE MODE')
+                    && str_contains($sql, 'ORDER BY id')),
+                [1],
+            )
+            ->andReturn([(object) ['id' => 1, 'xref' => 'alt.binaries.foo:100']]);
+        DB::shouldReceive('statement')->never();
+
+        $method->invoke($handler, [], ['aaa' => true], [
+            'first' => ['collectionhash' => 'aaa', 'xref_append' => ''],
+        ]);
+
+        $this->addToAssertionCount(1);
+    }
+
     public function test_binary_handler_logs_bulk_insert_failures_when_debug_is_disabled(): void
     {
         config(['app.debug' => false]);
@@ -471,6 +741,31 @@ class BinariesStorageInternalsTest extends TestCase
         $method->invoke($handler, [[
             'hash' => md5('retry-binary'),
             'name' => 'Retry.Binary',
+            'collections_id' => 1,
+            'totalparts' => 2,
+            'filenumber' => 1,
+            'partsize' => 100,
+        ]]);
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function test_binary_bulk_insert_initializes_aggregates_at_zero(): void
+    {
+        $handler = new BinaryHandler;
+        $method = new \ReflectionMethod($handler, 'bulkInsertBinariesMysql');
+
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_contains($sql, '(UNHEX(?), ?, ?, ?, 0, ?, 0)')),
+                Mockery::type('array'),
+            )
+            ->andReturn(true);
+
+        $method->invoke($handler, [[
+            'hash' => md5('zero-binary'),
+            'name' => 'Zero.Binary',
             'collections_id' => 1,
             'totalparts' => 2,
             'filenumber' => 1,
@@ -585,6 +880,73 @@ class BinariesStorageInternalsTest extends TestCase
         $this->assertSame(1, DB::table('parts')->count());
         $this->assertSame(1, (int) $binary->currentparts);
         $this->assertSame(125, (int) $binary->partsize);
+    }
+
+    public function test_current_forward_lineage_counts_only_new_parts_across_replay(): void
+    {
+        $this->createHeaderStorageTables();
+        $this->createCurrentForwardLineageTables();
+        config()->set('nntmux.orchestrator.current_forward_continuation_enabled', true);
+        DB::table('current_forward_windows')->insert([
+            'id' => 1,
+            'generation' => 42,
+            'state' => 'CLAIMED',
+            'chain_root_id' => 1,
+            'chain_ordinal' => 1,
+        ]);
+        $service = new HeaderStorageService(
+            $this->deterministicCollectionHandler(),
+            config: new BinariesConfig(partsChunkSize: 10),
+        );
+        $header = $this->parsedHeader(525, 1, 'Current.Forward.Replay', 125);
+
+        $this->assertSame([], $service->store([$header], ['id' => 1, 'name' => 'alt.test'], true, 42));
+        $this->assertSame([], $service->store([$header], ['id' => 1, 'name' => 'alt.test'], true, 42));
+
+        $this->assertSame(1, DB::table('parts')->count());
+        $this->assertSame(1, (int) DB::table('current_forward_window_objects')
+            ->where('object_type', 'BINARY')
+            ->sum('inserted_parts'));
+        $this->assertSame(1, DB::table('current_forward_window_objects')
+            ->where('object_type', 'COLLECTION')->count());
+        $this->assertSame(1, DB::table('current_forward_window_objects')
+            ->where('object_type', 'BINARY')->count());
+    }
+
+    public function test_current_forward_lineage_budget_breach_rolls_back_the_header_chunk(): void
+    {
+        $this->createHeaderStorageTables();
+        $this->createCurrentForwardLineageTables();
+        config([
+            'nntmux.orchestrator.current_forward_continuation_enabled' => true,
+            'nntmux.orchestrator.current_forward_continuation_max_parts' => 1,
+        ]);
+        DB::table('current_forward_windows')->insert([
+            'id' => 1,
+            'generation' => 42,
+            'state' => 'CLAIMED',
+            'chain_root_id' => 1,
+            'chain_ordinal' => 1,
+        ]);
+        $service = new HeaderStorageService(
+            $this->deterministicCollectionHandler(),
+            config: new BinariesConfig(partsChunkSize: 10),
+        );
+
+        try {
+            $service->store([
+                $this->parsedHeader(526, 1, 'Current.Forward.Budget', 125),
+                $this->parsedHeader(527, 2, 'Current.Forward.Budget', 175),
+            ], ['id' => 1, 'name' => 'alt.test'], true, 42);
+            $this->fail('The current-forward hard lineage budget was not enforced.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame('Current-forward continuation hard budget exceeded.', $exception->getMessage());
+        }
+
+        $this->assertSame(0, DB::table('collections')->count());
+        $this->assertSame(0, DB::table('binaries')->count());
+        $this->assertSame(0, DB::table('parts')->count());
+        $this->assertSame(0, DB::table('current_forward_window_objects')->count());
     }
 
     public function test_header_storage_does_not_increment_binary_counts_for_duplicate_multipart_replay(): void
@@ -911,6 +1273,50 @@ class BinariesStorageInternalsTest extends TestCase
             regex VARCHAR(255),
             status INT DEFAULT 1,
             ordinal INT DEFAULT 0
+        )');
+    }
+
+    private function createCurrentForwardLineageTables(): void
+    {
+        DB::statement('CREATE TABLE current_forward_windows (
+            id INTEGER PRIMARY KEY,
+            generation INT UNIQUE,
+            state VARCHAR(32),
+            chain_root_id INT,
+            parent_window_id INT NULL,
+            chain_ordinal INT,
+            continuation_deadline_at DATETIME NULL
+        )');
+        DB::statement('CREATE TABLE current_forward_window_objects (
+            id INTEGER PRIMARY KEY,
+            window_id INT,
+            chain_root_id INT,
+            object_type VARCHAR(16),
+            object_id INT,
+            parent_object_id INT NULL,
+            inserted_parts INT DEFAULT 0,
+            created_in_window INT DEFAULT 0,
+            touched_in_window INT DEFAULT 1,
+            created_at DATETIME NULL,
+            updated_at DATETIME NULL,
+            UNIQUE(window_id, object_type, object_id)
+        )');
+        DB::statement('CREATE TABLE current_forward_object_owners (
+            id INTEGER PRIMARY KEY,
+            object_type VARCHAR(16),
+            object_id INT,
+            chain_root_id INT,
+            created_at DATETIME NULL,
+            updated_at DATETIME NULL,
+            UNIQUE(object_type, object_id)
+        )');
+        DB::statement('CREATE TABLE current_forward_continuation_observations (
+            id INTEGER PRIMARY KEY,
+            window_id INT,
+            chain_root_id INT,
+            chain_ordinal INT,
+            created_at DATETIME NULL,
+            updated_at DATETIME NULL
         )');
     }
 

@@ -99,4 +99,54 @@ class ObfuscatedSubjectExtractorTest extends TestCase
 
         $this->assertSame('Landscape Garden Design Issue 2 2026', $result);
     }
+
+    #[Test]
+    public function it_deobfuscates_rot13_movie_subject(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        $result = $extractor->extract('Pneevr.Svfure.Jvfushy.Qevaxvat.7565.QIQE.AGFP.QIQ4.UOB [91/01] - "JVFUSHY_QEVAXVAT.cneg99.ene"');
+
+        $this->assertNotNull($result);
+        $this->assertStringContainsStringIgnoringCase('Carrie', $result);
+        $this->assertStringContainsStringIgnoringCase('Fisher', $result);
+        $this->assertStringContainsStringIgnoringCase('Wishful', $result);
+        $this->assertStringContainsStringIgnoringCase('Drinking', $result);
+        $this->assertStringContainsString('2010', $result);
+    }
+
+    #[Test]
+    public function it_deobfuscates_rot13_dvdr_subject(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        $result = $extractor->extract('Fgrcura.Tlyyraunny.Jngreynaq.6447.QIQE.AGFP.QIQ4 [99/01] - "JNGREYNAQ.iby556+57.cne7"');
+
+        $this->assertNotNull($result);
+        $this->assertStringContainsStringIgnoringCase('Waterland', $result);
+        $this->assertStringContainsString('1992', $result);
+    }
+
+    #[Test]
+    public function it_leaves_readable_name_untouched_by_rot13(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        $result = $extractor->extract('N:/NZB [2/5] - "History of War - Issue 158, 2026.rar"');
+
+        $this->assertSame('History of War - Issue 158, 2026', $result);
+    }
+
+    #[Test]
+    public function it_leaves_genuine_hashed_name_untouched_by_rot13(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        // Genuine hashed name: ROT13-decoding it yields no release signature,
+        // so the de-obfuscation step must NOT fire and the result must match
+        // the pre-existing extractor behaviour (base normalization only).
+        $result = $extractor->extract('eNwlv9GZIQBRrhBLimiQsVYa.rar');
+
+        $this->assertSame('eNwlv9GZIQBRrhBLimiQsVYa rar', $result);
+    }
 }

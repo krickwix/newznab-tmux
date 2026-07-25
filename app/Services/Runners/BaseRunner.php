@@ -67,8 +67,12 @@ abstract class BaseRunner
                 $group = $parts[2] ?? '';
                 $first = $parts[3] ?? '0';
                 $last = $parts[4] ?? '0';
+                $backfillGeneration = $parts[6] ?? '';
 
-                return PHP_BINARY.' artisan articles:get-range "'.$mode.'" "'.$group.'" '.$first.' '.$last;
+                return PHP_BINARY.' artisan articles:get-range "'.$mode.'" "'.$group.'" '.$first.' '.$last
+                    .($mode === 'backfill' && $backfillGeneration !== ''
+                        ? ' --backfill-generation='.$backfillGeneration
+                        : '');
 
             case 'part_repair':
                 // part_repair  {group}
@@ -256,11 +260,16 @@ abstract class BaseRunner
      * @param  int|null  $timeout  Timeout in seconds (null = use config default)
      * @return array<string|int, string> Command outputs keyed by the same identifiers
      */
-    protected function runParallelCommands(array $commands, int $maxProcesses, ?int $timeout = null): array
-    {
+    protected function runParallelCommands(
+        array $commands,
+        int $maxProcesses,
+        ?int $timeout = null,
+        bool $failOnError = false,
+    ): array {
         $maxProcesses = max(1, $maxProcesses);
         $timeout = $timeout ?? (int) config('nntmux.multiprocessing_max_child_time', 1800);
         $results = [];
+        $failures = [];
         $running = [];
         $queue = $commands;
 
@@ -293,6 +302,14 @@ abstract class BaseRunner
                     if ($err !== '') {
                         echo $err;
                     }
+                    if (! $proc->isSuccessful()) {
+                        $failures[] = sprintf(
+                            '%s (exit %s)%s',
+                            (string) $key,
+                            (string) ($proc->getExitCode() ?? 'unknown'),
+                            $err === '' ? '' : ': '.trim($err),
+                        );
+                    }
                     unset($running[$key]);
                     // Start next from queue if available
                     if (! empty($queue)) {
@@ -301,6 +318,10 @@ abstract class BaseRunner
                 }
             }
             usleep(50000); // 50ms
+        }
+
+        if ($failOnError && $failures !== []) {
+            throw new \RuntimeException('Managed child process failure: '.implode('; ', $failures));
         }
 
         return $results;

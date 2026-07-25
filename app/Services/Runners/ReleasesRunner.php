@@ -6,6 +6,7 @@ namespace App\Services\Runners;
 
 use App\Models\Settings;
 use App\Models\UsenetGroup;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Concurrency;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -14,22 +15,42 @@ class ReleasesRunner extends BaseRunner
 {
     public function releases(): void
     {
-        $groups = DB::select('SELECT id, name FROM usenet_groups WHERE (active = 1 OR backfill = 1)');
+        $rows = DB::select(
+            'SELECT g.id, g.name,
+                MAX(CASE
+                    WHEN c.filecheck IN (1, 2, 3, 15, 16) THEN 1
+                    WHEN c.filecheck = 0 AND c.dateadded >= (NOW() - INTERVAL 15 MINUTE) THEN 1
+                    ELSE 0
+                END) AS actionable,
+                MAX(CASE WHEN c.filecheck = 3 THEN 1 ELSE 0 END) AS ready
+            FROM usenet_groups g
+            INNER JOIN collections c ON c.groups_id = g.id
+            WHERE (g.active = 1 OR g.backfill = 1)
+            GROUP BY g.id, g.name
+            ORDER BY g.id'
+        );
         $maxProcesses = (int) Settings::settingValue('releasethreads');
+        $groups = array_map(static fn (object $group): array => [
+            'id' => (int) $group->id,
+            'name' => (string) $group->name,
+        ], $rows);
+        $actionableGroupIds = array_values(array_map(
+            static fn (object $group): int => (int) $group->id,
+            array_filter($rows, static fn (object $group): bool => (int) $group->actionable === 1),
+        ));
+        $readyGroupIds = array_values(array_map(
+            static fn (object $group): int => (int) $group->id,
+            array_filter($rows, static fn (object $group): bool => (int) $group->ready === 1),
+        ));
 
-        $uGroups = [];
-        foreach ($groups as $group) {
-            try {
-                $query = DB::select(sprintf('SELECT id FROM collections WHERE groups_id = %d LIMIT 1', $group->id));
-                if (! empty($query)) {
-                    $uGroups[] = ['id' => $group->id, 'name' => $group->name];
-                }
-            } catch (\PDOException $e) {
-                if (config('app.debug') === true) {
-                    Log::debug($e->getMessage());
-                }
-            }
-        }
+        $uGroups = $this->selectActionableGroups(
+            $groups,
+            trim((string) Settings::settingValue('orchestrator_bfc_group')),
+            $actionableGroupIds,
+            $this->nextReleaseSweepOffset(),
+            max(1, (int) config('nntmux.distributed_release_sweep_groups', 1)),
+            $readyGroupIds,
+        );
 
         $count = count($uGroups);
         if ($count === 0) {
@@ -72,6 +93,103 @@ class ReleasesRunner extends BaseRunner
                 Log::error('Release processing batch failed: '.$e->getMessage());
                 cli()->error('Batch '.($batchIndex + 1).' failed: '.$e->getMessage());
             }
+        }
+    }
+
+    /**
+     * Put the group supplying the active immutable backfill permit first so its
+     * collections reach release and NZB processing before unrelated backlog.
+     * The remaining groups retain a stable ID/name order when no pin is active
+     * or the pinned group has no eligible collections.
+     *
+     * @param  array<int, array{id: int|string, name: string}>  $groups
+     * @return array<int, array{id: int|string, name: string}>
+     */
+    protected function prioritizePinnedGroup(array $groups, string $pinnedGroup): array
+    {
+        usort($groups, static function (array $left, array $right) use ($pinnedGroup): int {
+            $leftPinned = $pinnedGroup !== '' && $left['name'] === $pinnedGroup;
+            $rightPinned = $pinnedGroup !== '' && $right['name'] === $pinnedGroup;
+
+            if ($leftPinned !== $rightPinned) {
+                return $leftPinned ? -1 : 1;
+            }
+
+            $idOrder = (int) $left['id'] <=> (int) $right['id'];
+
+            return $idOrder !== 0 ? $idOrder : $left['name'] <=> $right['name'];
+        });
+
+        return $groups;
+    }
+
+    /**
+     * Select actionable groups plus a bounded rotating idle sweep. The sweep is
+     * deliberately low-cardinality and prevents delayed/stuck cohorts from
+     * starving without launching one child for every historical group.
+     *
+     * @param  array<int, array{id: int|string, name: string}>  $groups
+     * @param  list<int>  $actionableGroupIds
+     * @param  list<int>  $readyGroupIds
+     * @return array<int, array{id: int|string, name: string}>
+     */
+    protected function selectActionableGroups(
+        array $groups,
+        string $pinnedGroup,
+        array $actionableGroupIds,
+        int $sweepOffset,
+        int $sweepSize,
+        array $readyGroupIds = [],
+    ): array {
+        $actionableLookup = array_fill_keys(array_map('intval', $actionableGroupIds), true);
+        $readyLookup = array_fill_keys(array_map('intval', $readyGroupIds), true);
+        $ready = [];
+        $preparing = [];
+        $idle = [];
+        foreach ($groups as $group) {
+            $groupId = (int) $group['id'];
+            if (isset($readyLookup[$groupId])) {
+                $ready[] = $group;
+            } elseif (isset($actionableLookup[$groupId])) {
+                $preparing[] = $group;
+            } else {
+                $idle[] = $group;
+            }
+        }
+
+        $ready = $this->prioritizePinnedGroup($ready, $pinnedGroup);
+        $preparing = $this->prioritizePinnedGroup($preparing, $pinnedGroup);
+        $actionable = [...$ready, ...$preparing];
+        $idle = $this->prioritizePinnedGroup($idle, '');
+        if ($idle === [] || $sweepSize <= 0) {
+            return $actionable;
+        }
+
+        $offset = max(0, $sweepOffset) % \count($idle);
+        $rotated = [...array_slice($idle, $offset), ...array_slice($idle, 0, $offset)];
+
+        return [...$actionable, ...array_slice($rotated, 0, min($sweepSize, \count($idle)))];
+    }
+
+    private function nextReleaseSweepOffset(): int
+    {
+        try {
+            $store = Cache::store((string) config('nntmux.distributed_lock_store', 'redis'));
+            $key = 'nntmux:releases:sweep-cursor';
+            if (! $store->has($key)) {
+                $store->forever($key, 0);
+            }
+
+            $current = max(0, (int) $store->get($key, 0));
+            $store->forever($key, $current + 1);
+
+            return $current;
+        } catch (\Throwable $e) {
+            if (config('app.debug') === true) {
+                Log::debug('Release sweep cursor unavailable: '.$e->getMessage());
+            }
+
+            return 0;
         }
     }
 

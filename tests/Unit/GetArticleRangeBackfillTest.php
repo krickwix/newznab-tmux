@@ -34,7 +34,8 @@ final class GetArticleRangeBackfillTest extends TestCase
         DB::statement('CREATE TABLE short_groups (
             name VARCHAR(255),
             first_record INTEGER,
-            last_record INTEGER
+            last_record INTEGER,
+            updated DATETIME NULL
         )');
 
         DB::table('usenet_groups')->insert([
@@ -110,6 +111,75 @@ final class GetArticleRangeBackfillTest extends TestCase
         $this->assertSame(1, (int) $group->backfill);
     }
 
+    public function test_backfill_range_advances_without_fabricating_a_date_when_every_header_date_is_invalid(): void
+    {
+        $this->updateGroupRecords('backfill', [
+            'id' => 1,
+            'name' => 'a.b.multimedia.vintage-film',
+            'first_record' => 3,
+        ], [
+            'firstArticleNumber' => 2,
+        ], 2);
+
+        $group = DB::table('usenet_groups')->where('id', 1)->first();
+
+        $this->assertSame(2, (int) $group->first_record);
+        $this->assertSame('2025-09-20 16:56:29', $group->first_record_postdate);
+    }
+
+    public function test_binary_range_advances_without_fabricating_a_date_when_every_header_date_is_invalid(): void
+    {
+        $this->updateGroupRecords('binaries', [
+            'id' => 1,
+            'last_record' => 39602,
+        ], [
+            'lastArticleNumber' => 40000,
+        ], 39603);
+
+        $group = DB::table('usenet_groups')->where('id', 1)->first();
+
+        $this->assertSame(40000, (int) $group->last_record);
+        $this->assertSame('2026-02-12 23:32:04', $group->last_record_postdate);
+    }
+
+    public function test_requested_range_is_clamped_to_the_selected_provider_summary(): void
+    {
+        $this->assertSame(
+            [96727, 100000],
+            $this->clampRange(90000, 100000, ['first' => 96727, 'last' => 56925589])
+        );
+        $this->assertSame(
+            [56925000, 56925589],
+            $this->clampRange(56925000, 57000000, ['first' => 96727, 'last' => 56925589])
+        );
+    }
+
+    public function test_wholly_unavailable_requested_range_is_rejected(): void
+    {
+        $this->assertNull(
+            $this->clampRange(85300, 95299, ['first' => 96727, 'last' => 56925589])
+        );
+    }
+
+    public function test_managed_backfill_requires_storage_errors_and_empty_provider_results_to_fail_closed(): void
+    {
+        $source = (string) file_get_contents(app_path('Console/Commands/GetArticleRange.php'));
+        $binariesSource = (string) file_get_contents(app_path('Services/Binaries/BinariesService.php'));
+
+        self::assertStringContainsString(
+            'failOnStorageError: $currentForward || $managedBackfillGeneration !== null',
+            $source,
+        );
+        self::assertStringContainsString(
+            'Provider returned no usable headers for the exact managed backfill interval.',
+            $source,
+        );
+        self::assertStringContainsString(
+            '$currentForwardGeneration !== null || $failOnStorageError',
+            $binariesSource,
+        );
+    }
+
     /**
      * @param  array<string, mixed>  $group
      * @param  array<string, mixed>  $return
@@ -119,5 +189,20 @@ final class GetArticleRangeBackfillTest extends TestCase
         $method = new ReflectionMethod(GetArticleRange::class, 'updateGroupRecords');
         $method->setAccessible(true);
         $method->invoke(new GetArticleRange, $mode, $group, $return, $rangeFirstArticle);
+    }
+
+    /**
+     * @param  array<string, mixed>  $summary
+     * @return array{int, int}|null
+     */
+    private function clampRange(int $first, int $last, array $summary): ?array
+    {
+        $method = new ReflectionMethod(GetArticleRange::class, 'clampToSelectedProviderRange');
+        $method->setAccessible(true);
+
+        /** @var array{int, int}|null $result */
+        $result = $method->invoke(new GetArticleRange, $first, $last, $summary);
+
+        return $result;
     }
 }

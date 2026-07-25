@@ -62,8 +62,18 @@ class NzbContentsService
      */
     public function getNfoFromNzb(string $guid, int $relID, int $groupID, string $groupName): string|false
     {
-        // Step 1: Attempt to find a potential NFO message ID
+        // Step 1: Attempt to find a potential NFO message ID.
+        // A null result means the NZB artifact was unavailable or unreadable;
+        // keep the release retryable instead of recording "no NFO".
         $messageID = $this->parseNzb($guid, $relID, $groupID, true);
+        if ($messageID === null) {
+            Release::query()->where('id', $relID)->decrement('nfostatus');
+            if ($this->echoOutput) {
+                echo 'f';
+            }
+
+            return false;
+        }
 
         // If no NFO message ID found
         if ($messageID === false || ! isset($messageID['id'])) {
@@ -117,15 +127,15 @@ class NzbContentsService
      * @param  int  $relID  The release ID.
      * @param  int  $groupID  The group ID.
      * @param  bool  $nfoCheck  Whether to specifically look for an NFO file.
-     * @return array<string, mixed>|false An array containing NFO message ID and hidden status, or false if not found/error.
+     * @return array<string, mixed>|false|null NFO candidate data, false when absent, or null when the NZB is unavailable.
      *
      * @throws \Exception If NNTP operations fail.
      */
-    public function parseNzb(string $guid, int $relID, int $groupID, bool $nfoCheck = false): bool|array
+    public function parseNzb(string $guid, int $relID, int $groupID, bool $nfoCheck = false): bool|array|null
     {
         $nzbFile = $this->loadNzb($guid);
         if ($nzbFile === false) {
-            return false;
+            return null;
         }
 
         $messageID = $hiddenID = '';

@@ -7,6 +7,7 @@ namespace App\Console\Commands;
 use App\Models\UsenetGroup;
 use App\Services\Binaries\BinariesService;
 use App\Services\NNTP\NNTPService;
+use App\Services\Orchestrator\CurrentForwardRefreshTrustPolicy;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
 
@@ -32,6 +33,11 @@ class PartRepair extends Command
     public function handle(): int
     {
         $groupName = $this->argument('group');
+        if ((new CurrentForwardRefreshTrustPolicy)->protects((string) $groupName)) {
+            $this->error("Group {$groupName} is protected from generic part repair.");
+
+            return self::FAILURE;
+        }
 
         try {
             $groupMySQL = UsenetGroup::getByName($groupName)->toArray();

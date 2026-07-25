@@ -43,6 +43,25 @@ final class BinaryHandler
         $this->articles = [];
     }
 
+    /** @param list<int> $binaryIds */
+    public function prelockForPartWrites(array $binaryIds): void
+    {
+        if (DB::getDriverName() === 'sqlite') {
+            return;
+        }
+
+        $binaryIds = array_values(array_unique(array_map('intval', $binaryIds)));
+        sort($binaryIds, SORT_NUMERIC);
+
+        foreach (array_chunk($binaryIds, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
+            $placeholders = implode(',', array_fill(0, \count($chunk), '?'));
+            DB::select(
+                "SELECT id FROM binaries FORCE INDEX (PRIMARY) WHERE id IN ({$placeholders}) ORDER BY id FOR UPDATE",
+                $chunk,
+            );
+        }
+    }
+
     /**
      * Get or create a binary for the given header.
      *
@@ -155,12 +174,12 @@ final class BinaryHandler
             return $resolved;
         }
 
+        $this->sortBinaryInsertRows($pending);
+
         try {
             $result = $this->bulkInsertAndResolve($pending);
             $idsByKey = $result['ids'];
-            $existingKeys = $result['existing'];
             $existingPartKeys = $this->existingPartKeysForResolvedRows($pending, $idsByKey, $extraUpdatesByArticleKey);
-            $seenLookupKeys = [];
             $seenPartKeys = [];
             foreach ($pending as $articleKey => $row) {
                 $hashLookupKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
@@ -171,21 +190,13 @@ final class BinaryHandler
                 }
 
                 $this->binariesUpdate[$binaryId] = $this->binariesUpdate[$binaryId] ?? ['Size' => 0, 'Parts' => 0];
-                if (isset($existingKeys[$hashLookupKey])
-                    || isset($existingKeys[$fileLookupKey])
-                    || isset($seenLookupKeys[$fileLookupKey])
-                ) {
-                    $this->addBinaryUpdateForNewPart(
-                        $binaryId,
-                        (int) $row['number'],
-                        (int) $row['partsize'],
-                        $existingPartKeys,
-                        $seenPartKeys
-                    );
-                } else {
-                    $seenPartKeys[$this->partKey($binaryId, (int) $row['number'])] = true;
-                }
-                $seenLookupKeys[$fileLookupKey] = true;
+                $this->addBinaryUpdateForNewPart(
+                    $binaryId,
+                    (int) $row['number'],
+                    (int) $row['partsize'],
+                    $existingPartKeys,
+                    $seenPartKeys
+                );
                 foreach ($extraUpdatesByArticleKey[$articleKey] ?? [] as $extraPart) {
                     $this->addBinaryUpdateForNewPart(
                         $binaryId,
@@ -254,6 +265,9 @@ final class BinaryHandler
             }
         }
 
+        $this->sortBinaryInsertRows($insertRows);
+        $this->prelockForPartWrites(array_values($idsByKey));
+
         if (DB::getDriverName() === 'sqlite') {
             $this->bulkInsertBinariesSqlite($insertRows);
         } else {
@@ -284,6 +298,16 @@ final class BinaryHandler
         }
 
         return ['ids' => $idsByKey, 'existing' => $existingKeys];
+    }
+
+    /** @param array<int|string, array<string, mixed>> $rows */
+    private function sortBinaryInsertRows(array &$rows): void
+    {
+        uasort($rows, static function (array $left, array $right): int {
+            return ((int) $left['collections_id'] <=> (int) $right['collections_id'])
+                ?: ((int) $left['filenumber'] <=> (int) $right['filenumber'])
+                ?: strcmp((string) $left['hash'], (string) $right['hash']);
+        });
     }
 
     /**
@@ -325,9 +349,9 @@ final class BinaryHandler
                     'name' => $row['name'],
                     'collections_id' => $row['collections_id'],
                     'totalparts' => $row['totalparts'],
-                    'currentparts' => 1,
+                    'currentparts' => 0,
                     'filenumber' => $row['filenumber'],
-                    'partsize' => $row['partsize'],
+                    'partsize' => 0,
                 ];
             }
 
@@ -342,15 +366,14 @@ final class BinaryHandler
             $placeholders = [];
             $bindings = [];
             foreach ($chunk as $row) {
-                $placeholders[] = '(UNHEX(?), ?, ?, ?, 1, ?, ?)';
+                $placeholders[] = '(UNHEX(?), ?, ?, ?, 0, ?, 0)';
                 array_push(
                     $bindings,
                     $row['hash'],
                     $row['name'],
                     $row['collections_id'],
                     $row['totalparts'],
-                    $row['filenumber'],
-                    $row['partsize']
+                    $row['filenumber']
                 );
             }
 
@@ -481,6 +504,10 @@ final class BinaryHandler
                 $bindings[] = $number;
             }
 
+            // Header storage uses READ COMMITTED and holds each parent binary's
+            // X lock before this current read. A locking read for absent part
+            // keys would add next-key/gap locks that later part inserts must
+            // convert, creating PRIMARY-supremum deadlocks across transactions.
             $rows = DB::select("SELECT binaries_id, number FROM parts WHERE (binaries_id, number) IN ({$tuples})", $bindings);
             foreach ($rows as $row) {
                 $existing[$this->partKey((int) $row->binaries_id, (int) $row->number)] = true;

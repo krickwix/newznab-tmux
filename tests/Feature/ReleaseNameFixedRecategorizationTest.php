@@ -4,15 +4,21 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Events\ReleaseNameFixed;
 use App\Facades\Search;
 use App\Models\Category;
 use App\Models\Release;
 use App\Models\UsenetGroup;
+use App\Services\Categorization\CategorizationService;
+use App\Services\NameFixing\FilePrioritizer;
 use App\Services\NameFixing\NameFixingService;
 use App\Services\NameFixing\ReleaseUpdateService;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use PDO;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -222,6 +228,744 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
 
         $this->assertStringContainsString('rel.categories_id = '.Category::OTHER_HASHED, $fullHashed->getValue($service));
         $this->assertStringNotContainsString('rel.categories_id IN', $fullHashed->getValue($service));
+    }
+
+    public function test_fresh_hashed_file_retry_candidates_are_bounded_oldest_first_and_exactly_scoped(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        $service = app(NameFixingService::class);
+        $method = new \ReflectionMethod($service, 'freshHashedFileCandidates');
+        $group = UsenetGroup::query()->create(['name' => 'alt.binaries.movies', 'active' => 1, 'backfill' => 0]);
+        $eligible = [];
+        $now = now();
+        for ($index = 0; $index < 205; $index++) {
+            $eligible[] = Release::factory()->create([
+                'groups_id' => $group->id,
+                'categories_id' => Category::OTHER_HASHED,
+                'proc_files' => NameFixingService::PROC_FILES_DONE,
+                'isrenamed' => 0,
+                'predb_id' => 0,
+                'leftguid' => 'x',
+                'adddate' => $now->copy()->subSeconds($index),
+            ])->id;
+        }
+        foreach ([
+            ['categories_id' => Category::OTHER_MISC],
+            ['isrenamed' => 1],
+            ['predb_id' => 1],
+            ['proc_files' => NameFixingService::PROC_FILES_NONE],
+            ['adddate' => now()->subSeconds(601)],
+        ] as $override) {
+            Release::factory()->create([
+                'groups_id' => $group->id,
+                'categories_id' => Category::OTHER_HASHED,
+                'proc_files' => NameFixingService::PROC_FILES_DONE,
+                'isrenamed' => 0,
+                'predb_id' => 0,
+                'leftguid' => 'y',
+                'adddate' => now(),
+                ...$override,
+            ]);
+        }
+
+        $firstPage = $method->invoke($service, 500);
+        $secondPage = $method->invoke($service, 500);
+        $wrappedPage = $method->invoke($service, 500);
+        $oldestFirst = array_reverse($eligible);
+
+        $this->assertCount(100, $firstPage);
+        $this->assertSame(array_slice($oldestFirst, 0, 100), $firstPage->pluck('id')->all());
+        $this->assertSame(array_slice($oldestFirst, 100, 100), $secondPage->pluck('id')->all());
+        $this->assertSame(
+            [...array_slice($oldestFirst, 200, 5), ...array_slice($oldestFirst, 0, 95)],
+            $wrappedPage->pluck('id')->all(),
+        );
+    }
+
+    public function test_first_pass_marker_uses_original_select_snapshot_and_detects_interleaved_file(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        Search::shouldReceive('updateRelease')->zeroOrMoreTimes();
+        Search::shouldReceive('searchPredb')->zeroOrMoreTimes()->andReturn([]);
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.retry.interleave',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+        $release = Release::factory()->create([
+            'name' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'searchname' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'isrenamed' => 0,
+            'predb_id' => 0,
+            'proc_files' => NameFixingService::PROC_FILES_NONE,
+            'leftguid' => 'i',
+            'adddate' => now(),
+            'postdate' => now(),
+        ]);
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id,
+            'name' => 'R9lelFHQEMt9U8UtM9aVj2amEk7TnPx2OZUxcbBgnue8qyp3vD.7z.052',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $service = new class((int) $release->id) extends NameFixingService
+        {
+            public function __construct(private readonly int $targetReleaseId)
+            {
+                parent::__construct();
+            }
+
+            protected function finishFreshHashedFileFirstPass(Release $release, array $observedEvidence): void
+            {
+                DB::table('release_files')->insert([
+                    'releases_id' => $this->targetReleaseId,
+                    'name' => 'Kon-Tiki 1950.avi',
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+                parent::finishFreshHashedFileFirstPass($release, $observedEvidence);
+            }
+        };
+        $this->app->instance(NameFixingService::class, $service);
+
+        $this->artisan('releases:fix-names', [
+            'method' => '6', '--category' => 'hashed', '--update' => true, '--set-status' => true,
+        ])->assertSuccessful();
+        $marker = Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id);
+        $this->assertCount(1, $marker['evidence'] ?? []);
+        $this->assertSame(2, DB::table('release_files')->where('releases_id', $release->id)->count());
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+
+        $this->app->instance(NameFixingService::class, new NameFixingService);
+        $this->artisan('releases:fix-names', [
+            'method' => '22', '--category' => 'hashed', '--update' => true, '--set-status' => true, '--limit' => 100,
+        ])->assertSuccessful();
+        $this->assertSame(NameFixingService::PROC_FILES_RETRY_DONE, (int) $release->fresh()->proc_files);
+    }
+
+    public function test_expired_first_pass_window_skips_marker_but_preserves_status_cas(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        $group = UsenetGroup::query()->create(['name' => 'alt.binaries.movies.retry.expiry', 'active' => 1, 'backfill' => 0]);
+        $release = Release::factory()->create([
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'proc_files' => NameFixingService::PROC_FILES_NONE,
+            'leftguid' => 'e',
+            'adddate' => now()->subSeconds(601),
+        ]);
+        $service = new class extends NameFixingService
+        {
+            /** @param list<string> $evidence */
+            public function recordFirstPass(Release $release, array $evidence): void
+            {
+                $this->finishFreshHashedFileFirstPass($release, $evidence);
+            }
+        };
+        $release->releases_id = $release->id;
+
+        $service->recordFirstPass($release, [str_repeat('a', 64)]);
+
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        $this->assertNull(Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+    }
+
+    public function test_unchanged_multi_file_evidence_uses_same_canonical_signature_order(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        Search::shouldReceive('updateRelease')->zeroOrMoreTimes();
+        Search::shouldReceive('searchPredb')->zeroOrMoreTimes()->andReturn([]);
+        $group = UsenetGroup::query()->create(['name' => 'alt.binaries.movies.retry.multifile', 'active' => 1, 'backfill' => 0]);
+        $release = Release::factory()->create([
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'proc_files' => NameFixingService::PROC_FILES_NONE,
+            'isrenamed' => 0,
+            'predb_id' => 0,
+            'leftguid' => 'u',
+            'adddate' => now(),
+        ]);
+        DB::table('release_files')->insert([
+            ['releases_id' => $release->id, 'name' => 'alpha.mkv', 'created_at' => now(), 'updated_at' => now()],
+            ['releases_id' => $release->id, 'name' => 'zeta.mkv', 'created_at' => now(), 'updated_at' => now()],
+        ]);
+        $service = new class extends NameFixingService
+        {
+            /** @param list<string> $evidence */
+            public function recordFirstPass(Release $release, array $evidence): void
+            {
+                $this->finishFreshHashedFileFirstPass($release, $evidence);
+            }
+        };
+        $release->releases_id = $release->id;
+        $observedEvidence = [
+            hash('sha256', json_encode(['alpha.mkv', '0', ''], JSON_THROW_ON_ERROR)),
+            hash('sha256', json_encode(['zeta.mkv', '0', ''], JSON_THROW_ON_ERROR)),
+        ];
+        $sortedSignatures = $observedEvidence;
+        sort($sortedSignatures, SORT_STRING);
+        $this->assertNotSame(
+            $sortedSignatures,
+            $observedEvidence,
+            'Fixture must expose filename-order vs hash-order mismatch: '.json_encode($observedEvidence),
+        );
+        $service->recordFirstPass($release, $observedEvidence);
+        $marker = Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id);
+
+        $service->retryFreshHashedFiles(true, true, false, 100);
+
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        $this->assertSame($marker, Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+    }
+
+    public function test_first_pass_marker_survives_losing_cas_during_interleaved_pass(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        $group = UsenetGroup::query()->create(['name' => 'alt.binaries.movies.retry.cas-race', 'active' => 1, 'backfill' => 0]);
+        $release = Release::factory()->create([
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'proc_files' => NameFixingService::PROC_FILES_NONE,
+            'leftguid' => 'q',
+            'adddate' => now(),
+        ]);
+        $release->releases_id = $release->id;
+        $winnerEvidence = [str_repeat('a', 64)];
+        $contenderEvidence = [str_repeat('b', 64)];
+        $contender = new class extends NameFixingService
+        {
+            /** @param list<string> $evidence */
+            public function recordFirstPass(Release $release, array $evidence): void
+            {
+                $this->finishFreshHashedFileFirstPass($release, $evidence);
+            }
+        };
+        $winner = new class($contender, $release, $contenderEvidence) extends NameFixingService
+        {
+            public bool $interleaved = false;
+
+            /** @param list<string> $contenderEvidence */
+            public function __construct(
+                private readonly NameFixingService $contender,
+                private readonly Release $release,
+                private readonly array $contenderEvidence,
+            ) {
+                parent::__construct();
+            }
+
+            /** @param list<string> $evidence */
+            public function recordFirstPass(Release $release, array $evidence): void
+            {
+                $this->finishFreshHashedFileFirstPass($release, $evidence);
+            }
+
+            protected function beforeFreshHashedFileFirstPassCas(int $releaseId): void
+            {
+                if (! $this->interleaved) {
+                    $this->interleaved = true;
+                    $this->contender->recordFirstPass($this->release, $this->contenderEvidence);
+                }
+            }
+        };
+
+        $winner->recordFirstPass($release, $winnerEvidence);
+
+        $this->assertTrue($winner->interleaved);
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        $marker = Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id);
+        $this->assertSame($winnerEvidence, $marker['evidence'] ?? null);
+    }
+
+    public function test_expired_mutation_lease_owner_does_not_delete_marker_after_losing_cas(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        $group = UsenetGroup::query()->create(['name' => 'alt.binaries.movies.retry.expired-owner', 'active' => 1, 'backfill' => 0]);
+        $release = Release::factory()->create([
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'proc_files' => NameFixingService::PROC_FILES_NONE,
+            'leftguid' => 'x',
+            'adddate' => now(),
+        ]);
+        $release->releases_id = $release->id;
+        $originalEvidence = [str_repeat('c', 64)];
+        $contenderEvidence = [str_repeat('d', 64)];
+        $contender = new class extends NameFixingService
+        {
+            /** @param list<string> $evidence */
+            public function recordFirstPass(Release $release, array $evidence): void
+            {
+                $this->finishFreshHashedFileFirstPass($release, $evidence);
+            }
+        };
+        $originalPass = new class($contender, $release, $contenderEvidence) extends NameFixingService
+        {
+            /** @param list<string> $contenderEvidence */
+            public function __construct(
+                private readonly NameFixingService $contender,
+                private readonly Release $release,
+                private readonly array $contenderEvidence,
+            ) {
+                parent::__construct();
+            }
+
+            /** @param list<string> $evidence */
+            public function recordFirstPass(Release $release, array $evidence): void
+            {
+                $this->finishFreshHashedFileFirstPass($release, $evidence);
+            }
+
+            protected function beforeFreshHashedFileFirstPassCas(int $releaseId): void
+            {
+                Carbon::setTestNow(now()->addSeconds(31));
+                $this->contender->recordFirstPass($this->release, $this->contenderEvidence);
+            }
+        };
+
+        try {
+            $originalPass->recordFirstPass($release, $originalEvidence);
+        } finally {
+            Carbon::setTestNow();
+        }
+
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        $marker = Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id);
+        $this->assertSame($originalEvidence, $marker['evidence'] ?? null);
+    }
+
+    public function test_current_mutation_lease_owner_cleans_its_marker_after_losing_cas(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        $group = UsenetGroup::query()->create(['name' => 'alt.binaries.movies.retry.live-owner', 'active' => 1, 'backfill' => 0]);
+        $release = Release::factory()->create([
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'proc_files' => NameFixingService::PROC_FILES_NONE,
+            'leftguid' => 'o',
+            'adddate' => now(),
+        ]);
+        $release->releases_id = $release->id;
+        $service = new class extends NameFixingService
+        {
+            /** @param list<string> $evidence */
+            public function recordFirstPass(Release $release, array $evidence): void
+            {
+                $this->finishFreshHashedFileFirstPass($release, $evidence);
+            }
+
+            protected function beforeFreshHashedFileFirstPassCas(int $releaseId): void
+            {
+                DB::table('releases')->where('id', $releaseId)->update([
+                    'proc_files' => NameFixingService::PROC_FILES_DONE,
+                ]);
+            }
+        };
+
+        $service->recordFirstPass($release, [str_repeat('e', 64)]);
+
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        $this->assertNull(Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+    }
+
+    public function test_retry_revalidates_eligibility_after_lease_without_terminal_mutation(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        Search::shouldReceive('updateRelease')->zeroOrMoreTimes();
+        Search::shouldReceive('searchPredb')->zeroOrMoreTimes()->andReturn([]);
+        $group = UsenetGroup::query()->create(['name' => 'alt.binaries.movies.retry.race', 'active' => 1, 'backfill' => 0]);
+        $release = Release::factory()->create([
+            'name' => 'd41d8cd98f00b204e9800998ecf8427e', 'searchname' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'groups_id' => $group->id, 'categories_id' => Category::OTHER_HASHED, 'isrenamed' => 0,
+            'predb_id' => 0, 'proc_files' => 0, 'leftguid' => 'r', 'adddate' => now(), 'postdate' => now(),
+        ]);
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id, 'name' => 'R9lelFHQEMt9U8UtM9aVj2amEk7TnPx2OZUxcbBgnue8qyp3vD.7z.052',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $this->artisan('releases:fix-names', [
+            'method' => '6', '--category' => 'hashed', '--update' => true, '--set-status' => true,
+        ])->assertSuccessful();
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id, 'name' => 'Kon-Tiki 1950.avi', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $service = new class((int) $release->id) extends NameFixingService
+        {
+            public function __construct(private readonly int $targetReleaseId)
+            {
+                parent::__construct();
+            }
+
+            protected function freshHashedEligibleRelease(int $releaseId): ?Release
+            {
+                DB::table('releases')->where('id', $this->targetReleaseId)->update(['categories_id' => Category::MOVIE_OTHER]);
+
+                return parent::freshHashedEligibleRelease($releaseId);
+            }
+        };
+        $service->retryFreshHashedFiles(true, true, false, 100);
+
+        $release->refresh();
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->proc_files);
+        $this->assertSame(Category::MOVIE_OTHER, (int) $release->categories_id);
+        $this->assertNotNull(Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+        $lease = Cache::store('array')->lock('nntmux:namefix:fresh-hashed-files:'.$release->id.':lease', 10);
+        $this->assertTrue($lease->get());
+        $lease->release();
+    }
+
+    public function test_transient_retry_error_leaves_status_one_and_can_be_retried(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        Search::shouldReceive('updateRelease')->zeroOrMoreTimes();
+        Search::shouldReceive('searchPredb')->zeroOrMoreTimes()->andReturn([]);
+        $group = UsenetGroup::query()->create(['name' => 'alt.binaries.movies.retry.crash', 'active' => 1, 'backfill' => 0]);
+        $release = Release::factory()->create([
+            'name' => 'd41d8cd98f00b204e9800998ecf8427e', 'searchname' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'groups_id' => $group->id, 'categories_id' => Category::OTHER_HASHED, 'isrenamed' => 0,
+            'predb_id' => 0, 'proc_files' => 0, 'leftguid' => 'c', 'adddate' => now(), 'postdate' => now(),
+        ]);
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id, 'name' => 'R9lelFHQEMt9U8UtM9aVj2amEk7TnPx2OZUxcbBgnue8qyp3vD.7z.052',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $this->artisan('releases:fix-names', [
+            'method' => '6', '--category' => 'hashed', '--update' => true, '--set-status' => true,
+        ])->assertSuccessful();
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id, 'name' => 'Kon-Tiki 1950.avi', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $throwingPrioritizer = new class extends FilePrioritizer
+        {
+            public function prioritizeForMatching(array $files): array
+            {
+                throw new \RuntimeException('injected transient failure');
+            }
+        };
+        $crashingService = new NameFixingService(filePrioritizer: $throwingPrioritizer);
+        $crashingService->retryFreshHashedFiles(true, true, false, 100);
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        $this->assertNotNull(Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+
+        (new NameFixingService)->retryFreshHashedFiles(true, true, false, 100);
+        $this->assertSame(NameFixingService::PROC_FILES_RETRY_DONE, (int) $release->fresh()->proc_files);
+    }
+
+    public function test_file_set_change_during_miss_defers_terminal_status_until_next_retry(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        Search::shouldReceive('updateRelease')->zeroOrMoreTimes();
+        Search::shouldReceive('searchPredb')->zeroOrMoreTimes()->andReturn([]);
+        $group = UsenetGroup::query()->create(['name' => 'alt.binaries.movies.retry.change', 'active' => 1, 'backfill' => 0]);
+        $release = Release::factory()->create([
+            'name' => 'd41d8cd98f00b204e9800998ecf8427e', 'searchname' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'groups_id' => $group->id, 'categories_id' => Category::OTHER_HASHED, 'isrenamed' => 0,
+            'predb_id' => 0, 'proc_files' => 0, 'leftguid' => 'm', 'adddate' => now(), 'postdate' => now(),
+        ]);
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id, 'name' => 'R9lelFHQEMt9U8UtM9aVj2amEk7TnPx2OZUxcbBgnue8qyp3vD.7z.052',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $this->artisan('releases:fix-names', [
+            'method' => '6', '--category' => 'hashed', '--update' => true, '--set-status' => true,
+        ])->assertSuccessful();
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id, 'name' => 'Y8lelFHQEMt9U8UtM9aVj2amEk7TnPx2OZUxcbBgnue8qyp3vD.7z.053',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $service = new class((int) $release->id) extends NameFixingService
+        {
+            private int $evidenceReads = 0;
+
+            public function __construct(private readonly int $targetReleaseId)
+            {
+                parent::__construct();
+            }
+
+            protected function freshHashedFileEvidence(int $releaseId): array
+            {
+                $this->evidenceReads++;
+                if ($this->evidenceReads === 2) {
+                    DB::table('release_files')->insert([
+                        'releases_id' => $this->targetReleaseId,
+                        'name' => 'Kon-Tiki 1950.avi',
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                }
+
+                return parent::freshHashedFileEvidence($releaseId);
+            }
+        };
+        $service->retryFreshHashedFiles(true, true, false, 100);
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+
+        (new NameFixingService)->retryFreshHashedFiles(true, true, false, 100);
+        $this->assertSame(NameFixingService::PROC_FILES_RETRY_DONE, (int) $release->fresh()->proc_files);
+    }
+
+    public function test_fresh_hashed_file_retry_examines_new_evidence_once_and_stays_terminal(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        Event::fake([ReleaseNameFixed::class]);
+        Search::shouldReceive('updateRelease')->zeroOrMoreTimes();
+        Search::shouldReceive('searchPredb')->zeroOrMoreTimes()->andReturn([]);
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.retry',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+        $release = Release::factory()->create([
+            'name' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'searchname' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'isrenamed' => 0,
+            'predb_id' => 0,
+            'proc_files' => NameFixingService::PROC_FILES_NONE,
+            'leftguid' => 'd',
+            'adddate' => now(),
+            'postdate' => now(),
+        ]);
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id,
+            'name' => 'R9lelFHQEMt9U8UtM9aVj2amEk7TnPx2OZUxcbBgnue8qyp3vD.7z.052',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->artisan('releases:fix-names', [
+            'method' => '6', '--category' => 'hashed', '--update' => true, '--set-status' => true,
+        ])->assertSuccessful();
+        $release->refresh();
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->proc_files);
+        $marker = Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id);
+        $this->assertSame(2, $marker['schema'] ?? null);
+        $this->assertCount(1, $marker['evidence'] ?? []);
+        $this->assertArrayNotHasKey('baseline_count', $marker ?? []);
+        $this->assertLessThanOrEqual(($marker['observed_at'] ?? 0) + 600, $marker['expires_at'] ?? PHP_INT_MAX);
+        $this->assertLessThanOrEqual(strtotime((string) $release->adddate) + 600, $marker['expires_at'] ?? PHP_INT_MAX);
+
+        $this->artisan('releases:fix-names', [
+            'method' => '22', '--category' => 'hashed', '--update' => true, '--set-status' => true, '--limit' => 100,
+        ])->assertSuccessful();
+        $release->refresh();
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->proc_files);
+        $this->assertSame($marker, Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id,
+            'name' => 'Kon-Tiki 1950.avi',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $heldLease = Cache::store('array')->lock('nntmux:namefix:fresh-hashed-files:'.$release->id.':lease', 300);
+        $this->assertTrue($heldLease->get());
+        $this->artisan('releases:fix-names', [
+            'method' => '22', '--category' => 'hashed', '--update' => true, '--set-status' => true, '--limit' => 100,
+        ])->assertSuccessful();
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        $this->assertSame($marker, Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+        $heldLease->release();
+        Cache::store('array')->forget('nntmux:namefix:fresh-hashed-files:'.$release->id);
+        $this->artisan('releases:fix-names', [
+            'method' => '22', '--category' => 'hashed', '--update' => true, '--set-status' => true, '--limit' => 100,
+        ])->assertSuccessful();
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        $this->assertNull(Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+        Cache::store('array')->put('nntmux:namefix:fresh-hashed-files:'.$release->id, [
+            'schema' => 99,
+            'release_id' => $release->id,
+            'baseline_count' => 1,
+            'recorded_at' => time(),
+            'token' => 'malformed',
+        ], 600);
+        $this->artisan('releases:fix-names', [
+            'method' => '22', '--category' => 'hashed', '--update' => true, '--set-status' => true, '--limit' => 100,
+        ])->assertSuccessful();
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        Cache::store('array')->put('nntmux:namefix:fresh-hashed-files:'.$release->id, $marker, 600);
+        $this->artisan('releases:fix-names', [
+            'method' => '22', '--category' => 'hashed', '--set-status' => true, '--limit' => 100,
+        ])->assertSuccessful();
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        $this->assertSame($marker, Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+        $this->artisan('releases:fix-names', [
+            'method' => '22', '--category' => 'hashed', '--update' => true, '--set-status' => true, '--limit' => 100,
+        ])->assertSuccessful();
+        $release->refresh();
+        $this->assertSame(NameFixingService::PROC_FILES_RETRY_DONE, (int) $release->proc_files);
+        $this->assertContains((int) $release->categories_id, array_diff(Category::MOVIES_GROUP, [Category::MOVIE_ROOT]));
+        $this->assertNull(Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+
+        DB::table('releases')->where('id', $release->id)->update(['categories_id' => Category::OTHER_HASHED]);
+        $this->artisan('releases:fix-names', [
+            'method' => '22', '--category' => 'hashed', '--update' => true, '--set-status' => true, '--limit' => 100,
+        ])->assertSuccessful();
+        $this->assertSame(NameFixingService::PROC_FILES_RETRY_DONE, (int) $release->fresh()->proc_files);
+        Event::assertDispatchedTimes(ReleaseNameFixed::class, 1);
+    }
+
+    public function test_guarded_retry_rename_emits_no_event_or_search_when_identity_changed(): void
+    {
+        Event::fake([ReleaseNameFixed::class]);
+        Search::shouldReceive('updateRelease')->once();
+        $group = UsenetGroup::query()->create(['name' => 'alt.binaries.movies.retry.guard', 'active' => 1, 'backfill' => 0]);
+        $release = Release::factory()->create([
+            'name' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'searchname' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'isrenamed' => 0,
+            'predb_id' => 0,
+            'proc_files' => NameFixingService::PROC_FILES_DONE,
+            'leftguid' => 'g',
+            'adddate' => now(),
+            'postdate' => now(),
+        ]);
+        $snapshot = $release->fresh();
+        $snapshot->releases_id = $snapshot->id;
+        $snapshot->allowed_categories = array_values(array_diff(Category::MOVIES_GROUP, [Category::MOVIE_ROOT]));
+        $snapshot->fresh_hashed_retry_guard = [
+            'name' => (string) $snapshot->name,
+            'searchname' => (string) $snapshot->searchname,
+            'groups_id' => (int) $snapshot->groups_id,
+            'fromname' => $snapshot->fromname,
+            'adddate' => (string) $snapshot->adddate,
+        ];
+        DB::table('releases')->where('id', $release->id)->update(['searchname' => 'won-by-another-worker']);
+
+        $service = app(ReleaseUpdateService::class);
+        $service->updateRelease($snapshot, 'Kon-Tiki 1950', 'fileCheck: Video filename', true, 'Fresh hashed files, ', true, false);
+
+        $release->refresh();
+        $this->assertFalse($service->matched);
+        $this->assertSame('won-by-another-worker', $release->searchname);
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->proc_files);
+        Event::assertNotDispatched(ReleaseNameFixed::class);
+    }
+
+    #[DataProvider('freshHashedRootCategoryProvider')]
+    public function test_fresh_hashed_retry_rejects_movie_and_tv_root_categories(int $rootCategory): void
+    {
+        Event::fake([ReleaseNameFixed::class]);
+        Search::shouldReceive('updateRelease')->once();
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.retry.root.'.$rootCategory,
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+        $release = Release::factory()->create([
+            'name' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'searchname' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'isrenamed' => 0,
+            'predb_id' => 0,
+            'proc_files' => NameFixingService::PROC_FILES_DONE,
+            'leftguid' => 'l',
+            'adddate' => now(),
+            'postdate' => now(),
+        ]);
+        $categorizer = new class($rootCategory) extends CategorizationService
+        {
+            public function __construct(private readonly int $rootCategory) {}
+
+            public function determineCategory(int|string $groupId, string $releaseName = '', ?string $poster = '', bool $debug = false): array
+            {
+                return ['categories_id' => $this->rootCategory];
+            }
+        };
+        $snapshot = $release->fresh();
+        $snapshot->releases_id = $snapshot->id;
+        $snapshot->allowed_categories = [
+            ...array_values(array_diff(Category::MOVIES_GROUP, [Category::MOVIE_ROOT])),
+            ...array_values(array_diff(Category::TV_GROUP, [Category::TV_ROOT])),
+        ];
+        $service = new ReleaseUpdateService($categorizer);
+        $service->updateRelease($snapshot, 'Kon-Tiki 1950', 'fileCheck: Video filename', true, 'Fresh hashed files, ', true, false);
+
+        $this->assertFalse($service->matched);
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        Event::assertNotDispatched(ReleaseNameFixed::class);
+    }
+
+    /** @return array<string, array{int}> */
+    public static function freshHashedRootCategoryProvider(): array
+    {
+        return [
+            'movie root' => [Category::MOVIE_ROOT],
+            'tv root' => [Category::TV_ROOT],
+        ];
+    }
+
+    public function test_fresh_hashed_file_retry_fails_closed_when_file_count_exceeds_bound(): void
+    {
+        config(['cache.default' => 'array']);
+        Cache::store('array')->flush();
+        Search::shouldReceive('updateRelease')->zeroOrMoreTimes();
+        Search::shouldReceive('searchPredb')->zeroOrMoreTimes()->andReturn([]);
+        $group = UsenetGroup::query()->create([
+            'name' => 'alt.binaries.movies.retry.bound',
+            'active' => 1,
+            'backfill' => 0,
+        ]);
+        $release = Release::factory()->create([
+            'name' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'searchname' => 'd41d8cd98f00b204e9800998ecf8427e',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'isrenamed' => 0,
+            'predb_id' => 0,
+            'proc_files' => NameFixingService::PROC_FILES_NONE,
+            'leftguid' => 'e',
+            'adddate' => now(),
+            'postdate' => now(),
+        ]);
+        DB::table('release_files')->insert([
+            'releases_id' => $release->id,
+            'name' => 'R9lelFHQEMt9U8UtM9aVj2amEk7TnPx2OZUxcbBgnue8qyp3vD.7z.052',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->artisan('releases:fix-names', [
+            'method' => '6', '--category' => 'hashed', '--update' => true, '--set-status' => true,
+        ])->assertSuccessful();
+        $this->assertSame(NameFixingService::PROC_FILES_DONE, (int) $release->fresh()->proc_files);
+        $this->assertNotNull(Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
+
+        $files = [];
+        for ($index = 0; $index < 32; $index++) {
+            $files[] = [
+                'releases_id' => $release->id,
+                'name' => sprintf('opaque-payload-%02d.bin', $index),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
+        }
+        DB::table('release_files')->insert($files);
+
+        $this->artisan('releases:fix-names', [
+            'method' => '22', '--category' => 'hashed', '--update' => true, '--set-status' => true, '--limit' => 100,
+        ])->assertSuccessful();
+        $release->refresh();
+        $this->assertSame(NameFixingService::PROC_FILES_RETRY_DONE, (int) $release->proc_files);
+        $this->assertSame(Category::OTHER_HASHED, (int) $release->categories_id);
+        $this->assertSame(0, (int) $release->isrenamed);
+        $this->assertNull(Cache::store('array')->get('nntmux:namefix:fresh-hashed-files:'.$release->id));
     }
 
     public function test_renaming_olympic_webdl_release_recategorizes_it_from_movie_webdl_to_tv_sport(): void

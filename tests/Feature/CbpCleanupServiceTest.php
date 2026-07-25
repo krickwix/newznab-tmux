@@ -10,14 +10,53 @@ use App\Services\ReleaseCleaningService;
 use App\Services\ReleaseCreationService;
 use App\Services\ReleaseProcessingService;
 use App\Services\Releases\ReleaseDuplicateFinder;
+use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Mockery;
+use Mockery\Expectation;
+use PDO;
+use Psr\Log\LoggerInterface;
 use ReflectionClass;
 use ReflectionMethod;
 use Tests\TestCase;
 
 class CbpCleanupServiceTest extends TestCase
 {
+    private string $bootstrapDatabasePath;
+
+    /** @var array<string, string|false> */
+    private array $originalEnvironment = [];
+
+    public function createApplication()
+    {
+        $this->bootstrapDatabasePath = sys_get_temp_dir().'/nntmux-cbp-cleanup-test.sqlite';
+        $this->originalEnvironment = [
+            'APP_ENV' => getenv('APP_ENV'),
+            'DB_CONNECTION' => getenv('DB_CONNECTION'),
+            'DB_DATABASE' => getenv('DB_DATABASE'),
+        ];
+
+        if (is_file($this->bootstrapDatabasePath)) {
+            unlink($this->bootstrapDatabasePath);
+        }
+
+        $pdo = new PDO('sqlite:'.$this->bootstrapDatabasePath);
+        $pdo->exec('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        $pdo->exec("INSERT INTO settings (name, value) VALUES ('categorizeforeign', '0'), ('catwebdl', '0'), ('innerfileblacklist', '')");
+
+        $this->setEnvironmentValue('APP_ENV', 'testing');
+        $this->setEnvironmentValue('DB_CONNECTION', 'sqlite');
+        $this->setEnvironmentValue('DB_DATABASE', $this->bootstrapDatabasePath);
+
+        $app = require __DIR__.'/../../bootstrap/app.php';
+        $app->make(Kernel::class)->bootstrap();
+
+        return $app;
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -43,6 +82,19 @@ class CbpCleanupServiceTest extends TestCase
 
         $this->createTables();
         $this->seedSettings();
+    }
+
+    protected function tearDown(): void
+    {
+        if (isset($this->bootstrapDatabasePath) && is_file($this->bootstrapDatabasePath)) {
+            unlink($this->bootstrapDatabasePath);
+        }
+
+        parent::tearDown();
+
+        foreach ($this->originalEnvironment as $key => $value) {
+            $this->setEnvironmentValue($key, $value === false ? null : $value);
+        }
     }
 
     public function test_retention_cleanup_deletes_parts_binaries_and_collections_without_fk_cascades(): void
@@ -97,6 +149,181 @@ class CbpCleanupServiceTest extends TestCase
             [123],
             new \RuntimeException("SQLSTATE[HY000]: General error: 123 Got error 123 when reading table './nntmux/collections'")
         )));
+    }
+
+    public function test_descendant_cleanup_locks_collections_then_binaries_before_deleting_parts(): void
+    {
+        DB::table('collections')->insert([
+            'id' => 102,
+            'subject' => 'Lock.Order.Release',
+            'fromname' => 'poster@example.com',
+            'date' => now()->subHour()->format('Y-m-d H:i:s'),
+            'dateadded' => now()->subHour()->format('Y-m-d H:i:s'),
+            'added' => now()->subHour()->format('Y-m-d H:i:s'),
+            'xref' => 'alt.test:102',
+            'groups_id' => 1,
+            'totalfiles' => 1,
+            'filesize' => 500,
+            'filecheck' => CollectionFileCheckStatus::Sized->value,
+            'collectionhash' => 'lock-order-hash',
+            'collection_regexes_id' => 0,
+            'releases_id' => null,
+            'noise' => '',
+        ]);
+        DB::table('binaries')->insert([
+            [
+                'id' => 1020,
+                'name' => 'Lock.Order.Release.part02',
+                'collections_id' => 102,
+                'totalparts' => 1,
+            ],
+            [
+                'id' => 1019,
+                'name' => 'Lock.Order.Release.part01',
+                'collections_id' => 102,
+                'totalparts' => 1,
+            ],
+        ]);
+        DB::table('parts')->insert([
+            [
+                'binaries_id' => 1020,
+                'number' => 1,
+                'messageid' => '<lock-order-2@example.com>',
+                'partnumber' => 1,
+                'size' => 10,
+            ],
+            [
+                'binaries_id' => 1019,
+                'number' => 1,
+                'messageid' => '<lock-order-1@example.com>',
+                'partnumber' => 1,
+                'size' => 10,
+            ],
+        ]);
+
+        $queries = [];
+        DB::listen(static function (QueryExecuted $query) use (&$queries): void {
+            $queries[] = $query->sql;
+        });
+
+        $deleted = app(CollectionCleanupService::class)
+            ->deleteCollectionsAndDescendants([102], 'Lock order test');
+
+        $collectionLockIndex = array_find_key(
+            $queries,
+            static fn (string $query): bool => str_contains(strtolower($query), 'select "id" from "collections"')
+                && str_contains(strtolower($query), 'order by "id" asc'),
+        );
+        $binaryLockIndex = array_find_key(
+            $queries,
+            static fn (string $query): bool => str_contains(strtolower($query), 'select "id" from "binaries"')
+                && str_contains(strtolower($query), 'order by "id" asc'),
+        );
+        $partsDeleteIndex = array_find_key(
+            $queries,
+            static fn (string $query): bool => str_contains(strtolower($query), 'delete from "parts"'),
+        );
+        $binariesDelete = array_find(
+            $queries,
+            static fn (string $query): bool => str_contains(strtolower($query), 'delete from "binaries"'),
+        );
+
+        $this->assertSame(1, $deleted);
+        $this->assertIsInt($collectionLockIndex, implode(PHP_EOL, $queries));
+        $this->assertIsInt($binaryLockIndex, implode(PHP_EOL, $queries));
+        $this->assertIsInt($partsDeleteIndex, implode(PHP_EOL, $queries));
+        $this->assertLessThan($binaryLockIndex, $collectionLockIndex);
+        $this->assertLessThan($partsDeleteIndex, $binaryLockIndex);
+        $this->assertIsString($binariesDelete, implode(PHP_EOL, $queries));
+        $this->assertStringContainsString('"id" in', strtolower($binariesDelete));
+        $this->assertStringNotContainsString('"collections_id"', strtolower($binariesDelete));
+        $this->assertSame(0, DB::table('parts')->count());
+        $this->assertSame(0, DB::table('binaries')->count());
+        $this->assertSame(0, DB::table('collections')->count());
+
+        $source = (string) file_get_contents(app_path('Services/CollectionCleanupService.php'));
+        $this->assertSame(2, substr_count($source, '->lockForUpdate()'));
+    }
+
+    public function test_cleanup_retry_logs_a_transient_deadlock_before_recovering(): void
+    {
+        $logger = Mockery::mock(LoggerInterface::class);
+        /** @var Expectation $warning */
+        $warning = $logger->shouldReceive('warning');
+        $warning
+            ->once()
+            ->withArgs(static fn (string $message, array $context): bool => $message === 'Transient collection cleanup lock error; retrying.'
+                && $context['label'] === 'Retry visibility test'
+                && $context['attempt'] === 1
+                && $context['max_attempts'] === 5
+                && $context['exception'] === QueryException::class);
+        Log::swap($logger);
+        $attempts = 0;
+        $service = new CollectionCleanupService;
+        $method = new ReflectionMethod($service, 'retryOnLockError');
+        $method->setAccessible(true);
+
+        $result = $method->invoke(
+            $service,
+            function () use (&$attempts): int {
+                $attempts++;
+                if ($attempts === 1) {
+                    throw $this->transientDeadlockException();
+                }
+
+                return 7;
+            },
+            'Retry visibility test',
+            false,
+        );
+
+        $this->assertSame(7, $result);
+        $this->assertSame(2, $attempts);
+    }
+
+    public function test_cleanup_retry_logs_and_rethrows_after_exhaustion(): void
+    {
+        $logger = Mockery::mock(LoggerInterface::class);
+        /** @var Expectation $warning */
+        $warning = $logger->shouldReceive('warning');
+        $warning
+            ->times(4)
+            ->withArgs(static fn (string $message, array $context): bool => $message === 'Transient collection cleanup lock error; retrying.'
+                && $context['label'] === 'Retry exhaustion test'
+                && $context['attempt'] >= 1
+                && $context['attempt'] <= 4
+                && $context['max_attempts'] === 5);
+        /** @var Expectation $error */
+        $error = $logger->shouldReceive('error');
+        $error
+            ->once()
+            ->withArgs(static fn (string $message, array $context): bool => $message === 'Collection cleanup exhausted transient lock retries.'
+                && $context['label'] === 'Retry exhaustion test'
+                && $context['attempt'] === 5
+                && $context['max_attempts'] === 5
+                && $context['exception'] === QueryException::class);
+        Log::swap($logger);
+        $attempts = 0;
+        $service = new CollectionCleanupService;
+        $method = new ReflectionMethod($service, 'retryOnLockError');
+        $method->setAccessible(true);
+
+        try {
+            $method->invoke(
+                $service,
+                function () use (&$attempts): int {
+                    $attempts++;
+
+                    throw $this->transientDeadlockException();
+                },
+                'Retry exhaustion test',
+                false,
+            );
+            $this->fail('Expected the exhausted transient deadlock to be rethrown.');
+        } catch (QueryException) {
+            $this->assertSame(5, $attempts);
+        }
+
     }
 
     public function test_retention_cleanup_preserves_payload_for_release_waiting_on_nzb(): void
@@ -276,6 +503,68 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertTrue(DB::table('parts')->where('binaries_id', 1400)->exists());
     }
 
+    public function test_bounded_release_cleanup_preserves_pending_nzb_descendants(): void
+    {
+        DB::table('releases')->insert([
+            'id' => 45,
+            'name' => 'Pending.Nzb.Release',
+            'searchname' => 'Pending.Nzb.Release',
+            'totalpart' => 1,
+            'groups_id' => 1,
+            'adddate' => now()->format('Y-m-d H:i:s'),
+            'guid' => str_repeat('e', 36),
+            'leftguid' => 'e',
+            'postdate' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'fromname' => 'poster@example.com',
+            'size' => 500,
+            'passwordstatus' => 0,
+            'haspreview' => -1,
+            'categories_id' => 1,
+            'nfostatus' => -1,
+            'nzbstatus' => NzbService::NZB_NONE,
+            'completion' => 100,
+            'isrenamed' => 0,
+            'iscategorized' => 0,
+            'predb_id' => 0,
+        ]);
+        DB::table('collections')->insert([
+            'id' => 145,
+            'subject' => 'Pending.Nzb.Release',
+            'fromname' => 'poster@example.com',
+            'date' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'dateadded' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'added' => now()->subHours(10)->format('Y-m-d H:i:s'),
+            'xref' => 'alt.test:145',
+            'groups_id' => 1,
+            'totalfiles' => 1,
+            'filesize' => 500,
+            'filecheck' => CollectionFileCheckStatus::Inserted->value,
+            'collectionhash' => 'pending-nzb-retention',
+            'collection_regexes_id' => 0,
+            'releases_id' => 45,
+            'noise' => '',
+        ]);
+        DB::table('binaries')->insert([
+            'id' => 1450,
+            'name' => 'Pending.Nzb.Release.rar',
+            'collections_id' => 145,
+            'totalparts' => 1,
+        ]);
+        DB::table('parts')->insert([
+            'binaries_id' => 1450,
+            'number' => 1,
+            'messageid' => '<pending-nzb@example.com>',
+            'partnumber' => 1,
+            'size' => 10,
+        ]);
+
+        (new ReleaseProcessingService)->deleteCollectionsSlice(1, 10);
+
+        $this->assertTrue(DB::table('collections')->where('id', 145)->exists());
+        $this->assertTrue(DB::table('binaries')->where('id', 1450)->exists());
+        $this->assertTrue(DB::table('parts')->where('binaries_id', 1450)->exists());
+    }
+
     public function test_group_scoped_cleanup_deletes_only_requested_group_missed_nzb_rows(): void
     {
         DB::table('usenet_groups')->insert(['id' => 2, 'name' => 'alt.other']);
@@ -434,6 +723,86 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertSame(0, DB::table('binaries')->count());
         $this->assertSame(0, DB::table('collections')->count());
         $this->assertSame(1, (int) DB::table('releases')->where('id', 1)->value('nzbstatus'));
+        $this->assertSame(100.0, (float) DB::table('releases')->where('id', 1)->value('completion'));
+    }
+
+    public function test_nzb_creation_streams_large_part_sets_with_bounded_memory(): void
+    {
+        $guid = str_repeat('b', 36);
+        DB::table('releases')->insert([
+            'id' => 2,
+            'name' => 'Large.Nzb.Release',
+            'searchname' => 'Large.Nzb.Release',
+            'totalpart' => 50000,
+            'groups_id' => 1,
+            'adddate' => now()->format('Y-m-d H:i:s'),
+            'guid' => $guid,
+            'leftguid' => 'b',
+            'postdate' => now()->format('Y-m-d H:i:s'),
+            'fromname' => 'poster@example.com',
+            'size' => 500000,
+            'passwordstatus' => 0,
+            'haspreview' => -1,
+            'categories_id' => 1,
+            'nfostatus' => -1,
+            'nzbstatus' => NzbService::NZB_NONE,
+            'isrenamed' => 1,
+            'iscategorized' => 1,
+            'predb_id' => 0,
+            'source' => null,
+        ]);
+        DB::table('collections')->insert([
+            'id' => 210,
+            'subject' => 'Large.Nzb.Release',
+            'fromname' => 'poster@example.com',
+            'date' => now()->subHour()->format('Y-m-d H:i:s'),
+            'dateadded' => now()->subHour()->format('Y-m-d H:i:s'),
+            'added' => now()->subHour()->format('Y-m-d H:i:s'),
+            'xref' => 'alt.test:210',
+            'groups_id' => 1,
+            'totalfiles' => 1,
+            'filesize' => 500000,
+            'filecheck' => CollectionFileCheckStatus::Inserted->value,
+            'collectionhash' => 'large-nzb-hash',
+            'collection_regexes_id' => 0,
+            'releases_id' => 2,
+            'noise' => '',
+        ]);
+        DB::table('binaries')->insert([
+            'id' => 2100,
+            'name' => 'Large.Nzb.Release yEnc',
+            'collections_id' => 210,
+            'totalparts' => 50000,
+        ]);
+
+        for ($offset = 0; $offset < 50000; $offset += 1000) {
+            $rows = [];
+            for ($number = $offset + 1; $number <= $offset + 1000; $number++) {
+                $rows[] = [
+                    'binaries_id' => 2100,
+                    'number' => $number,
+                    'messageid' => '<large-'.$number.'@example.com>',
+                    'partnumber' => $number,
+                    'size' => 10,
+                ];
+            }
+            DB::table('parts')->insert($rows);
+        }
+
+        $release = Release::query()->findOrFail(2);
+        $baselineBytes = memory_get_usage(true);
+        memory_reset_peak_usage();
+
+        $written = app(NzbService::class)->writeNzbForReleaseId($release);
+        $peakGrowthBytes = memory_get_peak_usage(true) - $baselineBytes;
+
+        $this->assertTrue($written);
+        $this->assertLessThan(32 * 1024 * 1024, $peakGrowthBytes);
+        $nzbPath = app(NzbService::class)->nzbPath($guid);
+        $this->assertIsString($nzbPath);
+        $xml = gzdecode((string) file_get_contents($nzbPath));
+        $this->assertIsString($xml);
+        $this->assertStringContainsString('<segment bytes="10" number="50000">large-50000@example.com</segment>', $xml);
     }
 
     public function test_nzb_creation_uses_collection_group_when_xref_is_empty(): void
@@ -786,6 +1155,33 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertSame('name_match_fallback', $reason);
     }
 
+    private function transientDeadlockException(): QueryException
+    {
+        return new QueryException(
+            'mariadb',
+            'DELETE FROM parts WHERE binaries_id IN (?)',
+            [1020],
+            new \RuntimeException(
+                'SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction',
+                1213,
+            ),
+        );
+    }
+
+    private function setEnvironmentValue(string $key, ?string $value): void
+    {
+        if ($value === null) {
+            putenv($key);
+            unset($_ENV[$key], $_SERVER[$key]);
+
+            return;
+        }
+
+        putenv($key.'='.$value);
+        $_ENV[$key] = $value;
+        $_SERVER[$key] = $value;
+    }
+
     private function seedSettings(): void
     {
         $settings = [
@@ -834,6 +1230,7 @@ class CbpCleanupServiceTest extends TestCase
             categories_id INTEGER,
             nfostatus INTEGER,
             nzbstatus INTEGER,
+            completion REAL DEFAULT 0,
             isrenamed INTEGER,
             iscategorized INTEGER,
             predb_id INTEGER,

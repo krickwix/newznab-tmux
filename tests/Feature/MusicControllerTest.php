@@ -74,6 +74,49 @@ class MusicControllerTest extends TestCase
         $this->assertInstanceOf(LengthAwarePaginator::class, $response->getData()['results']);
     }
 
+    public function test_music_cover_view_uses_musicinfo_id_filename_for_covered_albums(): void
+    {
+        $album = (object) [
+            'id' => 10,
+            'title' => 'No Cover No More',
+            'artist' => 'Test Artist',
+            'cover' => 1,
+            'year' => '2026',
+            'releases' => [
+                (object) [
+                    'guid' => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'searchname' => 'Test Artist - No Cover No More',
+                    'group_name' => 'alt.binaries.music',
+                    'size' => 123456,
+                    'postdate' => now(),
+                    'nfoid' => null,
+                    'failed_count' => 0,
+                ],
+            ],
+            'total_releases' => 1,
+        ];
+
+        $results = new LengthAwarePaginator([$album], 1, 50, 1);
+
+        $this->view('music.index', [
+            'results' => $results,
+            'resultsadd' => [$album],
+            'ordering' => [],
+            'categorytitle' => 'All',
+            'catname' => 'Audio',
+            'category' => Category::MUSIC_ROOT,
+            'genres' => [],
+            'years' => [],
+            'site' => ['home_link' => '/'],
+            'artist' => '',
+            'title' => '',
+            'genre' => '',
+            'year' => '',
+        ])
+            ->assertSee('/covers/music/10.jpg', false)
+            ->assertDontSee('/covers/music/1"', false);
+    }
+
     private function createSchema(): void
     {
         Schema::create('settings', function (Blueprint $table): void {
@@ -99,6 +142,19 @@ class MusicControllerTest extends TestCase
             $table->unsignedBigInteger('minsizetoformrelease')->default(0);
             $table->unsignedBigInteger('maxsizetoformrelease')->default(0);
             $table->unsignedInteger('root_categories_id')->nullable();
+        });
+
+        Schema::create('content', function (Blueprint $table): void {
+            $table->increments('id');
+            $table->string('title');
+            $table->string('url')->nullable();
+            $table->text('body')->nullable();
+            $table->string('metadescription')->default('');
+            $table->string('metakeywords')->default('');
+            $table->integer('contenttype')->default(1);
+            $table->integer('status')->default(1);
+            $table->integer('ordinal')->nullable();
+            $table->integer('role')->default(0);
         });
     }
 

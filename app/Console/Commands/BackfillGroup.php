@@ -6,6 +6,7 @@ namespace App\Console\Commands;
 
 use App\Models\Settings;
 use App\Services\Backfill\BackfillService;
+use App\Services\Distributed\BackfillExecutionGuard;
 use App\Services\NNTP\NNTPService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -45,6 +46,7 @@ class BackfillGroup extends Command
         }
 
         try {
+            (new BackfillExecutionGuard)->assertLegacyCommandAllowed('backfill:group');
             $nntp = $this->getNntp();
 
             if ($quantity === null) {

@@ -6,6 +6,7 @@ namespace Tests\Unit\Distributed;
 
 use App\Services\Distributed\DistributedJobCatalog;
 use App\Services\Distributed\DistributedJobWorker;
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Tmux\TmuxMonitorService;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
@@ -16,11 +17,11 @@ final class DistributedJobWorkerSignalHandlerTest extends TestCase
     {
         $worker = new DistributedJobWorker(
             new DistributedJobCatalog,
-            $this->createMock(TmuxMonitorService::class),
+            $this->createStub(TmuxMonitorService::class),
+            $this->createStub(DistributedWorkerTelemetry::class),
         );
 
         $method = new ReflectionMethod($worker, 'formatTerminationSignalMessage');
-        $method->setAccessible(true);
 
         $message = $method->invoke(
             $worker,

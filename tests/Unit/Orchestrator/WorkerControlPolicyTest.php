@@ -1,0 +1,1415 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Unit\Orchestrator;
+
+use App\Services\Orchestrator\ControlProfile;
+use App\Services\Orchestrator\ControlState;
+use App\Services\Orchestrator\FailSafeCause;
+use App\Services\Orchestrator\PipelineSnapshot;
+use App\Services\Orchestrator\WorkerControlPolicy;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\TestCase;
+
+final class WorkerControlPolicyTest extends TestCase
+{
+    public function test_the_same_input_always_produces_the_same_decision(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $snapshot = $this->snapshot(lowPressure: true);
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            consecutiveLow: 2,
+            lastTransitionAt: 1_000,
+            cooldownUntil: 2_000,
+        );
+
+        self::assertEquals(
+            $policy->decide($snapshot, $state, 10_000),
+            $policy->decide($snapshot, $state, 10_000),
+        );
+    }
+
+    #[DataProvider('hardSafetyBreachProvider')]
+    public function test_a_hard_safety_breach_enters_fail_safe_immediately(array $override): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(...$override),
+            new ControlState(
+                profile: ControlProfile::Fill,
+                lastTransitionAt: 9_999,
+                cooldownUntil: 99_999,
+            ),
+            10_000,
+        );
+
+        self::assertSame(ControlProfile::FailSafe, $decision->profile->profile);
+        self::assertSame(ControlProfile::FailSafe, $decision->nextState->profile);
+        self::assertFalse($decision->backfillPermitted);
+        self::assertTrue($decision->transitioned);
+    }
+
+    public static function hardSafetyBreachProvider(): iterable
+    {
+        yield 'database memory' => [['databaseMemorySafe' => false]];
+        yield 'database CPU' => [['databaseCpuSafe' => false]];
+        yield 'database waits or deadlocks' => [['databaseWaitsSafe' => false]];
+        yield 'storage' => [['storageSafe' => false]];
+    }
+
+    #[DataProvider('invalidTelemetryProvider')]
+    public function test_stale_partial_or_contradictory_telemetry_fails_safe(array $override): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(...$override),
+            new ControlState(profile: ControlProfile::Balanced),
+            10_000,
+        );
+
+        self::assertSame(ControlProfile::FailSafe, $decision->profile->profile);
+        self::assertFalse($decision->backfillPermitted);
+    }
+
+    public static function invalidTelemetryProvider(): iterable
+    {
+        yield 'stale' => [['telemetryFresh' => false]];
+        yield 'partial' => [['telemetryComplete' => false]];
+        yield 'explicitly inconsistent' => [['telemetryConsistent' => false]];
+        yield 'contradictory pressure' => [['highPressure' => true, 'lowPressure' => true]];
+        yield 'negative backlog' => [['partsBacklog' => -1]];
+    }
+
+    public function test_three_consecutive_high_samples_are_required_to_move_one_rung_toward_drain(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(profile: ControlProfile::Balanced, lastTransitionAt: 1_000);
+
+        foreach ([10_000, 10_060] as $now) {
+            $decision = $policy->decide($this->snapshot(highPressure: true), $state, $now);
+            self::assertSame(ControlProfile::Balanced, $decision->profile->profile);
+            self::assertFalse($decision->transitioned);
+            $state = $decision->nextState;
+        }
+
+        $decision = $policy->decide($this->snapshot(highPressure: true), $state, 10_120);
+
+        self::assertSame(ControlProfile::Drain, $decision->profile->profile);
+        self::assertTrue($decision->transitioned);
+    }
+
+    public function test_high_pressure_transition_into_fail_safe_records_a_telemetry_cause(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(highPressure: true),
+            new ControlState(
+                profile: ControlProfile::Drain,
+                consecutiveHigh: 2,
+                lastTransitionAt: 1_000,
+            ),
+            10_000,
+        );
+
+        self::assertSame(ControlProfile::FailSafe, $decision->profile->profile);
+        self::assertSame(FailSafeCause::Telemetry, $decision->nextState->failSafeCause);
+    }
+
+    public function test_high_pressure_immediately_denies_new_backfill_supply_before_profile_transition(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->greenBackfillSnapshot(highPressure: true, lowPressure: false),
+            new ControlState(profile: ControlProfile::Fill, lastTransitionAt: 9_999),
+            10_000,
+        );
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_high_pressure', $decision->reasons);
+    }
+
+    public function test_backfill_requires_the_complete_pipeline_to_be_in_the_low_pressure_envelope(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->greenBackfillSnapshot(lowPressure: false),
+            new ControlState(profile: ControlProfile::Fill),
+            10_000,
+        );
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_pipeline_not_drained', $decision->reasons);
+    }
+
+    public function test_five_consecutive_low_samples_are_required_to_move_one_rung_toward_fill(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(profile: ControlProfile::Balanced, lastTransitionAt: 1_000);
+
+        foreach ([10_000, 10_060, 10_120, 10_180] as $now) {
+            $decision = $policy->decide($this->snapshot(lowPressure: true), $state, $now);
+            self::assertSame(ControlProfile::Balanced, $decision->profile->profile);
+            self::assertFalse($decision->transitioned);
+            $state = $decision->nextState;
+        }
+
+        $decision = $policy->decide($this->snapshot(lowPressure: true), $state, 10_240);
+
+        self::assertSame(ControlProfile::Fill, $decision->profile->profile);
+        self::assertTrue($decision->transitioned);
+    }
+
+    public function test_minimum_dwell_blocks_an_otherwise_eligible_transition(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(highPressure: true),
+            new ControlState(
+                profile: ControlProfile::Balanced,
+                consecutiveHigh: 2,
+                lastTransitionAt: 1_000,
+            ),
+            1_299,
+        );
+
+        self::assertSame(ControlProfile::Balanced, $decision->profile->profile);
+        self::assertFalse($decision->transitioned);
+    }
+
+    public function test_reversal_cooldown_blocks_a_move_back_toward_fill(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(lowPressure: true),
+            new ControlState(
+                profile: ControlProfile::Drain,
+                consecutiveLow: 4,
+                lastTransitionAt: 1_000,
+                cooldownUntil: 10_001,
+            ),
+            10_000,
+        );
+
+        self::assertSame(ControlProfile::Drain, $decision->profile->profile);
+        self::assertFalse($decision->transitioned);
+    }
+
+    public function test_telemetry_fail_safe_recovers_only_to_drain_after_two_distinct_safe_samples(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            lastTransitionAt: 10_000,
+            cooldownUntil: 99_999,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        );
+
+        $first = $policy->decide($this->snapshot(lowPressure: true, observedAt: 130), $state, 10_060);
+        self::assertSame(ControlProfile::FailSafe, $first->profile->profile);
+        self::assertFalse($first->backfillPermitted);
+        self::assertSame(1, $first->nextState->failSafeRecoverySamples);
+
+        $second = $policy->decide($this->greenBackfillSnapshot(observedAt: 160), $first->nextState, 10_120);
+        self::assertSame(ControlProfile::Drain, $second->profile->profile);
+        self::assertTrue($second->transitioned);
+        self::assertFalse($second->backfillPermitted);
+        self::assertNull($second->nextState->failSafeCause);
+        self::assertSame(10_120 + WorkerControlPolicy::TRANSITION_COOLDOWN_SECONDS, $second->nextState->cooldownUntil);
+        self::assertContains('fail_safe_recovered_to_drain', $second->reasons);
+    }
+
+    public function test_duplicate_or_high_pressure_samples_do_not_advance_fail_safe_recovery(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeRecoverySamples: 1,
+            failSafeLastObservedAt: 100,
+        );
+
+        $duplicate = $policy->decide($this->snapshot(lowPressure: true, observedAt: 100), $state, 10_000);
+        self::assertSame(1, $duplicate->nextState->failSafeRecoverySamples);
+
+        $high = $policy->decide($this->snapshot(highPressure: true, observedAt: 130), $state, 10_060);
+        self::assertSame(ControlProfile::FailSafe, $high->profile->profile);
+        self::assertSame(0, $high->nextState->failSafeRecoverySamples);
+    }
+
+    public function test_safe_high_pressure_marks_acceleration_only_while_all_core_backlogs_are_draining(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        );
+        $policy = new WorkerControlPolicy;
+        $drainingRates = ['parts' => 0.0, 'binaries' => 0.0, 'collections' => 0.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $drainingEwma = ['parts' => -5.0, 'binaries' => -6.0, 'collections' => -7.0, 'releases' => 0.0, 'nzbs' => 0.0];
+
+        foreach ([130, 190] as $observedAt) {
+            $warming = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: $observedAt,
+                backlogRatesPerMinute: $drainingRates,
+                backlogEwmaPerMinute: $drainingEwma,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $state, 10_000);
+            self::assertNotContains('core_pipeline_draining', $warming->reasons);
+            $state = $warming->nextState;
+            if ($observedAt === 130) {
+                $duplicate = $policy->decide($this->snapshot(
+                    highPressure: true,
+                    observedAt: 130,
+                    backlogRatesPerMinute: $drainingRates,
+                    backlogEwmaPerMinute: $drainingEwma,
+                    bodyRecoveryQueueBacklog: 1_000,
+                ), $state, 10_000);
+                self::assertSame(1, $duplicate->nextState->recoveryDrainSamples);
+                self::assertNotContains('core_pipeline_draining', $duplicate->reasons);
+            }
+        }
+        $draining = $policy->decide($this->snapshot(
+            highPressure: true,
+            observedAt: 250,
+            backlogRatesPerMinute: $drainingRates,
+            backlogEwmaPerMinute: $drainingEwma,
+            bodyRecoveryQueueBacklog: 1_000,
+        ), $state, 10_000);
+        self::assertContains('core_pipeline_draining', $draining->reasons);
+        self::assertSame(3, $draining->nextState->recoveryDrainSamples);
+
+        foreach (['releases', 'nzbs'] as $growingStage) {
+            $rates = $drainingRates;
+            $rates[$growingStage] = 0.1;
+            $notDraining = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: 310,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $drainingEwma,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $draining->nextState, 10_000);
+
+            self::assertNotContains('core_pipeline_draining', $notDraining->reasons, $growingStage);
+            self::assertSame(0, $notDraining->nextState->recoveryDrainSamples, $growingStage);
+        }
+
+        foreach (['parts', 'binaries', 'collections'] as $growingStage) {
+            $rates = $drainingRates;
+            $rates[$growingStage] = 0.1;
+            $transientPulse = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: 310,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $drainingEwma,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $draining->nextState, 10_000);
+
+            self::assertContains('core_pipeline_draining', $transientPulse->reasons, $growingStage);
+            self::assertSame(3, $transientPulse->nextState->recoveryDrainSamples, $growingStage);
+
+            $lostDrainMargin = $drainingEwma;
+            $lostDrainMargin[$growingStage] = 0.1;
+            $unsafe = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: 310,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $lostDrainMargin,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $draining->nextState, 10_000);
+
+            self::assertNotContains('core_pipeline_draining', $unsafe->reasons, $growingStage);
+            self::assertSame(0, $unsafe->nextState->recoveryDrainSamples, $growingStage);
+        }
+
+        $nonFinite = $drainingEwma;
+        $nonFinite['parts'] = NAN;
+        $invalid = $policy->decide($this->snapshot(
+            highPressure: true,
+            observedAt: 310,
+            backlogRatesPerMinute: $drainingRates,
+            backlogEwmaPerMinute: $nonFinite,
+            bodyRecoveryQueueBacklog: 1_000,
+        ), $draining->nextState, 10_000);
+        self::assertNotContains('core_pipeline_draining', $invalid->reasons);
+        self::assertSame(0, $invalid->nextState->recoveryDrainSamples);
+    }
+
+    public function test_transient_core_ingestion_pulses_preserve_but_do_not_advance_recovery_drain_streak(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        );
+        $draining = ['parts' => 0.0, 'binaries' => 0.0, 'collections' => 0.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $pulse = ['parts' => 4.0, 'binaries' => 2.0, 'collections' => 0.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $ewma = ['parts' => -800.0, 'binaries' => -26.0, 'collections' => -25.0, 'releases' => 0.0, 'nzbs' => 0.0];
+
+        foreach ([[130, $draining, 1, 0], [190, $pulse, 1, 1], [250, $draining, 2, 0], [310, $pulse, 2, 1], [370, $draining, 3, 0]] as [$observedAt, $rates, $expectedSamples, $expectedHoldSamples]) {
+            $decision = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: $observedAt,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $ewma,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $state, 10_000);
+            $state = $decision->nextState;
+            self::assertSame($expectedSamples, $state->recoveryDrainSamples);
+            self::assertSame($expectedHoldSamples, $state->recoveryDrainHoldSamples);
+            if ($expectedSamples < 3) {
+                self::assertNotContains('core_pipeline_draining', $decision->reasons);
+            }
+        }
+
+        self::assertContains('core_pipeline_draining', $decision->reasons);
+        self::assertSame(3, $state->recoveryDrainSamples);
+    }
+
+    public function test_bounded_repair_growth_holds_streak_for_at_most_three_samples(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+            recoveryDrainSamples: 3,
+        );
+        $rates = ['parts' => 802.0, 'binaries' => 6.0, 'collections' => 2.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $backlogs = ['parts' => 192_000_000, 'binaries' => 89_000, 'collections' => 52_000];
+        $ewma = [
+            'parts' => $backlogs['parts'] * log(2.0) / WorkerControlPolicy::RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES,
+            'binaries' => $backlogs['binaries'] * log(2.0) / WorkerControlPolicy::RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES,
+            'collections' => $backlogs['collections'] * log(2.0) / WorkerControlPolicy::RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES,
+            'releases' => 0.0,
+            'nzbs' => 0.0,
+        ];
+
+        foreach ([130, 160, 190] as $expectedHoldSamples => $observedAt) {
+            $bounded = $policy->decide($this->snapshot(
+                partsBacklog: $backlogs['parts'],
+                binariesBacklog: $backlogs['binaries'],
+                collectionsBacklog: $backlogs['collections'],
+                highPressure: true,
+                observedAt: $observedAt,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $ewma,
+                bodyRecoveryQueueBacklog: 10_000,
+            ), $state, 10_000);
+            $state = $bounded->nextState;
+            self::assertSame(3, $state->recoveryDrainSamples);
+            self::assertSame($expectedHoldSamples + 1, $state->recoveryDrainHoldSamples);
+            self::assertContains('core_pipeline_draining', $bounded->reasons);
+        }
+
+        $expired = $policy->decide($this->snapshot(
+            partsBacklog: $backlogs['parts'],
+            binariesBacklog: $backlogs['binaries'],
+            collectionsBacklog: $backlogs['collections'],
+            highPressure: true,
+            observedAt: 220,
+            backlogRatesPerMinute: $rates,
+            backlogEwmaPerMinute: $ewma,
+            bodyRecoveryQueueBacklog: 10_000,
+        ), $state, 10_000);
+        self::assertSame(0, $expired->nextState->recoveryDrainSamples);
+        self::assertSame(0, $expired->nextState->recoveryDrainHoldSamples);
+        self::assertNotContains('core_pipeline_draining', $expired->reasons);
+
+        $ewma['binaries'] = ($backlogs['binaries'] * log(2.0) / WorkerControlPolicy::RECOVERY_TRANSIENT_GROWTH_DOUBLING_MINUTES) + 0.001;
+        $excessive = $policy->decide($this->snapshot(
+            partsBacklog: $backlogs['parts'],
+            binariesBacklog: $backlogs['binaries'],
+            collectionsBacklog: $backlogs['collections'],
+            highPressure: true,
+            observedAt: 130,
+            backlogRatesPerMinute: $rates,
+            backlogEwmaPerMinute: $ewma,
+            bodyRecoveryQueueBacklog: 10_000,
+        ), new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+            recoveryDrainSamples: 1,
+        ), 10_000);
+        self::assertSame(0, $excessive->nextState->recoveryDrainSamples);
+
+        $delayed = $policy->decide($this->snapshot(
+            partsBacklog: $backlogs['parts'],
+            binariesBacklog: $backlogs['binaries'],
+            collectionsBacklog: $backlogs['collections'],
+            highPressure: true,
+            observedAt: 191,
+            backlogRatesPerMinute: $rates,
+            backlogEwmaPerMinute: array_replace($ewma, ['binaries' => 0.0]),
+            bodyRecoveryQueueBacklog: 10_000,
+        ), new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+            recoveryDrainSamples: 3,
+        ), 10_000);
+        self::assertSame(0, $delayed->nextState->recoveryDrainSamples);
+        self::assertNotContains('core_pipeline_draining', $delayed->reasons);
+    }
+
+    public function test_non_growing_core_samples_advance_while_ewma_remains_inside_bounded_envelope(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        );
+        $backlogs = ['parts' => 192_000_000, 'binaries' => 89_000, 'collections' => 52_000];
+        $rates = ['parts' => 0.0, 'binaries' => -1.0, 'collections' => 0.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $ewma = [
+            'parts' => 700.0,
+            'binaries' => 20.0,
+            'collections' => 10.0,
+            'releases' => 0.0,
+            'nzbs' => 0.0,
+        ];
+
+        foreach ([130, 190, 250] as $expectedSamples => $observedAt) {
+            $decision = $policy->decide($this->snapshot(
+                partsBacklog: $backlogs['parts'],
+                binariesBacklog: $backlogs['binaries'],
+                collectionsBacklog: $backlogs['collections'],
+                highPressure: true,
+                observedAt: $observedAt,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $ewma,
+                bodyRecoveryQueueBacklog: 10_000,
+            ), $state, 10_000);
+            $state = $decision->nextState;
+            self::assertSame($expectedSamples + 1, $state->recoveryDrainSamples);
+            self::assertSame(0, $state->recoveryDrainHoldSamples);
+        }
+
+        self::assertContains('core_pipeline_draining', $decision->reasons);
+    }
+
+    public function test_classification_drain_cannot_accelerate_recovery_while_physical_collections_grow(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide($this->snapshot(
+            partsBacklog: 192_000_000,
+            binariesBacklog: 89_000,
+            collectionsBacklog: 9_000,
+            collectionsTotalBacklog: 48_000,
+            highPressure: true,
+            observedAt: 130,
+            backlogRatesPerMinute: [
+                'parts' => 0.0,
+                'binaries' => 0.0,
+                'collections' => -500.0,
+                'collections_total' => 1.0,
+                'recovery_sources' => 501.0,
+                'releases' => 0.0,
+                'nzbs' => 0.0,
+            ],
+            backlogEwmaPerMinute: [
+                'parts' => 0.0,
+                'binaries' => 0.0,
+                'collections' => -100.0,
+                'collections_total' => 0.1,
+                'recovery_sources' => 100.1,
+                'releases' => 0.0,
+                'nzbs' => 0.0,
+            ],
+            bodyRecoveryQueueBacklog: 10_000,
+        ), new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        ), 10_000);
+
+        self::assertSame(0, $decision->nextState->recoveryDrainSamples);
+        self::assertNotContains('core_pipeline_draining', $decision->reasons);
+    }
+
+    public function test_stable_ineligible_nzb_backlog_does_not_permanently_block_recovery_drain(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeLastObservedAt: 100,
+        );
+        $rates = ['parts' => 0.0, 'binaries' => 0.0, 'collections' => 0.0, 'releases' => 0.0, 'nzbs' => 0.0];
+        $ewma = ['parts' => -5.0, 'binaries' => -6.0, 'collections' => -7.0, 'releases' => 0.0, 'nzbs' => 0.5];
+
+        foreach ([130, 190, 250] as $observedAt) {
+            $decision = $policy->decide($this->snapshot(
+                highPressure: true,
+                observedAt: $observedAt,
+                eligibleNzbs: 0,
+                backlogRatesPerMinute: $rates,
+                backlogEwmaPerMinute: $ewma,
+                bodyRecoveryQueueBacklog: 1_000,
+            ), $state, 10_000);
+            $state = $decision->nextState;
+        }
+        self::assertContains('core_pipeline_draining', $decision->reasons);
+
+        $actionable = $policy->decide($this->snapshot(
+            highPressure: true,
+            observedAt: 310,
+            eligibleNzbs: 1,
+            backlogRatesPerMinute: $rates,
+            backlogEwmaPerMinute: $ewma,
+            bodyRecoveryQueueBacklog: 1_000,
+        ), $state, 10_000);
+        self::assertNotContains('core_pipeline_draining', $actionable->reasons);
+        self::assertSame(0, $actionable->nextState->recoveryDrainSamples);
+    }
+
+    public function test_hard_or_legacy_fail_safe_requires_five_safe_samples_and_the_latest_cooldown(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            cooldownUntil: 20_000,
+            failSafeCause: FailSafeCause::Unknown,
+            failSafeLastObservedAt: 100,
+        );
+
+        foreach ([130, 160, 190, 220, 250] as $observedAt) {
+            $decision = $policy->decide($this->snapshot(lowPressure: true, observedAt: $observedAt), $state, 19_999);
+            $state = $decision->nextState;
+        }
+        self::assertSame(ControlProfile::FailSafe, $decision->profile->profile);
+        self::assertSame(5, $state->failSafeRecoverySamples);
+
+        $recovered = $policy->decide($this->snapshot(lowPressure: true, observedAt: 280), $state, 20_000);
+        self::assertSame(ControlProfile::Drain, $recovered->profile->profile);
+        self::assertFalse($recovered->backfillPermitted);
+    }
+
+    public function test_a_hard_breach_during_telemetry_recovery_latches_hard_and_resets_the_streak(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(databaseMemorySafe: false, observedAt: 102),
+            new ControlState(
+                profile: ControlProfile::FailSafe,
+                failSafeCause: FailSafeCause::Telemetry,
+                failSafeRecoverySamples: 1,
+                failSafeLastObservedAt: 101,
+            ),
+            10_000,
+        );
+
+        self::assertSame(FailSafeCause::Hard, $decision->nextState->failSafeCause);
+        self::assertSame(0, $decision->nextState->failSafeRecoverySamples);
+        self::assertSame(10_000 + WorkerControlPolicy::TRANSITION_COOLDOWN_SECONDS, $decision->nextState->cooldownUntil);
+    }
+
+    public function test_invalid_telemetry_cannot_downgrade_a_hard_or_legacy_fail_safe(): void
+    {
+        foreach ([FailSafeCause::Hard, FailSafeCause::Unknown] as $cause) {
+            $decision = (new WorkerControlPolicy)->decide(
+                $this->snapshot(telemetryFresh: false, observedAt: 102),
+                new ControlState(
+                    profile: ControlProfile::FailSafe,
+                    failSafeCause: $cause,
+                    failSafeRecoverySamples: 1,
+                    failSafeLastObservedAt: 101,
+                ),
+                10_000,
+            );
+
+            self::assertSame($cause, $decision->nextState->failSafeCause);
+            self::assertSame(0, $decision->nextState->failSafeRecoverySamples);
+        }
+    }
+
+    public function test_an_explicit_database_wait_is_hard_even_when_prometheus_telemetry_is_invalid(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(telemetryFresh: false, databaseWaitsSafe: false, observedAt: 102),
+            new ControlState(profile: ControlProfile::Fill),
+            10_000,
+        );
+
+        self::assertSame(FailSafeCause::Hard, $decision->nextState->failSafeCause);
+    }
+
+    public function test_a_fresh_prometheus_breach_is_hard_even_when_backlog_telemetry_is_invalid(): void
+    {
+        foreach ([
+            ['databaseMemorySafe' => false],
+            ['databaseCpuSafe' => false],
+            ['storageSafe' => false],
+        ] as $override) {
+            $decision = (new WorkerControlPolicy)->decide(
+                $this->snapshot(...array_replace([
+                    'telemetryComplete' => false,
+                    'telemetryFresh' => true,
+                    'observedAt' => 102,
+                ], $override)),
+                new ControlState(
+                    profile: ControlProfile::FailSafe,
+                    failSafeCause: FailSafeCause::Telemetry,
+                    failSafeRecoverySamples: 1,
+                    failSafeLastObservedAt: 101,
+                ),
+                10_000,
+            );
+
+            self::assertSame(FailSafeCause::Hard, $decision->nextState->failSafeCause);
+            self::assertSame(0, $decision->nextState->failSafeRecoverySamples);
+            self::assertSame(10_000 + WorkerControlPolicy::TRANSITION_COOLDOWN_SECONDS, $decision->nextState->cooldownUntil);
+        }
+    }
+
+    public function test_equal_or_older_observations_do_not_advance_or_regress_the_recovery_watermark(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeRecoverySamples: 1,
+            failSafeLastObservedAt: 100,
+        );
+
+        foreach ([100, 99] as $observedAt) {
+            $decision = $policy->decide($this->snapshot(lowPressure: true, observedAt: $observedAt), $state, 10_000);
+            self::assertSame(1, $decision->nextState->failSafeRecoverySamples);
+            self::assertSame(100, $decision->nextState->failSafeLastObservedAt);
+            $state = $decision->nextState;
+        }
+    }
+
+    public function test_early_samples_do_not_slide_the_recovery_watermark_forever(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(
+            profile: ControlProfile::FailSafe,
+            failSafeCause: FailSafeCause::Telemetry,
+            failSafeRecoverySamples: 1,
+            failSafeLastObservedAt: 100,
+        );
+
+        foreach ([110, 120] as $observedAt) {
+            $decision = $policy->decide($this->snapshot(lowPressure: true, observedAt: $observedAt), $state, 10_000);
+            self::assertSame(100, $decision->nextState->failSafeLastObservedAt);
+            self::assertSame(ControlProfile::FailSafe, $decision->profile->profile);
+            $state = $decision->nextState;
+        }
+
+        $recovered = $policy->decide($this->snapshot(lowPressure: true, observedAt: 130), $state, 10_030);
+        self::assertSame(ControlProfile::Drain, $recovered->profile->profile);
+    }
+
+    public function test_a_transition_is_clamped_to_one_profile_rung(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->snapshot(highPressure: true),
+            new ControlState(
+                profile: ControlProfile::Fill,
+                consecutiveHigh: 99,
+                lastTransitionAt: 1_000,
+            ),
+            10_000,
+        );
+
+        self::assertSame(ControlProfile::Balanced, $decision->profile->profile);
+        self::assertNotSame(ControlProfile::Drain, $decision->profile->profile);
+    }
+
+    public function test_backfill_is_permitted_only_when_all_green_gates_are_open(): void
+    {
+        foreach ([ControlProfile::Balanced, ControlProfile::Fill] as $profile) {
+            $decision = (new WorkerControlPolicy)->decide(
+                $this->greenBackfillSnapshot(),
+                new ControlState(profile: $profile, lastTransitionAt: 9_900),
+                10_000,
+            );
+
+            self::assertTrue($decision->backfillPermitted, $profile->value);
+            self::assertTrue($decision->profile->backfillEnabled, $profile->value);
+        }
+    }
+
+    public function test_profile_transition_blocks_supply_until_a_later_settled_cycle(): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->greenBackfillSnapshot(),
+            new ControlState(
+                profile: ControlProfile::Drain,
+                consecutiveLow: WorkerControlPolicy::LOW_SAMPLES_TO_FILL - 1,
+                lastTransitionAt: 1_000,
+            ),
+            10_000,
+        );
+
+        self::assertTrue($decision->transitioned);
+        self::assertSame(ControlProfile::Balanced, $decision->profile->profile);
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_profile_settling', $decision->reasons);
+    }
+
+    #[DataProvider('backfillDenialProvider')]
+    public function test_backfill_is_denied_when_any_supply_gate_is_closed(array $override): void
+    {
+        $decision = (new WorkerControlPolicy)->decide(
+            $this->greenBackfillSnapshot(...$override),
+            new ControlState(profile: ControlProfile::Balanced),
+            10_000,
+        );
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertNotEmpty(array_filter(
+            $decision->reasons,
+            static fn (string $reason): bool => str_starts_with($reason, 'backfill_'),
+        ));
+    }
+
+    public static function backfillDenialProvider(): iterable
+    {
+        yield 'provider unavailable' => [['providerAvailable' => false]];
+        yield 'cursor exhausted' => [['cursorAvailable' => false]];
+        yield 'no current groups' => [['currentGroupsAvailable' => false]];
+        yield 'no eligible supply' => [['eligibleBackfillSupply' => false]];
+        yield 'no safe capacity' => [['backfillSafeQuantity' => 0]];
+    }
+
+    public function test_target_ineffective_permits_do_not_globally_lock_other_targets(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(profile: ControlProfile::Balanced, lastTransitionAt: 9_900);
+        $ineffective = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $first = $policy->decide($ineffective, $state, 10_000);
+        self::assertFalse($first->nextState->backfillLocked);
+
+        $second = $policy->decide($ineffective, $first->nextState, 10_060);
+
+        self::assertSame(2, $second->nextState->ineffectiveBackfillPermitsByTarget['alt.a']);
+        self::assertFalse($second->nextState->backfillLocked);
+        self::assertTrue($second->backfillPermitted);
+        self::assertContains('backfill_target_locked_after_ineffective_permits', $second->reasons);
+    }
+
+    public function test_raised_ineffective_backfill_limit_defers_target_locking(): void
+    {
+        // With the env-tunable limit raised (cold/incomplete backlog needs more
+        // passes per group before a release is attributed), a group that would
+        // lock at the default of 2 keeps getting permits.
+        $policy = new WorkerControlPolicy(ineffectiveBackfillLimitOverride: 6);
+        $state = new ControlState(profile: ControlProfile::Balanced, lastTransitionAt: 9_900);
+        $ineffective = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $d = $policy->decide($ineffective, $state, 10_000);
+        for ($i = 1; $i < 5; $i++) {
+            $d = $policy->decide($ineffective, $d->nextState, 10_000 + $i * 60);
+        }
+
+        // 5 ineffective permits on alt.a, but the limit is 6 -> not locked yet.
+        self::assertSame(5, $d->nextState->ineffectiveBackfillPermitsByTarget['alt.a']);
+        self::assertFalse($d->nextState->backfillLocked);
+        self::assertTrue($d->backfillPermitted);
+    }
+
+    public function test_category_quality_failure_immediately_locks_the_exact_source_with_a_stable_reason(): void
+    {
+        $snapshot = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            0,
+            0,
+            lowPressure: true,
+            eligibleBackfillSupply: true,
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: true,
+            backfillPermitInputMoved: true,
+            backfillPermitGroup: 'alt.console',
+            backfillPermitQualityFailure: 'backfill_permit_wrong_category',
+            backfillGroup: 'alt.console',
+            backfillSafeQuantity: 10_000,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide(
+            $snapshot,
+            new ControlState(profile: ControlProfile::Fill),
+            time(),
+        );
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertSame(WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT, $decision->nextState->ineffectiveBackfillPermitsByTarget['alt.console']);
+        self::assertContains('backfill_permit_wrong_category', $decision->reasons);
+        self::assertContains('backfill_target_locked', $decision->reasons);
+    }
+
+    public function test_recent_proven_yield_cannot_override_exact_target_ineffective_lock(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            lastTransitionAt: 9_900,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 2],
+        );
+        $snapshot = $this->greenBackfillSnapshot(
+            backfillGroup: 'alt.a',
+            backfillYieldNzbsPer10k: 0.15,
+            backfillHistoryRecent: true,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($snapshot, $state, 10_000);
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_target_locked', $decision->reasons);
+    }
+
+    public function test_a_due_bounded_retry_overrides_only_the_selected_target_lock(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            lastTransitionAt: 9_900,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 2],
+        );
+        $snapshot = $this->greenBackfillSnapshot(
+            backfillGroup: 'alt.a',
+            backfillTargetLockRetryDue: true,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($snapshot, $state, 10_000);
+
+        self::assertTrue($decision->backfillPermitted);
+        self::assertContains('backfill_target_lock_retry_due', $decision->reasons);
+        self::assertSame(2, $decision->nextState->ineffectiveBackfillPermitsByTarget['alt.a']);
+    }
+
+    #[DataProvider('nonProvenTargetLockProvider')]
+    public function test_expired_or_below_threshold_history_remains_target_locked(float $yield, bool $recent): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            lastTransitionAt: 9_900,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 2],
+        );
+        $snapshot = $this->greenBackfillSnapshot(
+            backfillGroup: 'alt.a',
+            backfillYieldNzbsPer10k: $yield,
+            backfillHistoryRecent: $recent,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($snapshot, $state, 10_000);
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_target_locked', $decision->reasons);
+    }
+
+    /** @return array<string, array{float, bool}> */
+    public static function nonProvenTargetLockProvider(): array
+    {
+        return [
+            'below threshold' => [0.149, true],
+            'expired history' => [0.23, false],
+        ];
+    }
+
+    public function test_a_legacy_strike_is_conservatively_seeded_to_the_observed_target(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            consecutiveIneffectiveBackfillPermits: 1,
+        );
+        $ineffective = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($ineffective, $state, 10_000);
+
+        self::assertSame(2, $decision->nextState->ineffectiveBackfillPermitsByTarget['alt.a']);
+        self::assertTrue($decision->backfillPermitted);
+        self::assertContains('backfill_target_locked_after_ineffective_permits', $decision->reasons);
+    }
+
+    public function test_a_legacy_global_lock_remains_fail_closed(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            consecutiveIneffectiveBackfillPermits: 2,
+            backfillLocked: true,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($this->greenBackfillSnapshot(), $state, 10_000);
+
+        self::assertTrue($decision->nextState->backfillLocked);
+        self::assertFalse($decision->backfillPermitted);
+    }
+
+    public function test_a_no_input_permit_preserves_only_its_target_strike(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 1, 'alt.b' => 1],
+        );
+        $noInput = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: true,
+            backfillPermitInputMoved: false,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($noInput, $state, 10_000);
+
+        self::assertSame(['alt.a' => 1, 'alt.b' => 1], $decision->nextState->ineffectiveBackfillPermitsByTarget);
+        self::assertTrue($decision->backfillPermitted);
+    }
+
+    public function test_an_unclaimed_permit_does_not_consume_an_output_strike(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 1, 'alt.b' => 1],
+        );
+        $unclaimed = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: false,
+            backfillPermitInputMoved: false,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($unclaimed, $state, 10_000);
+
+        self::assertSame(['alt.a' => 1, 'alt.b' => 1], $decision->nextState->ineffectiveBackfillPermitsByTarget);
+        self::assertSame(0, $decision->nextState->consecutiveIneffectiveBackfillPermits);
+        self::assertContains('backfill_permit_unclaimed', $decision->reasons);
+        self::assertNotContains('backfill_permit_ineffective', $decision->reasons);
+        self::assertTrue($decision->backfillPermitted);
+    }
+
+    public function test_inactive_backfill_context_progress_reopens_only_its_target_at_probe_size(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 2, 'alt.b' => 1],
+        );
+        $progress = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: true,
+            backfillPermitInputMoved: true,
+            backfillPermitContextProgress: true,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.a',
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($progress, $state, 10_000);
+
+        self::assertSame(['alt.a' => 1, 'alt.b' => 1], $decision->nextState->ineffectiveBackfillPermitsByTarget);
+        self::assertSame(0, $decision->nextState->consecutiveIneffectiveBackfillPermits);
+        self::assertContains('backfill_permit_context_progress', $decision->reasons);
+        self::assertNotContains('backfill_permit_effective', $decision->reasons);
+        self::assertNotContains('backfill_permit_ineffective', $decision->reasons);
+        self::assertTrue($decision->backfillPermitted);
+        self::assertSame(10_000, $decision->profile->backfillQuantity);
+    }
+
+    public function test_an_effective_permit_resets_only_its_target_strike(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            ineffectiveBackfillPermitsByTarget: ['alt.a' => 1, 'alt.b' => 1],
+        );
+        $effective = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: true,
+            backfillPermitGroup: 'alt.a',
+            backfillGroup: 'alt.b',
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($effective, $state, 10_000);
+
+        self::assertSame(['alt.b' => 1], $decision->nextState->ineffectiveBackfillPermitsByTarget);
+        self::assertTrue($decision->backfillPermitted);
+    }
+
+    public function test_a_transient_database_wait_denies_backfill_without_forcing_fail_safe(): void
+    {
+        $state = new ControlState(profile: ControlProfile::Balanced);
+        $snapshot = $this->greenBackfillSnapshot(
+            databaseWaitsSafe: true,
+            databaseCurrentWaits: 1,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($snapshot, $state, 10_000);
+
+        self::assertSame(ControlProfile::Balanced, $decision->profile->profile);
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_database_busy', $decision->reasons);
+        self::assertNotContains('database_wait_or_deadlock', $decision->reasons);
+    }
+
+    public function test_a_delayed_permit_generation_mutates_strikes_only_once(): void
+    {
+        $policy = new WorkerControlPolicy;
+        $outcome = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: true,
+            backfillPermitInputMoved: true,
+            backfillPermitGroup: 'alt.test',
+            backfillPermitGeneration: 7,
+        );
+
+        $first = $policy->decide($outcome, new ControlState(profile: ControlProfile::Balanced), 10_000);
+        $replayed = $policy->decide($outcome, $first->nextState, 10_030);
+
+        self::assertSame(1, $first->nextState->ineffectiveBackfillPermitsByTarget['alt.test'] ?? null);
+        self::assertSame([7], $first->nextState->processedBackfillPermitGenerations);
+        self::assertSame(1, $replayed->nextState->ineffectiveBackfillPermitsByTarget['alt.test'] ?? null);
+        self::assertContains('backfill_permit_outcome_already_applied', $replayed->reasons);
+    }
+
+    public function test_database_busy_reason_is_visible_under_every_other_denial_state(): void
+    {
+        $cases = [
+            'drain' => [new ControlState(profile: ControlProfile::Drain), []],
+            'high pressure' => [new ControlState(profile: ControlProfile::Balanced), [
+                'highPressure' => true,
+                'lowPressure' => false,
+            ]],
+            'fail safe recovery' => [new ControlState(
+                profile: ControlProfile::FailSafe,
+                failSafeCause: FailSafeCause::Hard,
+                cooldownUntil: 20_000,
+            ), []],
+        ];
+
+        foreach ($cases as $label => [$state, $override]) {
+            $decision = (new WorkerControlPolicy)->decide($this->greenBackfillSnapshot(
+                ...array_replace($override, [
+                    'databaseWaitsSafe' => true,
+                    'databaseCurrentWaits' => 1,
+                    'observedAt' => 10_000,
+                ])
+            ), $state, 10_000);
+
+            self::assertFalse($decision->backfillPermitted, $label);
+            self::assertContains('backfill_database_busy', $decision->reasons, $label);
+        }
+    }
+
+    public function test_a_claimed_no_input_probe_rotates_without_consuming_an_output_strike(): void
+    {
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            consecutiveIneffectiveBackfillPermits: 1,
+        );
+        $noInput = $this->greenBackfillSnapshot(
+            backfillPermitCompleted: true,
+            backfillPermitEffective: false,
+            backfillPermitClaimed: true,
+            backfillPermitInputMoved: false,
+        );
+
+        $decision = (new WorkerControlPolicy)->decide($noInput, $state, 10_000);
+
+        self::assertSame(1, $decision->nextState->consecutiveIneffectiveBackfillPermits);
+        self::assertFalse($decision->nextState->backfillLocked);
+        self::assertContains('backfill_permit_no_input', $decision->reasons);
+    }
+
+    public function test_qualified_supply_starvation_activates_only_after_distinct_growth_dwell_samples(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyStarvationDwellSeconds: 600,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+        );
+        $snapshot = $this->snapshot(
+            observedAt: 1_000,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            releaseYieldPerMinute: 0.0,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+        );
+
+        $candidate = $policy->decide($snapshot, ControlState::initial(), 1_000);
+        self::assertFalse($candidate->nextState->qualifiedSupplyStarved);
+        self::assertSame(1_000, $candidate->nextState->qualifiedSupplyCandidateSince);
+        self::assertContains('qualified_supply_starvation_candidate', $candidate->reasons);
+
+        $duplicate = $policy->decide($snapshot, $candidate->nextState, 1_700);
+        self::assertFalse($duplicate->nextState->qualifiedSupplyStarved);
+
+        $active = $policy->decide(
+            $this->snapshot(
+                observedAt: 1_601,
+                schedulablePartsBacklog: 200,
+                schedulableBinariesBacklog: 30,
+                backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            ),
+            $duplicate->nextState,
+            1_601,
+        );
+        self::assertTrue($active->nextState->qualifiedSupplyStarved);
+        self::assertSame(1_601, $active->nextState->qualifiedSupplyStarvedSince);
+        self::assertContains('qualified_supply_starved', $active->reasons);
+    }
+
+    public function test_qualified_supply_starvation_requires_two_productive_samples_to_recover(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyRecoverySamples: 2,
+        );
+        $state = new ControlState(
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $first = $policy->decide($this->snapshot(observedAt: 1_700, releaseYieldPerMinute: 0.5), $state, 1_700);
+        self::assertTrue($first->nextState->qualifiedSupplyStarved);
+        self::assertSame(1, $first->nextState->qualifiedSupplyRecoverySamples);
+        self::assertContains('qualified_supply_recovery_pending', $first->reasons);
+
+        $second = $policy->decide($this->snapshot(observedAt: 1_800, releaseYieldPerMinute: 0.5), $first->nextState, 1_800);
+        self::assertFalse($second->nextState->qualifiedSupplyStarved);
+        self::assertSame(0, $second->nextState->qualifiedSupplyCandidateSince);
+    }
+
+    public function test_pending_ready_or_nzb_work_does_not_reopen_raw_input_without_settled_release_yield(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyRecoverySamples: 1,
+            qualifiedSupplyColdStartCooldownSeconds: 0,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $decision = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 1_700,
+            readyCollections: 1,
+            eligibleNzbs: 1,
+            releaseYieldPerMinute: 0.0,
+        ), $state, 1_700);
+
+        self::assertTrue($decision->nextState->qualifiedSupplyStarved);
+        self::assertFalse($decision->backfillPermitted);
+    }
+
+    public function test_qualified_supply_starvation_denies_new_raw_backfill_even_inside_a_green_pressure_envelope(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+            qualifiedSupplyColdStartCooldownSeconds: 0,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $decision = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 1_700,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $state, 1_700);
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertTrue($decision->nextState->qualifiedSupplyStarved);
+        self::assertContains('qualified_supply_starved', $decision->reasons);
+    }
+
+    public function test_cold_start_probe_grants_one_bounded_backfill_permit_while_starved_but_healthy(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+            qualifiedSupplyColdStartCooldownSeconds: 900,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        // First probe fires: starved but every other health gate is green.
+        $first = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 1_700,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $state, 1_700);
+
+        self::assertTrue($first->backfillPermitted, 'cold-start probe should grant one permit while starved but healthy');
+        self::assertContains('backfill_qualified_supply_cold_start', $first->reasons);
+        self::assertSame(1_700, $first->nextState->qualifiedSupplyColdStartAt);
+
+        // Second observation still within the cooldown window: no re-issue.
+        $second = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 2_000,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $first->nextState, 2_000);
+
+        self::assertFalse($second->backfillPermitted, 'cold-start must not re-fire within the cooldown window');
+        self::assertContains('backfill_qualified_supply_starved', $second->reasons);
+        self::assertSame(1_700, $second->nextState->qualifiedSupplyColdStartAt);
+
+        // After the cooldown elapses, a fresh probe may fire again.
+        $third = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 2_650,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $second->nextState, 2_650);
+
+        self::assertTrue($third->backfillPermitted, 'cold-start may re-fire after the cooldown elapses');
+        self::assertSame(2_650, $third->nextState->qualifiedSupplyColdStartAt);
+    }
+
+    public function test_cold_start_probe_fires_when_no_fresh_forward_content_is_available(): void
+    {
+        // Live regression: after draining a burst, currentGroupsAvailable is
+        // false (no >10k unfetched NEW server articles) so backfillGatesPassed()
+        // is false, but backward-fill of older missing parts is still possible.
+        // The cold-start must fire on the relaxed gate set.
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+            qualifiedSupplyColdStartCooldownSeconds: 900,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Fill,
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $decision = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 1_700,
+            currentGroupsAvailable: false,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $state, 1_700);
+
+        self::assertTrue($decision->backfillPermitted, 'cold-start must fire even without fresh forward content');
+        self::assertContains('backfill_qualified_supply_cold_start', $decision->reasons);
+        self::assertTrue($decision->nextState->qualifiedSupplyStarved, 'cold-start grants a probe permit but does not itself clear starvation');
+    }
+
+    public function test_cold_start_probe_disabled_when_cooldown_is_zero(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+            qualifiedSupplyColdStartCooldownSeconds: 0,
+        );
+        $state = new ControlState(
+            profile: ControlProfile::Balanced,
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $decision = $policy->decide($this->greenBackfillSnapshot(
+            observedAt: 1_700,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+            readyCollections: 0,
+            releasesBacklog: 0,
+            eligibleNzbs: 0,
+            releaseYieldPerMinute: 0.0,
+        ), $state, 1_700);
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertTrue($decision->nextState->qualifiedSupplyStarved);
+        self::assertContains('qualified_supply_starved', $decision->reasons);
+    }
+
+    private function greenBackfillSnapshot(...$override): PipelineSnapshot
+    {
+        return $this->snapshot(...array_replace([
+            'lowPressure' => true,
+            'providerAvailable' => true,
+            'cursorAvailable' => true,
+            'currentGroupsAvailable' => true,
+            'eligibleBackfillSupply' => true,
+        ], $override));
+    }
+
+    private function snapshot(...$override): PipelineSnapshot
+    {
+        return new PipelineSnapshot(...array_replace([
+            'partsBacklog' => 0,
+            'binariesBacklog' => 0,
+            'collectionsBacklog' => 0,
+            'releasesBacklog' => 0,
+            'nzbsBacklog' => 0,
+            'telemetryFresh' => true,
+            'telemetryComplete' => true,
+            'telemetryConsistent' => true,
+            'databaseMemorySafe' => true,
+            'databaseCpuSafe' => true,
+            'databaseWaitsSafe' => true,
+            'storageSafe' => true,
+            'highPressure' => false,
+            'lowPressure' => false,
+            'providerAvailable' => true,
+            'cursorAvailable' => true,
+            'currentGroupsAvailable' => true,
+            'eligibleBackfillSupply' => false,
+            'backfillPermitCompleted' => false,
+            'backfillPermitEffective' => false,
+        ], $override));
+    }
+}

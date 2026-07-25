@@ -15,6 +15,42 @@ use Illuminate\Support\Facades\DB;
  */
 class TmuxMonitorService
 {
+    /** @var array<string, string> */
+    private const array BACKFILL_CONTROL_SETTINGS = [
+        'orchestrator_mode' => 'orchestrator_mode',
+        'orchestrator_lease_until' => 'orchestrator_lease_until',
+        'orchestrator_back_timer' => 'orchestrator_back_timer',
+        'orchestrator_bf_paused' => 'orchestrator_bf_paused',
+        'orchestrator_bf_permit' => 'orchestrator_bf_permit',
+    ];
+
+    /** @var array<string, string> */
+    private const array CURRENT_FORWARD_CONTROL_SETTINGS = [
+        'orchestrator_mode' => 'orchestrator_mode',
+        'orchestrator_lease_until' => 'orchestrator_lease_until',
+        'orchestrator_cf_permit' => 'orchestrator_cf_permit',
+        'orchestrator_cf_group' => 'orchestrator_cf_group',
+        'orchestrator_cf_first' => 'orchestrator_cf_first',
+        'orchestrator_cf_last' => 'orchestrator_cf_last',
+    ];
+
+    /** @var array<string, string> */
+    private const array NZB_CONTROL_SETTINGS = [
+        'orchestrator_mode' => 'orchestrator_mode',
+        'orchestrator_lease_until' => 'orchestrator_lease_until',
+        'orchestrator_nzb_timer' => 'orchestrator_nzb_timer',
+        'orchestrator_nzb_limit' => 'orchestrator_nzb_limit',
+    ];
+
+    /** @var array<string, string> */
+    private const array RELEASE_CONTROL_SETTINGS = [
+        'releases_run' => 'releases_run',
+        'orchestrator_mode' => 'orchestrator_mode',
+        'orchestrator_lease_until' => 'orchestrator_lease_until',
+        'orchestrator_rel_timer' => 'orchestrator_rel_timer',
+        'exit' => 'exit',
+    ];
+
     protected Tmux $tmux;
 
     /**
@@ -137,6 +173,96 @@ class TmuxMonitorService
 
         // Set killswitches
         $this->setKillswitches();
+
+        return $this->runVar;
+    }
+
+    /**
+     * Refresh only the settings that make a one-shot backfill permit visible.
+     *
+     * The full monitor snapshot may be cached for up to a minute, while the
+     * permitted adaptive worker may loop every 10 seconds. Keeping this query narrow lets a
+     * worker observe a new permit on its next loop without repeatedly loading
+     * the expensive category and backlog statistics.
+     *
+     * @return array<string, mixed>
+     */
+    public function refreshBackfillControlSettings(): array
+    {
+        $settings = Settings::query()
+            ->whereIn('name', array_keys(self::BACKFILL_CONTROL_SETTINGS))
+            ->get()
+            ->mapWithKeys(static fn (Settings $setting): array => [
+                self::BACKFILL_CONTROL_SETTINGS[$setting->name] => Settings::convertValue($setting->getRawOriginal('value')),
+            ])
+            ->toArray();
+
+        $this->runVar['settings'] = array_replace($this->runVar['settings'] ?? [], $settings);
+
+        return $this->runVar;
+    }
+
+    /**
+     * Refresh only the controls needed to observe one exact current-forward permit.
+     *
+     * These settings are intentionally absent from the general tmux monitor view,
+     * so the isolated worker must read them directly on every bounded loop.
+     *
+     * @return array<string, mixed>
+     */
+    public function refreshCurrentForwardControlSettings(): array
+    {
+        $settings = Settings::query()
+            ->whereIn('name', array_keys(self::CURRENT_FORWARD_CONTROL_SETTINGS))
+            ->get()
+            ->mapWithKeys(static fn (Settings $setting): array => [
+                self::CURRENT_FORWARD_CONTROL_SETTINGS[$setting->name] => Settings::convertValue($setting->getRawOriginal('value')),
+            ])
+            ->toArray();
+
+        $this->runVar['settings'] = array_replace($this->runVar['settings'] ?? [], $settings);
+
+        return $this->runVar;
+    }
+
+    /**
+     * Refresh only the controls needed after a saturated NZB pass.
+     *
+     * @return array<string, mixed>
+     */
+    public function refreshNzbControlSettings(): array
+    {
+        $settings = Settings::query()
+            ->whereIn('name', array_keys(self::NZB_CONTROL_SETTINGS))
+            ->get()
+            ->mapWithKeys(static fn (Settings $setting): array => [
+                self::NZB_CONTROL_SETTINGS[$setting->name] => Settings::convertValue($setting->getRawOriginal('value')),
+            ])
+            ->toArray();
+
+        $this->runVar['settings'] = array_replace($this->runVar['settings'] ?? [], $settings);
+        $this->runVar['nzb_controls_fresh'] = count($settings) === count(self::NZB_CONTROL_SETTINGS);
+
+        return $this->runVar;
+    }
+
+    /**
+     * Refresh only the controls that can shorten or stop release-worker sleep.
+     *
+     * @return array<string, mixed>
+     */
+    public function refreshReleaseControlSettings(): array
+    {
+        $settings = Settings::query()
+            ->whereIn('name', array_keys(self::RELEASE_CONTROL_SETTINGS))
+            ->get()
+            ->mapWithKeys(static fn (Settings $setting): array => [
+                self::RELEASE_CONTROL_SETTINGS[$setting->name] => Settings::convertValue($setting->getRawOriginal('value')),
+            ])
+            ->toArray();
+
+        $this->runVar['settings'] = array_replace($this->runVar['settings'] ?? [], $settings);
+        $this->runVar['release_controls_fresh'] = \count($settings) === \count(self::RELEASE_CONTROL_SETTINGS);
 
         return $this->runVar;
     }

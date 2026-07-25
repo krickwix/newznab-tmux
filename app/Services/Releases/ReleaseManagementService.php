@@ -8,6 +8,7 @@ use App\Facades\Search;
 use App\Models\Release;
 use App\Services\CollectionCleanupService;
 use App\Services\Nzb\NzbService;
+use App\Services\Orchestrator\CurrentForwardWindowLineage;
 use App\Services\ReleaseImageService;
 use App\Support\ReleaseSearchIndexSync;
 use Illuminate\Database\Eloquent\Builder;
@@ -21,7 +22,12 @@ use Illuminate\Support\Facades\Log;
  */
 class ReleaseManagementService
 {
-    public function __construct() {}
+    private readonly CurrentForwardWindowLineage $currentForwardLineage;
+
+    public function __construct(?CurrentForwardWindowLineage $currentForwardLineage = null)
+    {
+        $this->currentForwardLineage = $currentForwardLineage ?? new CurrentForwardWindowLineage;
+    }
 
     /**
      * @param  array<string, mixed>  $list
@@ -50,31 +56,54 @@ class ReleaseManagementService
      */
     public function deleteSingle(array $identifiers, NzbService $nzb, ReleaseImageService $releaseImage): void
     {
-        // Delete NZB from disk.
+        // Resolve and verify one database identity before touching external
+        // artifacts so disposition and deletion cannot target different rows.
+        if ($identifiers['i'] === false) {
+            $release = Release::query()->where('guid', $identifiers['g'])->first(['id']);
+            if ($release === null) {
+                return;
+            }
+            $identifiers['i'] = $release->id;
+        }
+
+        // A policy deletion must become durable lineage evidence in the same
+        // database transaction that removes the release row. Open roots are
+        // terminalized before their exact output can disappear.
+        DB::transaction(function () use ($identifiers): void {
+            $releaseId = (int) ($identifiers['i'] ?? 0);
+            $guid = (string) ($identifiers['g'] ?? '');
+            if ($releaseId <= 0 || $guid === '') {
+                throw new \RuntimeException('Release deletion requires one exact ID and GUID identity.');
+            }
+            $target = Release::query()
+                ->whereKey($releaseId)
+                ->where('guid', $guid)
+                ->lockForUpdate()
+                ->first(['id']);
+            if ($target === null) {
+                throw new \RuntimeException('Release deletion ID and GUID do not identify the same row.');
+            }
+            $this->currentForwardLineage->recordReleaseDispositionForDeletion(
+                $releaseId,
+                (string) ($identifiers['reason'] ?? 'unspecified'),
+            );
+            $deleted = Release::query()
+                ->whereKey($releaseId)
+                ->where('guid', $guid)
+                ->delete();
+            if ($deleted !== 1) {
+                throw new \RuntimeException('Release deletion lost its locked target row.');
+            }
+        }, 3);
+
+        $releaseId = (int) $identifiers['i'];
         $nzbPath = $nzb->nzbPath($identifiers['g']);
         if (! empty($nzbPath)) {
             File::delete($nzbPath);
         }
-
-        // Delete images.
         $releaseImage->delete($identifiers['g']);
-
-        // Get release ID if not provided
-        if ($identifiers['i'] === false) {
-            $release = Release::query()->where('guid', $identifiers['g'])->first(['id']);
-            if ($release !== null) {
-                $identifiers['i'] = $release->id;
-            }
-        }
-
-        // Delete from search index
-        if (! empty($identifiers['i'])) {
-            Search::deleteRelease((int) $identifiers['i']);
-            $this->deleteLinkedCollections((int) $identifiers['i']);
-        }
-
-        // Delete from DB.
-        Release::whereGuid($identifiers['g'])->delete();
+        Search::deleteRelease($releaseId);
+        $this->deleteLinkedCollections($releaseId);
     }
 
     private function deleteLinkedCollections(int $releaseId): void

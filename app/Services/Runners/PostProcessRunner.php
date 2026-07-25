@@ -7,6 +7,7 @@ namespace App\Services\Runners;
 use App\Models\Category;
 use App\Models\Settings;
 use App\Services\AdditionalProcessing\AdditionalCandidateQuery;
+use App\Services\Movies\MovieLookupState;
 use App\Services\NfoService;
 use Illuminate\Support\Facades\Concurrency;
 use Illuminate\Support\Facades\DB;
@@ -273,6 +274,7 @@ class PostProcessRunner extends BaseRunner
 
         $condLookup = ((int) Settings::settingValue('lookupimdb') === 2 ? 'AND isrenamed = 1' : '');
         $condRenamedOnly = ($renamedOnly ? 'AND isrenamed = 1' : '');
+        $lookupEligibility = app(MovieLookupState::class)->eligibilitySql('releases');
 
         $checkSql = '
             SELECT id
@@ -282,6 +284,7 @@ class PostProcessRunner extends BaseRunner
                 '.imdb_id_needs_lookup_sql('imdbid').'
                 OR '.movieinfo_needs_repair_sql('imdbid', 'movieinfo_id').'
             )
+            AND '.$lookupEligibility.'
             '.$condLookup.' '.$condRenamedOnly.'
             LIMIT 1';
         if (count(DB::select($checkSql)) === 0) {
@@ -300,6 +303,7 @@ class PostProcessRunner extends BaseRunner
                 '.imdb_id_needs_lookup_sql('imdbid').'
                 OR '.movieinfo_needs_repair_sql('imdbid', 'movieinfo_id').'
             )
+            AND '.$lookupEligibility.'
             '.$condLookup.' '.$condRenamedOnly.'
             LIMIT 16';
         $queue = DB::select($sql);

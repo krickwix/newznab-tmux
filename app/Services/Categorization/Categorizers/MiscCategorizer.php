@@ -7,6 +7,7 @@ namespace App\Services\Categorization\Categorizers;
 use App\Models\Category;
 use App\Services\Categorization\CategorizationResult;
 use App\Services\Categorization\ReleaseContext;
+use App\Support\ReleaseNames\CompactTvEpisode;
 use App\Traits\DetectsHashedNames;
 
 /**
@@ -38,9 +39,16 @@ class MiscCategorizer extends AbstractCategorizer
             return $this->noMatch();
         }
 
-        // Check for hash patterns first
-        if ($result = $this->checkHash($name)) {
+        if ($result = $this->checkStrongHash($name)) {
             return $result;
+        }
+
+        if (CompactTvEpisode::match($name, $context->groupName) !== null) {
+            return $this->noMatch();
+        }
+
+        if ($this->isBase64LikeToken($name)) {
+            return $this->matched(Category::OTHER_HASHED, 0.9, 'hash_base64_like');
         }
 
         if ($this->isZeroVowelLongToken($analysis['coreName'])) {
@@ -123,7 +131,7 @@ class MiscCategorizer extends AbstractCategorizer
         ];
     }
 
-    protected function checkHash(string $name): ?CategorizationResult
+    protected function checkStrongHash(string $name): ?CategorizationResult
     {
         // MD5 hash (32 hex characters)
         if ($this->isBoundedMd5Hash($name)) {
@@ -143,10 +151,6 @@ class MiscCategorizer extends AbstractCategorizer
         // Generic long hex hash (32-128 chars)
         if ($this->isBoundedGenericHash($name)) {
             return $this->matched(Category::OTHER_HASHED, 0.95, 'hash_generic');
-        }
-
-        if ($this->isBase64LikeToken($name)) {
-            return $this->matched(Category::OTHER_HASHED, 0.9, 'hash_base64_like');
         }
 
         // Strip extensions and separators for core-name checks

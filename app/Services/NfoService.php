@@ -802,7 +802,8 @@ class NfoService
     private function buildNfoProcessingQuery(string $groupID, string $guidChar): \Illuminate\Database\Eloquent\Builder // @phpstan-ignore class.notFound, missingType.generics, return.phpDocType
     {
         $query = Release::query()
-            ->whereBetween('nfostatus', [$this->getMaxRetries(), self::NFO_UNPROC]);
+            ->whereBetween('nfostatus', [$this->getMaxRetries(), self::NFO_UNPROC])
+            ->where('nzbstatus', NzbService::NZB_ADDED);
 
         if ($guidChar !== '') {
             $query->where('leftguid', $guidChar);
@@ -937,7 +938,7 @@ class NfoService
 
     /**
      * Get a string like this:
-     * "AND r.nfostatus BETWEEN -8 AND -1 AND r.size < 1073741824 AND r.size > 1048576"
+     * "AND r.nfostatus BETWEEN -8 AND -1 AND r.nzbstatus = 1 AND r.size < 1073741824 AND r.size > 1048576"
      * To use in a query.
      *
      *
@@ -953,9 +954,10 @@ class NfoService
         $maxRetries = ($dummy >= 0 ? -($dummy + 1) : self::NFO_UNPROC);
 
         return sprintf(
-            'AND r.nfostatus BETWEEN %d AND %d %s %s',
+            'AND r.nfostatus BETWEEN %d AND %d AND r.nzbstatus = %d %s %s',
             ($maxRetries < -8 ? -8 : $maxRetries),
             self::NFO_UNPROC,
+            NzbService::NZB_ADDED,
             ($maxSize > 0 ? ('AND r.size < '.($maxSize * 1073741824)) : ''),
             ($minSize > 0 ? ('AND r.size > '.($minSize * 1048576)) : '')
         );

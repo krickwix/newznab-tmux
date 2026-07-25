@@ -657,6 +657,58 @@ class SettingsTableSeeder extends Seeder
                 'name' => 'maxpptimeoutcount',
                 'value' => '3',
             ],
+            241 => [
+                'name' => 'orchestrator_mode',
+                'value' => 'shadow',
+            ],
+            242 => [
+                'name' => 'orchestrator_lease_until',
+                'value' => '0',
+            ],
+            243 => [
+                'name' => 'orchestrator_generation',
+                'value' => '0',
+            ],
+            244 => [
+                'name' => 'orchestrator_bins_timer',
+                'value' => '300',
+            ],
+            245 => [
+                'name' => 'orchestrator_back_timer',
+                'value' => '1800',
+            ],
+            246 => [
+                'name' => 'orchestrator_rel_timer',
+                'value' => '180',
+            ],
+            247 => [
+                'name' => 'orchestrator_nzb_timer',
+                'value' => '180',
+            ],
+            248 => [
+                'name' => 'orchestrator_nzb_limit',
+                'value' => '5',
+            ],
+            249 => [
+                'name' => 'orchestrator_bf_paused',
+                'value' => '1',
+            ],
+            250 => [
+                'name' => 'orchestrator_bf_permit',
+                'value' => '0',
+            ],
+            251 => [
+                'name' => 'orchestrator_profile',
+                'value' => 'drain',
+            ],
+            252 => [
+                'name' => 'orchestrator_bf_group',
+                'value' => '',
+            ],
+            253 => [
+                'name' => 'orchestrator_bf_claimed',
+                'value' => '0',
+            ],
         ]);
     }
 }

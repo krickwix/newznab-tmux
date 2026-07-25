@@ -11,7 +11,14 @@ use App\Services\NameFixing\Extractors\FileNameExtractor;
 use App\Services\NameFixing\Extractors\NfoNameExtractor;
 use App\Services\NNTP\NNTPService;
 use App\Services\Nzb\NzbContentsService;
+use Illuminate\Cache\Lock;
+use Illuminate\Cache\Repository as CacheRepository;
+use Illuminate\Contracts\Cache\LockProvider;
+use Illuminate\Database\Query\Builder;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Main service for name fixing operations.
@@ -21,6 +28,8 @@ use Illuminate\Support\Facades\DB;
  */
 class NameFixingService
 {
+    private const FRESH_HASHED_MARKER_MUTATION_LEASE_SECONDS = 30;
+
     // Constants for name fixing status
     public const PROC_NFO_NONE = 0;
 
@@ -29,6 +38,8 @@ class NameFixingService
     public const PROC_FILES_NONE = 0;
 
     public const PROC_FILES_DONE = 1;
+
+    public const PROC_FILES_RETRY_DONE = 2;
 
     public const PROC_PAR2_NONE = 0;
 
@@ -234,7 +245,8 @@ class NameFixingService
         $preId = false;
         if ($cats === 3) {
             $query = sprintf(
-                'SELECT rf.name AS textstring, rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id,
+                'SELECT rf.name AS textstring, rf.size AS evidence_size, rf.crc32 AS evidence_crc32,
+                    rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id, rel.adddate,
                     rf.releases_id AS fileid, rel.id AS releases_id
                 FROM releases rel
                 INNER JOIN release_files rf ON rf.releases_id = rel.id
@@ -244,7 +256,8 @@ class NameFixingService
             $preId = true;
         } else {
             $query = sprintf(
-                'SELECT rf.name AS textstring, rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id,
+                'SELECT rf.name AS textstring, rf.size AS evidence_size, rf.crc32 AS evidence_crc32,
+                    rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id, rel.adddate,
                     rf.releases_id AS fileid, rel.id AS releases_id
                 FROM releases rel
                 INNER JOIN release_files rf ON rf.releases_id = rel.id
@@ -274,58 +287,28 @@ class NameFixingService
                     $releaseFiles[$releaseId] = [
                         'release' => $release,
                         'files' => [],
+                        'evidence' => [],
                     ];
                 }
                 $releaseFiles[$releaseId]['files'][] = $release->textstring;
+                $releaseFiles[$releaseId]['evidence'][] = $this->freshHashedFileSignature(
+                    (string) $release->textstring,
+                    (string) $release->evidence_size,
+                    (string) $release->evidence_crc32,
+                );
             }
 
             foreach ($releaseFiles as $releaseId => $data) {
-                $this->updateService->reset();
-                $this->updateService->incrementChecked();
-
-                // Prioritize files for matching
-                $prioritizedFiles = $this->filePrioritizer->prioritizeForMatching($data['files']); // @phpstan-ignore argument.type
-
-                foreach ($prioritizedFiles as $filename) {
-                    /** @var Release $release */
-                    $release = clone $data['release'];
-                    $release->textstring = $filename;
-                    if ($allowedCategories !== []) {
-                        $release->allowed_categories = $allowedCategories;
-                    }
-
-                    // Try file name extraction
-                    $fileResult = $this->fileExtractor->extractFromFile($filename);
-                    if ($fileResult !== null) {
-                        if ($allowedCategories === [] || $this->isSafeMovieFilenameResult($fileResult->method, $fileResult->newName)) {
-                            $this->updateService->updateRelease(
-                                $release,
-                                $fileResult->newName,
-                                'fileCheck: '.$fileResult->method,
-                                $echo,
-                                $type,
-                                $nameStatus,
-                                $show
-                            );
-                        }
-                    }
-
-                    // If not matched, try PreDB search
-                    if (! $this->updateService->matched) {
-                        $this->preDbFileCheck($release, $echo, $type, $nameStatus, $show);
-                    }
-
-                    if (! $this->updateService->matched) {
-                        $this->preDbTitleCheck($release, $echo, $type, $nameStatus, $show);
-                    }
-
-                    if ($this->updateService->matched) {
-                        break;
-                    }
-                }
+                $this->processReleaseFiles($data['release'], $data['files'], $allowedCategories, $echo, $nameStatus, $show, $type);
 
                 if ($nameStatus === true && ! $this->updateService->matched) {
-                    $this->updateProcessingFlags($type, (int) $releaseId);
+                    if ($cats === 5 && $this->isFreshRelease($data['release'])) {
+                        if ($echo) {
+                            $this->finishFreshHashedFileFirstPass($data['release'], $data['evidence']);
+                        }
+                    } else {
+                        $this->updateProcessingFlags($type, (int) $releaseId);
+                    }
                 }
 
                 $this->echoRenamed($show);
@@ -335,6 +318,529 @@ class NameFixingService
         } else {
             cli()->info('Nothing to fix.');
         }
+    }
+
+    public function retryFreshHashedFiles(bool $echo, bool $nameStatus, bool $show, int $limit = 100): void
+    {
+        if (! $echo || ! $nameStatus) {
+            return;
+        }
+        $limit = min(100, $limit > 0 ? $limit : 100);
+        $candidates = $this->freshHashedFileCandidates($limit);
+        $allowedCategories = [
+            ...array_values(array_diff(Category::MOVIES_GROUP, [Category::MOVIE_ROOT])),
+            ...array_values(array_diff(Category::TV_GROUP, [Category::TV_ROOT])),
+        ];
+        $stats = ['scanned' => $candidates->count(), 'eligible' => 0, 'growth' => 0, 'claims' => 0, 'matched' => 0, 'fail_closed' => 0, 'deferred' => 0];
+
+        foreach ($candidates as $candidate) {
+            $releaseId = (int) $candidate->id;
+            $marker = $this->freshHashedFileMarker($releaseId);
+            if ($marker === null || ! $this->acquireFreshHashedFileLease($releaseId, $lease)) {
+                continue;
+            }
+            $stats['claims']++;
+            try {
+                $markerAfterLease = $this->freshHashedFileMarker($releaseId);
+                $release = $this->freshHashedEligibleRelease($releaseId);
+                if ($markerAfterLease === null || $release === null || ! hash_equals($marker['token'], $markerAfterLease['token'])) {
+                    continue;
+                }
+                $marker = $markerAfterLease;
+                $stats['eligible']++;
+                $evidence = $this->freshHashedFileEvidence($releaseId);
+                if (! $evidence['overflow'] && $evidence['signatures'] === $marker['evidence']) {
+                    continue;
+                }
+                $stats['growth']++;
+                $release->releases_id = $release->id;
+                $release->fresh_hashed_retry_guard = $this->freshHashedRetryGuard($release);
+
+                if ($evidence['overflow']) {
+                    if ($this->finishFreshHashedRetry($release)) {
+                        $this->forgetFreshHashedFileMarker($releaseId, $marker['token']);
+                    }
+                    $stats['fail_closed']++;
+                    Log::warning('Fresh hashed file retry failed closed on excessive files', [
+                        'release_id' => $releaseId,
+                    ]);
+
+                    continue;
+                }
+
+                $this->processReleaseFiles(
+                    $release,
+                    $evidence['files'],
+                    $allowedCategories,
+                    $echo,
+                    $nameStatus,
+                    $show,
+                    'Fresh hashed files, ',
+                );
+                if ($this->updateService->matched) {
+                    $stats['matched']++;
+                    $this->forgetFreshHashedFileMarker($releaseId, $marker['token']);
+
+                    continue;
+                }
+
+                $after = $this->freshHashedFileEvidence($releaseId);
+                if ($after['overflow']) {
+                    if ($this->finishFreshHashedRetry($release)) {
+                        $this->forgetFreshHashedFileMarker($releaseId, $marker['token']);
+                    }
+                    $stats['fail_closed']++;
+
+                    continue;
+                }
+                if ($after['signatures'] !== $evidence['signatures']) {
+                    $stats['deferred']++;
+
+                    continue;
+                }
+                if ($this->finishFreshHashedRetry($release)) {
+                    $this->forgetFreshHashedFileMarker($releaseId, $marker['token']);
+                }
+            } catch (Throwable $error) {
+                $stats['deferred']++;
+                Log::warning('Fresh hashed file retry processing deferred after transient failure', [
+                    'release_id' => $releaseId,
+                    'error' => $error->getMessage(),
+                ]);
+            } finally {
+                $this->releaseFreshHashedFileLease($lease);
+            }
+        }
+        cli()->info(sprintf(
+            'Fresh hashed file retry: scanned=%d eligible=%d growth=%d claims=%d matched=%d fail_closed=%d deferred=%d',
+            $stats['scanned'],
+            $stats['eligible'],
+            $stats['growth'],
+            $stats['claims'],
+            $stats['matched'],
+            $stats['fail_closed'],
+            $stats['deferred'],
+        ));
+    }
+
+    protected function freshHashedFileCandidates(int $limit): \Illuminate\Support\Collection
+    {
+        $limit = min(100, max(1, $limit));
+        $cursor = $this->freshHashedFileCursor();
+        $query = $this->freshHashedFileCandidateQuery();
+        if ($cursor !== null) {
+            $query->where(function ($query) use ($cursor): void {
+                $query->where('adddate', '>', $cursor['adddate'])
+                    ->orWhere(function ($query) use ($cursor): void {
+                        $query->where('adddate', $cursor['adddate'])->where('id', '>', $cursor['id']);
+                    });
+            });
+        }
+        $candidates = $query->limit($limit)->get();
+        if ($cursor !== null && $candidates->count() < $limit) {
+            $wrapped = $this->freshHashedFileCandidateQuery()
+                ->where(function ($query) use ($cursor): void {
+                    $query->where('adddate', '<', $cursor['adddate'])
+                        ->orWhere(function ($query) use ($cursor): void {
+                            $query->where('adddate', $cursor['adddate'])->where('id', '<=', $cursor['id']);
+                        });
+                })
+                ->limit($limit - $candidates->count())
+                ->get();
+            $candidates = $candidates->concat($wrapped);
+        }
+        if ($candidates->isNotEmpty()) {
+            $last = $candidates->last();
+            $this->storeFreshHashedFileCursor((string) $last->adddate, (int) $last->id);
+        }
+
+        return $candidates;
+    }
+
+    private function freshHashedFileCandidateQuery(): Builder
+    {
+        return DB::table('releases')
+            ->select(['id', 'adddate'])
+            ->where('categories_id', Category::OTHER_HASHED)
+            ->where('isrenamed', self::IS_RENAMED_NONE)
+            ->where('predb_id', 0)
+            ->where('proc_files', self::PROC_FILES_DONE)
+            ->where('adddate', '>=', now()->subSeconds(600))
+            ->orderBy('adddate')
+            ->orderBy('id');
+    }
+
+    /** @param list<string> $files @param list<int> $allowedCategories */
+    private function processReleaseFiles(
+        Release $source,
+        array $files,
+        array $allowedCategories,
+        bool $echo,
+        bool $nameStatus,
+        bool $show,
+        string $type,
+    ): void {
+        $this->updateService->reset();
+        $this->updateService->incrementChecked();
+        foreach ($this->filePrioritizer->prioritizeForMatching($files) as $filename) {
+            $release = clone $source;
+            $release->textstring = $filename;
+            if ($allowedCategories !== []) {
+                $release->allowed_categories = $allowedCategories;
+            }
+            $fileResult = $this->fileExtractor->extractFromFile($filename);
+            if ($fileResult !== null
+                && ($allowedCategories === [] || $this->isSafeMovieFilenameResult($fileResult->method, $fileResult->newName))) {
+                $this->updateService->updateRelease(
+                    $release,
+                    $fileResult->newName,
+                    'fileCheck: '.$fileResult->method,
+                    $echo,
+                    $type,
+                    $nameStatus,
+                    $show,
+                );
+            }
+            if (! $this->updateService->matched) {
+                $this->preDbFileCheck($release, $echo, $type, $nameStatus, $show);
+            }
+            if (! $this->updateService->matched) {
+                $this->preDbTitleCheck($release, $echo, $type, $nameStatus, $show);
+            }
+            if ($this->updateService->matched) {
+                break;
+            }
+        }
+    }
+
+    private function isFreshRelease(Release $release): bool
+    {
+        return (int) $release->categories_id === Category::OTHER_HASHED
+            && strtotime((string) $release->adddate) >= time() - 600;
+    }
+
+    /** @param list<string> $observedEvidence */
+    protected function finishFreshHashedFileFirstPass(Release $release, array $observedEvidence): void
+    {
+        $releaseId = (int) $release->releases_id;
+        sort($observedEvidence, SORT_STRING);
+        $overflow = count($observedEvidence) > 32;
+        $observedEvidence = array_slice(array_values(array_unique($observedEvidence)), 0, 32);
+        $observedAt = time();
+        $releaseExpiry = strtotime((string) $release->adddate) + 600;
+        $expiresAt = min($observedAt + 600, $releaseExpiry);
+        $token = bin2hex(random_bytes(16));
+        $stored = false;
+        if ($expiresAt > $observedAt) {
+            $cache = null;
+            $mutationLease = null;
+            try {
+                $cache = $this->freshHashedCacheRepository();
+                $mutationLease = $this->freshHashedCacheLock(
+                    $cache,
+                    $this->freshHashedFileMarkerMutationKey($releaseId),
+                    self::FRESH_HASHED_MARKER_MUTATION_LEASE_SECONDS,
+                );
+                if (! $mutationLease->get()) {
+                    return;
+                }
+            } catch (Throwable $error) {
+                Log::warning('Could not coordinate fresh hashed file retry baseline', [
+                    'release_id' => $releaseId,
+                    'error' => $error->getMessage(),
+                ]);
+                $cache = null;
+                $mutationLease = null;
+            }
+
+            if ($cache !== null && $mutationLease !== null) {
+                try {
+                    try {
+                        $stored = $cache->add($this->freshHashedFileKey($releaseId), [
+                            'schema' => 2,
+                            'release_id' => $releaseId,
+                            'evidence' => $observedEvidence,
+                            'overflow' => $overflow,
+                            'observed_at' => $observedAt,
+                            'expires_at' => $expiresAt,
+                            'token' => $token,
+                        ], $expiresAt - $observedAt);
+                    } catch (Throwable $error) {
+                        Log::warning('Could not persist fresh hashed file retry baseline', [
+                            'release_id' => $releaseId,
+                            'error' => $error->getMessage(),
+                        ]);
+                    }
+
+                    $this->beforeFreshHashedFileFirstPassCas($releaseId);
+                    $updated = $this->markFreshHashedFileFirstPassDone($releaseId);
+                    if ($stored && $updated !== 1 && $mutationLease->isOwnedByCurrentProcess()) {
+                        try {
+                            $value = $cache->get($this->freshHashedFileKey($releaseId));
+                            if (is_array($value) && hash_equals((string) ($value['token'] ?? ''), $token)) {
+                                $cache->forget($this->freshHashedFileKey($releaseId));
+                            }
+                        } catch (Throwable $error) {
+                            Log::warning('Could not clean losing fresh hashed file retry baseline', [
+                                'release_id' => $releaseId,
+                                'error' => $error->getMessage(),
+                            ]);
+                        }
+                    }
+                } finally {
+                    try {
+                        $mutationLease->release();
+                    } catch (Throwable $error) {
+                        Log::warning('Could not release fresh hashed file marker mutation lease', [
+                            'release_id' => $releaseId,
+                            'error' => $error->getMessage(),
+                        ]);
+                    }
+                }
+
+                return;
+            }
+        }
+
+        $this->beforeFreshHashedFileFirstPassCas($releaseId);
+        $this->markFreshHashedFileFirstPassDone($releaseId);
+    }
+
+    private function markFreshHashedFileFirstPassDone(int $releaseId): int
+    {
+        return DB::table('releases')
+            ->where('id', $releaseId)
+            ->where('proc_files', self::PROC_FILES_NONE)
+            ->update(['proc_files' => self::PROC_FILES_DONE]);
+    }
+
+    protected function beforeFreshHashedFileFirstPassCas(int $releaseId): void {}
+
+    /** @return array{evidence: list<string>, overflow: bool, token: string}|null */
+    private function freshHashedFileMarker(int $releaseId): ?array
+    {
+        try {
+            $value = Cache::store((string) config('cache.default', 'redis'))->get($this->freshHashedFileKey($releaseId));
+        } catch (Throwable $error) {
+            Log::warning('Could not read fresh hashed file retry baseline', [
+                'release_id' => $releaseId,
+                'error' => $error->getMessage(),
+            ]);
+
+            return null;
+        }
+        if (! is_array($value)) {
+            return null;
+        }
+        $observedAt = (int) ($value['observed_at'] ?? 0);
+        $expiresAt = (int) ($value['expires_at'] ?? 0);
+        $evidence = $value['evidence'] ?? null;
+        if ((int) ($value['schema'] ?? 0) !== 2
+            || (int) ($value['release_id'] ?? 0) !== $releaseId
+            || ! is_array($evidence)
+            || count($evidence) > 32
+            || array_filter($evidence, static fn (mixed $signature): bool => ! is_string($signature) || strlen($signature) !== 64) !== []
+            || ! is_bool($value['overflow'] ?? null)
+            || $observedAt <= 0
+            || $observedAt > time()
+            || $expiresAt <= time()
+            || $expiresAt > $observedAt + 600
+            || ! is_string($value['token'] ?? null)
+            || $value['token'] === '') {
+            return null;
+        }
+
+        return ['evidence' => array_values($evidence), 'overflow' => $value['overflow'], 'token' => $value['token']];
+    }
+
+    /** @return array{signatures: list<string>, files: list<string>, overflow: bool} */
+    protected function freshHashedFileEvidence(int $releaseId): array
+    {
+        $rows = DB::table('release_files')
+            ->select(['name', 'size', 'crc32'])
+            ->where('releases_id', $releaseId)
+            ->orderBy('name')
+            ->limit(33)
+            ->get();
+        $bounded = $rows->take(32);
+        $signatures = $bounded->map(fn (object $row): string => $this->freshHashedFileSignature(
+            (string) $row->name,
+            (string) $row->size,
+            (string) $row->crc32,
+        ))->values()->all();
+        sort($signatures, SORT_STRING);
+
+        return [
+            'signatures' => array_values(array_unique($signatures)),
+            'files' => $bounded->pluck('name')->map(static fn (mixed $name): string => (string) $name)->values()->all(),
+            'overflow' => $rows->count() > 32,
+        ];
+    }
+
+    private function freshHashedFileSignature(string $name, string $size, string $crc32): string
+    {
+        return hash('sha256', json_encode([$name, $size, $crc32], JSON_THROW_ON_ERROR));
+    }
+
+    protected function freshHashedEligibleRelease(int $releaseId): ?Release
+    {
+        return Release::query()
+            ->where('id', $releaseId)
+            ->where('categories_id', Category::OTHER_HASHED)
+            ->where('isrenamed', self::IS_RENAMED_NONE)
+            ->where('predb_id', 0)
+            ->where('proc_files', self::PROC_FILES_DONE)
+            ->where('adddate', '>=', now()->subSeconds(600))
+            ->first();
+    }
+
+    /** @return array<string, int|string|null> */
+    private function freshHashedRetryGuard(Release $release): array
+    {
+        return [
+            'name' => (string) $release->name,
+            'searchname' => (string) $release->searchname,
+            'groups_id' => (int) $release->groups_id,
+            'fromname' => $release->fromname === null ? null : (string) $release->fromname,
+            'adddate' => (string) $release->adddate,
+        ];
+    }
+
+    private function finishFreshHashedRetry(Release $release): bool
+    {
+        $guard = (array) $release->fresh_hashed_retry_guard;
+        $query = DB::table('releases')
+            ->where('id', $release->id)
+            ->where('proc_files', self::PROC_FILES_DONE)
+            ->where('categories_id', Category::OTHER_HASHED)
+            ->where('isrenamed', self::IS_RENAMED_NONE)
+            ->where('predb_id', 0)
+            ->where('adddate', '>=', now()->subSeconds(600));
+        foreach ($guard as $column => $value) {
+            $query->where($column, $value);
+        }
+
+        return $query->update(['proc_files' => self::PROC_FILES_RETRY_DONE]) === 1;
+    }
+
+    private function acquireFreshHashedFileLease(int $releaseId, mixed &$lease): bool
+    {
+        try {
+            $cache = $this->freshHashedCacheRepository();
+            $lease = $this->freshHashedCacheLock($cache, $this->freshHashedFileLeaseKey($releaseId), 300);
+
+            return $lease->get();
+        } catch (Throwable $error) {
+            Log::warning('Could not acquire fresh hashed file retry lease', [
+                'release_id' => $releaseId,
+                'error' => $error->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    private function releaseFreshHashedFileLease(mixed $lease): void
+    {
+        try {
+            $lease->release();
+        } catch (Throwable $error) {
+            Log::warning('Could not release fresh hashed file retry lease', ['error' => $error->getMessage()]);
+        }
+    }
+
+    /** @return array{adddate: string, id: int}|null */
+    private function freshHashedFileCursor(): ?array
+    {
+        try {
+            $cursor = Cache::store((string) config('cache.default', 'redis'))->get($this->freshHashedFileCursorKey());
+        } catch (Throwable) {
+            return null;
+        }
+        if (! is_array($cursor) || ! is_string($cursor['adddate'] ?? null) || ! is_int($cursor['id'] ?? null)) {
+            return null;
+        }
+
+        return ['adddate' => $cursor['adddate'], 'id' => $cursor['id']];
+    }
+
+    private function storeFreshHashedFileCursor(string $adddate, int $id): void
+    {
+        try {
+            Cache::store((string) config('cache.default', 'redis'))->put($this->freshHashedFileCursorKey(), [
+                'adddate' => $adddate,
+                'id' => $id,
+            ], 1200);
+        } catch (Throwable) {
+            // Losing the optional cursor may delay a retry, but must not affect release state.
+        }
+    }
+
+    private function forgetFreshHashedFileMarker(int $releaseId, string $token): void
+    {
+        try {
+            $cache = $this->freshHashedCacheRepository();
+            $mutationLease = $this->freshHashedCacheLock($cache, $this->freshHashedFileMarkerMutationKey($releaseId), 10);
+            if ($mutationLease->get()) {
+                try {
+                    $value = $cache->get($this->freshHashedFileKey($releaseId));
+                    if (is_array($value) && hash_equals((string) ($value['token'] ?? ''), $token)) {
+                        $cache->forget($this->freshHashedFileKey($releaseId));
+                    }
+                } finally {
+                    $mutationLease->release();
+                }
+            }
+        } catch (Throwable $error) {
+            Log::warning('Could not clean fresh hashed file retry baseline', [
+                'release_id' => $releaseId,
+                'error' => $error->getMessage(),
+            ]);
+        }
+    }
+
+    private function freshHashedCacheRepository(): CacheRepository
+    {
+        $cache = Cache::store((string) config('cache.default', 'redis'));
+        if (! $cache instanceof CacheRepository) {
+            throw new \RuntimeException('Fresh hashed retry requires an Illuminate cache repository.');
+        }
+
+        return $cache;
+    }
+
+    private function freshHashedCacheLock(CacheRepository $cache, string $key, int $seconds): Lock
+    {
+        $store = $cache->getStore();
+        if (! $store instanceof LockProvider) {
+            throw new \RuntimeException('Fresh hashed retry requires a lock-capable cache store.');
+        }
+        $lock = $store->lock($key, $seconds);
+        if (! $lock instanceof Lock) {
+            throw new \RuntimeException('Fresh hashed retry cache store returned an invalid lock.');
+        }
+
+        return $lock;
+    }
+
+    private function freshHashedFileKey(int $releaseId): string
+    {
+        return 'nntmux:namefix:fresh-hashed-files:'.$releaseId;
+    }
+
+    private function freshHashedFileLeaseKey(int $releaseId): string
+    {
+        return $this->freshHashedFileKey($releaseId).':lease';
+    }
+
+    private function freshHashedFileMarkerMutationKey(int $releaseId): string
+    {
+        return $this->freshHashedFileKey($releaseId).':mutation';
+    }
+
+    private function freshHashedFileCursorKey(): string
+    {
+        return 'nntmux:namefix:fresh-hashed-files:cursor';
     }
 
     /**
@@ -1063,7 +1569,7 @@ class NameFixingService
      *
      * @return Collection<int, mixed>
      */
-    protected function getReleases(int $time, int $cats, string $query, int $limit = 0): \Illuminate\Database\Eloquent\Collection|bool // @phpstan-ignore class.notFound, missingType.generics, return.phpDocType
+    protected function getReleases(int $time, int $cats, string $query, int $limit = 0): \Illuminate\Database\Eloquent\Collection|bool // @phpstan-ignore class.notFound, return.phpDocType
     {
         $releases = false;
         $queryLimit = ($limit === 0) ? '' : ' LIMIT '.$limit;
@@ -1538,7 +2044,7 @@ class NameFixingService
         $matching = 0;
 
         $files = explode('||', $release->filename ?? '');
-        $prioritizedFiles = $this->filePrioritizer->prioritizeForPreDb($files); // @phpstan-ignore argument.type
+        $prioritizedFiles = $this->filePrioritizer->prioritizeForPreDb($files);
 
         foreach ($prioritizedFiles as $fileName) {
             $cleanedFileName = $this->fileNameCleaner->cleanForMatching($fileName);

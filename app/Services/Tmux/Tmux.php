@@ -6,6 +6,7 @@ namespace App\Services\Tmux;
 
 use App\Models\Category;
 use App\Models\Settings;
+use App\Services\Movies\MovieLookupState;
 use App\Services\NameFixing\NameFixingService;
 use App\Services\NfoService;
 use Illuminate\Support\Carbon;
@@ -23,9 +24,7 @@ class Tmux
     /**
      * Tmux constructor.
      */
-    public function __construct()
-    {
-    }
+    public function __construct() {}
 
     protected function pdo(): \PDO
     {
@@ -200,6 +199,18 @@ class Tmux
             'lookupnfo' => 'processnfo',
             'lookuppar2' => 'processpar2',
             'nzbthreads' => 'nzbthreads',
+            'orchestrator_mode' => 'orchestrator_mode',
+            'orchestrator_profile' => 'orchestrator_profile',
+            'orchestrator_lease_until' => 'orchestrator_lease_until',
+            'orchestrator_generation' => 'orchestrator_generation',
+            'orchestrator_bins_timer' => 'orchestrator_bins_timer',
+            'orchestrator_back_timer' => 'orchestrator_back_timer',
+            'orchestrator_rel_timer' => 'orchestrator_rel_timer',
+            'orchestrator_nzb_timer' => 'orchestrator_nzb_timer',
+            'orchestrator_nzb_limit' => 'orchestrator_nzb_limit',
+            'orchestrator_bf_paused' => 'orchestrator_bf_paused',
+            'orchestrator_bf_permit' => 'orchestrator_bf_permit',
+            'orchestrator_bf_group' => 'orchestrator_bf_group',
             'maxsizetopostprocess' => 'maxsize_pp',
             'minsizetopostprocess' => 'minsize_pp',
         ];
@@ -303,7 +314,8 @@ class Tmux
 
         switch ((int) $qry) {
             case 1:
-                $movieLookupSql = imdb_id_needs_lookup_sql('imdbid');
+                $movieLookupSql = '('.imdb_id_needs_lookup_sql('imdbid').' OR '.movieinfo_needs_repair_sql('imdbid', 'movieinfo_id').')'
+                    .' AND '.app(MovieLookupState::class)->eligibilitySql('r');
                 $lookupMovies = (int) Settings::settingValue('lookupimdb');
 
                 if ($lookupMovies <= 0) {

@@ -18,13 +18,16 @@ final class PartHandler
      * when we flush; this constant guarantees the actual SQL we emit is
      * never large enough to blow up PHP/MySQL memory.
      */
-    private const MAX_SQL_ROWS_PER_STATEMENT = 500;
+    private const MAX_SQL_ROWS_PER_STATEMENT = 100;
 
     /** @var array<string, mixed> Pending parts to insert */
     private array $parts = [];
 
     /** @var array<string, mixed> Part numbers successfully inserted */
     private array $insertedPartNumbers = [];
+
+    /** @var array<string, array{binaries_id:int,number:int}> */
+    private array $insertedParts = [];
 
     /** @var array<string, mixed> Part numbers that failed to insert */
     private array $failedPartNumbers = [];
@@ -33,6 +36,8 @@ final class PartHandler
 
     /** @phpstan-ignore property.onlyWritten */
     private bool $addToPartRepair;
+
+    private bool $trackInsertedParts = false;
 
     public function __construct(int $chunkSize = 5000, bool $addToPartRepair = true)
     {
@@ -47,6 +52,7 @@ final class PartHandler
     {
         $this->parts = [];
         $this->insertedPartNumbers = [];
+        $this->insertedParts = [];
         $this->failedPartNumbers = [];
     }
 
@@ -56,6 +62,11 @@ final class PartHandler
     public function setAddToPartRepair(bool $value): void
     {
         $this->addToPartRepair = $value;
+    }
+
+    public function setTrackInsertedParts(bool $value): void
+    {
+        $this->trackInsertedParts = $value;
     }
 
     /**
@@ -150,8 +161,21 @@ final class PartHandler
         $driver = DB::getDriverName();
         $totalInserted = 0;
 
+        // `parts` is clustered by PRIMARY KEY (binaries_id, number). Concurrent
+        // header transactions must visit that key space in the same order or
+        // their multi-row inserts can deadlock on the same leaf-page supremum.
+        $parts = array_values($parts);
+        usort($parts, static function (array $left, array $right): int {
+            $binaryOrder = (int) $left['binaries_id'] <=> (int) $right['binaries_id'];
+
+            return $binaryOrder !== 0
+                ? $binaryOrder
+                : (int) $left['number'] <=> (int) $right['number'];
+        });
+
         try {
             foreach (array_chunk($parts, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
+                $preexisting = $this->trackInsertedParts ? $this->existingPartKeys($chunk) : [];
                 $placeholders = [];
                 $bindings = [];
 
@@ -168,7 +192,24 @@ final class PartHandler
                     ? 'INSERT OR IGNORE INTO parts (binaries_id, number, messageid, partnumber, size) VALUES '.implode(',', $placeholders)
                     : 'INSERT IGNORE INTO parts (binaries_id, number, messageid, partnumber, size) VALUES '.implode(',', $placeholders);
 
-                $totalInserted += (int) DB::affectingStatement($sql, $bindings);
+                $inserted = (int) DB::affectingStatement($sql, $bindings);
+                $totalInserted += $inserted;
+                if ($this->trackInsertedParts && $inserted > 0) {
+                    $candidates = [];
+                    foreach ($chunk as $row) {
+                        $key = $this->partKey((int) $row['binaries_id'], (int) $row['number']);
+                        if (! isset($preexisting[$key])) {
+                            $candidates[$key] = [
+                                'binaries_id' => (int) $row['binaries_id'],
+                                'number' => (int) $row['number'],
+                            ];
+                        }
+                    }
+                    if (count($candidates) !== $inserted) {
+                        throw new \RuntimeException('Current-forward inserted-part lineage became ambiguous.');
+                    }
+                    $this->insertedParts += $candidates;
+                }
             }
 
             return $totalInserted;
@@ -245,6 +286,12 @@ final class PartHandler
     public function getInsertedNumbers(): array
     {
         return $this->insertedPartNumbers;
+    }
+
+    /** @return list<array{binaries_id:int,number:int}> */
+    public function getInsertedParts(): array
+    {
+        return array_values($this->insertedParts);
     }
 
     /**
