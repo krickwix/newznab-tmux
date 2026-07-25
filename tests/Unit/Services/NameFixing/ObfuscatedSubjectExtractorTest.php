@@ -149,4 +149,43 @@ class ObfuscatedSubjectExtractorTest extends TestCase
 
         $this->assertSame('eNwlv9GZIQBRrhBLimiQsVYa rar', $result);
     }
+
+    #[Test]
+    public function it_decodes_rot13_subject_structure_preserving(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        // Full-subject decoder used by release creation: returns the decoded
+        // FULL subject (not the cleaned title stem) so the release name +
+        // searchname + category all derive from the readable title.
+        $this->assertSame(
+            'Charles.Chaplin.The.Great.Dictator.1974.DVDR.2DiSC.D1.DVD4.CC-565',
+            $extractor->decodeRot13Subject('Puneyrf.Puncyva.Gur.Terng.Qvpgngbe.6429.QIQE.7QvFP.Q6.QIQ9.PP-010')
+        );
+        $this->assertSame(
+            'Akira.Kurosawa.The.Men.Who.Tread.On.The.Tigers.Tail.1994.DVDR.DVD5.CC-AK655',
+            $extractor->decodeRot13Subject('Nxven.Xhebfnjn.Gur.Zra.Jub.Gernq.Ba.Gur.Gvtref.Gnvy.6449.QIQE.QIQ0.PP-NX100')
+        );
+    }
+
+    #[Test]
+    public function it_leaves_readable_subject_untouched_by_rot13_decode(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        // Already-plaintext subject must be returned unchanged (decoding it
+        // would garble a real name).
+        $subject = 'Charles.Chaplin.The.Great.Dictator.1940.DVDR.2DiSC.D1.DVD9.CC-565';
+        $this->assertSame($subject, $extractor->decodeRot13Subject($subject));
+    }
+
+    #[Test]
+    public function it_leaves_genuine_hashed_subject_untouched_by_rot13_decode(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        // Genuine random hash: decoding yields no release signature -> unchanged.
+        $subject = 'eNwlv9GZIQBRrhBLimiQsVYa.rar';
+        $this->assertSame($subject, $extractor->decodeRot13Subject($subject));
+    }
 }

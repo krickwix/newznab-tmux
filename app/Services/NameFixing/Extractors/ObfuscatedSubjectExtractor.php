@@ -166,14 +166,49 @@ final class ObfuscatedSubjectExtractor
      * readable, and never "decodes" genuine hashed/garbage names into more
      * garbage (those fail the release-signature test post-decode).
      */
-    private function maybeDeRot13(string $value): string
+    /**
+     * Public, structure-preserving ROT13/ROT5 subject decoder for callers that
+     * need the decoded FULL subject (not the cleaned title stem), e.g. release
+     * creation which derives both the release name AND searchname from the
+     * collection subject. Returns the decoded subject when the decoded form
+     * looks like a real release (year + format token) and the original does
+     * not; otherwise returns the input unchanged. Never mangles readable names
+     * or genuine hashed/garbage subjects (those fail the post-decode signature).
+     */
+    public function decodeRot13Subject(string $value): string
     {
         if ($value === '') {
             return $value;
         }
 
-        // Byte-wise ROT13 on ASCII letters + ROT5 on ASCII digits. Non-ASCII
-        // (UTF-8 multibyte) bytes are left untouched so we never corrupt them.
+        $decoded = $this->rot13Rot5($value);
+        if ($decoded === $value) {
+            return $value;
+        }
+
+        if (! ($this->looksLikeRealRelease($decoded) && ! $this->looksLikeRealRelease($value))) {
+            return $value;
+        }
+
+        // Return the decoded TITLE STEM: strip the Usenet segment marker
+        // (" [46/56]") and any trailing quoted sidecar filename
+        // (- "bd-foo.part270.rar"), which otherwise derails categorization
+        // (the quoted .rar makes the categorizer bucket it as Misc). Fall back
+        // to the full decoded subject if the stem no longer looks like a real
+        // release.
+        $stem = preg_split('/\s*\[\d+\/\d+\]/', $decoded, 2)[0] ?? $decoded;
+        $stem = (string) preg_replace('/\s*-\s*"[^"]*"\s*.*$/', '', $stem);
+        $stem = trim($stem);
+
+        return ($stem !== '' && $this->looksLikeRealRelease($stem)) ? $stem : $decoded;
+    }
+
+    /**
+     * Byte-wise ROT13 on ASCII letters + ROT5 on ASCII digits. Non-ASCII
+     * (UTF-8 multibyte) bytes are left untouched so we never corrupt them.
+     */
+    private function rot13Rot5(string $value): string
+    {
         $decoded = '';
         $len = strlen($value);
         for ($i = 0; $i < $len; $i++) {
@@ -188,6 +223,19 @@ final class ObfuscatedSubjectExtractor
                 $decoded .= $value[$i];
             }
         }
+
+        return $decoded;
+    }
+
+    private function maybeDeRot13(string $value): string
+    {
+        if ($value === '') {
+            return $value;
+        }
+
+        // Byte-wise ROT13 on ASCII letters + ROT5 on ASCII digits. Non-ASCII
+        // (UTF-8 multibyte) bytes are left untouched so we never corrupt them.
+        $decoded = $this->rot13Rot5($value);
 
         if ($decoded === $value) {
             return $value;
@@ -215,7 +263,7 @@ final class ObfuscatedSubjectExtractor
     private function looksLikeRealRelease(string $value): bool
     {
         return preg_match('/\b(?:19|20)\d{2}\b/', $value) === 1
-            && preg_match('/\b(?:480p|576p|720p|1080p|2160p|x264|x265|h264|h265|hevc|xvid|divx|avc|bluray|bdrip|dvdrip|dvdr|dvd9|dvd5|webrip|web-dl|hdtv|remux|ntsc|pal|aac|ac3|dts|ddp|hdrip|brrip)\b/i', $value) === 1;
+            && preg_match('/(?:\b(?:480p|576p|720p|1080p|2160p|x264|x265|h264|h265|hevc|xvid|divx|avc|bluray|bdrip|dvdrip|dvdr|dvd9|dvd5|webrip|web-dl|hdtv|remux|ntsc|pal|aac|ac3|dts|ddp|hdrip|brrip)\b|blu[.\-\s]?ray)/i', $value) === 1;
     }
 
     private function countReadableWords(string $value): int
