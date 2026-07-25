@@ -611,7 +611,8 @@ class MovieService
             $title = TmdbClient::getString($tmdbLookup, 'title');
             if ($this->currentTitle !== '' && ! empty($title)) {
                 $percent = $this->similarityPercent($this->currentTitle, $title);
-                if ($percent < self::MATCH_PERCENT) {
+                if ($percent < self::MATCH_PERCENT
+                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, $title)) {
                     $tmdbId = TmdbClient::getInt($tmdbLookup, 'id');
                     $altTitles = $tmdbId > 0 ? $tmdbClient->getMovieAlternativeTitles($tmdbId) : null;
                     $titles = is_array($altTitles) ? ($altTitles['titles'] ?? []) : [];
@@ -620,7 +621,8 @@ class MovieService
                         $altTitle = is_array($alt) ? ($alt['title'] ?? '') : '';
                         if ($altTitle !== '') {
                             $altPercent = $this->similarityPercent($this->currentTitle, $altTitle);
-                            if ($altPercent >= self::MATCH_PERCENT) {
+                            if ($altPercent >= self::MATCH_PERCENT
+                                || $this->candidateCoversSearchTitleSuffix($this->currentTitle, $altTitle)) {
                                 $matched = true;
                                 break;
                             }
@@ -818,7 +820,8 @@ class MovieService
             }
             if (! empty($this->currentTitle)) {
                 $percent = $this->similarityPercent($this->currentTitle, $scraped['title']);
-                if ($percent < self::MATCH_PERCENT) {
+                if ($percent < self::MATCH_PERCENT
+                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, (string) $scraped['title'])) {
                     $this->cacheImdbMovieFailure($cacheKey, 'title_mismatch', null, now()->addHours(6));
 
                     return false;
@@ -896,7 +899,8 @@ class MovieService
 
             if (! empty($this->currentTitle)) {
                 $percent = $this->similarityPercent($this->currentTitle, $resp['title']);
-                if ($percent < self::MATCH_PERCENT) {
+                if ($percent < self::MATCH_PERCENT
+                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, (string) $resp['title'])) {
                     Cache::put($cacheKey, false, now()->addHours(6));
 
                     return false;
@@ -981,7 +985,8 @@ class MovieService
 
             if (! empty($this->currentTitle)) {
                 $percent = $this->similarityPercent($this->currentTitle, $resp->data->Title);
-                if ($percent < self::MATCH_PERCENT) {
+                if ($percent < self::MATCH_PERCENT
+                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, (string) $resp->data->Title)) {
                     Cache::put($cacheKey, false, now()->addHours(6));
 
                     return false;
@@ -1505,7 +1510,9 @@ class MovieService
             return true;
         }
 
-        if ($this->currentTitle !== '' && ! $this->hasSearchTitleTokenCoverage($this->currentTitle, $candidateTitle)) {
+        if ($this->currentTitle !== ''
+            && ! $this->hasSearchTitleTokenCoverage($this->currentTitle, $candidateTitle)
+            && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, $candidateTitle)) {
             return false;
         }
 
@@ -1581,6 +1588,76 @@ class MovieService
         }
 
         return true;
+    }
+
+    /**
+     * Accept catalogue titles that match the trailing portion of a mangled
+     * search title. Some sources (notably the classics/criterion DVD groups)
+     * post releases with a leading DIRECTOR NAME before the real title, e.g.
+     * "Andre Techine Les Temoins The Witnesses" for the film "The Witnesses",
+     * or dual foreign/English titles. The standard hasSearchTitleTokenCoverage()
+     * requires EVERY search-title token (including the director tokens) to appear
+     * in the candidate, which wrongly rejects the correct canonical title.
+     *
+     * This fallback accepts the candidate when the candidate's significant
+     * tokens form the contiguous trailing run of the search title's significant
+     * tokens (i.e. the candidate is a suffix of the search title, with a
+     * non-empty prefix to strip). Positional (non-deduplicated) token streams
+     * are used so repeated tokens (e.g. "Babettes ... Babettes Feast") do not
+     * corrupt the suffix comparison.
+     */
+    private function candidateCoversSearchTitleSuffix(string $needleTitle, string $candidateTitle): bool
+    {
+        $candidateTokens = $this->orderedSearchTitleTokens($candidateTitle);
+        if ($candidateTokens === []) {
+            return false;
+        }
+
+        $needleTokens = $this->orderedSearchTitleTokens($needleTitle);
+        $needleCount = count($needleTokens);
+        $candidateCount = count($candidateTokens);
+
+        // There must be a leading prefix to strip (the candidate is strictly a
+        // suffix, not the whole title — hasSearchTitleTokenCoverage handles the
+        // full-coverage case).
+        if ($candidateCount >= $needleCount) {
+            return false;
+        }
+
+        // A single generic trailing token is too weak to trust as a suffix
+        // match unless it is a distinctive standalone title token.
+        if ($candidateCount === 1 && ! $this->isDistinctiveSingleTokenTitle($candidateTitle)) {
+            return false;
+        }
+
+        $needleSuffix = array_slice($needleTokens, $needleCount - $candidateCount);
+
+        return $needleSuffix === $candidateTokens;
+    }
+
+    /**
+     * Ordered (non-deduplicated) significant tokens, preserving position so a
+     * trailing-run comparison is reliable even with repeated tokens.
+     *
+     * @return list<string>
+     */
+    private function orderedSearchTitleTokens(string $title): array
+    {
+        $title = strtolower($title);
+        $title = preg_replace('/[^\pL\pN]+/u', ' ', $title) ?? $title;
+        $stopWords = ['a', 'an', 'and', 'at', 'concert', 'cut', 'das', 'der', 'die', 'directors', 'edition', 'extended', 'final', 'for', 'from', 'in', 'of', 'on', 'redux', 'the', 'to', 'with'];
+        $tokens = [];
+
+        foreach (preg_split('/\s+/', trim($title)) ?: [] as $token) {
+            $token = trim($token);
+            if ($token === '' || in_array($token, $stopWords, true) || strlen($token) < 4) {
+                continue;
+            }
+
+            $tokens[] = rtrim($token, 's');
+        }
+
+        return array_values($tokens);
     }
 
     /**

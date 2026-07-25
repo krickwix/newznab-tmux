@@ -712,6 +712,49 @@ class MovieServiceTest extends ImdbScraperTestCase
     }
 
     #[Test]
+    public function it_accepts_director_prefixed_search_titles_against_canonical_titles(): void
+    {
+        $service = new class extends MovieService
+        {
+            public function acceptsFor(
+                string $currentTitle,
+                string $currentYear,
+                string $candidateTitle,
+                string $candidateYear,
+                int $rank = 0,
+            ): bool {
+                $this->currentTitle = $currentTitle;
+                $this->currentYear = $currentYear;
+
+                return $this->isImdbSearchMatchAcceptable($candidateTitle, $candidateYear, $rank);
+            }
+        };
+        $service->echooutput = false;
+
+        // classics/criterion director-prefixed names must match the canonical
+        // trailing title (the film) at the provider's real IMDb id.
+        $this->assertTrue($service->acceptsFor(
+            'Andre Techine Les Temoins The Witnesses', '2007', 'The Witnesses', '2007'
+        ));
+        $this->assertTrue($service->acceptsFor(
+            'Vincent Sherman All Through The Night', '1941', 'All Through the Night', '1941'
+        ));
+        $this->assertTrue($service->acceptsFor(
+            'Gabriel Axel Babettes Gaestebud Babettes Feast', '1987', 'Babette\'s Feast', '1987'
+        ));
+
+        // A genuinely different film that merely shares a leading director-ish
+        // prefix but whose real title is NOT the trailing run must still reject.
+        $this->assertFalse($service->acceptsFor(
+            'Andre Techine Les Temoins The Witnesses', '2007', 'The Prosecutors', '2007'
+        ));
+        // A single generic trailing token must not produce a suffix false-positive.
+        $this->assertFalse($service->acceptsFor(
+            'Some Director Person The Night', '1990', 'Night', '1990'
+        ));
+    }
+
+    #[Test]
     public function it_rejects_generic_zero_signal_imdb_search_titles(): void
     {
         $service = new class extends MovieService
