@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Services\CollectionCleanupService;
 use App\Services\NNTP\NNTPService;
 use App\Services\Nzb\NzbService;
 use App\Services\ReleaseImageService;
@@ -303,7 +304,7 @@ class UsenetGroup extends Model
     {
         self::purge($id);
 
-        return self::query()->where('id', $id)->delete();
+        return self::query()->where('id', $id)->delete() > 0;
     }
 
     /**
@@ -387,21 +388,52 @@ class UsenetGroup extends Model
             $res->where('groups_id', $id);
         }
 
-        $releases = $res->get();
-
         $releaseManagement = app(ReleaseManagementService::class);
         $nzb = app(NzbService::class);
         $releaseImage = new ReleaseImageService;
-        foreach ($releases as $row) {
-            $releaseManagement->deleteSingleWithService(
-                [
-                    'g' => $row->guid,
-                    'i' => $row->id,
-                ],
-                $nzb,
-                $releaseImage
-            );
+
+        $res->orderBy('id')->chunkById(500, function (Collection $releases) use ($releaseManagement, $nzb, $releaseImage): void {
+            foreach ($releases as $row) {
+                $releaseManagement->deleteSingleWithService(
+                    [
+                        'g' => $row->guid,
+                        'i' => $row->id,
+                    ],
+                    $nzb,
+                    $releaseImage
+                );
+            }
+        });
+
+        if ($id !== false) {
+            DB::table('releases_groups')->where('groups_id', $id)->delete();
+            self::deleteCollectionsForGroup((int) $id);
         }
+    }
+
+    private static function deleteCollectionsForGroup(int $id): void
+    {
+        $collectionCleanup = app(CollectionCleanupService::class);
+
+        do {
+            $collectionIds = DB::table('collections')
+                ->where('groups_id', $id)
+                ->orderBy('id')
+                ->limit(500)
+                ->pluck('id')
+                ->map(static fn ($collectionId): int => (int) $collectionId)
+                ->all();
+
+            if ($collectionIds === []) {
+                return;
+            }
+
+            $deleted = $collectionCleanup->deleteCollectionsAndDescendants(
+                $collectionIds,
+                'Group purge cleanup',
+                false
+            );
+        } while ($deleted > 0);
     }
 
     /**
