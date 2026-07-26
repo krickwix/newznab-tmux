@@ -153,6 +153,17 @@ class ImdbScraper
                 return $fallbackData;
             }
 
+            $omdbData = $this->fetchFromOmdb($id);
+            if ($omdbData !== false) {
+                $this->lastFetchSource = 'omdb';
+                $this->lastFailureReason = null;
+                $this->lastFallbackFailureReason = null;
+                Cache::put($cacheKey, $omdbData, now()->addDays(7));
+                $this->recordLookupMetric('success');
+
+                return $omdbData;
+            }
+
             $ttl = $this->lastRequestWasBlocked
                 ? now()->addMinutes(self::SOFT_FAILURE_TTL_MINUTES)
                 : now()->addHours(self::HARD_FAILURE_TTL_HOURS);
@@ -175,6 +186,17 @@ class ImdbScraper
                 $this->recordLookupMetric('success');
 
                 return $fallbackData;
+            }
+
+            $omdbData = $this->fetchFromOmdb($id);
+            if ($omdbData !== false) {
+                $this->lastFetchSource = 'omdb';
+                $this->lastFailureReason = null;
+                $this->lastFallbackFailureReason = null;
+                Cache::put($cacheKey, $omdbData, now()->addDays(7));
+                $this->recordLookupMetric('success');
+
+                return $omdbData;
             }
 
             $ttl = $this->lastRequestWasBlocked
@@ -382,6 +404,170 @@ class ImdbScraper
 
             return false;
         }
+    }
+
+    /**
+     * Fetch a movie by IMDB numeric ID from the OMDB API.
+     *
+     * @return array<string, mixed>|false
+     */
+    private function fetchFromOmdb(string $id): array|false
+    {
+        $apiKey = trim((string) config('nntmux_api.omdb_api_key', ''));
+        if ($apiKey === '') {
+            // Do not mask a more specific reason already recorded by an earlier
+            // fallback stage (e.g. imdbapi.dev). Only surface the OMDB disabled
+            // state when nothing else has explained the failure yet.
+            $this->lastFallbackFailureReason ??= 'omdb_fallback_disabled';
+
+            return false;
+        }
+
+        try {
+            $response = $this->client->get('https://www.omdbapi.com/', [
+                'query' => [
+                    'i' => 'tt'.$id,
+                    'apikey' => $apiKey,
+                    'plot' => 'short',
+                ],
+                'headers' => [
+                    'Accept' => 'application/json',
+                ],
+                'timeout' => 8,
+                'connect_timeout' => 5,
+            ]);
+
+            if ($response->getStatusCode() !== 200) {
+                $this->lastFallbackFailureReason = 'omdb_fallback_http_failure';
+
+                return false;
+            }
+
+            $body = (string) $response->getBody();
+            if (trim($body) === '') {
+                $this->lastFallbackFailureReason = 'omdb_fallback_invalid_json';
+
+                return false;
+            }
+
+            $payload = json_decode($body, true);
+            if (! is_array($payload) || $payload === []) {
+                $this->lastFallbackFailureReason = 'omdb_fallback_invalid_json';
+
+                return false;
+            }
+
+            $responseFlag = is_string($payload['Response'] ?? null) ? $payload['Response'] : '';
+            if (strcasecmp($responseFlag, 'True') !== 0) {
+                $this->lastFallbackFailureReason = 'omdb_fallback_invalid_payload';
+
+                return false;
+            }
+
+            $mapped = $this->mapOmdbTitle($payload, $id);
+            if ($mapped === false) {
+                $this->lastFallbackFailureReason = 'omdb_fallback_invalid_payload';
+
+                return false;
+            }
+
+            return $mapped;
+        } catch (\Throwable $e) {
+            Log::debug('OMDB fetch error tt'.$id.': '.$e->getMessage());
+            $this->lastFallbackFailureReason = 'omdb_fallback_exception';
+
+            return false;
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>|false
+     */
+    private function mapOmdbTitle(array $payload, string $id): array|false
+    {
+        $title = $this->normalizeOmdbScalar($payload['Title'] ?? '');
+        if ($title === '') {
+            return false;
+        }
+
+        $yearRaw = $this->normalizeOmdbScalar($payload['Year'] ?? '');
+        $year = '';
+        if ($yearRaw !== '' && preg_match('/(19|20)\d{2}/', $yearRaw, $matches) === 1) {
+            $year = $matches[0];
+        }
+
+        $plot = $this->normalizeOmdbScalar($payload['Plot'] ?? '');
+        $rating = $this->normalizeOmdbScalar($payload['imdbRating'] ?? '');
+        $cover = $this->normalizeOmdbScalar($payload['Poster'] ?? '');
+        $genres = $this->splitOmdbCsv($payload['Genre'] ?? '');
+        $directors = $this->splitOmdbCsv($payload['Director'] ?? '');
+        $actors = array_slice($this->splitOmdbCsv($payload['Actors'] ?? ''), 0, 10);
+        $language = implode(', ', $this->splitOmdbCsv($payload['Language'] ?? ''));
+        $type = $this->normalizeOmdbType((string) ($payload['Type'] ?? 'movie'));
+
+        return [
+            'imdbid' => $id,
+            'title' => $title,
+            'year' => $year,
+            'plot' => $plot,
+            'rating' => $rating,
+            'cover' => $cover,
+            'genre' => $genres,
+            'director' => $directors,
+            'actors' => $actors,
+            'language' => $language,
+            'type' => $type,
+        ];
+    }
+
+    private function normalizeOmdbScalar(mixed $value): string
+    {
+        if (! is_string($value) && ! is_numeric($value)) {
+            return '';
+        }
+
+        $string = trim((string) $value);
+        if ($string === '' || strcasecmp($string, 'N/A') === 0) {
+            return '';
+        }
+
+        return $string;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function splitOmdbCsv(mixed $value): array
+    {
+        if (! is_string($value)) {
+            return [];
+        }
+
+        $trimmed = trim($value);
+        if ($trimmed === '' || strcasecmp($trimmed, 'N/A') === 0) {
+            return [];
+        }
+
+        $items = [];
+        foreach (explode(',', $trimmed) as $part) {
+            $part = trim($part);
+            if ($part === '' || strcasecmp($part, 'N/A') === 0) {
+                continue;
+            }
+            $items[] = $part;
+        }
+
+        return array_values(array_unique($items));
+    }
+
+    private function normalizeOmdbType(string $type): string
+    {
+        return match (strtolower(trim($type))) {
+            'series' => 'tvseries',
+            'episode' => 'tvepisode',
+            default => 'movie',
+        };
     }
 
     private function canUseImdbApiDev(): bool
