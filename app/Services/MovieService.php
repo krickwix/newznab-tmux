@@ -612,7 +612,8 @@ class MovieService
             if ($this->currentTitle !== '' && ! empty($title)) {
                 $percent = $this->similarityPercent($this->currentTitle, $title);
                 if ($percent < self::MATCH_PERCENT
-                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, $title)) {
+                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, $title)
+                    && ! $this->candidateExtendsSearchTitlePrefix($this->currentTitle, $title)) {
                     $tmdbId = TmdbClient::getInt($tmdbLookup, 'id');
                     $altTitles = $tmdbId > 0 ? $tmdbClient->getMovieAlternativeTitles($tmdbId) : null;
                     $titles = is_array($altTitles) ? ($altTitles['titles'] ?? []) : [];
@@ -820,7 +821,8 @@ class MovieService
             if (! empty($this->currentTitle)) {
                 $percent = $this->similarityPercent($this->currentTitle, $scraped['title']);
                 if ($percent < self::MATCH_PERCENT
-                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, (string) $scraped['title'])) {
+                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, (string) $scraped['title'])
+                    && ! $this->candidateExtendsSearchTitlePrefix($this->currentTitle, (string) $scraped['title'])) {
                     $this->cacheImdbMovieFailure($cacheKey, 'title_mismatch', null, now()->addHours(6));
 
                     return false;
@@ -898,7 +900,8 @@ class MovieService
             if (! empty($this->currentTitle)) {
                 $percent = $this->similarityPercent($this->currentTitle, $resp['title']);
                 if ($percent < self::MATCH_PERCENT
-                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, (string) $resp['title'])) {
+                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, (string) $resp['title'])
+                    && ! $this->candidateExtendsSearchTitlePrefix($this->currentTitle, (string) $resp['title'])) {
                     Cache::put($cacheKey, false, now()->addHours(6));
 
                     return false;
@@ -983,7 +986,8 @@ class MovieService
             if (! empty($this->currentTitle)) {
                 $percent = $this->similarityPercent($this->currentTitle, $resp->data->Title);
                 if ($percent < self::MATCH_PERCENT
-                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, (string) $resp->data->Title)) {
+                    && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, (string) $resp->data->Title)
+                    && ! $this->candidateExtendsSearchTitlePrefix($this->currentTitle, (string) $resp->data->Title)) {
                     Cache::put($cacheKey, false, now()->addHours(6));
 
                     return false;
@@ -1508,7 +1512,8 @@ class MovieService
 
         if ($this->currentTitle !== ''
             && ! $this->hasSearchTitleTokenCoverage($this->currentTitle, $candidateTitle)
-            && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, $candidateTitle)) {
+            && ! $this->candidateCoversSearchTitleSuffix($this->currentTitle, $candidateTitle)
+            && ! ($yearMatches && $this->candidateExtendsSearchTitlePrefix($this->currentTitle, $candidateTitle))) {
             return false;
         }
 
@@ -1659,6 +1664,47 @@ class MovieService
         $needleSuffix = array_slice($needleTokens, $needleCount - $candidateCount);
 
         return $needleSuffix === $candidateTokens;
+    }
+
+    /**
+     * Accept a catalogue title that is a longer form of the release's title,
+     * where the release title is a contiguous LEADING PREFIX of the candidate.
+     * Releases frequently shorten dual/subtitled canonical titles, e.g.
+     * "At Home Among Strangers" for the film catalogued as
+     * "At Home Among Strangers, a Stranger Among His Own" (tt0072231), or
+     * "Kill Bill" for "Kill Bill: Vol. 1". This is the mirror of
+     * candidateCoversSearchTitleSuffix() and is only consulted by callers that
+     * already require the year to match, so a looser prefix match stays safe.
+     * Requires >=2 significant search tokens (or a single distinctive one) so a
+     * short generic prefix cannot produce a false positive.
+     */
+    private function candidateExtendsSearchTitlePrefix(string $needleTitle, string $candidateTitle): bool
+    {
+        $needleTokens = $this->orderedSearchTitleTokens($needleTitle);
+        $needleCount = count($needleTokens);
+        if ($needleCount < 2) {
+            return false;
+        }
+
+        $candidateTokens = $this->orderedSearchTitleTokens($candidateTitle);
+        $candidateCount = count($candidateTokens);
+
+        // Candidate must be strictly longer (there is a trailing subtitle to
+        // absorb); the full-coverage / suffix cases are handled elsewhere.
+        if ($candidateCount <= $needleCount) {
+            return false;
+        }
+
+        $candidatePrefix = array_slice($candidateTokens, 0, $needleCount);
+        if ($candidatePrefix !== $needleTokens) {
+            return false;
+        }
+
+        // Only trust the extension when it reads like a genuine subtitle/dual
+        // title: the candidate carries a subtitle separator ("," ":" " - " or
+        // " aka ") so we don't match unrelated longer titles that merely share a
+        // leading word run (e.g. "Blue Water" vs "Blue Water High Surf Academy").
+        return preg_match('/[:,]|\s-\s|\baka\b/i', $candidateTitle) === 1;
     }
 
     /**
