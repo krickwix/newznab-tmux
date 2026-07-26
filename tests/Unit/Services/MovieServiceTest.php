@@ -755,6 +755,44 @@ class MovieServiceTest extends ImdbScraperTestCase
     }
 
     #[Test]
+    public function it_accepts_shortened_release_titles_against_dual_or_subtitled_canonical_titles(): void
+    {
+        $service = new class extends MovieService
+        {
+            public function acceptsFor(
+                string $currentTitle,
+                string $currentYear,
+                string $candidateTitle,
+                string $candidateYear,
+                int $rank = 0,
+            ): bool {
+                $this->currentTitle = $currentTitle;
+                $this->currentYear = $currentYear;
+
+                return $this->isImdbSearchMatchAcceptable($candidateTitle, $candidateYear, $rank);
+            }
+        };
+        $service->echooutput = false;
+
+        // Releases often shorten a dual/subtitled canonical title; the release
+        // title is a contiguous leading PREFIX of the catalogue title, and the
+        // extension follows a subtitle separator ("," ":" " - " "aka").
+        // Real case: "At Home Among Strangers" == tt0072231
+        // "At Home Among Strangers, a Stranger Among His Own" (1974).
+        $this->assertTrue($service->acceptsFor(
+            'At Home Among Strangers', '1974', 'At Home Among Strangers, a Stranger Among His Own', '1974'
+        ));
+        $this->assertTrue($service->acceptsFor(
+            'Kill Bill', '2003', 'Kill Bill: Vol. 1', '2003'
+        ));
+
+        // Year must match for the looser prefix acceptance.
+        $this->assertFalse($service->acceptsFor(
+            'At Home Among Strangers', '1974', 'At Home Among Strangers, a Stranger Among His Own', '1999'
+        ));
+    }
+
+    #[Test]
     public function it_accepts_provider_years_within_two_year_tolerance(): void
     {
         $service = new class extends MovieService
