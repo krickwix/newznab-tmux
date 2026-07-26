@@ -236,6 +236,157 @@ class ImdbScraperTest extends ImdbScraperTestCase
         $this->assertSame([], $scraper->search(''));
     }
 
+    public function test_fetch_by_id_falls_back_to_omdb_when_imdb_html_is_blocked_and_imdbapi_dev_is_disabled(): void
+    {
+        config([
+            'nntmux_api.imdbapi_dev_enabled' => false,
+            'nntmux_api.omdb_api_key' => 'test-omdb-key',
+        ]);
+
+        $scraper = $this->makeScraperWithResponses([
+            new Response(403, ['Content-Type' => 'text/html; charset=UTF-8'], '<html><body>awswaf challenge</body></html>'),
+            new Response(200, ['Content-Type' => 'application/json; charset=UTF-8'], json_encode([
+                'Title' => 'OMDB Fallback Movie',
+                'Year' => '2024',
+                'Rated' => 'PG-13',
+                'Released' => '01 Jan 2024',
+                'Runtime' => '120 min',
+                'Genre' => 'Action, Adventure, Sci-Fi',
+                'Director' => 'Jane Director',
+                'Writer' => 'A Writer',
+                'Actors' => 'Star One, Star Two, Star Three',
+                'Plot' => 'A fallback plot from OMDB.',
+                'Language' => 'English, Spanish',
+                'Country' => 'United States',
+                'Awards' => 'N/A',
+                'Poster' => 'https://example.com/omdb-poster.jpg',
+                'imdbRating' => '7.4',
+                'imdbID' => 'tt1234567',
+                'Type' => 'movie',
+                'Response' => 'True',
+            ], JSON_THROW_ON_ERROR)),
+        ]);
+
+        $data = $scraper->fetchById('1234567');
+
+        $this->assertIsArray($data);
+        $this->assertTrue($scraper->wasBlockedByWaf());
+        $this->assertSame('omdb', $scraper->getLastFetchSource());
+        $this->assertNull($scraper->getLastFailureReason());
+        $this->assertNull($scraper->getLastFallbackFailureReason());
+        $this->assertSame('1234567', $data['imdbid']);
+        $this->assertSame('OMDB Fallback Movie', $data['title']);
+        $this->assertSame('2024', $data['year']);
+        $this->assertSame('A fallback plot from OMDB.', $data['plot']);
+        $this->assertSame('7.4', $data['rating']);
+        $this->assertSame('https://example.com/omdb-poster.jpg', $data['cover']);
+        $this->assertSame(['Action', 'Adventure', 'Sci-Fi'], $data['genre']);
+        $this->assertSame(['Jane Director'], $data['director']);
+        $this->assertSame(['Star One', 'Star Two', 'Star Three'], $data['actors']);
+        $this->assertSame('English, Spanish', $data['language']);
+        $this->assertSame('movie', $data['type']);
+    }
+
+    public function test_fetch_by_id_omdb_fallback_maps_na_sentinels_to_empty_and_series_to_tvseries(): void
+    {
+        config([
+            'nntmux_api.imdbapi_dev_enabled' => false,
+            'nntmux_api.omdb_api_key' => 'test-omdb-key',
+        ]);
+
+        $scraper = $this->makeScraperWithResponses([
+            new Response(202, ['Content-Type' => 'text/html; charset=UTF-8'], '<html><script>window.awsWafCookieDomainList=[];window.gokuProps={};</script></html>'),
+            new Response(200, ['Content-Type' => 'application/json; charset=UTF-8'], json_encode([
+                'Title' => 'A Series',
+                'Year' => '2019–2023',
+                'Genre' => 'Drama, N/A, Mystery',
+                'Director' => 'N/A',
+                'Actors' => 'Lead Actor, N/A, Supporting Actor',
+                'Plot' => 'N/A',
+                'Language' => 'English',
+                'Poster' => 'N/A',
+                'imdbRating' => 'N/A',
+                'imdbID' => 'tt2345678',
+                'Type' => 'series',
+                'Response' => 'True',
+            ], JSON_THROW_ON_ERROR)),
+        ]);
+
+        $data = $scraper->fetchById('2345678');
+
+        $this->assertIsArray($data);
+        $this->assertSame('omdb', $scraper->getLastFetchSource());
+        $this->assertSame('A Series', $data['title']);
+        $this->assertSame('2019', $data['year']);
+        $this->assertSame('', $data['plot']);
+        $this->assertSame('', $data['rating']);
+        $this->assertSame('', $data['cover']);
+        $this->assertSame(['Drama', 'Mystery'], $data['genre']);
+        $this->assertSame([], $data['director']);
+        $this->assertSame(['Lead Actor', 'Supporting Actor'], $data['actors']);
+        $this->assertSame('English', $data['language']);
+        $this->assertSame('tvseries', $data['type']);
+    }
+
+    public function test_fetch_by_id_omdb_fallback_no_ops_when_key_missing(): void
+    {
+        config([
+            'nntmux_api.imdbapi_dev_enabled' => false,
+            'nntmux_api.omdb_api_key' => '',
+        ]);
+
+        $scraper = $this->makeScraperWithResponses([
+            new Response(202, ['Content-Type' => 'text/html; charset=UTF-8'], '<html><script>window.awsWafCookieDomainList=[];window.gokuProps={};</script></html>'),
+        ]);
+
+        $this->assertFalse($scraper->fetchById('1234567'));
+        $this->assertTrue($scraper->wasBlockedByWaf());
+        $this->assertSame('waf_block', $scraper->getLastFailureReason());
+        // imdbapi.dev runs first and is disabled, recording 'fallback_disabled'.
+        // The OMDB stage (no key) must not mask that earlier diagnostic.
+        $this->assertSame('fallback_disabled', $scraper->getLastFallbackFailureReason());
+        $this->assertNull($scraper->getLastFetchSource());
+    }
+
+    public function test_fetch_by_id_omdb_fallback_returns_false_on_response_false_payload(): void
+    {
+        config([
+            'nntmux_api.imdbapi_dev_enabled' => false,
+            'nntmux_api.omdb_api_key' => 'test-omdb-key',
+        ]);
+
+        $scraper = $this->makeScraperWithResponses([
+            new Response(202, ['Content-Type' => 'text/html; charset=UTF-8'], '<html><script>window.awsWafCookieDomainList=[];window.gokuProps={};</script></html>'),
+            new Response(200, ['Content-Type' => 'application/json; charset=UTF-8'], json_encode([
+                'Response' => 'False',
+                'Error' => 'Invalid API key!',
+            ], JSON_THROW_ON_ERROR)),
+        ]);
+
+        $this->assertFalse($scraper->fetchById('1234567'));
+        $this->assertSame('waf_block', $scraper->getLastFailureReason());
+        $this->assertSame('omdb_fallback_invalid_payload', $scraper->getLastFallbackFailureReason());
+        $this->assertNull($scraper->getLastFetchSource());
+    }
+
+    public function test_fetch_by_id_omdb_fallback_returns_false_on_non_200(): void
+    {
+        config([
+            'nntmux_api.imdbapi_dev_enabled' => false,
+            'nntmux_api.omdb_api_key' => 'test-omdb-key',
+        ]);
+
+        $scraper = $this->makeScraperWithResponses([
+            new Response(202, ['Content-Type' => 'text/html; charset=UTF-8'], '<html><script>window.awsWafCookieDomainList=[];window.gokuProps={};</script></html>'),
+            new Response(500, ['Content-Type' => 'text/plain'], 'internal server error'),
+        ]);
+
+        $this->assertFalse($scraper->fetchById('1234567'));
+        $this->assertSame('waf_block', $scraper->getLastFailureReason());
+        $this->assertSame('omdb_fallback_http_failure', $scraper->getLastFallbackFailureReason());
+        $this->assertNull($scraper->getLastFetchSource());
+    }
+
     /**
      * @param  array<int, Response>  $responses
      */
