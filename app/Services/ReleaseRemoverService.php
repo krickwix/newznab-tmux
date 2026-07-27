@@ -709,7 +709,7 @@ class ReleaseRemoverService
         $this->query = sprintf(
             'SELECT r.guid, r.searchname, r.id FROM releases r %s %s %s %s',
             $regexSQL,
-            ! empty($searchResult) ? ' WHERE r.id IN ('.implode(',', $searchResult).')' : '',
+            ! empty($searchResult) ? ' AND r.id IN ('.implode(',', $searchResult).')' : '',
             $groupID,
             $this->crapTime
         );
