@@ -251,6 +251,10 @@ return [
     'redis_fast_degrade' => (bool) env('REDIS_FAST_DEGRADE', true),
     'redis_tcp_check_seconds' => (float) env('REDIS_TCP_CHECK_SECONDS', 0.2),
     'body_preamble_deobfuscate_groups' => env('NNTMUX_BODY_PREAMBLE_DEOBFUSCATE_GROUPS', ''),
+    'obfuscated_brace_token_groups' => array_values(array_unique(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('NNTMUX_OBFUSCATED_BRACE_TOKEN_GROUPS', '')),
+    )))),
     'body_preamble_deobfuscate_limit' => (int) env('NNTMUX_BODY_PREAMBLE_DEOBFUSCATE_LIMIT', 0),
     'body_preamble_line_limit' => (int) env('NNTMUX_BODY_PREAMBLE_LINE_LIMIT', 8),
     'body_preamble_deobfuscate_max_seconds' => (float) env('NNTMUX_BODY_PREAMBLE_DEOBFUSCATE_MAX_SECONDS', 0),
