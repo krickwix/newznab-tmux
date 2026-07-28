@@ -104,9 +104,22 @@ final class ObfuscatedHashSetNormalizer
         }
 
         return [
-            'name' => \sprintf('hashset:g%d:t%d:d%d', $groupId, $totalFiles, $articleUnixtime),
+            'name' => self::cohortKey($groupId, $totalFiles, $articleUnixtime),
             'file_number' => $fileNumber,
             'total_files' => $totalFiles,
         ];
+    }
+
+    /**
+     * The collection key shared by every file of one hash-set post.
+     *
+     * Single source of truth: the ingest path keys new collections with this, and
+     * the par2 repair pass (nntmux:repair-par2-set-identity) rewrites stranded
+     * collections onto the same value. If the two ever disagree, repaired rows
+     * become invisible to ingest and the post stalls again on the next header.
+     */
+    public static function cohortKey(int $groupId, int $totalFiles, int $articleUnixtime): string
+    {
+        return \sprintf('hashset:g%d:t%d:d%d', $groupId, $totalFiles, $articleUnixtime);
     }
 }

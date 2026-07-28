@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Diagnostics;
 
+use App\Services\Binaries\ObfuscatedHashSetNormalizer;
 use App\Services\Binaries\Par2Packet;
 use App\Services\NNTP\NNTPService;
 use Illuminate\Support\Collection;
@@ -145,9 +146,20 @@ final class Par2SetIdentityRepairService
                 // membership is taken from the whole cohort.
                 $membership = $this->cohortMembership($cohortKey);
 
+                [$cohortGroupId, $cohortUnixtime, $cohortTotalFiles] = array_pad(
+                    array_map('intval', explode('|', $cohortKey)),
+                    3,
+                    0
+                );
+
                 $resolved[] = [
                     'cohort' => $cohortKey,
                     'set_id' => $setId,
+                    'collection_key' => ObfuscatedHashSetNormalizer::cohortKey(
+                        $cohortGroupId,
+                        $cohortTotalFiles,
+                        $cohortUnixtime
+                    ),
                     'probed_par2_collections' => array_values(array_unique(array_map(
                         static fn (object $m): int => (int) $m->collection_id,
                         $members
@@ -225,9 +237,12 @@ final class Par2SetIdentityRepairService
     /**
      * Point every collection of a confirmed set at one shared identity.
      *
-     * The set id is authoritative, so it becomes the collection key directly;
-     * collectionhash keeps its existing sha1-of-key shape so the ingest path
-     * continues to match these rows.
+     * The rewritten key MUST be the one the ingest path computes for this cohort,
+     * which is why it comes from ObfuscatedHashSetNormalizer::cohortKey() rather
+     * than being derived from the par2 set id. The set id proves the cohort is a
+     * single post, but it is not a key ingest can reproduce from a header: a
+     * later article for this post would hash 'hashset:g..:t..:d..', miss a row
+     * keyed on the set id, and mint a fresh stalled collection.
      *
      * Two uniqueness constraints govern this merge and are both handled rather
      * than assumed away:
@@ -251,8 +266,7 @@ final class Par2SetIdentityRepairService
         foreach ($resolved as $entry) {
             /** @var list<int> $collectionIds */
             $collectionIds = $entry['collections'];
-            $key = 'par2set:'.(string) $entry['set_id'];
-            $hash = sha1($key);
+            $hash = sha1((string) $entry['collection_key']);
 
             // Adopt an existing owner of this hash so a re-run converges instead
             // of colliding on the unique index.
