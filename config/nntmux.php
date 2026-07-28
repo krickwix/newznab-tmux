@@ -255,6 +255,10 @@ return [
         'trim',
         explode(',', (string) env('NNTMUX_OBFUSCATED_BRACE_TOKEN_GROUPS', '')),
     )))),
+    'obfuscated_hash_set_groups' => array_values(array_unique(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('NNTMUX_OBFUSCATED_HASH_SET_GROUPS', '')),
+    )))),
     'body_preamble_deobfuscate_limit' => (int) env('NNTMUX_BODY_PREAMBLE_DEOBFUSCATE_LIMIT', 0),
     'body_preamble_line_limit' => (int) env('NNTMUX_BODY_PREAMBLE_LINE_LIMIT', 8),
     'body_preamble_deobfuscate_max_seconds' => (float) env('NNTMUX_BODY_PREAMBLE_DEOBFUSCATE_MAX_SECONDS', 0),
