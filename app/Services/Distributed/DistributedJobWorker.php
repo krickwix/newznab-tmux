@@ -15,6 +15,12 @@ use Throwable;
 
 class DistributedJobWorker
 {
+    /**
+     * Set once a termination signal has been observed, so no later pass can
+     * acquire a fresh lock this process will never live long enough to release.
+     */
+    private bool $terminating = false;
+
     public function __construct(
         private readonly DistributedJobCatalog $catalog,
         private readonly TmuxMonitorService $monitorService,
@@ -31,6 +37,7 @@ class DistributedJobWorker
         bool $stopOnDisabled = false,
     ): int {
         $this->monitorService->initializeMonitor();
+        $this->registerShutdownSignalHandlers($output);
 
         do {
             if ($job === 'backfill') {
@@ -136,6 +143,20 @@ class DistributedJobWorker
 
             return $result(1);
         }
+        // A pod being replaced must not take a fresh lock it cannot outlive.
+        // Kubernetes runs preStop concurrently with SIGTERM, so an acquisition
+        // after preStop's forceRelease would strand the lane for the full TTL.
+        if ($this->terminating) {
+            $output->writeln(sprintf(
+                '[%s] skipped %s: shutting down, refusing to acquire %s',
+                now()->toDateTimeString(),
+                $plan['name'],
+                $lockName,
+            ));
+
+            return $result(0);
+        }
+
         $lock = $cacheStore->lock($lockName, $lockSeconds);
 
         try {
@@ -281,6 +302,53 @@ class DistributedJobWorker
     }
 
     /**
+     * Observe termination for the whole worker lifetime, including the idle
+     * sleep between passes where no lock is held.
+     *
+     * `registerLockTerminationHandlers()` only covers a pass that already owns
+     * a lock. A signal arriving outside that window previously hit PHP's
+     * default disposition and killed the process, and — because Kubernetes
+     * runs preStop concurrently with SIGTERM — the dying worker could still
+     * start one more pass and take a fresh full-TTL lock after preStop had
+     * already released it, stranding the lane.
+     *
+     * The per-pass handler saves and restores whatever handler it displaces,
+     * so this one is reinstated after every pass.
+     */
+    private function registerShutdownSignalHandlers(OutputInterface $output): void
+    {
+        if (! function_exists('pcntl_signal')) {
+            return;
+        }
+
+        $signals = array_values(array_filter([
+            defined('SIGTERM') ? SIGTERM : null,
+            defined('SIGINT') ? SIGINT : null,
+        ]));
+
+        if ($signals === []) {
+            return;
+        }
+
+        if (function_exists('pcntl_async_signals')) {
+            pcntl_async_signals(true);
+        }
+
+        foreach ($signals as $signal) {
+            pcntl_signal($signal, function (int $receivedSignal) use ($output): void {
+                $this->terminating = true;
+                $output->writeln(sprintf(
+                    '[%s] received signal %d while idle; shutting down without a held lock',
+                    now()->toDateTimeString(),
+                    $receivedSignal,
+                ));
+
+                exit(128 + $receivedSignal);
+            });
+        }
+    }
+
+    /**
      * Release a held distributed lock when Kubernetes terminates this pod.
      *
      * Without this, a Recreate rollout can leave the next pod polling until
@@ -321,6 +389,7 @@ class DistributedJobWorker
                 : SIG_DFL;
 
             pcntl_signal($signal, function (int $receivedSignal) use ($lock, $lockName, $job, $startedAt, $output): void {
+                $this->terminating = true;
                 $output->writeln($this->formatTerminationSignalMessage($receivedSignal, $job, $lockName));
                 $this->workerTelemetry->finishRun($job, 'terminated', $startedAt);
 
