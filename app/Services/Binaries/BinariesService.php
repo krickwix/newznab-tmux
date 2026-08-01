@@ -26,6 +26,16 @@ use Illuminate\Support\Str;
  */
 class BinariesService
 {
+    /**
+     * Smallest batch on which the misaligned-header check is trustworthy.
+     */
+    private const int MISALIGNED_BATCH_MIN_ARTICLES = 50;
+
+    /**
+     * Share of unparseable dates in a batch that indicates misaligned overview fields.
+     */
+    private const float MISALIGNED_BATCH_INVALID_DATE_RATIO = 0.99;
+
     private BinariesConfig $config;
 
     private HeaderParser $headerParser;
@@ -389,6 +399,24 @@ class BinariesService
         $this->notYEnc = $parseResult['notYEnc'];
         $this->headersBlackListed = $parseResult['blacklisted'];
         $this->invalidDate = $parseResult['invalidDate'];
+
+        // A batch where (nearly) every article has an unparseable date is a protocol fault, not a
+        // group full of bad articles: it means the overview fields arrived misaligned, so 'Date'
+        // holds some other header. Abort the pass instead of discarding the articles and queueing
+        // the whole range into part repair, which would amplify the fault on every later scan.
+        if ($this->isMisalignedHeaderBatch($msgCount)) {
+            $this->logError(sprintf(
+                'Aborting scan: %d of %d articles had an unparseable date (group=%s range=%d-%d). '
+                .'Overview fields are probably misaligned; not queueing this range for part repair.',
+                $this->invalidDate,
+                $msgCount,
+                $groupMySQL['name'] ?? 'unknown',
+                $this->first,
+                $this->last,
+            ));
+
+            return $returnArray;
+        }
 
         if ($partRepair && $this->bodyPreambleProbeRequired !== []) {
             $parseResult['headers'] = array_filter(
@@ -1483,5 +1511,21 @@ class BinariesService
         if (config('app.debug')) {
             Log::error($message);
         }
+    }
+
+    /**
+     * Does this batch look like the overview fields arrived misaligned?
+     *
+     * Legitimately bad dates are rare and scattered; a batch that is almost entirely unparseable
+     * means we mapped some other header onto 'Date'. Only meaningful on a reasonably sized batch,
+     * since a handful of genuinely broken articles can otherwise account for all of a tiny one.
+     */
+    private function isMisalignedHeaderBatch(int $msgCount): bool
+    {
+        if ($msgCount < self::MISALIGNED_BATCH_MIN_ARTICLES) {
+            return false;
+        }
+
+        return $this->invalidDate >= (int) ceil($msgCount * self::MISALIGNED_BATCH_INVALID_DATE_RATIO);
     }
 }

@@ -519,18 +519,23 @@ class NNTPService extends NntpClient
         }
 
         // Fetch the header overview format (for setting the array keys on the return array).
-        if ($this->_overviewFormatCache !== null && isset($this->_overviewFormatCache['Xref'])) {
+        if ($this->_overviewFormatCache !== null) {
             $overview = $this->_overviewFormatCache;
         } else {
             $overview = $this->getOverviewFormat(false, true);
             if (self::isError($overview)) {
                 return $overview;
             }
+            // Normalise to the "Number"-inclusive shape before caching. The cache is shared with
+            // parent::getOverview(), which stores it that way, so both readers must agree on the
+            // shape or the header fields get shifted by one position (Date would receive the
+            // Message-ID, and every article would then be discarded as an invalid date).
+            $overview = array_merge(['Number' => false], $overview);
             $this->_overviewFormatCache = $overview;
         }
 
         // Pre-compute keys array and Xref position for faster processing
-        $keys = array_merge(['Number'], array_keys($overview));
+        $keys = array_keys($overview);
         $keyCount = \count($keys);
         $xrefIndex = array_search('Xref', $keys, true);
 
