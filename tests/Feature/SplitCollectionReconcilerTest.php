@@ -818,6 +818,62 @@ final class SplitCollectionReconcilerTest extends TestCase
         }
     }
 
+    public function test_merge_budget_defaults_to_twenty_pairs_per_pass(): void
+    {
+        $this->seedIndependentPairs(25);
+
+        self::assertSame(20, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    public function test_merge_budget_is_raisable_by_config(): void
+    {
+        $this->seedIndependentPairs(25);
+        config()->set('nntmux.split_collection_reconcile_max_pairs_per_pass', 25);
+        config()->set('nntmux.split_collection_reconcile_max_source_collections_per_pass', 200);
+
+        // Draining a split backlog is the whole point of the override: one pass
+        // must be able to clear more than the steady-state budget of 20.
+        self::assertSame(25, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    public function test_merge_budget_override_is_clamped_to_sane_bounds(): void
+    {
+        $this->seedIndependentPairs(3);
+        config()->set('nntmux.split_collection_reconcile_max_pairs_per_pass', 0);
+
+        // A zero/negative override must not disable reconciliation outright.
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    public function test_source_collection_budget_caps_a_raised_pair_budget(): void
+    {
+        $this->seedIndependentPairs(25);
+        config()->set('nntmux.split_collection_reconcile_max_pairs_per_pass', 25);
+        config()->set('nntmux.split_collection_reconcile_max_source_collections_per_pass', 5);
+
+        // Each pair consumes one source collection, so the tighter budget wins.
+        self::assertSame(5, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    /**
+     * Seed $count independent anchor/parity pairs, each its own cohort so every
+     * pair is separately mergeable and the merge budget is the only limit.
+     */
+    private function seedIndependentPairs(int $count): void
+    {
+        for ($pair = 0; $pair < $count; $pair++) {
+            $anchorId = 1000 + ($pair * 2);
+            $companionId = $anchorId + 1;
+            $poster = sprintf('poster%02d@example.com', $pair);
+            $date = sprintf('2026-07-13 02:%02d:15', $pair);
+
+            $this->seedCollection($anchorId, sprintf('[01/02] - "Episode.%02d.mkv" yEnc', $pair), $poster, 2, $date);
+            $this->seedCollection($companionId, sprintf('[02/02] - "hash%02d.par2" yEnc', $pair), $poster, 2, $date);
+            $this->seedBinary($anchorId * 10, $anchorId, 1, sprintf('Episode.%02d.mkv', $pair), 10, 10);
+            $this->seedBinary($companionId * 10, $companionId, 2, sprintf('hash%02d.par2', $pair), 1, 1);
+        }
+    }
+
     private function seedCollection(
         int $id,
         string $subject,

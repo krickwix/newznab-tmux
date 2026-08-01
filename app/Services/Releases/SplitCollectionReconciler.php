@@ -21,9 +21,13 @@ final class SplitCollectionReconciler
 
     private const int DISCOVERY_EDGE_OVERLAP = 20;
 
-    private const int MAX_PAIRS_PER_PASS = 20;
+    private const int DEFAULT_MAX_PAIRS_PER_PASS = 20;
 
-    private const int MAX_SOURCE_COLLECTIONS_PER_PASS = 100;
+    private const int MAX_PAIRS_PER_PASS_CEILING = 500;
+
+    private const int DEFAULT_MAX_SOURCE_COLLECTIONS_PER_PASS = 100;
+
+    private const int MAX_SOURCE_COLLECTIONS_PER_PASS_CEILING = 2000;
 
     private const int MAX_TOTAL_FILES = 200;
 
@@ -78,6 +82,8 @@ final class SplitCollectionReconciler
         try {
             $merged = 0;
             $sourceCollectionsMerged = 0;
+            $maxPairs = $this->maxPairsPerPass();
+            $maxSourceCollections = $this->maxSourceCollectionsPerPass();
             $cutoff = now()->subHours($this->lookbackHours())->toDateTimeString();
             foreach ($groupIds as $allowedGroupId) {
                 $collectionIds = $this->expandCandidateCohorts(
@@ -89,8 +95,8 @@ final class SplitCollectionReconciler
                 $fanouts = $this->uniqueFanoutCohorts($allowedGroupId, $collectionIds);
                 foreach ($this->interleavedCandidates($pairs, $fanouts) as $candidate) {
                     $sourceCount = count($candidate['companion_ids']);
-                    if ($merged >= self::MAX_PAIRS_PER_PASS
-                        || $sourceCollectionsMerged + $sourceCount > self::MAX_SOURCE_COLLECTIONS_PER_PASS
+                    if ($merged >= $maxPairs
+                        || $sourceCollectionsMerged + $sourceCount > $maxSourceCollections
                     ) {
                         return $merged;
                     }
@@ -393,6 +399,32 @@ final class SplitCollectionReconciler
     }
 
     /**
+     * Successful merges allowed per pass. Raising this drains a split backlog
+     * faster at the cost of a longer pass; the default keeps steady-state work
+     * small.
+     */
+    private function maxPairsPerPass(): int
+    {
+        return min(self::MAX_PAIRS_PER_PASS_CEILING, max(1, (int) config(
+            'nntmux.split_collection_reconcile_max_pairs_per_pass',
+            self::DEFAULT_MAX_PAIRS_PER_PASS,
+        )));
+    }
+
+    /**
+     * Source collections consumed per pass. A fanout merge spends several of
+     * these at once, so this bounds total row churn independently of the merge
+     * count.
+     */
+    private function maxSourceCollectionsPerPass(): int
+    {
+        return min(self::MAX_SOURCE_COLLECTIONS_PER_PASS_CEILING, max(1, (int) config(
+            'nntmux.split_collection_reconcile_max_source_collections_per_pass',
+            self::DEFAULT_MAX_SOURCE_COLLECTIONS_PER_PASS,
+        )));
+    }
+
+    /**
      * @param  list<int>  $collectionIds
      * @return list<array{anchor_id:int,companion_id:int}>
      */
@@ -435,7 +467,7 @@ final class SplitCollectionReconciler
 
         usort($pairs, static fn (array $left, array $right): int => $left['anchor_id'] <=> $right['anchor_id']);
 
-        return array_slice($pairs, 0, self::MAX_PAIRS_PER_PASS);
+        return array_slice($pairs, 0, $this->maxPairsPerPass());
     }
 
     /**
@@ -463,7 +495,7 @@ final class SplitCollectionReconciler
 
         usort($cohorts, static fn (array $left, array $right): int => $left['anchor_id'] <=> $right['anchor_id']);
 
-        return array_slice($cohorts, 0, self::MAX_PAIRS_PER_PASS);
+        return array_slice($cohorts, 0, $this->maxPairsPerPass());
     }
 
     /**

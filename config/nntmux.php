@@ -40,6 +40,8 @@ return [
         explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_RECONCILE_GROUPS', '')),
     )))),
     'split_collection_reconcile_lookback_hours' => min(72, max(24, (int) env('NNTMUX_SPLIT_COLLECTION_RECONCILE_LOOKBACK_HOURS', 24))),
+    'split_collection_reconcile_max_pairs_per_pass' => min(500, max(1, (int) env('NNTMUX_SPLIT_COLLECTION_RECONCILE_MAX_PAIRS_PER_PASS', 20))),
+    'split_collection_reconcile_max_source_collections_per_pass' => min(2000, max(1, (int) env('NNTMUX_SPLIT_COLLECTION_RECONCILE_MAX_SOURCE_COLLECTIONS_PER_PASS', 100))),
     'split_collection_reconcile_cursor_store' => env('NNTMUX_SPLIT_COLLECTION_RECONCILE_CURSOR_STORE', 'array'),
     'split_collection_dynamic_pair_gap_groups' => array_values(array_unique(array_filter(array_map(
         'trim',
