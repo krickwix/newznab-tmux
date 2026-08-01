@@ -214,6 +214,97 @@ final class SplitCollectionReconcilerTest extends TestCase
         self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
     }
 
+    public function test_xref_gap_override_admits_a_large_anchor_fanout(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 5000]);
+
+        $this->seedLargeAnchorFanout('alt.binaries.hdtv.x264', 12, 2869);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(12, DB::table('binaries')->where('collections_id', 40)->count());
+        self::assertSame(1, DB::table('collections')->whereBetween('id', [40, 51])->count());
+    }
+
+    public function test_large_anchor_fanout_is_refused_without_a_gap_override(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+
+        $this->seedLargeAnchorFanout('alt.binaries.hdtv.x264', 12, 2869);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(12, DB::table('collections')->whereBetween('id', [40, 51])->count());
+    }
+
+    public function test_xref_gap_override_is_clamped_to_the_ceiling(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 500000]);
+
+        $this->seedLargeAnchorFanout('alt.binaries.hdtv.x264', 12, 25000);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(12, DB::table('collections')->whereBetween('id', [40, 51])->count());
+    }
+
+    public function test_fanout_cap_override_admits_a_cohort_above_the_default(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 5000]);
+        config()->set('nntmux.split_collection_max_fanout_files', 40);
+
+        $this->seedLargeAnchorFanout('alt.binaries.hdtv.x264', 25, 2869);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(25, DB::table('binaries')->where('collections_id', 40)->count());
+    }
+
+    public function test_fanout_above_the_default_cap_is_refused_without_an_override(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 5000]);
+
+        $this->seedLargeAnchorFanout('alt.binaries.hdtv.x264', 25, 2869);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(25, DB::table('collections')->whereBetween('id', [40, 64])->count());
+    }
+
+    /**
+     * Reproduce the deployed shape: one complete payload anchor whose parts push
+     * the PAR2 companions well past the small-anchor xref gap default.
+     */
+    private function seedLargeAnchorFanout(string $groupName, int $totalFiles, int $articleGap): void
+    {
+        $anchorArticle = 8649442804;
+
+        $this->seedCollection(40, sprintf('[01/%02d] - "Episode.mkv" yEnc', $totalFiles), 'large@example.com', $totalFiles, '2026-07-30 03:43:24');
+        DB::table('collections')->where('id', 40)->update([
+            'xref' => $groupName.':'.$anchorArticle,
+        ]);
+        $this->seedBinary(400, 40, 1, 'Episode.mkv', 2876, 2876);
+
+        for ($fileNumber = 2; $fileNumber <= $totalFiles; $fileNumber++) {
+            $collectionId = 39 + $fileNumber;
+            $this->seedCollection(
+                $collectionId,
+                sprintf('[%02d/%02d] - "hash-%02d.par2" yEnc', $fileNumber, $totalFiles, $fileNumber),
+                'large@example.com',
+                $totalFiles,
+                '2026-07-30 03:43:24',
+            );
+            DB::table('collections')->where('id', $collectionId)->update([
+                'xref' => $groupName.':'.($anchorArticle + $articleGap + $fileNumber),
+            ]);
+            $this->seedBinary(400 + $fileNumber, $collectionId, $fileNumber, 'hash-'.$fileNumber.'.par2', 1, 1);
+        }
+    }
+
     public function test_refuses_incomplete_single_file_parity_fanout(): void
     {
         $this->seedCollection(24, '[01/03] - "Episode.mkv" yEnc', 'fanout@example.com', 3, '2026-07-16 05:47:20');

@@ -43,6 +43,7 @@ return [
     'split_collection_reconcile_max_pairs_per_pass' => min(500, max(1, (int) env('NNTMUX_SPLIT_COLLECTION_RECONCILE_MAX_PAIRS_PER_PASS', 20))),
     'split_collection_reconcile_max_source_collections_per_pass' => min(2000, max(1, (int) env('NNTMUX_SPLIT_COLLECTION_RECONCILE_MAX_SOURCE_COLLECTIONS_PER_PASS', 100))),
     'split_collection_reconcile_cursor_store' => env('NNTMUX_SPLIT_COLLECTION_RECONCILE_CURSOR_STORE', 'array'),
+    'split_collection_max_fanout_files' => min(200, max(2, (int) env('NNTMUX_SPLIT_COLLECTION_MAX_FANOUT_FILES', 20))),
     'split_collection_dynamic_pair_gap_groups' => array_values(array_unique(array_filter(array_map(
         'trim',
         explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_DYNAMIC_PAIR_GAP_GROUPS', '')),
@@ -59,7 +60,7 @@ return [
         array_filter(array_map('trim', explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_XREF_GAP_OVERRIDES', '')))),
         static function (array $overrides, string $entry): array {
             if (preg_match('/^([^:\s,]+):([1-9][0-9]*)$/', $entry, $match) === 1) {
-                $overrides[$match[1]] = min(2000, max(1, (int) $match[2]));
+                $overrides[$match[1]] = min(20000, max(1, (int) $match[2]));
             }
 
             return $overrides;

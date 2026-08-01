@@ -35,6 +35,13 @@ final class SplitCollectionReconciler
 
     private const int MAX_XREF_ARTICLE_GAP = 1000;
 
+    /**
+     * A split anchor is the payload file, so the PAR2 companions follow it by
+     * roughly one article per anchor part. Large anchors therefore need a wider
+     * per-group override than the small-anchor default.
+     */
+    private const int MAX_XREF_ARTICLE_GAP_CEILING = 20000;
+
     private const int MAX_DYNAMIC_PAIR_ARTICLE_GAP = 12000;
 
     private const int MAX_DYNAMIC_PAIR_TOTAL_PARTS = 12000;
@@ -45,7 +52,9 @@ final class SplitCollectionReconciler
 
     private const int MAX_MATCHING_COLLECTIONS = 20;
 
-    private const int MAX_FANOUT_FILES = 20;
+    private const int DEFAULT_MAX_FANOUT_FILES = 20;
+
+    private const int MAX_FANOUT_FILES_CEILING = 200;
 
     /** @var array<int, string> */
     private array $groupNamesById = [];
@@ -320,7 +329,7 @@ final class SplitCollectionReconciler
                     date('Y-m-d H:i:s', $timestamp + self::MAX_POSTING_GAP_SECONDS),
                 ])
                 ->orderBy('id')
-                ->limit(self::MAX_MATCHING_COLLECTIONS + 1)
+                ->limit($this->maxCohortRows())
                 ->pluck('id')
                 ->map(static fn (mixed $id): int => (int) $id)
                 ->all();
@@ -422,6 +431,28 @@ final class SplitCollectionReconciler
             'nntmux.split_collection_reconcile_max_source_collections_per_pass',
             self::DEFAULT_MAX_SOURCE_COLLECTIONS_PER_PASS,
         )));
+    }
+
+    /**
+     * Largest fanout a single anchor may absorb. Obfuscated posts that split
+     * every PAR2 volume into its own collection exceed the small-cohort
+     * default, so a deployment can widen this after auditing the group.
+     */
+    private function maxFanoutFiles(): int
+    {
+        return min(self::MAX_FANOUT_FILES_CEILING, max(2, (int) config(
+            'nntmux.split_collection_max_fanout_files',
+            self::DEFAULT_MAX_FANOUT_FILES,
+        )));
+    }
+
+    /**
+     * Row budget for the cohort queries that must observe every member of a
+     * fanout plus one extra row to detect an ambiguous over-full cohort.
+     */
+    private function maxCohortRows(): int
+    {
+        return max(self::MAX_MATCHING_COLLECTIONS, $this->maxFanoutFiles()) + 1;
     }
 
     /**
@@ -802,7 +833,7 @@ final class SplitCollectionReconciler
             return self::MAX_XREF_ARTICLE_GAP;
         }
 
-        return min(2000, max(
+        return min(self::MAX_XREF_ARTICLE_GAP_CEILING, max(
             self::MAX_XREF_ARTICLE_GAP,
             (int) ($configured[$groupName] ?? self::MAX_XREF_ARTICLE_GAP),
         ));
@@ -867,7 +898,7 @@ final class SplitCollectionReconciler
     private function isUniqueFanoutInDatabase(array $anchor, array $companionIds, bool $lock = false): bool
     {
         $anchorTimestamp = strtotime((string) $anchor['date']);
-        if ($anchorTimestamp === false || (int) $anchor['totalfiles'] > self::MAX_FANOUT_FILES) {
+        if ($anchorTimestamp === false || (int) $anchor['totalfiles'] > $this->maxFanoutFiles()) {
             return false;
         }
 
@@ -882,7 +913,7 @@ final class SplitCollectionReconciler
                 date('Y-m-d H:i:s', $anchorTimestamp + self::MAX_POSTING_GAP_SECONDS),
             ])
             ->orderBy('id')
-            ->limit(self::MAX_MATCHING_COLLECTIONS + 1);
+            ->limit($this->maxCohortRows());
         if ($lock) {
             $query->lockForUpdate();
         }
