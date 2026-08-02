@@ -279,6 +279,13 @@ final class BackfillService
             flush();
             $scanResult = $this->binaries->scan($groupArr, $first, $last, $this->config->safePartRepair);
 
+            // Misaligned overview fields mean this chunk was neither stored nor queued for repair.
+            // Leave first_record where it is: backfill walks backwards, so advancing it would step
+            // permanently past the range instead of retrying it on the next run.
+            if (($scanResult['misalignedHeaders'] ?? false) === true) {
+                return;
+            }
+
             $this->updateGroupRecord($groupArr, $first, $scanResult);
 
             if ($first === $targetPost) {

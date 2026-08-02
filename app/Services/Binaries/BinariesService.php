@@ -331,7 +331,9 @@ class BinariesService
      * @param  int  $last  The newest wanted header.
      * @param  string  $type  Is this part repair or update or backfill?
      * @param  list<int>|null  $missingParts  If we are running in part repair, the list of missing article numbers.
-     * @return array<string, mixed> Empty on failure.
+     * @return array<string, mixed> Empty on failure. `['misalignedHeaders' => true]` when the
+     *                              overview fields arrived misaligned, in which case the caller
+     *                              must leave the group cursor where it is so the range is retried.
      *
      * @throws \Exception
      * @throws \Throwable
@@ -407,7 +409,8 @@ class BinariesService
         if ($this->isMisalignedHeaderBatch($msgCount)) {
             $this->logError(sprintf(
                 'Aborting scan: %d of %d articles had an unparseable date (group=%s range=%d-%d). '
-                .'Overview fields are probably misaligned; not queueing this range for part repair.',
+                .'Overview fields are probably misaligned; not queueing this range for part repair '
+                .'and not advancing the group cursor.',
                 $this->invalidDate,
                 $msgCount,
                 $groupMySQL['name'] ?? 'unknown',
@@ -415,7 +418,12 @@ class BinariesService
                 $this->last,
             ));
 
-            return $returnArray;
+            // Signal the fault rather than returning the range we just parsed. The article
+            // numbers in $returnArray are still trustworthy (they come from 'Number', not the
+            // shifted fields), so a caller that treated this as a normal result would happily
+            // advance the cursor past a block it never stored and deliberately did not queue for
+            // repair -- losing it for good.
+            return ['misalignedHeaders' => true];
         }
 
         if ($partRepair && $this->bodyPreambleProbeRequired !== []) {
@@ -710,12 +718,24 @@ class BinariesService
             $ranges = $this->groupMissingPartsIntoRanges($missingParts);
 
             // Download missing parts in ranges
+            $misaligned = false;
             foreach ($ranges as $range) {
                 if ($this->config->echoCli) {
                     echo \chr(random_int(45, 46)).PHP_EOL;
                 }
 
-                $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+                $rangeResult = $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+                if (($rangeResult['misalignedHeaders'] ?? false) === true) {
+                    $misaligned = true;
+                    break;
+                }
+            }
+
+            // A misaligned batch stored nothing, so charging an attempt would spend the repair
+            // budget on a connection fault and let cleanupExhaustedParts() delete parts that were
+            // never actually retried. Leave the attempt counts alone and try again next cycle.
+            if ($misaligned) {
+                return;
             }
 
             // Calculate parts repaired
@@ -808,13 +828,19 @@ class BinariesService
                 ) !== $existingBeforeRange) {
                     break;
                 }
+                $rangeResult = $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+                // Misaligned overview fields stored nothing for this range, so leave it out of
+                // $processedIds: counting it would charge an attempt via incrementClaimedAttempts()
+                // for a connection fault and move these parts closer to deletion unretried.
+                if (($rangeResult['misalignedHeaders'] ?? false) === true) {
+                    break;
+                }
                 foreach ($range['partlist'] as $number) {
                     $id = $this->partRepairClaimIdsByNumber[(string) $number] ?? null;
                     if ($id !== null) {
                         $processedIds[] = $id;
                     }
                 }
-                $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
             }
 
             $existing = $this->missedPartHandler->countExistingIds($cohortIds, (int) $groupArr['id']);
@@ -1110,6 +1136,13 @@ class BinariesService
 
             // Scan this chunk
             $scanSummary = $this->scan($groupMySQL, $first, $last);
+
+            // Misaligned overview fields are a connection-level fault that will recur on the very
+            // next chunk, so stop the group here and leave the cursor untouched. Advancing would
+            // skip this range permanently: it was neither stored nor queued for part repair.
+            if (($scanSummary['misalignedHeaders'] ?? false) === true) {
+                return;
+            }
 
             // Update group record
             $this->updateGroupAfterScan($groupMySQL, $groupNNTP, $scanSummary, $last);
