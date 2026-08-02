@@ -382,7 +382,10 @@ final class ReleaseProcessingService
         if ($this->deadlineReached()) {
             return;
         }
-        $this->splitCollectionReconciler->reconcile($normalizedGroupId);
+        // Pass the slice deadline down: reconcile() is the one stage here whose
+        // own budgets are counted rather than timed, so without it a saturated
+        // pass overruns the slice and starves every stage below.
+        $this->splitCollectionReconciler->reconcile($normalizedGroupId, $this->workDeadline());
         if ($this->deadlineReached()) {
             return;
         }
@@ -1043,6 +1046,17 @@ final class ReleaseProcessingService
     private function deadlineReached(): bool
     {
         return microtime(true) >= $this->workDeadlineAt;
+    }
+
+    /**
+     * The slice deadline, for stages that must bound themselves internally.
+     *
+     * Null when this is an exhaustive run rather than a cooperative slice, so a
+     * stage receiving it knows it may take the time it needs.
+     */
+    private function workDeadline(): ?float
+    {
+        return $this->workDeadlineAt === PHP_FLOAT_MAX ? null : $this->workDeadlineAt;
     }
 
     private function cooperativeStageCursor(string $stage, int $groupId): int
