@@ -1084,6 +1084,34 @@ final class SplitCollectionReconcilerTest extends TestCase
         self::assertSame(1, DB::table('collections')->count());
     }
 
+    /**
+     * Production posts a cohort's members over a second or two, so the payload
+     * collections do not all share one timestamp. Discovery must still yield the
+     * cohort exactly once: the resolver matches a whole posting window, so
+     * seeding it from two different timestamps used to emit the same cohort
+     * twice and the second copy could only ever fail its locked re-resolution.
+     */
+    public function test_multi_payload_cohort_is_discovered_once_when_members_straddle_a_second(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $anchorId = $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        // Nudge the last payload collection one second later, as production does.
+        DB::table('collections')->where('id', $anchorId + 2)->update(['date' => '2026-07-30 19:30:51']);
+
+        $reconciler = new SplitCollectionReconciler;
+        $cohorts = (new \ReflectionMethod(SplitCollectionReconciler::class, 'uniqueMultiPayloadCohorts'))
+            ->invoke($reconciler, 5, DB::table('collections')->orderBy('id')->pluck('id')->map('intval')->all());
+        self::assertCount(1, $cohorts);
+        self::assertSame($anchorId, $cohorts[0]['anchor_id']);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(1, DB::table('collections')->count());
+        self::assertSame(
+            range(1, 15),
+            DB::table('binaries')->where('collections_id', $anchorId)->orderBy('filenumber')->pluck('filenumber')->map('intval')->all(),
+        );
+    }
+
     public function test_multi_payload_cohort_is_refused_without_the_group_opt_in(): void
     {
         DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
@@ -1141,9 +1169,9 @@ final class SplitCollectionReconcilerTest extends TestCase
     }
 
     /**
-     * Two postings can share poster, file count and posting second while being
-     * unrelated. Articles must advance monotonically across the cohort in file
-     * order, so an overlapping member proves the cohort was mis-assembled.
+     * The payload is reassembled in file order, so its collections must advance
+     * monotonically. An overlapping payload member proves the cohort was
+     * mis-assembled.
      */
     public function test_refuses_multi_payload_cohort_whose_articles_overlap(): void
     {
@@ -1152,6 +1180,47 @@ final class SplitCollectionReconcilerTest extends TestCase
         // Rewind the last payload collection behind its predecessor.
         $last = (int) DB::table('binaries')->where('filenumber', 15)->value('collections_id');
         DB::table('collections')->where('id', $last)->update(['xref' => 'alt.binaries.hdtv.x264:8650141000']);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(15, DB::table('collections')->count());
+    }
+
+    /**
+     * Real posters upload parity out of file order — production shows file 1
+     * posted after files 2..8 — so parity article order carries no meaning and
+     * must not veto a cohort that tiles cleanly. Only the payload has to be
+     * ordered. Observed on alt.binaries.hdtv.x264 tf=22.
+     */
+    public function test_merges_multi_payload_cohort_whose_parity_articles_are_out_of_file_order(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $anchorId = $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        // Move parity file 1 to the end of the parity article run, past file 12.
+        $first = (int) DB::table('binaries')->where('filenumber', 1)->value('collections_id');
+        $twelfth = (int) DB::table('binaries')->where('filenumber', 12)->value('collections_id');
+        $after = (int) explode(':', (string) DB::table('collections')->where('id', $twelfth)->value('xref'))[1] + 1;
+        DB::table('collections')->where('id', $first)->update(['xref' => 'alt.binaries.hdtv.x264:'.$after]);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(
+            range(1, 15),
+            DB::table('binaries')->where('collections_id', $anchorId)->orderBy('filenumber')->pluck('filenumber')->map('intval')->all(),
+        );
+        self::assertSame(1, DB::table('collections')->count());
+    }
+
+    /**
+     * Parity order is unconstrained, but parity still has to belong to the same
+     * posting: a collection whose articles sit far outside the payload's
+     * neighbourhood came from somewhere else.
+     */
+    public function test_refuses_multi_payload_cohort_whose_parity_articles_are_far_from_the_payload(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        $first = (int) DB::table('binaries')->where('filenumber', 1)->value('collections_id');
+        // 20000 is the configured gap limit for this group; put it well beyond.
+        DB::table('collections')->where('id', $first)->update(['xref' => 'alt.binaries.hdtv.x264:9650141343']);
 
         self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
         self::assertSame(15, DB::table('collections')->count());

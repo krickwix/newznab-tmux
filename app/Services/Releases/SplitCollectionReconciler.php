@@ -577,6 +577,7 @@ final class SplitCollectionReconciler
         $collections = $this->collectionData($collectionIds);
         $cohorts = [];
         $seenCohorts = [];
+        $seenAnchors = [];
         foreach ($collections as $collection) {
             if (! $this->isPayloadOnlyCollection($collection)) {
                 continue;
@@ -596,7 +597,12 @@ final class SplitCollectionReconciler
             $seenCohorts[$cohortKey] = true;
 
             $cohort = $this->multiPayloadCohortInDatabase($collection);
-            if ($cohort !== null) {
+            // The seed key only skips repeat queries; it cannot deduplicate on
+            // its own, because members of one cohort may be posted a second or
+            // two apart and the resolver deliberately matches a whole window.
+            // The resolved anchor is the real identity, so dedupe on that.
+            if ($cohort !== null && ! isset($seenAnchors[$cohort['anchor_id']])) {
+                $seenAnchors[$cohort['anchor_id']] = true;
                 $cohorts[] = $cohort;
             }
         }
@@ -699,7 +705,7 @@ final class SplitCollectionReconciler
             return null;
         }
         usort($ordered, static fn (array $left, array $right): int => $left['first_file'] <=> $right['first_file']);
-        if (! $this->multiPayloadArticlesCohere($ordered, $groupName)) {
+        if (! $this->multiPayloadArticlesCohere($ordered, $payloadIds, $groupName)) {
             return null;
         }
 
@@ -727,31 +733,57 @@ final class SplitCollectionReconciler
     }
 
     /**
-     * Articles must advance monotonically in file-number order across the whole
-     * cohort, with no overlap between members and no gap wider than the group
-     * limit. A cohort assembled from two different postings that happen to share
-     * poster, file count and second fails this.
+     * The payload collections must advance monotonically in file-number order,
+     * with no overlap between them and no gap wider than the group limit, since
+     * that is the order the payload is reassembled in. Parity collections only
+     * have to sit in the payload's article neighbourhood: real posters upload
+     * parity out of file order — file 1 is routinely posted after files 2..8 —
+     * so requiring monotonicity across every member rejects healthy cohorts.
      *
-     * @param  list<array{id:int,first_file:int,xref:string}>  $ordered
+     * Note this is a secondary check. A cohort spliced together from two
+     * postings that happen to share poster, file count and second is already
+     * rejected by the exact tiling of 1..totalfiles, because two postings would
+     * contribute the same file number twice.
+     *
+     * @param  list<array{id:int,first_file:int,xref:string}>  $ordered  in file order
+     * @param  list<int>  $payloadIds
      */
-    private function multiPayloadArticlesCohere(array $ordered, string $groupName): bool
+    private function multiPayloadArticlesCohere(array $ordered, array $payloadIds, string $groupName): bool
     {
+        $gapLimit = $this->xrefArticleGapLimit($groupName);
+        $parity = [];
         $previousMax = null;
+        $low = null;
+        $high = null;
         foreach ($ordered as $member) {
             $articles = $this->xrefArticles($member['xref'], $groupName);
             if ($articles === []) {
                 return false;
             }
             $minimum = min($articles);
-            if ($previousMax !== null) {
-                if ($minimum <= $previousMax || $minimum - $previousMax > $this->xrefArticleGapLimit($groupName)) {
-                    return false;
-                }
+            $maximum = max($articles);
+            if (! in_array($member['id'], $payloadIds, true)) {
+                $parity[] = [$minimum, $maximum];
+
+                continue;
             }
-            $previousMax = max($articles);
+            if ($previousMax !== null
+                && ($minimum <= $previousMax || $minimum - $previousMax > $gapLimit)
+            ) {
+                return false;
+            }
+            $previousMax = $maximum;
+            $low = $low === null ? $minimum : min($low, $minimum);
+            $high = $high === null ? $maximum : max($high, $maximum);
+        }
+        if ($low === null || $high === null) {
+            return false;
         }
 
-        return $previousMax !== null;
+        return array_all(
+            $parity,
+            static fn (array $span): bool => $span[0] >= $low - $gapLimit && $span[1] <= $high + $gapLimit,
+        );
     }
 
     /**
