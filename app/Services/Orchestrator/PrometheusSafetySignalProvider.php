@@ -9,7 +9,27 @@ use Throwable;
 
 class PrometheusSafetySignalProvider
 {
-    /** @return array{fresh: bool, memory_safe: bool, cpu_safe: bool, storage_safe: bool, storage_available_bytes: int} */
+    /**
+     * Safety signals, fail-closed, with each reading's measurability reported
+     * alongside it.
+     *
+     * The *_safe booleans stay fail-closed: an unreadable or stale query is
+     * treated as unsafe, which is the correct default. But false alone cannot
+     * distinguish "the limit is genuinely breached" from "Prometheus did not
+     * answer", and those call for opposite operator responses. The companion
+     * *_known flags carry that distinction without changing any gate.
+     *
+     * @return array{
+     *     fresh: bool,
+     *     memory_safe: bool,
+     *     cpu_safe: bool,
+     *     storage_safe: bool,
+     *     storage_available_bytes: int,
+     *     memory_known: bool,
+     *     cpu_known: bool,
+     *     storage_known: bool,
+     * }
+     */
     public function signals(): array
     {
         try {
@@ -32,6 +52,9 @@ class PrometheusSafetySignalProvider
                 'cpu_safe' => $cpu !== null && $cpu < (float) config('nntmux.orchestrator.database_cpu_limit_cores'),
                 'storage_safe' => $storage !== null && $storage >= (float) config('nntmux.orchestrator.storage_floor_bytes'),
                 'storage_available_bytes' => max(0, (int) ($storage ?? 0)),
+                'memory_known' => $memory !== null,
+                'cpu_known' => $cpu !== null,
+                'storage_known' => $storage !== null,
             ];
         } catch (Throwable) {
             return [
@@ -40,6 +63,9 @@ class PrometheusSafetySignalProvider
                 'cpu_safe' => false,
                 'storage_safe' => false,
                 'storage_available_bytes' => 0,
+                'memory_known' => false,
+                'cpu_known' => false,
+                'storage_known' => false,
             ];
         }
     }

@@ -77,8 +77,16 @@ final readonly class PipelineSnapshot
         public ?int $schedulablePartsBacklog = null,
         public ?int $schedulableBinariesBacklog = null,
         public ?int $schedulableCollectionsBacklog = null,
-        public float $releaseYieldPerMinute = 0.0,
+        /** Null when no usable observation window exists: unknown, not zero. */
+        public ?float $releaseYieldPerMinute = null,
         public int $releaseCreatedTotal = 0,
+        // Whether each safety reading was actually measurable. The *Safe flags
+        // above are fail-closed, so false there can mean either a real breach or
+        // an unanswered query; these say which. Default true so a snapshot built
+        // without them keeps reporting its *Safe values at face value.
+        public bool $databaseMemoryKnown = true,
+        public bool $databaseCpuKnown = true,
+        public bool $storageKnown = true,
     ) {}
 
     public function withPermitOutcome(
@@ -162,6 +170,9 @@ final readonly class PipelineSnapshot
             schedulableCollectionsBacklog: $this->schedulableCollectionsBacklog,
             releaseYieldPerMinute: $this->releaseYieldPerMinute,
             releaseCreatedTotal: $this->releaseCreatedTotal,
+            databaseMemoryKnown: $this->databaseMemoryKnown,
+            databaseCpuKnown: $this->databaseCpuKnown,
+            storageKnown: $this->storageKnown,
         );
     }
 
@@ -243,7 +254,7 @@ final readonly class PipelineSnapshot
             || ($this->schedulablePartsBacklog !== null && $this->schedulablePartsBacklog < 0)
             || ($this->schedulableBinariesBacklog !== null && $this->schedulableBinariesBacklog < 0)
             || ($this->schedulableCollectionsBacklog !== null && $this->schedulableCollectionsBacklog < 0)
-            || $this->releaseYieldPerMinute < 0
+            || ($this->releaseYieldPerMinute !== null && $this->releaseYieldPerMinute < 0)
             || $this->bodyRecoverySourceBacklog < 0
             || $this->releasesBacklog < 0
             || $this->nzbsBacklog < 0;

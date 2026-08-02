@@ -137,10 +137,16 @@ class PipelineSnapshotRepository
         $high = $physicalCapacityHigh || $this->pressure->isHigh($backlogs, $ages, $ewma);
         $low = ! $physicalCapacityHigh && $this->pressure->isLow($backlogs, $ewma);
         $workerTelemetry = (new DistributedWorkerTelemetry)->snapshot(['releases'], (float) $now);
+        // Unavailable telemetry is not a zero counter. Reading it as one reports
+        // a false zero yield, and persisting that zero would make the next
+        // successful read look like a huge jump from nothing. Carry the last
+        // known total forward and report the yield as unmeasured instead.
         $releaseCreatedTotal = $workerTelemetry['available']
             ? (int) ($workerTelemetry['workers']['releases']['items']['release']['created'] ?? 0)
-            : 0;
-        $releaseYield = $this->releaseYieldPerMinute($releaseCreatedTotal, $previous, $now);
+            : (int) ($previous['release_created_total'] ?? 0);
+        $releaseYield = $workerTelemetry['available']
+            ? $this->releaseYieldPerMinute($releaseCreatedTotal, $previous, $now)
+            : null;
         $deadlocks = isset($status['Innodb_deadlocks']) ? (int) $status['Innodb_deadlocks'] : null;
         $waits = isset($status['Innodb_row_lock_current_waits']) ? (int) $status['Innodb_row_lock_current_waits'] : null;
         $rowLockWaits = isset($status['Innodb_row_lock_waits']) ? (int) $status['Innodb_row_lock_waits'] : null;
@@ -211,6 +217,9 @@ class PipelineSnapshotRepository
             schedulableCollectionsBacklog: $schedulableCollections,
             releaseYieldPerMinute: $releaseYield,
             releaseCreatedTotal: $releaseCreatedTotal,
+            databaseMemoryKnown: $signals['memory_known'],
+            databaseCpuKnown: $signals['cpu_known'],
+            storageKnown: $signals['storage_known'],
         );
     }
 
@@ -1429,8 +1438,18 @@ class PipelineSnapshotRepository
             || $recoverySources >= (int) config('nntmux.orchestrator.high_watermarks.recovery_sources', PHP_INT_MAX);
     }
 
-    /** @param array<string, int|float>|null $previous */
-    private function releaseYieldPerMinute(int $releaseCreatedTotal, ?array $previous, int $now): float
+    /**
+     * Committed releases per minute, or null when it cannot be measured.
+     *
+     * Returning 0.0 for an unusable window made a stale reading
+     * indistinguishable from a genuinely idle pipeline: the controller loops
+     * every 15s against a 180s freshness bound, so one slow pass reported zero
+     * yield while releases were still landing, and recovery treated that as an
+     * unproductive pipeline. Null means "no information".
+     *
+     * @param  array<string, int|float>|null  $previous
+     */
+    private function releaseYieldPerMinute(int $releaseCreatedTotal, ?array $previous, int $now): ?float
     {
         $previousObservedAt = (int) ($previous['observed_at'] ?? 0);
         $previousTotal = (int) ($previous['release_created_total'] ?? $releaseCreatedTotal);
@@ -1438,9 +1457,11 @@ class PipelineSnapshotRepository
         if ((int) ($previous['schema_version'] ?? 0) < 5
             || $elapsed < 1
             || $elapsed > (int) config('nntmux.orchestrator.snapshot_max_age_seconds', 180)
+            // A counter that moved backwards means the worker telemetry reset,
+            // so the delta is meaningless rather than zero.
             || $releaseCreatedTotal < $previousTotal
         ) {
-            return 0.0;
+            return null;
         }
 
         return ($releaseCreatedTotal - $previousTotal) * 60 / $elapsed;

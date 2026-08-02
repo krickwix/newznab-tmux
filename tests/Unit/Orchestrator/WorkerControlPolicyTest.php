@@ -58,6 +58,56 @@ final class WorkerControlPolicyTest extends TestCase
         yield 'storage' => [['storageSafe' => false]];
     }
 
+    /**
+     * Fail-closed either way, but the reason must say which it was: a breached
+     * limit calls for shedding load, an unanswered query calls for fixing
+     * Prometheus.
+     */
+    #[DataProvider('unknownSafetySignalProvider')]
+    public function test_an_unreadable_safety_signal_is_reported_apart_from_a_real_breach(
+        array $breached,
+        array $unknown,
+        string $breachReason,
+        string $unknownReason,
+    ): void {
+        $policy = new WorkerControlPolicy;
+        $state = new ControlState(profile: ControlProfile::Fill, lastTransitionAt: 9_999, cooldownUntil: 99_999);
+
+        $breach = $policy->decide($this->snapshot(...$breached), $state, 10_000);
+        self::assertContains($breachReason, $breach->reasons);
+        self::assertNotContains($unknownReason, $breach->reasons);
+
+        $unreadable = $policy->decide($this->snapshot(...$unknown), $state, 10_000);
+        self::assertContains($unknownReason, $unreadable->reasons);
+        self::assertNotContains($breachReason, $unreadable->reasons);
+
+        // The gate itself is unchanged: both still fail closed.
+        self::assertSame(ControlProfile::FailSafe, $breach->profile->profile);
+        self::assertSame(ControlProfile::FailSafe, $unreadable->profile->profile);
+    }
+
+    public static function unknownSafetySignalProvider(): iterable
+    {
+        yield 'database memory' => [
+            ['databaseMemorySafe' => false, 'databaseMemoryKnown' => true],
+            ['databaseMemorySafe' => false, 'databaseMemoryKnown' => false],
+            'database_memory_limit',
+            'database_memory_unknown',
+        ];
+        yield 'database CPU' => [
+            ['databaseCpuSafe' => false, 'databaseCpuKnown' => true],
+            ['databaseCpuSafe' => false, 'databaseCpuKnown' => false],
+            'database_cpu_limit',
+            'database_cpu_unknown',
+        ];
+        yield 'storage' => [
+            ['storageSafe' => false, 'storageKnown' => true],
+            ['storageSafe' => false, 'storageKnown' => false],
+            'storage_floor',
+            'storage_unknown',
+        ];
+    }
+
     #[DataProvider('invalidTelemetryProvider')]
     public function test_stale_partial_or_contradictory_telemetry_fails_safe(array $override): void
     {
@@ -1156,6 +1206,7 @@ final class WorkerControlPolicyTest extends TestCase
                 observedAt: 1_601,
                 schedulablePartsBacklog: 200,
                 schedulableBinariesBacklog: 30,
+                releaseYieldPerMinute: 0.0,
                 backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
             ),
             $duplicate->nextState,
@@ -1187,6 +1238,57 @@ final class WorkerControlPolicyTest extends TestCase
         $second = $policy->decide($this->snapshot(observedAt: 1_800, releaseYieldPerMinute: 0.5), $first->nextState, 1_800);
         self::assertFalse($second->nextState->qualifiedSupplyStarved);
         self::assertSame(0, $second->nextState->qualifiedSupplyCandidateSince);
+    }
+
+    public function test_an_unmeasurable_release_yield_holds_recovery_progress_instead_of_resetting_it(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyRecoverySamples: 2,
+        );
+        $state = new ControlState(
+            qualifiedSupplyStarved: true,
+            qualifiedSupplyCandidateSince: 1_000,
+            qualifiedSupplyStarvedSince: 1_600,
+            qualifiedSupplyLastObservedAt: 1_600,
+        );
+
+        $first = $policy->decide($this->snapshot(observedAt: 1_700, releaseYieldPerMinute: 0.5), $state, 1_700);
+        self::assertSame(1, $first->nextState->qualifiedSupplyRecoverySamples);
+
+        // The controller loops far faster than the freshness bound, so stale
+        // samples are routine. One must not discard the progress already made.
+        $stale = $policy->decide($this->snapshot(observedAt: 1_750, releaseYieldPerMinute: null), $first->nextState, 1_750);
+        self::assertSame(1, $stale->nextState->qualifiedSupplyRecoverySamples);
+        self::assertContains('release_yield_unknown', $stale->reasons);
+        self::assertTrue($stale->nextState->qualifiedSupplyStarved);
+
+        $second = $policy->decide($this->snapshot(observedAt: 1_800, releaseYieldPerMinute: 0.5), $stale->nextState, 1_800);
+        self::assertFalse($second->nextState->qualifiedSupplyStarved);
+    }
+
+    public function test_an_unmeasurable_release_yield_does_not_open_a_starvation_candidacy(): void
+    {
+        $policy = new WorkerControlPolicy(
+            qualifiedSupplyStarvationEnabled: true,
+            qualifiedSupplyStarvationDwellSeconds: 600,
+            qualifiedSupplyGrowthMinPerMinute: 1.0,
+        );
+
+        // Growing backlog, but no usable yield reading: that is not evidence the
+        // pipeline is failing to produce, so no dwell clock may start.
+        $decision = $policy->decide($this->snapshot(
+            observedAt: 1_000,
+            schedulablePartsBacklog: 100,
+            schedulableBinariesBacklog: 20,
+            releaseYieldPerMinute: null,
+            backlogEwmaPerMinute: ['parts' => 10.0, 'binaries' => 2.0],
+        ), ControlState::initial(), 1_000);
+
+        self::assertFalse($decision->nextState->qualifiedSupplyStarved);
+        self::assertSame(0, $decision->nextState->qualifiedSupplyCandidateSince);
+        self::assertContains('release_yield_unknown', $decision->reasons);
+        self::assertNotContains('qualified_supply_starvation_candidate', $decision->reasons);
     }
 
     public function test_pending_ready_or_nzb_work_does_not_reopen_raw_input_without_settled_release_yield(): void

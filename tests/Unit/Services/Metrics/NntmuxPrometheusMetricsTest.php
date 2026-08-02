@@ -631,6 +631,7 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_body_recovery_queue 17', $output);
         $this->assertStringContainsString('nntmux_orchestrator_qualified_supply_starved 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_release_yield_per_minute 0.25', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_release_yield_known 1', $output);
         $this->assertStringContainsString('nntmux_orchestrator_schedulable_backlog{stage="parts"} 8', $output);
         $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="total"} 70', $output);
         $this->assertStringContainsString('nntmux_orchestrator_collection_backlog{scope="ordinary"} 30', $output);
@@ -657,6 +658,29 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_orchestrator_current_forward_quarantined_windows 2', $output);
         $this->assertStringContainsString('nntmux_orchestrator_current_forward_halted 0', $output);
         $this->assertStringContainsString('nntmux_orchestrator_current_forward_target_info{group="alt.test"} 1', $output);
+    }
+
+    public function test_an_unmeasurable_release_yield_stays_exported_as_zero_but_flagged_unknown(): void
+    {
+        // The yield gauge must never vanish: alerts read it, and an absent series
+        // would silently stop evaluating them. Export 0 and flag it instead.
+        config(['nntmux.orchestrator.state_store' => 'array']);
+        DB::statement('CREATE TABLE settings (name VARCHAR PRIMARY KEY, value TEXT NULL)');
+        Cache::store('array')->flush();
+        Cache::store('array')->forever(WorkerControlStateStore::DECISION_KEY, [
+            'mode' => 'shadow',
+            'profile' => 'balanced',
+            'observed_at' => time() - 10,
+            'qualified_supply' => ['starved' => true, 'release_yield_per_minute' => null],
+        ]);
+
+        $metrics = new NntmuxPrometheusMetrics;
+        $method = (new ReflectionClass($metrics))->getMethod('orchestratorMetrics');
+        $method->setAccessible(true);
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_orchestrator_release_yield_per_minute 0', $output);
+        $this->assertStringContainsString('nntmux_orchestrator_release_yield_known 0', $output);
     }
 
     public function test_persisted_fail_safe_overrides_a_stale_redis_decision(): void

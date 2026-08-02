@@ -680,6 +680,13 @@ final class NntmuxDeploymentManifestTest extends TestCase
             ),
         );
         self::assertContains('nntmux_orchestrator_release_yield_per_minute', $dashboardExpressions);
+        // The starvation-deadlock alert reads a yield of 0, which is also what an
+        // unmeasurable window exports, so it must require a known reading before
+        // firing.
+        self::assertStringContainsString(
+            'max_over_time(nntmux_orchestrator_release_yield_known[30m]) == 1',
+            (string) file_get_contents($monitoringPath),
+        );
         self::assertNotContains(
             'nntmux_orchestrator_schedulable_backlog{stage="releases"} or vector(0)',
             $dashboardExpressions,
@@ -1129,5 +1136,166 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 sprintf('%s must retain the shared 60-second sleep.', $name),
             );
         }
+    }
+
+    /**
+     * Every NNTMUX_ variable the manifests set must be read by a config file.
+     *
+     * A thin overlay that COPYs config/nntmux.php from a branch missing a key
+     * fails silently: config() returns null, the feature becomes dead code, and
+     * nothing logs. That is exactly how the brace-token and hash-set
+     * normalizers ran as no-ops for ~75h while their env vars were set. An
+     * orphan variable here means either the reader never shipped or an overlay
+     * reverted the config that read it.
+     */
+    public function test_every_declared_nntmux_variable_is_read_by_a_config_file(): void
+    {
+        // Known-inert variables. These are set in the manifests but their
+        // readers live on the unmerged fix/backfill-fair-share-newest-cursor
+        // branch (05db090fd, 6d949d099), so they are dead today. Left declared
+        // rather than deleted so the values survive until that branch lands;
+        // drop these entries when it does.
+        $pendingReaders = [
+            'NNTMUX_ORCHESTRATOR_BACKFILL_FAIR_SHARE_NEWEST_CURSOR',
+            'NNTMUX_ORCHESTRATOR_BACKFILL_FILL_QUANTITY',
+        ];
+
+        $manifestRoot = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux';
+        if (! is_dir($manifestRoot)) {
+            self::markTestSkipped('mediahome sibling checkout is required for the workspace manifest regression.');
+        }
+
+        $declared = self::declaredNntmuxVariables($manifestRoot);
+        // Guards against a silently-skipping sweep: the manifests have carried
+        // ~100 of these for a long time, so a near-empty scan means the walk
+        // broke, not that the fleet stopped being configured.
+        self::assertGreaterThan(90, count($declared), 'Manifest scan collected implausibly few variables.');
+
+        $configured = self::configuredNntmuxVariables();
+
+        // Keep the exemption list honest: once a reader ships, the entry must go,
+        // otherwise the list quietly grows into a place to hide real drift.
+        self::assertSame(
+            [],
+            array_values(array_intersect($pendingReaders, $configured)),
+            'These variables now have config readers -- remove them from $pendingReaders.',
+        );
+
+        $orphans = array_values(array_diff(array_keys($declared), $configured, $pendingReaders));
+
+        self::assertSame([], $orphans, sprintf(
+            'These NNTMUX_ variables are set in the manifests but no config/*.php reads them, '.
+            "so they are silently inert:\n  - %s",
+            implode("\n  - ", array_map(
+                static fn (string $name): string => $name.' ('.implode(', ', $declared[$name]).')',
+                $orphans,
+            )),
+        ));
+    }
+
+    /**
+     * The obfuscation normalizers are opt-in per group and default to an empty
+     * list, so a missing variable disables them without any error. They were
+     * applied out-of-band and are absent from the manifests, which means a
+     * `kubectl apply` of this repo would strip them and silently re-break the
+     * collections pipeline. Pin them here so the manifests stay the source of
+     * truth.
+     */
+    public function test_obfuscation_normalizer_groups_are_declared_in_the_manifests(): void
+    {
+        $manifestRoot = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux';
+        if (! is_dir($manifestRoot)) {
+            self::markTestSkipped('mediahome sibling checkout is required for the workspace manifest regression.');
+        }
+
+        $declared = self::declaredNntmuxVariables($manifestRoot);
+
+        foreach (['NNTMUX_OBFUSCATED_BRACE_TOKEN_GROUPS', 'NNTMUX_OBFUSCATED_HASH_SET_GROUPS'] as $variable) {
+            self::assertArrayHasKey($variable, $declared, sprintf(
+                '%s must be declared in the manifests, or applying them strips it from the running fleet.',
+                $variable,
+            ));
+        }
+    }
+
+    /**
+     * @return array<string, list<string>> variable name => manifest files declaring it
+     */
+    private static function declaredNntmuxVariables(string $manifestRoot): array
+    {
+        $parser = new Parser(maxAliasesForCollections: 1000);
+        $declared = [];
+
+        foreach (glob($manifestRoot.'/*.yaml') ?: [] as $file) {
+            $documents = preg_split('/^---\s*$/m', (string) file_get_contents($file)) ?: [];
+            foreach ($documents as $document) {
+                try {
+                    $resource = $parser->parse($document);
+                } catch (\Throwable) {
+                    // Templates and partial documents are not our concern here.
+                    continue;
+                }
+                if (! is_array($resource)) {
+                    continue;
+                }
+                self::collectNntmuxVariables($resource, basename($file), $declared);
+            }
+        }
+
+        ksort($declared);
+
+        return $declared;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @param  array<string, list<string>>  $declared
+     */
+    private static function collectNntmuxVariables(array $node, string $file, array &$declared): void
+    {
+        // ConfigMap keys and container `env` entries are the only two shapes
+        // that actually reach a pod's environment.
+        if (($node['kind'] ?? null) === 'ConfigMap' && is_array($node['data'] ?? null)) {
+            foreach (array_keys($node['data']) as $key) {
+                if (is_string($key) && str_starts_with($key, 'NNTMUX_')) {
+                    $declared[$key][] = $file;
+                }
+            }
+        }
+
+        if (is_string($node['name'] ?? null) && array_key_exists('value', $node)
+            && str_starts_with($node['name'], 'NNTMUX_')) {
+            $declared[$node['name']][] = $file;
+        }
+
+        foreach ($node as $value) {
+            if (is_array($value)) {
+                self::collectNntmuxVariables($value, $file, $declared);
+            }
+        }
+    }
+
+    /**
+     * @return list<string>
+     */
+    private static function configuredNntmuxVariables(): array
+    {
+        $variables = [];
+
+        foreach (glob(dirname(__DIR__, 4).'/config/*.php') ?: [] as $file) {
+            // env() calls wrap across lines in these files, so match the name
+            // argument rather than a single-line call.
+            if (preg_match_all(
+                '/env\(\s*[\'"](NNTMUX_[A-Z0-9_]+)[\'"]/',
+                (string) file_get_contents($file),
+                $matches,
+            )) {
+                foreach ($matches[1] as $variable) {
+                    $variables[$variable] = true;
+                }
+            }
+        }
+
+        return array_keys($variables);
     }
 }

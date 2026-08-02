@@ -698,7 +698,17 @@ class NntmuxPrometheusMetrics
         $lines[] = $this->metric('nntmux_orchestrator_qualified_supply_starved', ($qualifiedSupply['starved'] ?? false) ? 1 : 0);
         $lines[] = '# HELP nntmux_orchestrator_release_yield_per_minute Committed release creations per minute from monotonic worker telemetry between fresh controller observations.';
         $lines[] = '# TYPE nntmux_orchestrator_release_yield_per_minute gauge';
+        // Reported as 0 when unmeasurable so the series never disappears (an
+        // absent series would silently disable the alerts that read it). Pair it
+        // with the companion gauge below to tell "no releases" from "no reading".
         $lines[] = $this->metric('nntmux_orchestrator_release_yield_per_minute', (float) ($qualifiedSupply['release_yield_per_minute'] ?? 0.0));
+        $lines[] = '# HELP nntmux_orchestrator_release_yield_known Whether the release yield above was actually measurable (0 means the observation window was unusable, not that yield was zero).';
+        $lines[] = '# TYPE nntmux_orchestrator_release_yield_known gauge';
+        $lines[] = $this->metric(
+            'nntmux_orchestrator_release_yield_known',
+            array_key_exists('release_yield_per_minute', $qualifiedSupply)
+                && $qualifiedSupply['release_yield_per_minute'] !== null ? 1 : 0,
+        );
         $lines[] = '# HELP nntmux_orchestrator_schedulable_backlog Pending rows attached to enabled groups and eligible pipeline states.';
         $lines[] = '# TYPE nntmux_orchestrator_schedulable_backlog gauge';
         $schedulableBacklogs = is_array($decision['schedulable_backlogs'] ?? null) ? $decision['schedulable_backlogs'] : [];
