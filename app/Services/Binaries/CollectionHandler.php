@@ -28,6 +28,11 @@ final class CollectionHandler
 
     private XrefService $xrefService;
 
+    private ObfuscatedHashSetNormalizer $hashSetNormalizer;
+
+    /** @var array<string, bool> Cached per-group applicability of hash-set cohort keying */
+    private array $hashSetGroupApplies = [];
+
     /** @var array<string, int> Cached collection IDs by key */
     private array $collectionIds = [];
 
@@ -45,10 +50,44 @@ final class CollectionHandler
 
     public function __construct(
         ?CollectionsCleaningService $collectionsCleaning = null,
-        ?XrefService $xrefService = null
+        ?XrefService $xrefService = null,
+        ?ObfuscatedHashSetNormalizer $hashSetNormalizer = null
     ) {
         $this->collectionsCleaning = $collectionsCleaning ?? new CollectionsCleaningService;
         $this->xrefService = $xrefService ?? new XrefService;
+        $this->hashSetNormalizer = $hashSetNormalizer ?? new ObfuscatedHashSetNormalizer;
+    }
+
+    /**
+     * Resolve the identity used to key a collection.
+     *
+     * Hash-set posts name every file by its own SHA-1, so the cleaned subject
+     * name is unique per file and cannot group the set. For those we substitute
+     * a cohort identity shared by every file of the post. All other subjects
+     * keep the existing cleaned-name behaviour untouched.
+     *
+     * @param  array{name: string, id: int|string}  $collMatch
+     */
+    private function collectionIdentity(
+        array $collMatch,
+        string $parsedSubject,
+        string $groupName,
+        int $groupId,
+        int $totalFiles,
+        int $articleUnixtime
+    ): string {
+        if (! isset($this->hashSetGroupApplies[$groupName])) {
+            $this->hashSetGroupApplies[$groupName] = $this->hashSetNormalizer->appliesTo($groupName);
+        }
+
+        if ($this->hashSetGroupApplies[$groupName]) {
+            $cohort = $this->hashSetNormalizer->normalize($parsedSubject, $groupId, $articleUnixtime);
+            if ($cohort !== null) {
+                return $cohort['name'];
+            }
+        }
+
+        return $collMatch['name'].$totalFiles;
     }
 
     /**
@@ -81,7 +120,18 @@ final class CollectionHandler
             $groupName
         );
 
-        $collectionKey = $collMatch['name'].$totalFiles;
+        $headerDate = is_numeric($header['Date']) ? (int) $header['Date'] : strtotime($header['Date']);
+        $now = now()->timestamp;
+        $unixtime = min($headerDate, $now) ?: $now;
+
+        $collectionKey = $this->collectionIdentity(
+            $collMatch,
+            (string) $header['matches'][1],
+            $groupName,
+            $groupId,
+            $totalFiles,
+            $unixtime
+        );
 
         // Return cached ID if already processed this batch
         if (isset($this->collectionIds[$collectionKey])) {
@@ -90,10 +140,6 @@ final class CollectionHandler
 
         $collectionHash = sha1($collectionKey);
         $this->batchCollectionHashes[$collectionHash] = true;
-
-        $headerDate = is_numeric($header['Date']) ? (int) $header['Date'] : strtotime($header['Date']);
-        $now = now()->timestamp;
-        $unixtime = min($headerDate, $now) ?: $now;
 
         if (! array_key_exists($collectionKey, $this->existingXrefs)) {
             $this->existingXrefs[$collectionKey] = Collection::whereCollectionhash($collectionHash)->value('xref');
@@ -172,7 +218,18 @@ final class CollectionHandler
             }
             $collMatch = $cleanedBySubject[$subject];
 
-            $collectionKey = $collMatch['name'].$totalFiles;
+            $headerDate = is_numeric($header['Date']) ? (int) $header['Date'] : strtotime($header['Date']);
+            $now = now()->timestamp;
+            $unixtime = min($headerDate, $now) ?: $now;
+
+            $collectionKey = $this->collectionIdentity(
+                $collMatch,
+                $subject,
+                $groupName,
+                $groupId,
+                $totalFiles,
+                $unixtime
+            );
             if (isset($this->collectionIds[$collectionKey])) {
                 $resolved[$index] = $this->collectionIds[$collectionKey];
 
@@ -189,9 +246,6 @@ final class CollectionHandler
 
             $xrefsToPrefetch[$collectionKey] = $collectionHash;
 
-            $headerDate = is_numeric($header['Date']) ? (int) $header['Date'] : strtotime($header['Date']);
-            $now = now()->timestamp;
-            $unixtime = min($headerDate, $now) ?: $now;
             $headerTokens = $this->xrefService->extractTokens($header['Xref'] ?? '');
 
             $pending[$collectionKey] = [

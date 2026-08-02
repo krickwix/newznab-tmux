@@ -14,15 +14,22 @@ final class HeaderParser
 {
     private BlacklistService $blacklistService;
 
+    private ObfuscatedSubjectNormalizer $obfuscatedSubjectNormalizer;
+
     private int $notYEnc = 0;
 
     private int $blacklisted = 0;
 
     private int $invalidDate = 0;
 
-    public function __construct(?BlacklistService $blacklistService = null)
-    {
+    private int $obfuscationNormalized = 0;
+
+    public function __construct(
+        ?BlacklistService $blacklistService = null,
+        ?ObfuscatedSubjectNormalizer $obfuscatedSubjectNormalizer = null
+    ) {
         $this->blacklistService = $blacklistService ?? new BlacklistService;
+        $this->obfuscatedSubjectNormalizer = $obfuscatedSubjectNormalizer ?? new ObfuscatedSubjectNormalizer;
     }
 
     /**
@@ -33,6 +40,7 @@ final class HeaderParser
         $this->notYEnc = 0;
         $this->blacklisted = 0;
         $this->invalidDate = 0;
+        $this->obfuscationNormalized = 0;
     }
 
     /**
@@ -53,6 +61,7 @@ final class HeaderParser
         $parsed = [];
         $headersRepaired = [];
         $receivedNumbers = [];
+        $normalizeObfuscated = $this->obfuscatedSubjectNormalizer->appliesTo($groupName);
         $missingPartLookup = $missingParts === null
             ? null
             : array_fill_keys(
@@ -93,6 +102,18 @@ final class HeaderParser
                 $matches[1] .= ' yEnc';
             }
 
+            // Collapse per-article obfuscation tokens so every article of a
+            // file shares one collection key and one binary hash.
+            if ($normalizeObfuscated) {
+                $normalized = $this->obfuscatedSubjectNormalizer->normalize($matches[1]);
+                if ($normalized !== null) {
+                    $matches[1] = $normalized['name'];
+                    $header['collection_file_number'] = $normalized['file_number'];
+                    $header['collection_total_files'] = $normalized['total_files'];
+                    $this->obfuscationNormalized++;
+                }
+            }
+
             $header['matches'] = $matches;
 
             // Filter subject based on black/white list
@@ -123,6 +144,7 @@ final class HeaderParser
             'notYEnc' => $this->notYEnc,
             'blacklisted' => $this->blacklisted,
             'invalidDate' => $this->invalidDate,
+            'obfuscationNormalized' => $this->obfuscationNormalized,
         ];
     }
 
@@ -151,6 +173,14 @@ final class HeaderParser
     public function getBlacklistedCount(): int
     {
         return $this->blacklisted;
+    }
+
+    /**
+     * Get count of headers whose obfuscation token was stripped.
+     */
+    public function getObfuscationNormalizedCount(): int
+    {
+        return $this->obfuscationNormalized;
     }
 
     /**
