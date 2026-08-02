@@ -48,6 +48,11 @@ return [
         'trim',
         explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_DYNAMIC_PAIR_GAP_GROUPS', '')),
     )))),
+    'split_collection_multi_payload_groups' => array_values(array_unique(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_MULTI_PAYLOAD_GROUPS', '')),
+    )))),
+    'split_collection_max_multi_payload_files' => min(200, max(2, (int) env('NNTMUX_SPLIT_COLLECTION_MAX_MULTI_PAYLOAD_FILES', 40))),
     'split_collection_terminal_pair_repair_groups' => array_values(array_unique(array_filter(array_map(
         'trim',
         explode(',', (string) env('NNTMUX_SPLIT_COLLECTION_TERMINAL_PAIR_REPAIR_GROUPS', '')),

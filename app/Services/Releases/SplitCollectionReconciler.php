@@ -56,6 +56,10 @@ final class SplitCollectionReconciler
 
     private const int MAX_FANOUT_FILES_CEILING = 200;
 
+    private const int DEFAULT_MAX_MULTI_PAYLOAD_FILES = 40;
+
+    private const int MAX_MULTI_PAYLOAD_FILES_CEILING = 200;
+
     /** @var array<int, string> */
     private array $groupNamesById = [];
 
@@ -102,16 +106,19 @@ final class SplitCollectionReconciler
                 );
                 $pairs = $this->uniquePairs($allowedGroupId, $collectionIds);
                 $fanouts = $this->uniqueFanoutCohorts($allowedGroupId, $collectionIds);
-                foreach ($this->interleavedCandidates($pairs, $fanouts) as $candidate) {
+                $multiPayloads = $this->uniqueMultiPayloadCohorts($allowedGroupId, $collectionIds);
+                foreach ($this->interleavedCandidates($pairs, $fanouts, $multiPayloads) as $candidate) {
                     $sourceCount = count($candidate['companion_ids']);
                     if ($merged >= $maxPairs
                         || $sourceCollectionsMerged + $sourceCount > $maxSourceCollections
                     ) {
                         return $merged;
                     }
-                    $didMerge = $candidate['type'] === 'pair'
-                        ? $this->mergePair($allowedGroupId, $candidate['anchor_id'], $candidate['companion_ids'][0])
-                        : $this->mergeFanout($allowedGroupId, $candidate['anchor_id'], $candidate['companion_ids']);
+                    $didMerge = match ($candidate['type']) {
+                        'pair' => $this->mergePair($allowedGroupId, $candidate['anchor_id'], $candidate['companion_ids'][0]),
+                        'multi_payload' => $this->mergeMultiPayload($allowedGroupId, $candidate['anchor_id'], $candidate['companion_ids']),
+                        default => $this->mergeFanout($allowedGroupId, $candidate['anchor_id'], $candidate['companion_ids']),
+                    };
                     if ($didMerge) {
                         $merged++;
                         $sourceCollectionsMerged += $sourceCount;
@@ -126,18 +133,21 @@ final class SplitCollectionReconciler
     }
 
     /**
-     * Alternate pair and fanout work so either shape can make progress under
-     * a sustained backlog. Pairs go first because previous versions always
-     * gave fanouts the entire success budget.
+     * Alternate pair, fanout and multi-payload work so every shape can make
+     * progress under a sustained backlog. Pairs go first because previous
+     * versions always gave fanouts the entire success budget, and multi-payload
+     * cohorts go last because one of them can consume dozens of source
+     * collections at once.
      *
      * @param  list<array{anchor_id:int,companion_id:int}>  $pairs
      * @param  list<array{anchor_id:int,companion_ids:list<int>}>  $fanouts
-     * @return list<array{type:'pair'|'fanout',anchor_id:int,companion_ids:list<int>}>
+     * @param  list<array{anchor_id:int,companion_ids:list<int>}>  $multiPayloads
+     * @return list<array{type:'pair'|'fanout'|'multi_payload',anchor_id:int,companion_ids:list<int>}>
      */
-    private function interleavedCandidates(array $pairs, array $fanouts): array
+    private function interleavedCandidates(array $pairs, array $fanouts, array $multiPayloads = []): array
     {
         $candidates = [];
-        $length = max(count($pairs), count($fanouts));
+        $length = max(count($pairs), count($fanouts), count($multiPayloads));
         for ($index = 0; $index < $length; $index++) {
             if (isset($pairs[$index])) {
                 $candidates[] = [
@@ -151,6 +161,13 @@ final class SplitCollectionReconciler
                     'type' => 'fanout',
                     'anchor_id' => $fanouts[$index]['anchor_id'],
                     'companion_ids' => $fanouts[$index]['companion_ids'],
+                ];
+            }
+            if (isset($multiPayloads[$index])) {
+                $candidates[] = [
+                    'type' => 'multi_payload',
+                    'anchor_id' => $multiPayloads[$index]['anchor_id'],
+                    'companion_ids' => $multiPayloads[$index]['companion_ids'],
                 ];
             }
         }
@@ -296,10 +313,12 @@ final class SplitCollectionReconciler
 
         $expandedIds = $collectionIds;
         $seenCohorts = [];
+        $multiPayload = $this->multiPayloadEnabled($this->groupName($groupId));
         foreach ($this->collectionData($collectionIds) as $collection) {
             if (! $this->isAnchor($collection)
                 && ! $this->isCompanion($collection)
                 && ! $this->isFanoutCompanion($collection)
+                && ! ($multiPayload && $this->isPayloadOnlyCollection($collection))
             ) {
                 continue;
             }
@@ -448,11 +467,17 @@ final class SplitCollectionReconciler
 
     /**
      * Row budget for the cohort queries that must observe every member of a
-     * fanout plus one extra row to detect an ambiguous over-full cohort.
+     * fanout plus one extra row to detect an ambiguous over-full cohort. A
+     * multi-payload cohort can be wider than a fanout, so its cap participates
+     * too or discovery would truncate one mid-expansion.
      */
     private function maxCohortRows(): int
     {
-        return max(self::MAX_MATCHING_COLLECTIONS, $this->maxFanoutFiles()) + 1;
+        return max(
+            self::MAX_MATCHING_COLLECTIONS,
+            $this->maxFanoutFiles(),
+            $this->maxMultiPayloadFiles(),
+        ) + 1;
     }
 
     /**
@@ -527,6 +552,276 @@ final class SplitCollectionReconciler
         usort($cohorts, static fn (array $left, array $right): int => $left['anchor_id'] <=> $right['anchor_id']);
 
         return array_slice($cohorts, 0, $this->maxPairsPerPass());
+    }
+
+    /**
+     * Cohorts whose payload spans several collections, which the single-anchor
+     * pair and fanout shapes cannot express at all.
+     *
+     * Two layouts occur in production and both are handled here: parity split
+     * one-file-per-collection with the payload split across the trailing
+     * collections, and a single collection holding every parity file followed by
+     * one collection per payload part. The anchor is simply the payload
+     * collection holding the lowest file number; the remaining payload
+     * collections are absorbed exactly like parity companions.
+     *
+     * @param  list<int>  $collectionIds
+     * @return list<array{anchor_id:int,companion_ids:list<int>}>
+     */
+    private function uniqueMultiPayloadCohorts(int $groupId, array $collectionIds): array
+    {
+        if ($collectionIds === [] || ! $this->multiPayloadEnabled($this->groupName($groupId))) {
+            return [];
+        }
+
+        $collections = $this->collectionData($collectionIds);
+        $cohorts = [];
+        $seenCohorts = [];
+        foreach ($collections as $collection) {
+            if (! $this->isPayloadOnlyCollection($collection)) {
+                continue;
+            }
+            $timestamp = strtotime((string) $collection['date']);
+            if ($timestamp === false) {
+                continue;
+            }
+            $cohortKey = implode('|', [
+                (string) $collection['fromname'],
+                (string) $collection['totalfiles'],
+                (string) $timestamp,
+            ]);
+            if (isset($seenCohorts[$cohortKey])) {
+                continue;
+            }
+            $seenCohorts[$cohortKey] = true;
+
+            $cohort = $this->multiPayloadCohortInDatabase($collection);
+            if ($cohort !== null) {
+                $cohorts[] = $cohort;
+            }
+        }
+
+        usort($cohorts, static fn (array $left, array $right): int => $left['anchor_id'] <=> $right['anchor_id']);
+
+        return array_slice($cohorts, 0, $this->maxPairsPerPass());
+    }
+
+    /**
+     * Resolve and validate the whole cohort from the database rather than from
+     * the bounded discovery page, so a member hidden by paging cannot cause a
+     * partial merge. Returns null unless the cohort is unambiguous.
+     *
+     * @param  array<string,mixed>  $seed
+     * @return array{anchor_id:int,companion_ids:list<int>}|null
+     */
+    private function multiPayloadCohortInDatabase(array $seed, bool $lock = false): ?array
+    {
+        $timestamp = strtotime((string) $seed['date']);
+        $totalFiles = (int) $seed['totalfiles'];
+        if ($timestamp === false || $totalFiles > $this->maxMultiPayloadFiles()) {
+            return null;
+        }
+
+        $query = DB::table('collections')
+            ->where('groups_id', (int) $seed['groups_id'])
+            ->where('fromname', (string) $seed['fromname'])
+            ->where('totalfiles', $totalFiles)
+            ->where('filecheck', 0)
+            ->whereNull('releases_id')
+            ->whereBetween('date', [
+                date('Y-m-d H:i:s', $timestamp - self::MAX_POSTING_GAP_SECONDS),
+                date('Y-m-d H:i:s', $timestamp + self::MAX_POSTING_GAP_SECONDS),
+            ])
+            ->orderBy('id')
+            ->limit($this->maxMultiPayloadCohortRows());
+        if ($lock) {
+            $query->lockForUpdate();
+        }
+        $ids = $query->pluck('id')->map(static fn (mixed $id): int => (int) $id)->all();
+        // A cohort splitting the payload always needs at least three
+        // collections, and never more than one per file. The upper bound is a
+        // cheap bail-out rather than a distinct rule: every member carries at
+        // least one binary, so an over-full cohort could never tile
+        // 1..totalfiles anyway.
+        if (count($ids) < 3 || count($ids) > $totalFiles) {
+            return null;
+        }
+
+        return $this->multiPayloadCohortFrom($this->collectionData($ids, $lock), $seed);
+    }
+
+    /**
+     * @param  array<int,array<string,mixed>>  $collections
+     * @param  array<string,mixed>  $seed
+     * @return array{anchor_id:int,companion_ids:list<int>}|null
+     */
+    private function multiPayloadCohortFrom(array $collections, array $seed): ?array
+    {
+        $totalFiles = (int) $seed['totalfiles'];
+        $groupName = $this->groupName((int) $seed['groups_id']);
+        $payloadIds = [];
+        $fileNumbers = [];
+        $ordered = [];
+        foreach ($collections as $collection) {
+            $isPayload = $this->isPayloadOnlyCollection($collection);
+            // Every member must be cleanly one kind or the other. A collection
+            // mixing payload and parity, or carrying an incomplete binary, makes
+            // the cohort unsafe to collapse.
+            if (! $isPayload && ! $this->isPar2OnlyCollection($collection)) {
+                return null;
+            }
+            if (! $this->multiPayloadMetadataMatches($seed, $collection)) {
+                return null;
+            }
+            $memberFileNumbers = array_map(
+                static fn (array $binary): int => (int) $binary['filenumber'],
+                $collection['binaries'],
+            );
+            sort($memberFileNumbers, SORT_NUMERIC);
+            if ($isPayload) {
+                $payloadIds[] = (int) $collection['id'];
+            }
+            $fileNumbers = [...$fileNumbers, ...$memberFileNumbers];
+            $ordered[] = [
+                'id' => (int) $collection['id'],
+                'first_file' => $memberFileNumbers[0],
+                'xref' => (string) $collection['xref'],
+            ];
+        }
+
+        // The pair and fanout shapes already cover a single payload collection;
+        // this shape exists only for the ones they cannot express.
+        if (count($payloadIds) < 2) {
+            return null;
+        }
+        sort($fileNumbers, SORT_NUMERIC);
+        if ($fileNumbers !== range(1, $totalFiles)) {
+            return null;
+        }
+        usort($ordered, static fn (array $left, array $right): int => $left['first_file'] <=> $right['first_file']);
+        if (! $this->multiPayloadArticlesCohere($ordered, $groupName)) {
+            return null;
+        }
+
+        // The anchor is the payload collection holding the lowest file number,
+        // so the choice is deterministic and independent of insertion order.
+        $anchorId = 0;
+        foreach ($ordered as $member) {
+            if (in_array($member['id'], $payloadIds, true)) {
+                $anchorId = $member['id'];
+                break;
+            }
+        }
+        if ($anchorId === 0) {
+            return null;
+        }
+
+        $companionIds = [];
+        foreach ($ordered as $member) {
+            if ($member['id'] !== $anchorId) {
+                $companionIds[] = $member['id'];
+            }
+        }
+
+        return ['anchor_id' => $anchorId, 'companion_ids' => $companionIds];
+    }
+
+    /**
+     * Articles must advance monotonically in file-number order across the whole
+     * cohort, with no overlap between members and no gap wider than the group
+     * limit. A cohort assembled from two different postings that happen to share
+     * poster, file count and second fails this.
+     *
+     * @param  list<array{id:int,first_file:int,xref:string}>  $ordered
+     */
+    private function multiPayloadArticlesCohere(array $ordered, string $groupName): bool
+    {
+        $previousMax = null;
+        foreach ($ordered as $member) {
+            $articles = $this->xrefArticles($member['xref'], $groupName);
+            if ($articles === []) {
+                return false;
+            }
+            $minimum = min($articles);
+            if ($previousMax !== null) {
+                if ($minimum <= $previousMax || $minimum - $previousMax > $this->xrefArticleGapLimit($groupName)) {
+                    return false;
+                }
+            }
+            $previousMax = max($articles);
+        }
+
+        return $previousMax !== null;
+    }
+
+    /**
+     * @param  array<string,mixed>  $seed
+     * @param  array<string,mixed>  $collection
+     */
+    private function multiPayloadMetadataMatches(array $seed, array $collection): bool
+    {
+        $seedTimestamp = strtotime((string) $seed['date']);
+        $timestamp = strtotime((string) $collection['date']);
+
+        return (int) $seed['groups_id'] === (int) $collection['groups_id']
+            && hash_equals((string) $seed['fromname'], (string) $collection['fromname'])
+            && (int) $seed['totalfiles'] === (int) $collection['totalfiles']
+            && $seedTimestamp !== false
+            && $timestamp !== false
+            && abs($seedTimestamp - $timestamp) <= self::MAX_POSTING_GAP_SECONDS;
+    }
+
+    /** @param array<string,mixed> $collection */
+    private function isPayloadOnlyCollection(array $collection): bool
+    {
+        $binaries = $collection['binaries'];
+
+        return $this->isMutableCollection($collection)
+            && $binaries !== []
+            && array_all($binaries, fn (array $binary): bool => $this->isCompleteBinary($binary)
+                && ! $this->isPar2((string) $binary['name'])
+                && $this->isFileNumberInRange($collection, (int) $binary['filenumber']));
+    }
+
+    /** @param array<string,mixed> $collection */
+    private function isPar2OnlyCollection(array $collection): bool
+    {
+        $binaries = $collection['binaries'];
+
+        return $this->isMutableCollection($collection)
+            && $binaries !== []
+            && array_all($binaries, fn (array $binary): bool => $this->isCompleteBinary($binary)
+                && $this->isPar2((string) $binary['name'])
+                && $this->isFileNumberInRange($collection, (int) $binary['filenumber']));
+    }
+
+    /**
+     * Largest cohort the multi-payload shape may collapse. Kept separate from
+     * the fanout cap because a split payload legitimately produces more members
+     * than a parity fanout of the same posting.
+     */
+    private function maxMultiPayloadFiles(): int
+    {
+        return min(self::MAX_MULTI_PAYLOAD_FILES_CEILING, max(2, (int) config(
+            'nntmux.split_collection_max_multi_payload_files',
+            self::DEFAULT_MAX_MULTI_PAYLOAD_FILES,
+        )));
+    }
+
+    /** Row budget wide enough to see one extra member and reject an over-full cohort. */
+    private function maxMultiPayloadCohortRows(): int
+    {
+        return $this->maxMultiPayloadFiles() + 1;
+    }
+
+    private function multiPayloadEnabled(string $groupName): bool
+    {
+        $groups = array_values(array_unique(array_filter(array_map(
+            static fn (mixed $group): string => trim((string) $group),
+            (array) config('nntmux.split_collection_multi_payload_groups', []),
+        ))));
+
+        return $groupName !== '' && count($groups) <= 16 && in_array($groupName, $groups, true);
     }
 
     /**
@@ -1143,6 +1438,111 @@ final class SplitCollectionReconciler
             }
 
             Log::notice('Reconciled split main and PAR2 fanout collections', [
+                'group_id' => $groupId,
+                'anchor_collection_id' => $anchorId,
+                'companion_collection_ids' => $companionIds,
+                'total_files' => (int) $anchor['totalfiles'],
+            ]);
+
+            return true;
+        }, 5);
+    }
+
+    /**
+     * Collapse a cohort whose payload spans several collections into its anchor.
+     *
+     * Unlike mergeFanout() a companion here may carry many binaries, so the
+     * reparent count is asserted per companion against the locked row rather
+     * than against a fixed one.
+     *
+     * @param  list<int>  $companionIds
+     */
+    private function mergeMultiPayload(int $groupId, int $anchorId, array $companionIds): bool
+    {
+        return DB::transaction(function () use ($groupId, $anchorId, $companionIds): bool {
+            $collectionIds = [$anchorId, ...$companionIds];
+            $preflight = $this->collectionData($collectionIds);
+            $preflightAnchor = $preflight[$anchorId] ?? null;
+            if ($preflightAnchor === null) {
+                return false;
+            }
+
+            // Re-resolve the cohort under lock: it must still be exactly the one
+            // discovery proposed, or another worker has changed it underneath us.
+            $locked = $this->multiPayloadCohortInDatabase($preflightAnchor, true);
+            // The anchor comparison is subsumed by the companion-list check
+            // below — a different locked anchor would put the caller's anchor in
+            // the companion list, which $expected never contains — but it is
+            // kept so the failure is attributed to the anchor, not the list.
+            if ($locked === null || $locked['anchor_id'] !== $anchorId) {
+                return false;
+            }
+            $expected = $companionIds;
+            sort($expected, SORT_NUMERIC);
+            $lockedCompanionIds = $locked['companion_ids'];
+            sort($lockedCompanionIds, SORT_NUMERIC);
+            if ($lockedCompanionIds !== $expected) {
+                return false;
+            }
+
+            $collections = $this->collectionData($collectionIds, true);
+            $anchor = $collections[$anchorId] ?? null;
+            if ($anchor === null
+                || (int) $anchor['groups_id'] !== $groupId
+                || ! $this->sameCohortIdentity($preflightAnchor, $anchor)
+                || ! $this->isPayloadOnlyCollection($anchor)
+            ) {
+                return false;
+            }
+
+            $mergedXref = (string) $anchor['xref'];
+            foreach ($companionIds as $companionId) {
+                $preflightCompanion = $preflight[$companionId] ?? null;
+                $companion = $collections[$companionId] ?? null;
+                if ($preflightCompanion === null
+                    || $companion === null
+                    || ! $this->sameCohortIdentity($preflightCompanion, $companion)
+                    || ! $this->multiPayloadMetadataMatches($anchor, $companion)
+                ) {
+                    return false;
+                }
+
+                $mergedXref = $this->mergedXref($mergedXref, (string) $companion['xref']);
+            }
+
+            $this->currentForwardLineage->recordCollectionHandoffsForMerge(
+                $companionIds,
+                $anchorId,
+                'split collection multi-payload merge',
+            );
+
+            foreach ($companionIds as $companionId) {
+                $expectedBinaries = count($collections[$companionId]['binaries']);
+                $updated = DB::table('binaries')
+                    ->where('collections_id', $companionId)
+                    ->update(['collections_id' => $anchorId]);
+                if ($updated !== $expectedBinaries) {
+                    throw new \RuntimeException('Split collection multi-payload companion changed during reconciliation.');
+                }
+            }
+
+            DB::table('collections')->where('id', $anchorId)->update(['xref' => $mergedXref]);
+            foreach ($companionIds as $companionId) {
+                $deleted = DB::table('collections')
+                    ->where('id', $companionId)
+                    ->where('filecheck', 0)
+                    ->whereNull('releases_id')
+                    ->whereNotExists(static fn ($query) => $query
+                        ->selectRaw('1')
+                        ->from('binaries')
+                        ->whereColumn('binaries.collections_id', 'collections.id'))
+                    ->delete();
+                if ($deleted !== 1) {
+                    throw new \RuntimeException('Split collection multi-payload companion could not be removed safely.');
+                }
+            }
+
+            Log::notice('Reconciled split multi-payload collections', [
                 'group_id' => $groupId,
                 'anchor_collection_id' => $anchorId,
                 'companion_collection_ids' => $companionIds,
