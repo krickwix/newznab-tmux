@@ -445,7 +445,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
                     : (in_array($name, [
                         'nntmux-worker-releases',
                     ], true)
-                ? ':microservices-pods-20260721-release-yield-v189@sha256:f3516461589b5ec6f9ff5a178ec14e0a0d2a23cc26e8df1db56d1d5ab5594a74'
+                ? ':microservices-pods-20260802-split-lookback-retention-v215@sha256:028421bdfb9c2b12f682331cb8c5bde98c005ae6684442a76c9d4e3a2431951c'
                 : (in_array($name, [
                     'nntmux-worker-removecrap',
                     'nntmux-worker-per-group',
@@ -922,11 +922,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
         $releases = $deployments['nntmux-worker-releases'] ?? null;
         self::assertIsArray($releases);
         self::assertSame(
-            'microservices-pods-20260721-release-yield-v189',
+            'microservices-pods-20260802-split-lookback-retention-v215',
             $environment($releases)['NNTMUX_BUILD_VERSION'] ?? null,
         );
         self::assertSame(
-            'docker.io/krickwix/nntmux:microservices-pods-20260721-release-yield-v189@sha256:f3516461589b5ec6f9ff5a178ec14e0a0d2a23cc26e8df1db56d1d5ab5594a74',
+            'docker.io/krickwix/nntmux:microservices-pods-20260802-split-lookback-retention-v215@sha256:028421bdfb9c2b12f682331cb8c5bde98c005ae6684442a76c9d4e3a2431951c',
             $releases['spec']['template']['spec']['containers'][0]['image'] ?? null,
         );
         self::assertSame('25', $environment($releases)['NNTMUX_DISTRIBUTED_RELEASE_PUMP_DEADLINE_SECONDS'] ?? null);
@@ -954,7 +954,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
             'alt.binaries.documentaries:2000,alt.binaries.hdtv.tv-episodes:2000',
             $environment($releases)['NNTMUX_SPLIT_COLLECTION_XREF_GAP_OVERRIDES'] ?? null,
         );
-        self::assertSame('72', $environment($releases)['NNTMUX_SPLIT_COLLECTION_RECONCILE_LOOKBACK_HOURS'] ?? null);
+        // Tracks the partretentionhours setting; a cohort is only mergeable
+        // while the retention cleanup has spared its collections.
+        self::assertSame('96', $environment($releases)['NNTMUX_SPLIT_COLLECTION_RECONCILE_LOOKBACK_HOURS'] ?? null);
         self::assertSame('redis', $environment($releases)['NNTMUX_SPLIT_COLLECTION_RECONCILE_CURSOR_STORE'] ?? null);
         self::assertSame(
             'alt.binaries.hdtv.tv-episodes',
