@@ -9,6 +9,13 @@ use Symfony\Component\Yaml\Parser;
 
 final class NntmuxDeploymentManifestTest extends TestCase
 {
+    /**
+     * The single image every app lane runs, pinned by manifest list digest so a
+     * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
+     * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
+     */
+    private const FLEET_IMAGE = 'microservices-pods-20260802-misaligned-cursor-pump-deadline-v216@sha256:7925bd7828cf215ff10aba8947c06ad4ba977b44e1daf99df22f8fd04102f70b';
+
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
         $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/worker-orchestrator.Dockerfile');
@@ -430,37 +437,18 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
             $name = (string) ($deployment['metadata']['name'] ?? 'unknown');
             $workers[] = $name;
-            $expectedImage = in_array($name, [
-                'nntmux-worker-backfill',
-                'nntmux-worker-binaries',
-                'nntmux-worker-current-forward',
-            ], true)
-                ? ':microservices-pods-20260720-sustainable-backfill-v188@sha256:9162bcefa4e5e0f7b6c0690d1e05c26ede86e938900dd2f8efda36dd20468a0a'
-                : ($name === 'nntmux-worker-nzb-backlog'
-                    ? ':microservices-pods-20260714-nzb-saturated-retry-v147@sha256:6ede1752f1d15e0334f6f8f91d9f3c3869034c65484d60a568bcccdf62703cc1'
-                    : ($name === 'nntmux-worker-post-additional'
-                        ? ':microservices-pods-20260714-nfo-gate-v143@sha256:82bc4bf05d48dc1e4af9ce19f6219e7dfeee16bde3d32b48cf20ace464a11ab3'
-                : ($name === 'nntmux-worker-hashed-fixnames'
-                    ? ':microservices-pods-20260717-compact-tv-hashed-v164@sha256:5754963047c0be86b2c05dda05d714f50fc350e01f4cdf88946ce83be6f3f566'
-                    : (in_array($name, [
-                        'nntmux-worker-releases',
-                    ], true)
-                ? ':microservices-pods-20260802-split-lookback-retention-v215@sha256:028421bdfb9c2b12f682331cb8c5bde98c005ae6684442a76c9d4e3a2431951c'
-                : (in_array($name, [
-                    'nntmux-worker-removecrap',
-                    'nntmux-worker-per-group',
-                ], true)
-                ? ':microservices-pods-20260718-cf-release-disposition-removecrap-v179@sha256:96d5d5c088970dc3fcd972d54997201de2976c893a36a8c3fa1f9e236c88096e'
-                : ($name === 'nntmux-worker-post-tv'
-                    ? ':microservices-pods-20260717-compact-tv-post-v165@sha256:e071558242c06fc56abc4f9acd96ce04cc9947d996491df2026c8fbe02977499'
-                    : ':microservices-pods-20260710-nzb-query-v8'))))));
-            if ($name === 'nntmux-worker-post-movies') {
-                $expectedImage = ':microservices-pods-20260721-imdb-identity-post-movies-v13@sha256:e66333ce5da4c83a7ade98ba109725dd774306da5e0903037cba7faf46fdea1c';
-            }
+
+            // The lanes no longer run per-lane isolated images. Each fix used to
+            // ship to only the lanes that executed it, which is what the long
+            // per-lane table here recorded; the fleet has since converged on one
+            // overlay, because every image in that lineage is a strict superset
+            // of the one below it. One expected pin is now the honest assertion
+            // -- and a stronger one, since it also catches a lane left behind.
+            $expectedImage = ':'.self::FLEET_IMAGE;
             self::assertStringEndsWith(
                 $expectedImage,
                 (string) ($container['image'] ?? ''),
-                sprintf('%s must retain its intended isolated image.', $name),
+                sprintf('%s must run the converged fleet image.', $name),
             );
             $environment = array_column($container['env'] ?? [], 'value', 'name');
             self::assertSame(
@@ -618,9 +606,12 @@ final class NntmuxDeploymentManifestTest extends TestCase
             'name',
         );
         self::assertSame('false', $webEnvironment['IMDBAPI_DEV_ENABLED'] ?? null);
+        // These two are no longer held back on an old pin: they run the
+        // converged fleet image with every other app lane. Web is the one
+        // deployment that stays on its own amd64 lineage above.
         foreach (['nntmux-worker', 'nntmux-scheduler'] as $deployment) {
             self::assertStringEndsWith(
-                ':microservices-pods-20260615-group-delete-v1',
+                ':'.self::FLEET_IMAGE,
                 (string) ($deployments[$deployment]['spec']['template']['spec']['containers'][0]['image'] ?? ''),
             );
         }
