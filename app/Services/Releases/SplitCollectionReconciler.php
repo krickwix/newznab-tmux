@@ -31,6 +31,17 @@ final class SplitCollectionReconciler
 
     private const int MAX_TOTAL_FILES = 200;
 
+    private const int MIN_LOOKBACK_HOURS = 24;
+
+    /**
+     * A cohort can only be merged while its collections still exist, so the
+     * useful window is bounded by the partretentionhours cleanup rather than by
+     * this ceiling. Keep the ceiling above that retention so the lookback can
+     * follow it; scanning wider than retention finds nothing and only costs
+     * query time.
+     */
+    private const int LOOKBACK_HOURS_CEILING = 336;
+
     private const int MAX_POSTING_GAP_SECONDS = 120;
 
     private const int MAX_XREF_ARTICLE_GAP = 1000;
@@ -423,7 +434,10 @@ final class SplitCollectionReconciler
 
     private function lookbackHours(): int
     {
-        return min(72, max(24, (int) config('nntmux.split_collection_reconcile_lookback_hours', 24)));
+        return min(self::LOOKBACK_HOURS_CEILING, max(
+            self::MIN_LOOKBACK_HOURS,
+            (int) config('nntmux.split_collection_reconcile_lookback_hours', self::MIN_LOOKBACK_HOURS),
+        ));
     }
 
     /**

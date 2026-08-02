@@ -865,18 +865,36 @@ final class SplitCollectionReconcilerTest extends TestCase
         self::assertSame(210, (int) DB::table('binaries')->where('id', 2110)->value('collections_id'));
     }
 
-    public function test_lookback_is_clamped_to_72_hours(): void
+    public function test_lookback_is_clamped_to_336_hours(): void
     {
         config()->set('nntmux.split_collection_reconcile_lookback_hours', 999);
         $this->seedCollection(220, '[01/02] - "Too.Old.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:15');
         $this->seedCollection(221, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:16');
         $this->seedBinary(2200, 220, 1, 'Too.Old.Episode.mkv', 10, 10);
         $this->seedBinary(2210, 221, 2, 'hash.par2', 1, 1);
-        DB::table('collections')->whereIn('id', [220, 221])->update(['dateadded' => now()->subHours(73)]);
+        DB::table('collections')->whereIn('id', [220, 221])->update(['dateadded' => now()->subHours(337)]);
 
         self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
         self::assertTrue(DB::table('collections')->where('id', 221)->exists());
         self::assertSame(221, (int) DB::table('binaries')->where('id', 2210)->value('collections_id'));
+    }
+
+    /**
+     * The window has to be able to follow partretentionhours past 72, since a
+     * cohort is only mergeable while the retention cleanup has spared it.
+     */
+    public function test_lookback_beyond_72_hours_admits_a_96_hour_old_pair_when_retention_allows(): void
+    {
+        config()->set('nntmux.split_collection_reconcile_lookback_hours', 120);
+        $this->seedCollection(240, '[01/02] - "Retained.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:15');
+        $this->seedCollection(241, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:16');
+        $this->seedBinary(2400, 240, 1, 'Retained.Episode.mkv', 10, 10);
+        $this->seedBinary(2410, 241, 2, 'hash.par2', 1, 1);
+        DB::table('collections')->whereIn('id', [240, 241])->update(['dateadded' => now()->subHours(96)]);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertFalse(DB::table('collections')->where('id', 241)->exists());
+        self::assertSame(240, (int) DB::table('binaries')->where('id', 2410)->value('collections_id'));
     }
 
     public function test_bounded_fair_discovery_does_not_starve_an_old_valid_pair_behind_newer_fillers(): void
