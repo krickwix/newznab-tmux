@@ -214,6 +214,191 @@ final class SplitCollectionReconcilerTest extends TestCase
         self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
     }
 
+    public function test_xref_gap_override_admits_a_large_anchor_fanout(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 5000]);
+
+        $this->seedLargeAnchorFanout('alt.binaries.hdtv.x264', 12, 2869);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(12, DB::table('binaries')->where('collections_id', 40)->count());
+        self::assertSame(1, DB::table('collections')->whereBetween('id', [40, 51])->count());
+    }
+
+    public function test_large_anchor_fanout_is_refused_without_a_gap_override(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+
+        $this->seedLargeAnchorFanout('alt.binaries.hdtv.x264', 12, 2869);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(12, DB::table('collections')->whereBetween('id', [40, 51])->count());
+    }
+
+    public function test_xref_gap_override_is_clamped_to_the_ceiling(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 500000]);
+
+        $this->seedLargeAnchorFanout('alt.binaries.hdtv.x264', 12, 25000);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(12, DB::table('collections')->whereBetween('id', [40, 51])->count());
+    }
+
+    public function test_fanout_cap_override_admits_a_cohort_above_the_default(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 5000]);
+        config()->set('nntmux.split_collection_max_fanout_files', 40);
+
+        $this->seedLargeAnchorFanout('alt.binaries.hdtv.x264', 25, 2869);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(25, DB::table('binaries')->where('collections_id', 40)->count());
+    }
+
+    public function test_fanout_above_the_default_cap_is_refused_without_an_override(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 5000]);
+
+        $this->seedLargeAnchorFanout('alt.binaries.hdtv.x264', 25, 2869);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(25, DB::table('collections')->whereBetween('id', [40, 64])->count());
+    }
+
+    /**
+     * Reproduce the deployed shape: one complete payload anchor whose parts push
+     * the PAR2 companions well past the small-anchor xref gap default.
+     */
+    private function seedLargeAnchorFanout(string $groupName, int $totalFiles, int $articleGap): void
+    {
+        $anchorArticle = 8649442804;
+
+        $this->seedCollection(40, sprintf('[01/%02d] - "Episode.mkv" yEnc', $totalFiles), 'large@example.com', $totalFiles, '2026-07-30 03:43:24');
+        DB::table('collections')->where('id', 40)->update([
+            'xref' => $groupName.':'.$anchorArticle,
+        ]);
+        $this->seedBinary(400, 40, 1, 'Episode.mkv', 2876, 2876);
+
+        for ($fileNumber = 2; $fileNumber <= $totalFiles; $fileNumber++) {
+            $collectionId = 39 + $fileNumber;
+            $this->seedCollection(
+                $collectionId,
+                sprintf('[%02d/%02d] - "hash-%02d.par2" yEnc', $fileNumber, $totalFiles, $fileNumber),
+                'large@example.com',
+                $totalFiles,
+                '2026-07-30 03:43:24',
+            );
+            DB::table('collections')->where('id', $collectionId)->update([
+                'xref' => $groupName.':'.($anchorArticle + $articleGap + $fileNumber),
+            ]);
+            $this->seedBinary(400 + $fileNumber, $collectionId, $fileNumber, 'hash-'.$fileNumber.'.par2', 1, 1);
+        }
+    }
+
+    /**
+     * The dominant real-world layout: the poster emits the .par2 as file 1 and
+     * the payload last. Pinning the anchor to filenumber 1 rejected every such
+     * cohort, which is why the reconciler merged nothing in production.
+     */
+    public function test_merges_fanout_when_the_payload_is_posted_last(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 20000]);
+
+        $totalFiles = 13;
+        // Parity occupies 1..12; the .mkv payload lands on file 13.
+        for ($fileNumber = 1; $fileNumber < $totalFiles; $fileNumber++) {
+            $collectionId = 500 + $fileNumber;
+            $this->seedCollection(
+                $collectionId,
+                sprintf('[%02d/%02d] - "NYXIS.vol%03d+001.par2" yEnc', $fileNumber, $totalFiles, $fileNumber),
+                'inverted@example.com',
+                $totalFiles,
+                '2026-07-31 12:07:44',
+            );
+            DB::table('collections')->where('id', $collectionId)->update([
+                'xref' => 'alt.binaries.hdtv.x264:'.(8650820480 + $fileNumber),
+            ]);
+            $this->seedBinary(5000 + $fileNumber, $collectionId, $fileNumber, sprintf('NYXIS.vol%03d+001.par2', $fileNumber), 1, 1);
+        }
+
+        $anchorId = 500 + $totalFiles;
+        $this->seedCollection(
+            $anchorId,
+            sprintf('[%02d/%02d] - "Basketball.Wives.LA.S01E13.mkv" yEnc', $totalFiles, $totalFiles),
+            'inverted@example.com',
+            $totalFiles,
+            '2026-07-31 12:07:44',
+        );
+        DB::table('collections')->where('id', $anchorId)->update([
+            'xref' => 'alt.binaries.hdtv.x264:8650820587',
+        ]);
+        $this->seedBinary(5000 + $totalFiles, $anchorId, $totalFiles, 'Basketball.Wives.LA.S01E13.mkv', 7726, 7726);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame($totalFiles, DB::table('binaries')->where('collections_id', $anchorId)->count());
+        self::assertSame(
+            range(1, $totalFiles),
+            DB::table('binaries')->where('collections_id', $anchorId)->orderBy('filenumber')->pluck('filenumber')->map('intval')->all(),
+        );
+        // Every parity collection is absorbed into the payload anchor.
+        self::assertSame(1, DB::table('collections')->whereBetween('id', [501, $anchorId])->count());
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    /**
+     * With the anchor no longer pinned to filenumber 1, a companion sharing the
+     * anchor's slot must not be merged: the union has to tile 1..totalfiles
+     * exactly once or a parity file would be silently lost.
+     */
+    public function test_refuses_fanout_when_a_companion_occupies_the_anchor_file_number(): void
+    {
+        $totalFiles = 4;
+        $this->seedCollection(560, '[04/04] - "Episode.mkv" yEnc', 'collide@example.com', $totalFiles, '2026-07-16 05:47:20');
+        $this->seedBinary(5600, 560, 4, 'Episode.mkv', 100, 100);
+        // Files 2 and 3 are present, but the third companion duplicates the
+        // anchor's slot 4 instead of supplying the missing file 1.
+        foreach ([2, 3, 4] as $index => $fileNumber) {
+            $collectionId = 561 + $index;
+            $this->seedCollection($collectionId, sprintf('[%02d/04] - "hash.par2" yEnc', $fileNumber), 'collide@example.com', $totalFiles, '2026-07-16 05:47:29');
+            $this->seedBinary(5610 + $index, $collectionId, $fileNumber, 'hash-'.$fileNumber.'.par2', 1, 1);
+        }
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(4, DB::table('collections')->whereBetween('id', [560, 563])->count());
+    }
+
+    /**
+     * A pair whose parity companion does not fill the anchor's missing slot
+     * would drop a file on merge, so it must be refused.
+     */
+    public function test_refuses_pair_that_does_not_cover_every_file(): void
+    {
+        $this->seedCollection(570, '[04/04] - "Episode.mkv" yEnc', 'gap@example.com', 4, '2026-07-13 02:18:15');
+        $this->seedCollection(571, '[02/04] - "hash.par2" yEnc', 'gap@example.com', 4, '2026-07-13 02:18:16');
+        // The anchor payload sits on file 4, and the companion carries the
+        // correct totalfiles-1 parity count — but it re-covers file 4 instead
+        // of supplying file 1, so merging would silently drop a file.
+        $this->seedBinary(5700, 570, 4, 'Episode.mkv', 10, 10);
+        $this->seedBinary(5701, 571, 2, 'hash.vol000+001.par2', 1, 1);
+        $this->seedBinary(5702, 571, 3, 'hash.vol001+002.par2', 1, 1);
+        $this->seedBinary(5703, 571, 4, 'hash.vol002+004.par2', 1, 1);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(2, DB::table('collections')->whereBetween('id', [570, 571])->count());
+    }
+
     public function test_refuses_incomplete_single_file_parity_fanout(): void
     {
         $this->seedCollection(24, '[01/03] - "Episode.mkv" yEnc', 'fanout@example.com', 3, '2026-07-16 05:47:20');
@@ -680,18 +865,78 @@ final class SplitCollectionReconcilerTest extends TestCase
         self::assertSame(210, (int) DB::table('binaries')->where('id', 2110)->value('collections_id'));
     }
 
-    public function test_lookback_is_clamped_to_72_hours(): void
+    public function test_lookback_is_clamped_to_336_hours(): void
     {
         config()->set('nntmux.split_collection_reconcile_lookback_hours', 999);
         $this->seedCollection(220, '[01/02] - "Too.Old.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:15');
         $this->seedCollection(221, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:16');
         $this->seedBinary(2200, 220, 1, 'Too.Old.Episode.mkv', 10, 10);
         $this->seedBinary(2210, 221, 2, 'hash.par2', 1, 1);
-        DB::table('collections')->whereIn('id', [220, 221])->update(['dateadded' => now()->subHours(73)]);
+        DB::table('collections')->whereIn('id', [220, 221])->update(['dateadded' => now()->subHours(337)]);
 
         self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
         self::assertTrue(DB::table('collections')->where('id', 221)->exists());
         self::assertSame(221, (int) DB::table('binaries')->where('id', 2210)->value('collections_id'));
+    }
+
+    /**
+     * The window has to be able to follow partretentionhours past 72, since a
+     * cohort is only mergeable while the retention cleanup has spared it.
+     */
+    public function test_lookback_beyond_72_hours_admits_a_96_hour_old_pair_when_retention_allows(): void
+    {
+        config()->set('nntmux.split_collection_reconcile_lookback_hours', 120);
+        $this->seedCollection(240, '[01/02] - "Retained.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:15');
+        $this->seedCollection(241, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:16');
+        $this->seedBinary(2400, 240, 1, 'Retained.Episode.mkv', 10, 10);
+        $this->seedBinary(2410, 241, 2, 'hash.par2', 1, 1);
+        DB::table('collections')->whereIn('id', [240, 241])->update(['dateadded' => now()->subHours(96)]);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertFalse(DB::table('collections')->where('id', 241)->exists());
+        self::assertSame(240, (int) DB::table('binaries')->where('id', 2410)->value('collections_id'));
+    }
+
+    /**
+     * The count budgets cannot honour the cooperative release pump's slice: at
+     * the deployed source budget a saturated pass merges for minutes against a
+     * 25s deadline, starving every preparation stage below the reconciler.
+     */
+    public function test_an_expired_deadline_yields_before_merging_anything(): void
+    {
+        $this->seedCollection(250, '[01/02] - "Deadline.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:15');
+        $this->seedCollection(251, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:16');
+        $this->seedBinary(2500, 250, 1, 'Deadline.Episode.mkv', 10, 10);
+        $this->seedBinary(2510, 251, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5, microtime(true) - 1.0));
+        // The cohort survives untouched, so the next pass can still merge it.
+        self::assertTrue(DB::table('collections')->where('id', 251)->exists());
+        self::assertSame(251, (int) DB::table('binaries')->where('id', 2510)->value('collections_id'));
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5, microtime(true) + 30.0));
+        self::assertFalse(DB::table('collections')->where('id', 251)->exists());
+    }
+
+    /**
+     * A deadline still in the future must not stop a pass, and the default of
+     * no deadline must leave the exhaustive callers unbounded.
+     */
+    public function test_a_future_deadline_and_no_deadline_both_permit_merging(): void
+    {
+        $this->seedCollection(260, '[01/02] - "Future.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:15');
+        $this->seedCollection(261, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:16');
+        $this->seedBinary(2600, 260, 1, 'Future.Episode.mkv', 10, 10);
+        $this->seedBinary(2610, 261, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5, microtime(true) + 300.0));
+
+        $this->seedCollection(270, '[01/02] - "Unbounded.Episode.mkv" yEnc', 'other@example.com', 2, '2026-07-16 03:20:15');
+        $this->seedCollection(271, '[02/02] - "other.par2" yEnc', 'other@example.com', 2, '2026-07-16 03:20:16');
+        $this->seedBinary(2700, 270, 1, 'Unbounded.Episode.mkv', 10, 10);
+        $this->seedBinary(2710, 271, 2, 'other.par2', 1, 1);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertFalse(DB::table('collections')->where('id', 271)->exists());
     }
 
     public function test_bounded_fair_discovery_does_not_starve_an_old_valid_pair_behind_newer_fillers(): void
@@ -815,6 +1060,439 @@ final class SplitCollectionReconcilerTest extends TestCase
             $drifted = $identity;
             $drifted[$field] = is_int($identity[$field]) ? $identity[$field] + 1 : $identity[$field].'-changed';
             self::assertFalse($method->invoke(new SplitCollectionReconciler, $identity, $drifted), $field);
+        }
+    }
+
+    public function test_merge_budget_defaults_to_twenty_pairs_per_pass(): void
+    {
+        $this->seedIndependentPairs(25);
+
+        self::assertSame(20, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    public function test_merge_budget_is_raisable_by_config(): void
+    {
+        $this->seedIndependentPairs(25);
+        config()->set('nntmux.split_collection_reconcile_max_pairs_per_pass', 25);
+        config()->set('nntmux.split_collection_reconcile_max_source_collections_per_pass', 200);
+
+        // Draining a split backlog is the whole point of the override: one pass
+        // must be able to clear more than the steady-state budget of 20.
+        self::assertSame(25, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    public function test_merge_budget_override_is_clamped_to_sane_bounds(): void
+    {
+        $this->seedIndependentPairs(3);
+        config()->set('nntmux.split_collection_reconcile_max_pairs_per_pass', 0);
+
+        // A zero/negative override must not disable reconciliation outright.
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    public function test_source_collection_budget_caps_a_raised_pair_budget(): void
+    {
+        $this->seedIndependentPairs(25);
+        config()->set('nntmux.split_collection_reconcile_max_pairs_per_pass', 25);
+        config()->set('nntmux.split_collection_reconcile_max_source_collections_per_pass', 5);
+
+        // Each pair consumes one source collection, so the tighter budget wins.
+        self::assertSame(5, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    /**
+     * Seed $count independent anchor/parity pairs, each its own cohort so every
+     * pair is separately mergeable and the merge budget is the only limit.
+     */
+    /**
+     * Production layout A (alt.binaries.hdtv.x264): parity is split one file per
+     * collection over 1..12 and the payload is split across collections 13..15.
+     * No single collection holds the whole payload, so neither the pair nor the
+     * fanout shape can express this and the cohort stayed unmerged forever.
+     */
+    public function test_merges_cohort_whose_payload_spans_several_collections(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $anchorId = $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(
+            range(1, 15),
+            DB::table('binaries')->where('collections_id', $anchorId)->orderBy('filenumber')->pluck('filenumber')->map('intval')->all(),
+        );
+        // The anchor is the payload collection holding the lowest file number.
+        self::assertSame($anchorId, (int) DB::table('collections')->value('id'));
+        self::assertSame(1, DB::table('collections')->count());
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    /**
+     * Production layout B (alt.binaries.movies): one collection holds every
+     * parity file 1..13, then the payload is split one part per collection over
+     * 14..19. A companion here carries many binaries, unlike a parity fanout.
+     */
+    public function test_merges_cohort_with_one_parity_collection_and_split_payload(): void
+    {
+        $this->enableMultiPayload('alt.binaries.movies');
+        $anchorId = $this->seedMultiPayloadCohort('alt.binaries.movies', 13, 6, groupedParity: true);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(
+            range(1, 19),
+            DB::table('binaries')->where('collections_id', $anchorId)->orderBy('filenumber')->pluck('filenumber')->map('intval')->all(),
+        );
+        self::assertSame(1, DB::table('collections')->count());
+    }
+
+    /**
+     * Production posts a cohort's members over a second or two, so the payload
+     * collections do not all share one timestamp. Discovery must still yield the
+     * cohort exactly once: the resolver matches a whole posting window, so
+     * seeding it from two different timestamps used to emit the same cohort
+     * twice and the second copy could only ever fail its locked re-resolution.
+     */
+    public function test_multi_payload_cohort_is_discovered_once_when_members_straddle_a_second(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $anchorId = $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        // Nudge the last payload collection one second later, as production does.
+        DB::table('collections')->where('id', $anchorId + 2)->update(['date' => '2026-07-30 19:30:51']);
+
+        $reconciler = new SplitCollectionReconciler;
+        $cohorts = (new \ReflectionMethod(SplitCollectionReconciler::class, 'uniqueMultiPayloadCohorts'))
+            ->invoke($reconciler, 5, DB::table('collections')->orderBy('id')->pluck('id')->map('intval')->all());
+        self::assertCount(1, $cohorts);
+        self::assertSame($anchorId, $cohorts[0]['anchor_id']);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(1, DB::table('collections')->count());
+        self::assertSame(
+            range(1, 15),
+            DB::table('binaries')->where('collections_id', $anchorId)->orderBy('filenumber')->pluck('filenumber')->map('intval')->all(),
+        );
+    }
+
+    public function test_multi_payload_cohort_is_refused_without_the_group_opt_in(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 20000]);
+        // Deliberately no split_collection_multi_payload_groups entry.
+        $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(15, DB::table('collections')->count());
+    }
+
+    /**
+     * The union must tile 1..totalfiles exactly once. A cohort missing a file is
+     * an incomplete posting, and collapsing it would strand the missing part.
+     */
+    public function test_refuses_multi_payload_cohort_that_does_not_tile_every_file(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        // Drop parity file 7, leaving a hole in the middle of the range.
+        $orphan = (int) DB::table('binaries')->where('filenumber', 7)->value('collections_id');
+        DB::table('binaries')->where('filenumber', 7)->delete();
+        DB::table('collections')->where('id', $orphan)->delete();
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(14, DB::table('collections')->count());
+    }
+
+    public function test_refuses_multi_payload_cohort_with_an_incomplete_binary(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        DB::table('binaries')->where('filenumber', 14)->update(['currentparts' => 2400, 'totalparts' => 2669]);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(15, DB::table('collections')->count());
+    }
+
+    /**
+     * A collection mixing payload and parity is not one of the two shapes this
+     * merge understands, so the cohort must be left alone rather than guessed at.
+     */
+    public function test_refuses_multi_payload_cohort_containing_a_mixed_collection(): void
+    {
+        $this->enableMultiPayload('alt.binaries.movies');
+        // The grouped-parity layout puts many binaries in one collection, so
+        // renaming a single one of them yields a collection that genuinely holds
+        // both kinds while the cohort still tiles 1..19.
+        $this->seedMultiPayloadCohort('alt.binaries.movies', 13, 6, groupedParity: true);
+        DB::table('binaries')->where('filenumber', 3)->update(['name' => 'Payload.Extra.mkv']);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(7, DB::table('collections')->count());
+    }
+
+    /**
+     * The payload is reassembled in file order, so its collections must advance
+     * monotonically. An overlapping payload member proves the cohort was
+     * mis-assembled.
+     */
+    public function test_refuses_multi_payload_cohort_whose_articles_overlap(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        // Rewind the last payload collection behind its predecessor.
+        $last = (int) DB::table('binaries')->where('filenumber', 15)->value('collections_id');
+        DB::table('collections')->where('id', $last)->update(['xref' => 'alt.binaries.hdtv.x264:8650141000']);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(15, DB::table('collections')->count());
+    }
+
+    /**
+     * Real posters upload parity out of file order — production shows file 1
+     * posted after files 2..8 — so parity article order carries no meaning and
+     * must not veto a cohort that tiles cleanly. Only the payload has to be
+     * ordered. Observed on alt.binaries.hdtv.x264 tf=22.
+     */
+    public function test_merges_multi_payload_cohort_whose_parity_articles_are_out_of_file_order(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $anchorId = $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        // Move parity file 1 to the end of the parity article run, past file 12.
+        $first = (int) DB::table('binaries')->where('filenumber', 1)->value('collections_id');
+        $twelfth = (int) DB::table('binaries')->where('filenumber', 12)->value('collections_id');
+        $after = (int) explode(':', (string) DB::table('collections')->where('id', $twelfth)->value('xref'))[1] + 1;
+        DB::table('collections')->where('id', $first)->update(['xref' => 'alt.binaries.hdtv.x264:'.$after]);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(
+            range(1, 15),
+            DB::table('binaries')->where('collections_id', $anchorId)->orderBy('filenumber')->pluck('filenumber')->map('intval')->all(),
+        );
+        self::assertSame(1, DB::table('collections')->count());
+    }
+
+    /**
+     * Parity order is unconstrained, but parity still has to belong to the same
+     * posting: a collection whose articles sit far outside the payload's
+     * neighbourhood came from somewhere else.
+     */
+    public function test_refuses_multi_payload_cohort_whose_parity_articles_are_far_from_the_payload(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        $first = (int) DB::table('binaries')->where('filenumber', 1)->value('collections_id');
+        // 20000 is the configured gap limit for this group; put it well beyond.
+        DB::table('collections')->where('id', $first)->update(['xref' => 'alt.binaries.hdtv.x264:9650141343']);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(15, DB::table('collections')->count());
+    }
+
+    /**
+     * A single payload collection is already covered by the pair and fanout
+     * shapes; this one must not also claim it, or the two would race to merge
+     * the same cohort under different anchors.
+     */
+    public function test_multi_payload_shape_ignores_a_single_payload_cohort(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $anchorId = $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 1);
+
+        // The fanout shape handles it, so exactly one merge still happens, with
+        // the sole payload collection as the anchor.
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(
+            range(1, 13),
+            DB::table('binaries')->where('collections_id', $anchorId)->orderBy('filenumber')->pluck('filenumber')->map('intval')->all(),
+        );
+    }
+
+    /**
+     * A cohort with a single payload collection must stay out of this shape even
+     * when the pair and fanout shapes cannot claim it either. Parity split across
+     * two multi-binary collections matches neither isCompanion (wrong binary
+     * count) nor isFanoutCompanion (more than one binary), so without the
+     * two-payload floor this shape would quietly take over single-payload work
+     * and merge on an anchor the other shapes never chose.
+     */
+    public function test_multi_payload_shape_declines_single_payload_cohort_no_other_shape_claims(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $totalFiles = 14;
+        $date = '2026-07-30 19:30:50';
+        $article = 8650141343;
+
+        // Parity in two chunks: files 1..6 and 7..13.
+        foreach ([[800, 1, 6], [801, 7, 13]] as [$collectionId, $firstFile, $lastFile]) {
+            $this->seedCollection($collectionId, sprintf('[%02d/%02d] - "NYXIS.par2" yEnc', $firstFile, $totalFiles), 'chunked@example.com', $totalFiles, $date);
+            DB::table('collections')->where('id', $collectionId)->update(['xref' => 'alt.binaries.hdtv.x264:'.$article]);
+            for ($fileNumber = $firstFile; $fileNumber <= $lastFile; $fileNumber++) {
+                $this->seedBinary(8000 + $fileNumber, $collectionId, $fileNumber, sprintf('NYXIS.vol%03d+001.par2', $fileNumber), 1, 1);
+            }
+            $article += 500;
+        }
+        // Exactly one payload collection, on the trailing file.
+        $this->seedCollection(802, sprintf('[%02d/%02d] - "Episode.mkv" yEnc', $totalFiles, $totalFiles), 'chunked@example.com', $totalFiles, $date);
+        DB::table('collections')->where('id', 802)->update(['xref' => 'alt.binaries.hdtv.x264:'.$article]);
+        $this->seedBinary(8000 + $totalFiles, 802, $totalFiles, 'Episode.mkv', 2669, 2669);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(3, DB::table('collections')->whereBetween('id', [800, 802])->count());
+    }
+
+    /**
+     * Two payload collections with no parity at all are not evidence of a split
+     * posting: two unrelated single-file posts sharing poster, file count and
+     * posting second would tile 1..2 just as well. A real split payload always
+     * arrives with parity, hence the three-collection floor.
+     */
+    public function test_refuses_two_collection_all_payload_cohort(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $date = '2026-07-30 19:30:50';
+        foreach ([[810, 1, 8650141343], [811, 2, 8650144012]] as [$collectionId, $fileNumber, $article]) {
+            $this->seedCollection($collectionId, sprintf('[%02d/02] - "Episode.mkv" yEnc', $fileNumber), 'nopar2@example.com', 2, $date);
+            DB::table('collections')->where('id', $collectionId)->update(['xref' => 'alt.binaries.hdtv.x264:'.$article]);
+            $this->seedBinary(8100 + $fileNumber, $collectionId, $fileNumber, sprintf('Episode.part%02d.mkv', $fileNumber), 2669, 2669);
+        }
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(2, DB::table('collections')->whereBetween('id', [810, 811])->count());
+    }
+
+    /**
+     * The merge re-resolves the cohort under lock and must refuse anything that
+     * is not exactly what discovery proposed. Passing a short companion list
+     * simulates a member having been merged or claimed by another worker between
+     * discovery and merge; without the recheck a file would be stranded.
+     */
+    public function test_multi_payload_merge_refuses_a_companion_list_that_no_longer_matches(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $anchorId = $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        $companionIds = DB::table('collections')
+            ->where('id', '<>', $anchorId)
+            ->orderBy('id')
+            ->pluck('id')
+            ->map('intval')
+            ->all();
+        array_pop($companionIds);
+
+        $merge = new \ReflectionMethod(SplitCollectionReconciler::class, 'mergeMultiPayload');
+
+        self::assertFalse($merge->invoke(new SplitCollectionReconciler, 5, $anchorId, $companionIds));
+        // Nothing moved: every collection and every binary is still in place.
+        self::assertSame(15, DB::table('collections')->count());
+        self::assertSame(1, DB::table('binaries')->where('collections_id', $anchorId)->count());
+    }
+
+    /**
+     * If the cohort stops resolving at all between discovery and merge — a
+     * member deleted or claimed, so the union no longer tiles — the merge must
+     * bail out rather than operate on a cohort it can no longer verify.
+     */
+    public function test_multi_payload_merge_refuses_when_the_cohort_no_longer_resolves(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        $anchorId = $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+        $companionIds = DB::table('collections')
+            ->where('id', '<>', $anchorId)
+            ->orderBy('id')
+            ->pluck('id')
+            ->map('intval')
+            ->all();
+        // Remove a parity member so the cohort no longer tiles 1..15, while the
+        // caller still holds the companion list discovery handed it.
+        $vanished = array_shift($companionIds);
+        DB::table('binaries')->where('collections_id', $vanished)->delete();
+        DB::table('collections')->where('id', $vanished)->delete();
+
+        $merge = new \ReflectionMethod(SplitCollectionReconciler::class, 'mergeMultiPayload');
+
+        self::assertFalse($merge->invoke(new SplitCollectionReconciler, 5, $anchorId, $companionIds));
+        self::assertSame(14, DB::table('collections')->count());
+        self::assertSame(1, DB::table('binaries')->where('collections_id', $anchorId)->count());
+    }
+
+    public function test_multi_payload_cohort_above_the_file_cap_is_refused(): void
+    {
+        $this->enableMultiPayload('alt.binaries.hdtv.x264');
+        config()->set('nntmux.split_collection_max_multi_payload_files', 14);
+        $this->seedMultiPayloadCohort('alt.binaries.hdtv.x264', 12, 3);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(15, DB::table('collections')->count());
+    }
+
+    private function enableMultiPayload(string $groupName): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => $groupName]);
+        config()->set('nntmux.split_collection_reconcile_groups', [$groupName]);
+        config()->set('nntmux.split_collection_multi_payload_groups', [$groupName]);
+        config()->set('nntmux.split_collection_xref_gap_overrides', [$groupName => 20000]);
+    }
+
+    /**
+     * Reproduce a production multi-payload cohort. Parity occupies the low file
+     * numbers (either one collection per file, or all files in one collection
+     * when $groupedParity is set) and the payload occupies the trailing ones,
+     * with articles advancing in file order the way a real posting does.
+     *
+     * @return int the expected anchor: the payload collection on the lowest file
+     */
+    private function seedMultiPayloadCohort(
+        string $groupName,
+        int $parityFiles,
+        int $payloadCollections,
+        bool $groupedParity = false,
+    ): int {
+        $totalFiles = $parityFiles + $payloadCollections;
+        $date = '2026-07-30 19:30:50';
+        $article = 8650141343;
+        $collectionId = 700;
+        $binaryId = 7000;
+
+        if ($groupedParity) {
+            $this->seedCollection($collectionId, sprintf('[01/%02d] - "NYXIS.par2" yEnc', $totalFiles), 'multi@example.com', $totalFiles, $date);
+            DB::table('collections')->where('id', $collectionId)->update(['xref' => $groupName.':'.$article]);
+            for ($fileNumber = 1; $fileNumber <= $parityFiles; $fileNumber++) {
+                $this->seedBinary($binaryId + $fileNumber, $collectionId, $fileNumber, sprintf('NYXIS.vol%03d+001.par2', $fileNumber), 1, 1);
+            }
+            $article += 2167;
+            $collectionId++;
+        } else {
+            for ($fileNumber = 1; $fileNumber <= $parityFiles; $fileNumber++) {
+                $this->seedCollection($collectionId, sprintf('[%02d/%02d] - "NYXIS.par2" yEnc', $fileNumber, $totalFiles), 'multi@example.com', $totalFiles, $date);
+                DB::table('collections')->where('id', $collectionId)->update(['xref' => $groupName.':'.$article]);
+                $this->seedBinary($binaryId + $fileNumber, $collectionId, $fileNumber, sprintf('NYXIS.vol%03d+001.par2', $fileNumber), 1, 1);
+                $article += 4;
+                $collectionId++;
+            }
+        }
+
+        $anchorId = $collectionId;
+        for ($index = 0; $index < $payloadCollections; $index++) {
+            $fileNumber = $parityFiles + 1 + $index;
+            $this->seedCollection($collectionId, sprintf('[%02d/%02d] - "Episode.mkv" yEnc', $fileNumber, $totalFiles), 'multi@example.com', $totalFiles, $date);
+            DB::table('collections')->where('id', $collectionId)->update(['xref' => $groupName.':'.$article]);
+            $this->seedBinary($binaryId + $fileNumber, $collectionId, $fileNumber, sprintf('Episode.part%02d.mkv', $fileNumber), 2669, 2669);
+            $article += 2669;
+            $collectionId++;
+        }
+
+        return $anchorId;
+    }
+
+    private function seedIndependentPairs(int $count): void
+    {
+        for ($pair = 0; $pair < $count; $pair++) {
+            $anchorId = 1000 + ($pair * 2);
+            $companionId = $anchorId + 1;
+            $poster = sprintf('poster%02d@example.com', $pair);
+            $date = sprintf('2026-07-13 02:%02d:15', $pair);
+
+            $this->seedCollection($anchorId, sprintf('[01/02] - "Episode.%02d.mkv" yEnc', $pair), $poster, 2, $date);
+            $this->seedCollection($companionId, sprintf('[02/02] - "hash%02d.par2" yEnc', $pair), $poster, 2, $date);
+            $this->seedBinary($anchorId * 10, $anchorId, 1, sprintf('Episode.%02d.mkv', $pair), 10, 10);
+            $this->seedBinary($companionId * 10, $companionId, 2, sprintf('hash%02d.par2', $pair), 1, 1);
         }
     }
 

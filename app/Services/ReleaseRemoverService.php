@@ -709,6 +709,7 @@ class ReleaseRemoverService
         $this->query = sprintf(
             'SELECT r.guid, r.searchname, r.id FROM releases r %s %s %s %s',
             $regexSQL,
+            // $regexSQL already opened the WHERE clause, so this must extend it.
             ! empty($searchResult) ? ' AND r.id IN ('.implode(',', $searchResult).')' : '',
             $groupID,
             $this->crapTime

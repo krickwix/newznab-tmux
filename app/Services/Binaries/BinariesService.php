@@ -26,6 +26,16 @@ use Illuminate\Support\Str;
  */
 class BinariesService
 {
+    /**
+     * Smallest batch on which the misaligned-header check is trustworthy.
+     */
+    private const int MISALIGNED_BATCH_MIN_ARTICLES = 50;
+
+    /**
+     * Share of unparseable dates in a batch that indicates misaligned overview fields.
+     */
+    private const float MISALIGNED_BATCH_INVALID_DATE_RATIO = 0.99;
+
     private BinariesConfig $config;
 
     private HeaderParser $headerParser;
@@ -321,7 +331,9 @@ class BinariesService
      * @param  int  $last  The newest wanted header.
      * @param  string  $type  Is this part repair or update or backfill?
      * @param  list<int>|null  $missingParts  If we are running in part repair, the list of missing article numbers.
-     * @return array<string, mixed> Empty on failure.
+     * @return array<string, mixed> Empty on failure. `['misalignedHeaders' => true]` when the
+     *                              overview fields arrived misaligned, in which case the caller
+     *                              must leave the group cursor where it is so the range is retried.
      *
      * @throws \Exception
      * @throws \Throwable
@@ -389,6 +401,30 @@ class BinariesService
         $this->notYEnc = $parseResult['notYEnc'];
         $this->headersBlackListed = $parseResult['blacklisted'];
         $this->invalidDate = $parseResult['invalidDate'];
+
+        // A batch where (nearly) every article has an unparseable date is a protocol fault, not a
+        // group full of bad articles: it means the overview fields arrived misaligned, so 'Date'
+        // holds some other header. Abort the pass instead of discarding the articles and queueing
+        // the whole range into part repair, which would amplify the fault on every later scan.
+        if ($this->isMisalignedHeaderBatch($msgCount)) {
+            $this->logError(sprintf(
+                'Aborting scan: %d of %d articles had an unparseable date (group=%s range=%d-%d). '
+                .'Overview fields are probably misaligned; not queueing this range for part repair '
+                .'and not advancing the group cursor.',
+                $this->invalidDate,
+                $msgCount,
+                $groupMySQL['name'] ?? 'unknown',
+                $this->first,
+                $this->last,
+            ));
+
+            // Signal the fault rather than returning the range we just parsed. The article
+            // numbers in $returnArray are still trustworthy (they come from 'Number', not the
+            // shifted fields), so a caller that treated this as a normal result would happily
+            // advance the cursor past a block it never stored and deliberately did not queue for
+            // repair -- losing it for good.
+            return ['misalignedHeaders' => true];
+        }
 
         if ($partRepair && $this->bodyPreambleProbeRequired !== []) {
             $parseResult['headers'] = array_filter(
@@ -682,12 +718,24 @@ class BinariesService
             $ranges = $this->groupMissingPartsIntoRanges($missingParts);
 
             // Download missing parts in ranges
+            $misaligned = false;
             foreach ($ranges as $range) {
                 if ($this->config->echoCli) {
                     echo \chr(random_int(45, 46)).PHP_EOL;
                 }
 
-                $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+                $rangeResult = $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+                if (($rangeResult['misalignedHeaders'] ?? false) === true) {
+                    $misaligned = true;
+                    break;
+                }
+            }
+
+            // A misaligned batch stored nothing, so charging an attempt would spend the repair
+            // budget on a connection fault and let cleanupExhaustedParts() delete parts that were
+            // never actually retried. Leave the attempt counts alone and try again next cycle.
+            if ($misaligned) {
+                return;
             }
 
             // Calculate parts repaired
@@ -780,13 +828,19 @@ class BinariesService
                 ) !== $existingBeforeRange) {
                     break;
                 }
+                $rangeResult = $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
+                // Misaligned overview fields stored nothing for this range, so leave it out of
+                // $processedIds: counting it would charge an attempt via incrementClaimedAttempts()
+                // for a connection fault and move these parts closer to deletion unretried.
+                if (($rangeResult['misalignedHeaders'] ?? false) === true) {
+                    break;
+                }
                 foreach ($range['partlist'] as $number) {
                     $id = $this->partRepairClaimIdsByNumber[(string) $number] ?? null;
                     if ($id !== null) {
                         $processedIds[] = $id;
                     }
                 }
-                $this->scan($groupArr, $range['partfrom'], $range['partto'], 'partrepair', $range['partlist']);
             }
 
             $existing = $this->missedPartHandler->countExistingIds($cohortIds, (int) $groupArr['id']);
@@ -1082,6 +1136,13 @@ class BinariesService
 
             // Scan this chunk
             $scanSummary = $this->scan($groupMySQL, $first, $last);
+
+            // Misaligned overview fields are a connection-level fault that will recur on the very
+            // next chunk, so stop the group here and leave the cursor untouched. Advancing would
+            // skip this range permanently: it was neither stored nor queued for part repair.
+            if (($scanSummary['misalignedHeaders'] ?? false) === true) {
+                return;
+            }
 
             // Update group record
             $this->updateGroupAfterScan($groupMySQL, $groupNNTP, $scanSummary, $last);
@@ -1483,5 +1544,21 @@ class BinariesService
         if (config('app.debug')) {
             Log::error($message);
         }
+    }
+
+    /**
+     * Does this batch look like the overview fields arrived misaligned?
+     *
+     * Legitimately bad dates are rare and scattered; a batch that is almost entirely unparseable
+     * means we mapped some other header onto 'Date'. Only meaningful on a reasonably sized batch,
+     * since a handful of genuinely broken articles can otherwise account for all of a tiny one.
+     */
+    private function isMisalignedHeaderBatch(int $msgCount): bool
+    {
+        if ($msgCount < self::MISALIGNED_BATCH_MIN_ARTICLES) {
+            return false;
+        }
+
+        return $this->invalidDate >= (int) ceil($msgCount * self::MISALIGNED_BATCH_INVALID_DATE_RATIO);
     }
 }

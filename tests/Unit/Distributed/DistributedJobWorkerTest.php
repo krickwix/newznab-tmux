@@ -15,6 +15,7 @@ use Mockery;
 use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionClass;
 use ReflectionMethod;
+use ReflectionProperty;
 use Symfony\Component\Console\Output\BufferedOutput;
 use Tests\TestCase;
 
@@ -79,6 +80,74 @@ class DistributedJobWorkerTest extends TestCase
 
         self::assertSame(0, $result['exit_code']);
         self::assertTrue($result['completed']);
+    }
+
+    public function test_a_terminating_worker_refuses_to_acquire_a_fresh_lock(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'array']);
+        Cache::store('array')->flush();
+        Artisan::shouldReceive('call')->never();
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('startRun')->never();
+
+        $worker = new DistributedJobWorker(
+            new DistributedJobCatalog,
+            Mockery::mock(TmuxMonitorService::class),
+            $telemetry,
+        );
+
+        $terminating = new ReflectionProperty(DistributedJobWorker::class, 'terminating');
+        $terminating->setValue($worker, true);
+
+        $output = new BufferedOutput;
+        $result = (new ReflectionMethod($worker, 'runLockedPlan'))->invoke($worker, [
+            'name' => 'releases',
+            'description' => 'test release processing',
+            'enabled' => true,
+            'disabled_reason' => null,
+            'commands' => [['command' => 'test:work', 'arguments' => []]],
+            'sleep' => 1,
+        ], 900, $output);
+
+        self::assertSame(0, $result['exit_code']);
+        self::assertStringContainsString('shutting down, refusing to acquire', $output->fetch());
+        // The lock must be left untouched so the replacement pod can take it.
+        self::assertTrue(
+            Cache::store('array')->lock('nntmux:distributed-worker:releases', 900)->get(),
+            'A terminating worker must not leave a lock behind.',
+        );
+    }
+
+    public function test_a_running_worker_still_acquires_the_lock(): void
+    {
+        config(['nntmux.distributed_lock_store' => 'array']);
+        Cache::store('array')->flush();
+        Artisan::shouldReceive('call')->once()->with('test:work', [], Mockery::type(BufferedOutput::class))->andReturn(0);
+
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldReceive('startRun')->once()->with('releases', null, 900)->andReturn(100.0);
+        $telemetry->shouldReceive('finishRun')->once()->with('releases', 'success', 100.0);
+
+        $worker = new DistributedJobWorker(
+            new DistributedJobCatalog,
+            Mockery::mock(TmuxMonitorService::class),
+            $telemetry,
+        );
+
+        $output = new BufferedOutput;
+        $result = (new ReflectionMethod($worker, 'runLockedPlan'))->invoke($worker, [
+            'name' => 'releases',
+            'description' => 'test release processing',
+            'enabled' => true,
+            'disabled_reason' => null,
+            'commands' => [['command' => 'test:work', 'arguments' => []]],
+            'sleep' => 1,
+        ], 900, $output);
+
+        self::assertSame(0, $result['exit_code']);
+        self::assertTrue($result['completed']);
+        self::assertStringNotContainsString('refusing to acquire', $output->fetch());
     }
 
     public function test_successful_backfill_marks_the_claimed_generation_complete(): void
