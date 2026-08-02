@@ -31,6 +31,20 @@ use Manticoresearch\Search;
 class ManticoreSearchDriver implements SearchDriverInterface
 {
     /**
+     * Enough retries to ride out a Manticore restart or a brief connection
+     * refusal, without letting a permanently unindexable release requeue itself
+     * forever.
+     */
+    private const int MAX_REINDEX_ATTEMPTS = 3;
+
+    /**
+     * The per-release attempt counter is a backstop, not a ledger: it expires so
+     * a release that failed during an outage is retried again the next time it
+     * legitimately changes.
+     */
+    private const int REINDEX_ATTEMPT_TTL_SECONDS = 3600;
+
+    /**
      * @var array<string, mixed>
      */
     protected array $config;
@@ -172,14 +186,43 @@ class ManticoreSearchDriver implements SearchDriverInterface
         $releaseId = (int) $parameters['id'];
         if (! $this->replaceReleaseDocumentWithRetry($parameters)) {
             $this->recordReleaseIndexFailure($releaseId, 'insertRelease');
-            try {
-                ReindexReleaseJob::dispatch($releaseId)->delay(now()->addSeconds(2));
-            } catch (\Throwable $e) {
-                Log::error('ManticoreSearch: failed to queue ReindexReleaseJob', [
-                    'release_id' => $releaseId,
-                    'error' => $e->getMessage(),
+            $this->queueReleaseReindex($releaseId);
+        }
+    }
+
+    /**
+     * Queue one retry for a release the index refused, bounded per release.
+     *
+     * The retry is not self-limiting: ReindexReleaseJob calls updateRelease(),
+     * which re-enters insertRelease() and lands back here if the write fails
+     * again. Horizon's `tries` cannot cap that, because every pass is a newly
+     * dispatched job rather than another attempt at the same one, so the budget
+     * is tracked per release id and expires on its own.
+     */
+    private function queueReleaseReindex(int $releaseId): void
+    {
+        $attemptKey = 'search:index:reindex_attempts:releases:'.$releaseId;
+        $attempt = (int) Cache::get($attemptKey, 0) + 1;
+        if ($attempt > self::MAX_REINDEX_ATTEMPTS) {
+            if (Cache::add('search:index:reindex_giveup_warn_lock', true, 60)) {
+                Log::warning('ManticoreSearch: giving up on release reindex after repeated failures', [
+                    'release_id_sample' => $releaseId,
+                    'attempts' => self::MAX_REINDEX_ATTEMPTS,
                 ]);
             }
+
+            return;
+        }
+
+        Cache::put($attemptKey, $attempt, self::REINDEX_ATTEMPT_TTL_SECONDS);
+
+        try {
+            ReindexReleaseJob::dispatch($releaseId)->delay(now()->addSeconds(2 ** $attempt));
+        } catch (\Throwable $e) {
+            Log::error('ManticoreSearch: failed to queue ReindexReleaseJob', [
+                'release_id' => $releaseId,
+                'error' => $e->getMessage(),
+            ]);
         }
     }
 
