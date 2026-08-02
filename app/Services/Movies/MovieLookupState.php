@@ -133,9 +133,24 @@ final class MovieLookupState
         }, 3);
     }
 
+    /**
+     * Record that no IMDb match was found for a release.
+     *
+     * Previously this wrote an empty-string imdbid and deleted the lookup-state
+     * row, which made a no-match permanent: the empty string satisfies neither
+     * imdb_id_needs_lookup_sql (NULL / pending only) nor movieinfo_needs_repair_sql
+     * (requires imdbid <> ''), so the release fell through both eligibility
+     * predicates and never re-queued -- even after provider catalogs or the
+     * matcher itself improved.
+     *
+     * Instead we now route through the same bounded retry/quarantine backoff as
+     * fail(), leaving the imdbid NULL so the release stays eligible on the next
+     * retry window. This gives periodic, backed-off re-attempts (no hot-loop)
+     * that eventually quarantine after the configured max attempts.
+     */
     public function markNoMatch(int $releaseId, string $claimToken): bool
     {
-        return DB::transaction(function () use ($releaseId, $claimToken): bool {
+        $result = DB::transaction(function () use ($releaseId, $claimToken): ?array {
             $release = Release::query()->whereKey($releaseId)->lockForUpdate()->first([
                 'id', 'imdbid', 'searchname', 'categories_id', 'movieinfo_id',
             ]);
@@ -143,14 +158,47 @@ final class MovieLookupState
             if ($release === null
                 || ! $this->hasCurrentClaim($state, $release, $claimToken)
                 || ($release->movieinfo_id !== null && (int) $release->movieinfo_id !== 0)) {
-                return false;
+                return null;
             }
 
-            Release::query()->whereKey($releaseId)->update(['imdbid' => '']);
-            DB::table('movie_lookup_states')->where('release_id', $releaseId)->where('claim_token', $claimToken)->delete();
+            // Normalise any placeholder imdbid back to NULL so the release remains
+            // eligible for a future retry once the backoff window elapses.
+            Release::query()
+                ->whereKey($releaseId)
+                ->where(function (Builder $query): void {
+                    $query->whereNull('imdbid')
+                        ->orWhere('imdbid', '')
+                        ->orWhereIn('imdbid', imdb_id_pending_values());
+                })
+                ->update(['imdbid' => null]);
 
-            return true;
+            $attempts = (int) $state->attempts + 1;
+            $retryCount = (int) $state->retry_count + 1;
+            $maxAttempts = max(1, (int) config('nntmux_api.movie_lookup_max_attempts', 3));
+            $quarantined = $attempts >= $maxAttempts;
+            $retryMinutes = max(1, (int) config('nntmux_api.movie_lookup_retry_minutes', 30));
+            $delayMultiplier = 2 ** min(6, max(0, $retryCount - 1));
+            $baseDelay = min(1440, $retryMinutes * $delayMultiplier);
+            $jitter = (int) (abs(crc32($releaseId.':'.$retryCount)) % max(1, (int) ceil($baseDelay * 0.2)));
+            $now = now();
+
+            DB::table('movie_lookup_states')->where('release_id', $releaseId)->where('claim_token', $claimToken)->update([
+                'observed_imdbid' => null,
+                'status' => $quarantined ? self::STATUS_QUARANTINED : self::STATUS_RETRY,
+                'reason_code' => 'no_match',
+                'attempts' => $attempts,
+                'retry_count' => $retryCount,
+                'claim_token' => null,
+                'claim_expires_at' => null,
+                'next_attempt_at' => $quarantined ? null : $now->copy()->addMinutes($baseDelay + $jitter),
+                'quarantined_at' => $quarantined ? $now : null,
+                'updated_at' => $now,
+            ]);
+
+            return ['status' => $quarantined ? self::STATUS_QUARANTINED : self::STATUS_RETRY, 'attempts' => $attempts];
         }, 3);
+
+        return $result !== null;
     }
 
     public function link(int $releaseId, string $claimToken, string $imdbId, int $movieInfoId): bool

@@ -315,7 +315,7 @@ class Tmux
         switch ((int) $qry) {
             case 1:
                 $movieLookupSql = '('.imdb_id_needs_lookup_sql('imdbid').' OR '.movieinfo_needs_repair_sql('imdbid', 'movieinfo_id').')'
-                    .' AND '.app(MovieLookupState::class)->eligibilitySql('releases');
+                    .' AND '.app(MovieLookupState::class)->eligibilitySql('r');
                 $lookupMovies = (int) Settings::settingValue('lookupimdb');
 
                 if ($lookupMovies <= 0) {

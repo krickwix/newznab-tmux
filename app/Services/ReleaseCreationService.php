@@ -14,6 +14,7 @@ use App\Models\ReleaseRegex;
 use App\Models\ReleasesGroups;
 use App\Models\UsenetGroup;
 use App\Services\Categorization\CategorizationService;
+use App\Services\NameFixing\Extractors\ObfuscatedSubjectExtractor;
 use App\Services\Nzb\NzbService;
 use App\Services\Orchestrator\CurrentForwardTerminalSplitRepair;
 use App\Services\Orchestrator\CurrentForwardWindowLineage;
@@ -114,11 +115,12 @@ class ReleaseCreationService
             if ($deadlineAt !== null && microtime(true) >= $deadlineAt) {
                 break;
             }
-            $cleanRelName = Utf8::clean(str_replace(['#', '@', '$', '%', '^', '§', '¨', '©', 'Ö'], '', $collection->subject));
+            $decodedSubject = (new ObfuscatedSubjectExtractor)->decodeRot13Subject((string) $collection->subject);
+            $cleanRelName = Utf8::clean(str_replace(['#', '@', '$', '%', '^', '§', '¨', '©', 'Ö'], '', $decodedSubject));
             $fromName = Utf8::clean(trim($collection->fromname, "'"));
 
             $cleanedMeta = $this->releaseCleaning->releaseCleaner(
-                $collection->subject,
+                $decodedSubject,
                 $collection->fromname,
                 $collection->gname
             );

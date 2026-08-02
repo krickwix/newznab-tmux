@@ -314,6 +314,35 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame('backfill_permit_wrong_category', Settings::settingValue('orchestrator_bf_quality'));
     }
 
+    public function test_quality_lock_does_not_disable_configured_probe_groups(): void
+    {
+        Schema::create('usenet_groups', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name')->unique();
+            $table->boolean('backfill');
+            $table->unsignedBigInteger('first_record');
+        });
+        DB::table('usenet_groups')->insert([
+            ['name' => 'alt.binaries.movies.dvd', 'backfill' => 1, 'first_record' => 64_923_468],
+            ['name' => 'alt.console', 'backfill' => 1, 'first_record' => 12_345],
+        ]);
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['alt.binaries.movies.dvd']);
+
+        (new WorkerProfileApplier)->qualityLockBackfillTarget('alt.binaries.movies.dvd');
+
+        // Probe group keeps backfill enabled (so it stays in short_groups and
+        // remains a backfill candidate) even though its cohort failed quality.
+        self::assertSame(1, DB::table('usenet_groups')->where('name', 'alt.binaries.movies.dvd')->value('backfill'));
+        // But the current permit is still paused + the reason recorded, so the
+        // orchestrator advances past the bad cohort instead of re-picking it.
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
+        self::assertSame('backfill_permit_wrong_category', Settings::settingValue('orchestrator_bf_quality'));
+        // Non-probe groups are still hard-disabled by the quality lock.
+        (new WorkerProfileApplier)->qualityLockBackfillTarget('alt.console');
+        self::assertSame(0, DB::table('usenet_groups')->where('name', 'alt.console')->value('backfill'));
+    }
+
     public function test_it_preserves_an_unclaimed_permit_during_the_claim_grace_period(): void
     {
         Settings::query()->insert([
