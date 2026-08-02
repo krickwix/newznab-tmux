@@ -897,6 +897,48 @@ final class SplitCollectionReconcilerTest extends TestCase
         self::assertSame(240, (int) DB::table('binaries')->where('id', 2410)->value('collections_id'));
     }
 
+    /**
+     * The count budgets cannot honour the cooperative release pump's slice: at
+     * the deployed source budget a saturated pass merges for minutes against a
+     * 25s deadline, starving every preparation stage below the reconciler.
+     */
+    public function test_an_expired_deadline_yields_before_merging_anything(): void
+    {
+        $this->seedCollection(250, '[01/02] - "Deadline.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:15');
+        $this->seedCollection(251, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:16');
+        $this->seedBinary(2500, 250, 1, 'Deadline.Episode.mkv', 10, 10);
+        $this->seedBinary(2510, 251, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5, microtime(true) - 1.0));
+        // The cohort survives untouched, so the next pass can still merge it.
+        self::assertTrue(DB::table('collections')->where('id', 251)->exists());
+        self::assertSame(251, (int) DB::table('binaries')->where('id', 2510)->value('collections_id'));
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5, microtime(true) + 30.0));
+        self::assertFalse(DB::table('collections')->where('id', 251)->exists());
+    }
+
+    /**
+     * A deadline still in the future must not stop a pass, and the default of
+     * no deadline must leave the exhaustive callers unbounded.
+     */
+    public function test_a_future_deadline_and_no_deadline_both_permit_merging(): void
+    {
+        $this->seedCollection(260, '[01/02] - "Future.Episode.mkv" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:15');
+        $this->seedCollection(261, '[02/02] - "hash.par2" yEnc', 'poster@example.com', 2, '2026-07-16 02:20:16');
+        $this->seedBinary(2600, 260, 1, 'Future.Episode.mkv', 10, 10);
+        $this->seedBinary(2610, 261, 2, 'hash.par2', 1, 1);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5, microtime(true) + 300.0));
+
+        $this->seedCollection(270, '[01/02] - "Unbounded.Episode.mkv" yEnc', 'other@example.com', 2, '2026-07-16 03:20:15');
+        $this->seedCollection(271, '[02/02] - "other.par2" yEnc', 'other@example.com', 2, '2026-07-16 03:20:16');
+        $this->seedBinary(2700, 270, 1, 'Unbounded.Episode.mkv', 10, 10);
+        $this->seedBinary(2710, 271, 2, 'other.par2', 1, 1);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertFalse(DB::table('collections')->where('id', 271)->exists());
+    }
+
     public function test_bounded_fair_discovery_does_not_starve_an_old_valid_pair_behind_newer_fillers(): void
     {
         config()->set('nntmux.split_collection_reconcile_lookback_hours', 72);

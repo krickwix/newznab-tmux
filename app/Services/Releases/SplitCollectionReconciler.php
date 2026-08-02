@@ -95,7 +95,12 @@ final class SplitCollectionReconciler
         );
     }
 
-    public function reconcile(?int $groupId): int
+    /**
+     * @param  float|null  $deadlineAt  `microtime(true)` value this pass must not
+     *                                  run past. Null means unbounded, for the
+     *                                  exhaustive callers that own their runtime.
+     */
+    public function reconcile(?int $groupId, ?float $deadlineAt = null): int
     {
         $this->pairXrefDecisionCounts = [];
         $groupIds = $this->allowedGroupIds($groupId);
@@ -110,6 +115,11 @@ final class SplitCollectionReconciler
             $maxSourceCollections = $this->maxSourceCollectionsPerPass();
             $cutoff = now()->subHours($this->lookbackHours())->toDateTimeString();
             foreach ($groupIds as $allowedGroupId) {
+                // Discovery itself costs several queries per group, so check
+                // before paying for a group whose merges could not start anyway.
+                if ($this->deadlineReached($deadlineAt)) {
+                    return $merged;
+                }
                 $collectionIds = $this->expandCandidateCohorts(
                     $allowedGroupId,
                     $this->candidateCollectionIds($allowedGroupId, $cutoff),
@@ -122,6 +132,7 @@ final class SplitCollectionReconciler
                     $sourceCount = count($candidate['companion_ids']);
                     if ($merged >= $maxPairs
                         || $sourceCollectionsMerged + $sourceCount > $maxSourceCollections
+                        || $this->deadlineReached($deadlineAt)
                     ) {
                         return $merged;
                     }
@@ -141,6 +152,28 @@ final class SplitCollectionReconciler
         } finally {
             $this->telemetry->record($this->pairXrefDecisionCounts);
         }
+    }
+
+    /**
+     * Has this pass run out of its allotted time?
+     *
+     * The reconciler is called from the cooperative release pump, whose slice is
+     * bounded by `distributed_release_pump_deadline_seconds` (25s in
+     * production). The count budgets alone cannot honour that: a saturated pass
+     * at the deployed 1200-source-collection budget merges for roughly 200s,
+     * overrunning the slice and starving every later preparation stage.
+     *
+     * Yielding is safe and loses no work, because discovery resumes from the
+     * persisted rotating cursor on the next pass.
+     *
+     * Impure by nature: it reads the wall clock, so repeated calls with the same
+     * argument legitimately return different answers.
+     *
+     * @phpstan-impure
+     */
+    private function deadlineReached(?float $deadlineAt): bool
+    {
+        return $deadlineAt !== null && microtime(true) >= $deadlineAt;
     }
 
     /**
