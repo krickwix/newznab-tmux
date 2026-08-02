@@ -577,30 +577,45 @@ final class SplitCollectionReconciler
         return $collections;
     }
 
-    /** @param array<string,mixed> $collection */
+    /**
+     * The anchor is the payload file, identified by content rather than by
+     * position. Its filenumber is not fixed: many posters emit the .par2 as
+     * file 1 and the payload last, so requiring filenumber 1 here rejected
+     * every such cohort. Complementarity against the companions is enforced
+     * by `pairCoversEveryFile()` and `fanoutCompanionIds()`.
+     *
+     * @param  array<string,mixed>  $collection
+     */
     private function isAnchor(array $collection): bool
     {
         $binaries = $collection['binaries'];
 
         return $this->isMutableCollection($collection)
             && count($binaries) === 1
-            && (int) $binaries[0]['filenumber'] === 1
+            && $this->isFileNumberInRange($collection, (int) $binaries[0]['filenumber'])
             && $this->isCompleteBinary($binaries[0])
             && ! $this->isPar2((string) $binaries[0]['name']);
     }
 
-    /** @param array<string,mixed> $collection */
+    /**
+     * A pair companion holds every parity file for the posting in one
+     * collection, so it covers all but one slot. Which slot is missing depends
+     * on where the poster placed the payload, so only the count and bounds are
+     * checked here; the anchor fills the gap exactly.
+     *
+     * @param  array<string,mixed>  $collection
+     */
     private function isCompanion(array $collection): bool
     {
         if (! $this->isMutableCollection($collection)) {
             return false;
         }
-        $expected = range(2, (int) $collection['totalfiles']);
         $actual = array_map(static fn (array $binary): int => (int) $binary['filenumber'], $collection['binaries']);
         sort($actual, SORT_NUMERIC);
 
-        return $actual === $expected
+        return count($actual) === (int) $collection['totalfiles'] - 1
             && count($actual) === count(array_unique($actual))
+            && array_all($actual, fn (int $fileNumber): bool => $this->isFileNumberInRange($collection, $fileNumber))
             && array_all($collection['binaries'], fn (array $binary): bool => $this->isCompleteBinary($binary) && $this->isPar2((string) $binary['name']));
     }
 
@@ -613,12 +628,16 @@ final class SplitCollectionReconciler
         }
 
         $binary = $binaries[0];
-        $fileNumber = (int) $binary['filenumber'];
 
-        return $fileNumber >= 2
-            && $fileNumber <= (int) $collection['totalfiles']
+        return $this->isFileNumberInRange($collection, (int) $binary['filenumber'])
             && $this->isCompleteBinary($binary)
             && $this->isPar2((string) $binary['name']);
+    }
+
+    /** @param array<string,mixed> $collection */
+    private function isFileNumberInRange(array $collection, int $fileNumber): bool
+    {
+        return $fileNumber >= 1 && $fileNumber <= (int) $collection['totalfiles'];
     }
 
     /** @param array<string,mixed> $collection */
@@ -658,6 +677,7 @@ final class SplitCollectionReconciler
             || $anchorTimestamp === false
             || $companionTimestamp === false
             || abs($anchorTimestamp - $companionTimestamp) > self::MAX_POSTING_GAP_SECONDS
+            || ! $this->pairCoversEveryFile($anchor, $companion)
         ) {
             return false;
         }
@@ -669,6 +689,27 @@ final class SplitCollectionReconciler
         }
 
         return $decision['accepted'];
+    }
+
+    /**
+     * The anchor payload and its parity companion must tile 1..totalfiles
+     * exactly once between them. While the anchor was pinned to filenumber 1
+     * and companions to 2..totalfiles this held by construction; now that both
+     * are matched by content it has to be asserted, or a payload could be
+     * merged onto a companion that already occupies its slot.
+     *
+     * @param  array<string,mixed>  $anchor
+     * @param  array<string,mixed>  $companion
+     */
+    private function pairCoversEveryFile(array $anchor, array $companion): bool
+    {
+        $fileNumbers = array_map(
+            static fn (array $binary): int => (int) $binary['filenumber'],
+            [...$anchor['binaries'], ...$companion['binaries']],
+        );
+        sort($fileNumbers, SORT_NUMERIC);
+
+        return $fileNumbers === range(1, (int) $anchor['totalfiles']);
     }
 
     /**
@@ -806,6 +847,7 @@ final class SplitCollectionReconciler
      */
     private function fanoutCompanionIds(array $collections, array $anchor): ?array
     {
+        $anchorFileNumber = (int) $anchor['binaries'][0]['filenumber'];
         $companionsByFileNumber = [];
         foreach ($collections as $collection) {
             if (! $this->isFanoutCompanion($collection) || ! $this->fanoutMetadataMatches($anchor, $collection)) {
@@ -819,7 +861,13 @@ final class SplitCollectionReconciler
         }
 
         ksort($companionsByFileNumber, SORT_NUMERIC);
-        if (array_keys($companionsByFileNumber) !== range(2, (int) $anchor['totalfiles'])) {
+        // Anchor plus companions must tile 1..totalfiles exactly once, whatever
+        // slot the poster used for the payload.
+        $expected = array_values(array_diff(
+            range(1, (int) $anchor['totalfiles']),
+            [$anchorFileNumber],
+        ));
+        if (array_keys($companionsByFileNumber) !== $expected) {
             return null;
         }
 

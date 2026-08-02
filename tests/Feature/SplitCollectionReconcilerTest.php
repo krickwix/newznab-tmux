@@ -305,6 +305,100 @@ final class SplitCollectionReconcilerTest extends TestCase
         }
     }
 
+    /**
+     * The dominant real-world layout: the poster emits the .par2 as file 1 and
+     * the payload last. Pinning the anchor to filenumber 1 rejected every such
+     * cohort, which is why the reconciler merged nothing in production.
+     */
+    public function test_merges_fanout_when_the_payload_is_posted_last(): void
+    {
+        DB::table('usenet_groups')->where('id', 5)->update(['name' => 'alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_reconcile_groups', ['alt.binaries.hdtv.x264']);
+        config()->set('nntmux.split_collection_xref_gap_overrides', ['alt.binaries.hdtv.x264' => 20000]);
+
+        $totalFiles = 13;
+        // Parity occupies 1..12; the .mkv payload lands on file 13.
+        for ($fileNumber = 1; $fileNumber < $totalFiles; $fileNumber++) {
+            $collectionId = 500 + $fileNumber;
+            $this->seedCollection(
+                $collectionId,
+                sprintf('[%02d/%02d] - "NYXIS.vol%03d+001.par2" yEnc', $fileNumber, $totalFiles, $fileNumber),
+                'inverted@example.com',
+                $totalFiles,
+                '2026-07-31 12:07:44',
+            );
+            DB::table('collections')->where('id', $collectionId)->update([
+                'xref' => 'alt.binaries.hdtv.x264:'.(8650820480 + $fileNumber),
+            ]);
+            $this->seedBinary(5000 + $fileNumber, $collectionId, $fileNumber, sprintf('NYXIS.vol%03d+001.par2', $fileNumber), 1, 1);
+        }
+
+        $anchorId = 500 + $totalFiles;
+        $this->seedCollection(
+            $anchorId,
+            sprintf('[%02d/%02d] - "Basketball.Wives.LA.S01E13.mkv" yEnc', $totalFiles, $totalFiles),
+            'inverted@example.com',
+            $totalFiles,
+            '2026-07-31 12:07:44',
+        );
+        DB::table('collections')->where('id', $anchorId)->update([
+            'xref' => 'alt.binaries.hdtv.x264:8650820587',
+        ]);
+        $this->seedBinary(5000 + $totalFiles, $anchorId, $totalFiles, 'Basketball.Wives.LA.S01E13.mkv', 7726, 7726);
+
+        self::assertSame(1, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame($totalFiles, DB::table('binaries')->where('collections_id', $anchorId)->count());
+        self::assertSame(
+            range(1, $totalFiles),
+            DB::table('binaries')->where('collections_id', $anchorId)->orderBy('filenumber')->pluck('filenumber')->map('intval')->all(),
+        );
+        // Every parity collection is absorbed into the payload anchor.
+        self::assertSame(1, DB::table('collections')->whereBetween('id', [501, $anchorId])->count());
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+    }
+
+    /**
+     * With the anchor no longer pinned to filenumber 1, a companion sharing the
+     * anchor's slot must not be merged: the union has to tile 1..totalfiles
+     * exactly once or a parity file would be silently lost.
+     */
+    public function test_refuses_fanout_when_a_companion_occupies_the_anchor_file_number(): void
+    {
+        $totalFiles = 4;
+        $this->seedCollection(560, '[04/04] - "Episode.mkv" yEnc', 'collide@example.com', $totalFiles, '2026-07-16 05:47:20');
+        $this->seedBinary(5600, 560, 4, 'Episode.mkv', 100, 100);
+        // Files 2 and 3 are present, but the third companion duplicates the
+        // anchor's slot 4 instead of supplying the missing file 1.
+        foreach ([2, 3, 4] as $index => $fileNumber) {
+            $collectionId = 561 + $index;
+            $this->seedCollection($collectionId, sprintf('[%02d/04] - "hash.par2" yEnc', $fileNumber), 'collide@example.com', $totalFiles, '2026-07-16 05:47:29');
+            $this->seedBinary(5610 + $index, $collectionId, $fileNumber, 'hash-'.$fileNumber.'.par2', 1, 1);
+        }
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(4, DB::table('collections')->whereBetween('id', [560, 563])->count());
+    }
+
+    /**
+     * A pair whose parity companion does not fill the anchor's missing slot
+     * would drop a file on merge, so it must be refused.
+     */
+    public function test_refuses_pair_that_does_not_cover_every_file(): void
+    {
+        $this->seedCollection(570, '[04/04] - "Episode.mkv" yEnc', 'gap@example.com', 4, '2026-07-13 02:18:15');
+        $this->seedCollection(571, '[02/04] - "hash.par2" yEnc', 'gap@example.com', 4, '2026-07-13 02:18:16');
+        // The anchor payload sits on file 4, and the companion carries the
+        // correct totalfiles-1 parity count — but it re-covers file 4 instead
+        // of supplying file 1, so merging would silently drop a file.
+        $this->seedBinary(5700, 570, 4, 'Episode.mkv', 10, 10);
+        $this->seedBinary(5701, 571, 2, 'hash.vol000+001.par2', 1, 1);
+        $this->seedBinary(5702, 571, 3, 'hash.vol001+002.par2', 1, 1);
+        $this->seedBinary(5703, 571, 4, 'hash.vol002+004.par2', 1, 1);
+
+        self::assertSame(0, (new SplitCollectionReconciler)->reconcile(5));
+        self::assertSame(2, DB::table('collections')->whereBetween('id', [570, 571])->count());
+    }
+
     public function test_refuses_incomplete_single_file_parity_fanout(): void
     {
         $this->seedCollection(24, '[01/03] - "Episode.mkv" yEnc', 'fanout@example.com', 3, '2026-07-16 05:47:20');
