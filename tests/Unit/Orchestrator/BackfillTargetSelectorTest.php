@@ -6,6 +6,7 @@ namespace Tests\Unit\Orchestrator;
 
 use App\Services\Orchestrator\BackfillTargetSelector;
 use App\Services\Orchestrator\WorkerControlPolicy;
+use ErrorException;
 use PHPUnit\Framework\TestCase;
 
 final class BackfillTargetSelectorTest extends TestCase
@@ -1052,6 +1053,91 @@ final class BackfillTargetSelectorTest extends TestCase
             );
 
             self::assertNull($target, $message);
+        }
+    }
+
+    public function test_a_candidate_with_no_history_does_not_crash_the_round_robin_fallback(): void
+    {
+        // The live shape that took the fleet down: every candidate carries at
+        // least one ineffective-permit strike, so the probe and untried branches
+        // (which both require a strike count of exactly 0) decline, and
+        // selection falls through to the last-resort round-robin. Candidates
+        // whose yield history has expired or never existed reach that sort with
+        // no entry at all -- reading it unguarded raised an ErrorException that
+        // WorkerOrchestrator's catch-all turned into failClosed(), latching
+        // orchestrator_mode=failsafe every cycle.
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.probe'],
+            historyTtlSeconds: 86_400,
+        );
+
+        // Laravel's handler promotes E_WARNING to ErrorException, which is what
+        // made this fatal in production. Bare PHPUnit only records a warning, so
+        // reproduce the production handler here or the test cannot fail.
+        $target = $this->throwingOnPhpWarnings(fn (): ?array => $selector->select(
+            [
+                $this->candidate('alt.with.history', '2026-01-01 00:00:00'),
+                $this->candidate('alt.no.history', '2026-01-02 00:00:00'),
+            ],
+            ['alt.with.history' => $this->history(2, 1.0)],
+            now: 2_000_000_000,
+            ineffectivePermitsByTarget: [
+                'alt.with.history' => 1,
+                'alt.no.history' => 1,
+            ],
+        ));
+
+        // No history means never attempted, which sorts first in the
+        // least-recently-attempted round-robin.
+        self::assertNotNull($target);
+        self::assertSame('alt.no.history', $target['name']);
+    }
+
+    public function test_the_round_robin_fallback_serves_the_least_recently_attempted_candidate(): void
+    {
+        $selector = new BackfillTargetSelector(
+            probeGroups: [],
+            historyTtlSeconds: 86_400,
+        );
+
+        $target = $selector->select(
+            [
+                $this->candidate('alt.recent', '2026-01-01 00:00:00'),
+                $this->candidate('alt.older', '2026-01-02 00:00:00'),
+            ],
+            [
+                'alt.recent' => [...$this->history(2, 1.0), 'last_attempt_at' => 1_999_999_500],
+                'alt.older' => [...$this->history(2, 1.0), 'last_attempt_at' => 1_999_999_000],
+            ],
+            now: 2_000_000_000,
+            ineffectivePermitsByTarget: [
+                'alt.recent' => 1,
+                'alt.older' => 1,
+            ],
+        );
+
+        self::assertNotNull($target);
+        self::assertSame('alt.older', $target['name']);
+    }
+
+    /**
+     * Runs the callback under Laravel's warning-to-exception semantics.
+     *
+     * @template TReturn
+     *
+     * @param  callable(): TReturn  $callback
+     * @return TReturn
+     */
+    private function throwingOnPhpWarnings(callable $callback): mixed
+    {
+        set_error_handler(static function (int $severity, string $message, string $file, int $line): bool {
+            throw new ErrorException($message, 0, $severity, $file, $line);
+        });
+
+        try {
+            return $callback();
+        } finally {
+            restore_error_handler();
         }
     }
 

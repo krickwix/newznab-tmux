@@ -31,6 +31,17 @@ namespace App\Services\Binaries;
  * actually a single file). We therefore pin the collection file numbers
  * explicitly to 1 of 1.
  *
+ * Stripping the token is necessary but not sufficient: the surviving name still
+ * has to key the collection, and the default key runs the cleaned subject
+ * through CollectionsCleaningService, which strips digit runs. Measured against
+ * the live cleaner, the 98 real filenames of four postings collapse onto FIVE
+ * collection keys ('{Soulm8te. } yEnc' absorbs part01..part35 plus every par2
+ * volume). With file_number pinned to 1 and binaries carrying UNIQUE
+ * (collections_id, filenumber), each of those files would then resolve to the
+ * same single binary and pile every part onto it -- one NZB "file" standing in
+ * for 43. The collection therefore gets an explicit per-file key instead; see
+ * collectionKey().
+ *
  * Opt-in per group: obfuscation styles are poster-specific, so we only apply
  * this where it has been observed rather than reshaping every group's headers.
  */
@@ -79,14 +90,103 @@ final class ObfuscatedSubjectNormalizer
             return null;
         }
 
-        $name = $captured['name'].rtrim($captured['trailer']);
-
         return [
-            'name' => trim($name),
+            'name' => trim($captured['name'].rtrim($captured['trailer'])),
             // These subjects describe a single file; the only counter present
             // is the part counter, which must not be mistaken for a file count.
             'file_number' => 1,
             'total_files' => 1,
         ];
+    }
+
+    /**
+     * The collection key shared by every article of one brace-token file.
+     *
+     * Keyed on the de-tokenised filename rather than the cleaned subject: the
+     * cleaner strips digit runs, so 'part01.rar' and 'part02.rar' clean to the
+     * same string and would share a collection, and with file_number pinned to
+     * 1/1 they would then share a binary too.
+     *
+     * Single source of truth: the ingest path keys new collections with this,
+     * and the brace-token repair pass (nntmux:repair-brace-token-identity)
+     * rewrites stranded collections onto the same value. If the two ever
+     * disagree, repaired rows become invisible to ingest and the next article
+     * for that file mints a fresh stalled collection.
+     *
+     * @param  string  $normalizedName  The subject with its token already stripped.
+     */
+    public static function collectionKey(string $normalizedName, int $groupId): string
+    {
+        return \sprintf('bracetoken:g%d:%s', $groupId, sha1(trim($normalizedName)));
+    }
+
+    /**
+     * The collection key shared by every FILE of one brace-token posting.
+     *
+     * Keying per file (collectionKey() above) produces a collection holding a
+     * single binary, and the release pipeline deletes that shape twice over:
+     *
+     *  - runCollectionFileCheckStage6() rewrites totalfiles to COUNT(binaries),
+     *    so a one-binary collection lands below `minfilestoformrelease` and
+     *    deleteCollectionsUnderThreshold() removes it;
+     *  - a par2 file's lone binary is 100% par2, so createReleases()' par2-only
+     *    filter removes it even when the floor is cleared.
+     *
+     * Both deletes cascade through FK_Collections and take the parts with them.
+     * Grouping a posting's payload volumes and its par2 recovery set into one
+     * collection -- each file its own binary -- is what satisfies them, and is
+     * also the shape an unobfuscated post already has.
+     *
+     * @param  string  $postingName  The posting stem from postingIdentity().
+     */
+    public static function postingKey(string $postingName, int $groupId): string
+    {
+        return \sprintf('bracetokenpost:g%d:%s', $groupId, sha1(trim($postingName)));
+    }
+
+    /**
+     * Split a de-tokenised filename into its posting stem and file ordering.
+     *
+     * Only the *relative* order within a kind is derivable from one filename,
+     * which is why this returns a sort hint rather than a file number: dense
+     * ordinals need the payload count, so they can only be allocated once the
+     * whole cohort is known (see BraceTokenIdentityRepairService). Two gates
+     * read MAX(filenumber) as a file count, so sparse or high-band numbering
+     * would leave a collection permanently incomplete.
+     *
+     * 'kind' orders payload files ahead of the par2 set, matching how a normal
+     * post is laid out.
+     *
+     * @param  string  $normalizedName  Subject with its token already stripped.
+     * @return array{posting: string, kind: int, hint: int}
+     */
+    public static function postingIdentity(string $normalizedName): array
+    {
+        $name = trim($normalizedName);
+        // Work on the braced filename, keeping whatever trailer ('yEnc') follows
+        // so the reassembled posting subject stays in the same shape.
+        $inner = preg_match('/^\{(?P<inner>[^{}]+)\}/', $name, $braced) === 1
+            ? $braced['inner']
+            : $name;
+
+        if (preg_match('/^(?P<stem>.+)\.part(?P<n>\d+)\.rar$/i', $inner, $m) === 1) {
+            return ['posting' => $m['stem'], 'kind' => 0, 'hint' => (int) $m['n']];
+        }
+
+        if (preg_match('/^(?P<stem>.+)\.vol(?P<start>\d+)\+\d+\.par2$/i', $inner, $m) === 1) {
+            return ['posting' => $m['stem'], 'kind' => 1, 'hint' => (int) $m['start']];
+        }
+
+        if (preg_match('/^(?P<stem>.+)\.par2$/i', $inner, $m) === 1) {
+            return ['posting' => $m['stem'], 'kind' => 1, 'hint' => -1];
+        }
+
+        if (preg_match('/^(?P<stem>.+)\.(?:rar|r\d+|\d+)$/i', $inner, $m) === 1) {
+            return ['posting' => $m['stem'], 'kind' => 0, 'hint' => 1];
+        }
+
+        // Unrecognised layout: treat the file as its own posting rather than
+        // guessing a stem and fusing unrelated files.
+        return ['posting' => $inner, 'kind' => 0, 'hint' => 1];
     }
 }

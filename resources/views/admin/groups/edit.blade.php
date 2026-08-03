@@ -102,10 +102,18 @@
                            id="minfilestoformrelease"
                            name="minfilestoformrelease"
                            class="pl-10 w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-gray-100"
-                           value="{{ $group['minfilestoformrelease'] ?? 0 }}"/>
+                           {{-- Blank for a NULL override, NOT 0. `?? 0` rendered
+                                "use the site setting" as 0, and saving the form
+                                unchanged then wrote that 0 back as a real
+                                override -- which DISABLES the min-files delete
+                                for the group rather than setting no floor.
+                                updateGroup() maps '' back to NULL, so blank
+                                round-trips. --}}
+                           value="{{ $group['minfilestoformrelease'] ?? '' }}"/>
                 </div>
                 <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">
                     The minimum number of files to make a release. If left blank, will use the site wide setting.
+                    0 disables the check for this group entirely.
                 </p>
             </div>
 

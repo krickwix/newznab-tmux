@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Services\Metrics;
 
+use App\Support\Data\ProcessReleasesSettings;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Yaml\Parser;
 
@@ -14,7 +15,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
      * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
      */
-    private const FLEET_IMAGE = 'microservices-pods-20260803-obfuscated-config-regression-v217@sha256:f3825e86776d60952d5db28c98b87d3e9fe0ef5ceaa1258b4bf598eaa41f1494';
+    private const FLEET_IMAGE = 'microservices-pods-20260803-split-posting-guard-v223@sha256:90179ef0876e1e3608889755956d53cbb2f23f385cd01d44e62bf735162c4017';
 
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
@@ -360,6 +361,230 @@ final class NntmuxDeploymentManifestTest extends TestCase
         ] as $path) {
             self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
         }
+    }
+
+    public function test_brace_token_residue_overlay_packages_the_repair_pass(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-posting-repair-v221.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260803-obfuscated-config-regression-v217@sha256:f3825e86776d60952d5db28c98b87d3e9fe0ef5ceaa1258b4bf598eaa41f1494',
+            $dockerfile,
+        );
+        foreach ([
+            // The repair pass calls postingKey()/postingIdentity(), so the
+            // normalizer has to ship with it. Its normalize() is unchanged from
+            // v217, so this COPY does not alter ingest.
+            'app/Services/Binaries/ObfuscatedSubjectNormalizer.php',
+            'app/Services/Diagnostics/BraceTokenIdentityRepairService.php',
+            'app/Console/Commands/RepairBraceTokenIdentity.php',
+            // Unrelated to brace-token keying, but the fleet cannot process any
+            // reclaimed collection while the orchestrator crashes into
+            // failClosed() every cycle, so the guard ships in the same image.
+            'app/Services/Orchestrator/BackfillTargetSelector.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    /**
+     * The ingest-side keying must NOT ship in this image.
+     *
+     * Routing brace-token subjects onto a per-real-file collection key fixes the
+     * cleaned-name collapse, but it yields one binary per collection -- the shape
+     * stage 6 + deleteCollectionsUnderThreshold() delete outright, cascading
+     * every part through FK_Collections. An earlier build shipped it and cost 512
+     * production collections and ~541 MB of articles. Ingest is left as v217
+     * (wrong, but only for a poster that has been silent since 2026-08-02) until
+     * a fix exists that survives the release gates.
+     */
+    public function test_brace_token_overlay_does_not_ship_the_per_file_ingest_keying(): void
+    {
+        $dockerfile = (string) file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-posting-repair-v221.Dockerfile');
+
+        foreach ([
+            'app/Services/Binaries/HeaderParser.php',
+            'app/Services/Binaries/CollectionHandler.php',
+        ] as $path) {
+            self::assertStringNotContainsString("COPY {$path}", $dockerfile);
+        }
+    }
+
+    public function test_brace_token_overlay_does_not_copy_config_over_the_repaired_keys(): void
+    {
+        $dockerfile = (string) file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-posting-repair-v221.Dockerfile');
+
+        // v214/v215 shipped a config/nntmux.php from a branch that lacked the
+        // obfuscated_* keys, which silently NULLed them out and made the
+        // normalizers permanent no-ops. This overlay changes no config, so it
+        // must not carry that COPY at all.
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
+    public function test_split_posting_overlay_packages_the_repair_and_layers_on_v221(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/split-posting-repair-v222.Dockerfile'
+        );
+
+        // Layered on v221, not on v217: v221's brace-token repair must not be
+        // rolled back by shipping this one, and a sibling FROM would do exactly
+        // that silently.
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260803-brace-token-posting-repair-v221'
+            .'@sha256:1181b40b385498f2cd02daafb67de16660fd233763d6e8d00b5e8bc213c38ee4',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Diagnostics/SplitPostingIdentityRepairService.php',
+            'app/Console/Commands/RepairSplitPostingIdentity.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    /**
+     * The ingest-side keying must NOT ship in this image either.
+     *
+     * Keying these collections on the filename stem rather than the part count is
+     * the actual cure, but it re-identifies every live collection in every group,
+     * not only the stalled ones. Shipping it alongside a repair whose survivor
+     * hash is deliberately un-recomputable by ingest would leave the two
+     * disagreeing about what a collection is.
+     */
+    public function test_split_posting_overlay_does_not_ship_the_ingest_keying(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/split-posting-repair-v222.Dockerfile'
+        );
+
+        foreach ([
+            'app/Services/Binaries/HeaderParser.php',
+            'app/Services/Binaries/CollectionHandler.php',
+            // Nor the release pipeline: the repair works by producing a shape the
+            // existing gates already accept, and a gate change shipped in the
+            // same image would make a bad merge indistinguishable from a bad gate.
+            'app/Services/ReleaseProcessingService.php',
+        ] as $path) {
+            self::assertStringNotContainsString("COPY {$path}", $dockerfile);
+        }
+
+        // Same hazard as v214/v215: a config COPY from a branch missing keys
+        // silently NULLs them out in-pod.
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
+    /**
+     * v223 layers the file-counter guard over v222, and v222 must never be the
+     * fleet image again.
+     *
+     * v222's repair rewrites totalfiles to COUNT(binaries) without checking
+     * whether the subject declares a real file count, so --update on a
+     * counter-bearing cohort publishes a partial archive as complete. Two
+     * production dry-runs found it -- `[58/93]` on Nativ, then `==(37/62)` on
+     * theBorrowers after the bracket-only fix. A sibling overlay that re-based on
+     * v221 or v222 would silently un-ship the guard.
+     */
+    public function test_split_posting_guard_overlay_layers_on_v222_and_ships_the_guard(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/split-posting-guard-v223.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260803-split-posting-repair-v222'
+            .'@sha256:aff3dae4d1160830a19d244b59da43628d0ccd139c471e36bdcddd421bb16623',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Diagnostics/SplitPostingIdentityRepairService.php',
+            // The min-files default and the admin form that was manufacturing
+            // explicit 0s: 0 disables the delete rather than lowering it.
+            'app/Support/Data/ProcessReleasesSettings.php',
+            'app/Http/Controllers/Admin/AdminGroupController.php',
+            'resources/views/admin/groups/edit.blade.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+
+        // The ingest cure is still withheld, for the same reason as in v222.
+        foreach ([
+            'app/Services/Binaries/HeaderParser.php',
+            'app/Services/Binaries/CollectionHandler.php',
+            'app/Services/ReleaseProcessingService.php',
+        ] as $path) {
+            self::assertStringNotContainsString("COPY {$path}", $dockerfile);
+        }
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
+    /**
+     * The guard itself, asserted against the image that ships it.
+     *
+     * A bracket-anchored pattern is the natural thing to write and it is wrong:
+     * over the live residue the counter is parenthesised on 94 collections and
+     * missing its opening delimiter on 239, so `\[\d+/\d+\]` passes 333
+     * collections through to a merge that would misreport their file counts.
+     */
+    public function test_the_shipped_repair_refuses_undelimited_file_counters(): void
+    {
+        $service = (string) file_get_contents(
+            dirname(__DIR__, 4).'/app/Services/Diagnostics/SplitPostingIdentityRepairService.php'
+        );
+
+        self::assertStringContainsString("FILE_COUNTER_PATTERN = '/\\d+\\s*\\/\\s*\\d+/'", $service);
+        self::assertStringNotContainsString('\[\d+\s*\/\s*\d+\]', $service);
+        self::assertStringContainsString("'declares_a_real_file_count'", $service);
+    }
+
+    /**
+     * The site's min-files floor is 1, declared where the fleet actually reads
+     * it -- the settings table -- and not merely as a PHP fallback.
+     *
+     * ProcessReleasesSettings' default only applies when the row is absent, and
+     * the row is present: production carried `2`, which is what gates the drain.
+     * Re-measured over the live residue, a floor of 2 lets 264 repaired cohorts
+     * survive both delete predicates against 1,452 at a floor of 1, and it
+     * deletes for real -- 9 collections and 48 of 8,277 releases sit below
+     * totalfiles/totalpart 2, while nothing at all sits below 1. So this job is
+     * the only place the change takes effect, and a code default without it is a
+     * no-op.
+     *
+     * The group-level reset is deliberately scoped to explicit 0s. Those are the
+     * values the admin form manufactured out of NULLs, and 0 DISABLES the delete
+     * rather than lowering it; a blanket wipe of every override would also erase
+     * a floor someone set on purpose, on every run of this job.
+     */
+    public function test_the_settings_job_declares_the_min_files_floor(): void
+    {
+        $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/processing-settings-job.yaml';
+        if (! is_file($path)) {
+            self::markTestSkipped('mediahome sibling checkout is required for the workspace manifest regression.');
+        }
+
+        $job = (new Parser)->parse((string) file_get_contents($path));
+        self::assertIsArray($job);
+        $arguments = $job['spec']['template']['spec']['containers'][0]['args'] ?? null;
+        self::assertIsArray($arguments);
+        $execute = implode("\n", array_filter(
+            $arguments,
+            static fn (mixed $argument): bool => is_string($argument) && str_contains($argument, '$settings'),
+        ));
+        self::assertNotSame('', $execute, 'The settings job no longer carries an inline $settings array.');
+
+        self::assertStringContainsString('"minfilestoformrelease" => "1"', $execute);
+        self::assertSame(
+            1,
+            (new ProcessReleasesSettings)->minFilesToFormRelease,
+            'The declared site floor must match the code default, or one of the two is dead weight.',
+        );
+        self::assertStringContainsString(
+            'DB::table("usenet_groups")->where("minfilestoformrelease", 0)->update(["minfilestoformrelease" => null]);',
+            $execute,
+        );
+        // A blanket reset would clear deliberate per-group floors every run.
+        self::assertStringNotContainsString('whereNotNull("minfilestoformrelease")', $execute);
     }
 
     public function test_lossless_body_preamble_repair_is_explicitly_enabled(): void
