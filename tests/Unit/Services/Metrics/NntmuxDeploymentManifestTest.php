@@ -520,6 +520,56 @@ final class NntmuxDeploymentManifestTest extends TestCase
     }
 
     /**
+     * v224 layers the additional-postprocess bucket fix over v223.
+     *
+     * The fan-out that feeds additional postprocessing collapsed every GUID
+     * bucket onto '0' -- a projection aliased `id` on the Release model picked
+     * up Eloquent's primary-key int cast, so (int) 'e' === 0. It logged the
+     * right number of jobs the whole time, which is why it survived ten weeks.
+     * Re-basing this overlay on anything below v223 would un-ship the
+     * file-counter guard, so the base is asserted as well as the payload.
+     */
+    public function test_additional_pp_bucket_overlay_layers_on_v223_and_ships_the_query(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/additional-pp-bucket-v224.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260803-split-posting-guard-v223'
+            .'@sha256:90179ef0876e1e3608889755956d53cbb2f23f385cd01d44e62bf735162c4017',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/AdditionalProcessing/AdditionalCandidateQuery.php'
+            .' /app/app/Services/AdditionalProcessing/AdditionalCandidateQuery.php',
+            $dockerfile,
+        );
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
+    /**
+     * The bucket projection must never be aliased `id` again.
+     *
+     * Eloquent merges [getKeyName() => getKeyType()] into the casts for any
+     * incrementing model, so a hex character selected AS `id` off the Release
+     * model is silently integer-cast on read. The failure is invisible from the
+     * outside -- the right number of buckets comes back, every one of them 0 --
+     * so this asserts the shape of the query rather than waiting for the
+     * symptom.
+     */
+    public function test_the_shipped_bucket_query_cannot_be_primary_key_cast(): void
+    {
+        $query = (string) file_get_contents(
+            dirname(__DIR__, 4).'/app/Services/AdditionalProcessing/AdditionalCandidateQuery.php'
+        );
+
+        self::assertStringContainsString('->toBase()', $query);
+        self::assertStringContainsString('AS bucket', $query);
+        self::assertStringNotContainsString('AS id', $query);
+    }
+
+    /**
      * The guard itself, asserted against the image that ships it.
      *
      * A bracket-anchored pattern is the natural thing to write and it is wrong:
