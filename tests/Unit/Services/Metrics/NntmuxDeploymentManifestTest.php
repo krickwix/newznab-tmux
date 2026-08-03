@@ -421,6 +421,59 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
     }
 
+    public function test_split_posting_overlay_packages_the_repair_and_layers_on_v221(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/split-posting-repair-v222.Dockerfile'
+        );
+
+        // Layered on v221, not on v217: v221's brace-token repair must not be
+        // rolled back by shipping this one, and a sibling FROM would do exactly
+        // that silently.
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260803-brace-token-posting-repair-v221'
+            .'@sha256:1181b40b385498f2cd02daafb67de16660fd233763d6e8d00b5e8bc213c38ee4',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Diagnostics/SplitPostingIdentityRepairService.php',
+            'app/Console/Commands/RepairSplitPostingIdentity.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    /**
+     * The ingest-side keying must NOT ship in this image either.
+     *
+     * Keying these collections on the filename stem rather than the part count is
+     * the actual cure, but it re-identifies every live collection in every group,
+     * not only the stalled ones. Shipping it alongside a repair whose survivor
+     * hash is deliberately un-recomputable by ingest would leave the two
+     * disagreeing about what a collection is.
+     */
+    public function test_split_posting_overlay_does_not_ship_the_ingest_keying(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/split-posting-repair-v222.Dockerfile'
+        );
+
+        foreach ([
+            'app/Services/Binaries/HeaderParser.php',
+            'app/Services/Binaries/CollectionHandler.php',
+            // Nor the release pipeline: the repair works by producing a shape the
+            // existing gates already accept, and a gate change shipped in the
+            // same image would make a bad merge indistinguishable from a bad gate.
+            'app/Services/ReleaseProcessingService.php',
+        ] as $path) {
+            self::assertStringNotContainsString("COPY {$path}", $dockerfile);
+        }
+
+        // Same hazard as v214/v215: a config COPY from a branch missing keys
+        // silently NULLs them out in-pod.
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
     public function test_lossless_body_preamble_repair_is_explicitly_enabled(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/infra.yaml';
