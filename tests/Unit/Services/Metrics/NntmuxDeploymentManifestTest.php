@@ -1150,15 +1150,12 @@ final class NntmuxDeploymentManifestTest extends TestCase
      */
     public function test_every_declared_nntmux_variable_is_read_by_a_config_file(): void
     {
-        // Known-inert variables. These are set in the manifests but their
-        // readers live on the unmerged fix/backfill-fair-share-newest-cursor
-        // branch (05db090fd, 6d949d099), so they are dead today. Left declared
-        // rather than deleted so the values survive until that branch lands;
-        // drop these entries when it does.
-        $pendingReaders = [
-            'NNTMUX_ORCHESTRATOR_BACKFILL_FAIR_SHARE_NEWEST_CURSOR',
-            'NNTMUX_ORCHESTRATOR_BACKFILL_FILL_QUANTITY',
-        ];
+        // Variables whose readers have not shipped yet. Empty on purpose: the
+        // last two entries (fair-share newest cursor and fill quantity) were
+        // cleared when fix/backfill-fair-share-newest-cursor landed. Add an
+        // entry only to cover a genuinely pending reader, and remove it as soon
+        // as that reader merges -- the assertion below enforces that.
+        $pendingReaders = [];
 
         $manifestRoot = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux';
         if (! is_dir($manifestRoot)) {
@@ -1215,6 +1212,252 @@ final class NntmuxDeploymentManifestTest extends TestCase
                 '%s must be declared in the manifests, or applying them strips it from the running fleet.',
                 $variable,
             ));
+        }
+    }
+
+    /**
+     * Anything under apply management must be in the repo, or apply strips it.
+     *
+     * `kubectl apply` reconciles against the last-applied-configuration
+     * annotation: a key present there but absent from the file being applied is
+     * deleted. Keys added purely out-of-band (set env / patch / edit) never
+     * enter that annotation and survive, which is why plain live-vs-repo diffing
+     * over-reports. Only apply-managed keys are true strip hazards -- that is
+     * how NNTMUX_OBFUSCATED_{BRACE_TOKEN,HASH_SET}_GROUPS came to be one commit
+     * away from silently re-breaking the collections pipeline.
+     *
+     * Read-only, and skips when no cluster is reachable, so it is a no-op in CI
+     * and in the Docker gate; run it on a host with KUBECONFIG to get coverage.
+     */
+    public function test_apply_managed_nntmux_variables_are_declared_in_the_manifests(): void
+    {
+        $manifestRoot = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux';
+        if (! is_dir($manifestRoot)) {
+            self::markTestSkipped('mediahome sibling checkout is required for the workspace manifest regression.');
+        }
+        if (self::shell('kubectl version --client -o json 2>/dev/null') === null) {
+            self::markTestSkipped('kubectl is required for the live apply-management check.');
+        }
+
+        $raw = self::shell(
+            'kubectl -n media get deploy,statefulset,cronjob,configmap '
+            .'-o json 2>/dev/null',
+        );
+        if ($raw === null) {
+            self::markTestSkipped('No reachable cluster for the live apply-management check.');
+        }
+
+        $payload = json_decode($raw, true);
+        if (! is_array($payload) || ! is_array($payload['items'] ?? null)) {
+            self::markTestSkipped('Unexpected kubectl payload for the live apply-management check.');
+        }
+
+        $applyManaged = [];
+        foreach ($payload['items'] as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            $annotation = $item['metadata']['annotations']['kubectl.kubernetes.io/last-applied-configuration'] ?? null;
+            if (! is_string($annotation)) {
+                continue;
+            }
+            $lastApplied = json_decode($annotation, true);
+            if (! is_array($lastApplied)) {
+                continue;
+            }
+            $name = is_string($item['metadata']['name'] ?? null) ? $item['metadata']['name'] : '?';
+            $found = [];
+            self::collectNntmuxVariables($lastApplied, $name, $found);
+            foreach (array_keys($found) as $variable) {
+                $applyManaged[$variable][] = $name;
+            }
+        }
+
+        if ($applyManaged === []) {
+            self::markTestSkipped('No apply-managed workloads found; nothing to compare.');
+        }
+
+        $declared = self::declaredNntmuxVariables($manifestRoot);
+        $hazards = [];
+        foreach ($applyManaged as $variable => $workloads) {
+            if (! array_key_exists($variable, $declared)) {
+                $hazards[] = $variable.' (live on '.implode(', ', array_unique($workloads)).')';
+            }
+        }
+        sort($hazards);
+
+        self::assertSame([], $hazards, sprintf(
+            'These NNTMUX_ variables are under apply management live but are absent '
+            ."from the manifests, so applying this repo would strip them:\n  - %s",
+            implode("\n  - ", $hazards),
+        ));
+    }
+
+    private static function shell(string $command): ?string
+    {
+        $output = @shell_exec($command);
+
+        return is_string($output) && trim($output) !== '' ? $output : null;
+    }
+
+    /**
+     * A variable only reaches PHP from a container that loads the app env.
+     *
+     * Four NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_* settings were applied
+     * out-of-band onto the `prepare-volumes` init container, which is
+     * busybox:1.36 running mkdir/chmod with no envFrom. They looked configured
+     * from `kubectl get`, but PHP never saw them and each silently fell back to
+     * its config/nntmux.php default. The reader guard above cannot catch this:
+     * the variables have readers, they are simply attached to a container that
+     * cannot reach them.
+     */
+    public function test_nntmux_variables_are_never_set_on_a_non_app_container(): void
+    {
+        $manifestRoot = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux';
+        if (! is_dir($manifestRoot)) {
+            self::markTestSkipped('mediahome sibling checkout is required for the workspace manifest regression.');
+        }
+
+        $misplaced = [];
+        foreach (self::manifestPodSpecs($manifestRoot) as [$file, $workload, $spec]) {
+            foreach ($spec['initContainers'] ?? [] as $container) {
+                if (! is_array($container)) {
+                    continue;
+                }
+                foreach ($container['env'] ?? [] as $entry) {
+                    if (! is_array($entry) || ! is_string($entry['name'] ?? null)) {
+                        continue;
+                    }
+                    if (str_starts_with($entry['name'], 'NNTMUX_')) {
+                        $misplaced[] = sprintf(
+                            '%s (%s, init container %s in %s)',
+                            $entry['name'],
+                            $workload,
+                            is_string($container['name'] ?? null) ? $container['name'] : '?',
+                            $file,
+                        );
+                    }
+                }
+            }
+        }
+
+        self::assertSame([], $misplaced, sprintf(
+            'These NNTMUX_ variables sit on init containers, which do not run the app '
+            ."and cannot pass them to PHP, so they silently resolve to config defaults:\n  - %s",
+            implode("\n  - ", $misplaced),
+        ));
+    }
+
+    /**
+     * Every app container that reads NNTMUX_ variables must load the shared env.
+     *
+     * Declaring a variable inline on a container that lacks `envFrom` would work
+     * for that one key while leaving DB/Redis credentials unset, so this catches
+     * a container being wired up by hand instead of from the nntmux-env
+     * ConfigMap.
+     */
+    public function test_app_containers_setting_nntmux_variables_load_the_shared_env(): void
+    {
+        $manifestRoot = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux';
+        if (! is_dir($manifestRoot)) {
+            self::markTestSkipped('mediahome sibling checkout is required for the workspace manifest regression.');
+        }
+
+        $unwired = [];
+        $checked = 0;
+        foreach (self::manifestPodSpecs($manifestRoot) as [$file, $workload, $spec]) {
+            foreach ($spec['containers'] ?? [] as $container) {
+                if (! is_array($container)) {
+                    continue;
+                }
+                $setsNntmux = false;
+                foreach ($container['env'] ?? [] as $entry) {
+                    if (is_array($entry) && is_string($entry['name'] ?? null)
+                        && str_starts_with($entry['name'], 'NNTMUX_')) {
+                        $setsNntmux = true;
+                        break;
+                    }
+                }
+                if (! $setsNntmux) {
+                    continue;
+                }
+                $checked++;
+                if (($container['envFrom'] ?? []) === []) {
+                    $unwired[] = sprintf(
+                        '%s / %s (%s)',
+                        $workload,
+                        is_string($container['name'] ?? null) ? $container['name'] : '?',
+                        $file,
+                    );
+                }
+            }
+        }
+
+        // A zero here would mean the walk broke rather than the fleet being clean.
+        self::assertGreaterThan(5, $checked, 'Pod-spec walk collected implausibly few app containers.');
+        self::assertSame([], $unwired, sprintf(
+            'These containers set NNTMUX_ variables but have no envFrom, so they '
+            ."miss the shared nntmux-env ConfigMap:\n  - %s",
+            implode("\n  - ", $unwired),
+        ));
+    }
+
+    /**
+     * Every pod spec in the manifests, as [file, workload name, spec].
+     *
+     * CronJobs nest their template a level deeper than Deployments and
+     * StatefulSets, so unwrap that here rather than at each call site.
+     *
+     * @return list<array{0:string,1:string,2:array<string, mixed>}>
+     */
+    private static function manifestPodSpecs(string $manifestRoot): array
+    {
+        $parser = new Parser(maxAliasesForCollections: 1000);
+        $specs = [];
+
+        foreach (glob($manifestRoot.'/*.yaml') ?: [] as $file) {
+            $documents = preg_split('/^---\s*$/m', (string) file_get_contents($file)) ?: [];
+            foreach ($documents as $document) {
+                try {
+                    $resource = $parser->parse($document);
+                } catch (\Throwable) {
+                    // Templates and partial documents are not our concern here.
+                    continue;
+                }
+                if (is_array($resource)) {
+                    self::collectPodSpecs($resource, basename($file), $specs);
+                }
+            }
+        }
+
+        return $specs;
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @param  list<array{0:string,1:string,2:array<string, mixed>}>  $specs
+     */
+    private static function collectPodSpecs(array $node, string $file, array &$specs): void
+    {
+        // A List resource nests real workloads under `items`, so recurse over
+        // every node rather than only inspecting the document root.
+        $kind = $node['kind'] ?? null;
+        if (in_array($kind, ['Deployment', 'StatefulSet', 'DaemonSet', 'CronJob', 'Job'], true)) {
+            $spec = $kind === 'CronJob'
+                ? ($node['spec']['jobTemplate']['spec']['template']['spec'] ?? null)
+                : ($node['spec']['template']['spec'] ?? null);
+            if (is_array($spec)) {
+                $name = is_string($node['metadata']['name'] ?? null)
+                    ? $node['metadata']['name']
+                    : '?';
+                $specs[] = [$file, $name, $spec];
+            }
+        }
+
+        foreach ($node as $value) {
+            if (is_array($value)) {
+                self::collectPodSpecs($value, $file, $specs);
+            }
         }
     }
 

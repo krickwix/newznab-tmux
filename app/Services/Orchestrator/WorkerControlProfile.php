@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Services\Orchestrator;
 
+use Illuminate\Container\Container;
+
 final readonly class WorkerControlProfile
 {
     public function __construct(
@@ -21,8 +23,8 @@ final readonly class WorkerControlProfile
 
     public static function for(ControlProfile $profile): self
     {
-        $container = \class_exists(\Illuminate\Container\Container::class)
-            ? \Illuminate\Container\Container::getInstance()
+        $container = \class_exists(Container::class)
+            ? Container::getInstance()
             : null;
         $configBound = $container !== null && $container->bound('config');
         $fillGroups = $configBound
