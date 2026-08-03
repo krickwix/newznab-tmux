@@ -22,5 +22,13 @@ COPY app/Services/Binaries/CollectionHandler.php /app/app/Services/Binaries/Coll
 COPY app/Services/Diagnostics/BraceTokenIdentityRepairService.php /app/app/Services/Diagnostics/BraceTokenIdentityRepairService.php
 COPY app/Console/Commands/RepairBraceTokenIdentity.php /app/app/Console/Commands/RepairBraceTokenIdentity.php
 
+# Unrelated to the brace-token work but shipped here because v218 had not been
+# deployed yet: the selector's last-resort round-robin read a candidate's yield
+# history unguarded, and Laravel turns the resulting E_WARNING into an
+# ErrorException that WorkerOrchestrator's catch-all converts into
+# failClosed(). Production sat in that crash-and-fail-closed loop from
+# 07:22:35 UTC with backfill paused and no pod restart to signal it.
+COPY app/Services/Orchestrator/BackfillTargetSelector.php /app/app/Services/Orchestrator/BackfillTargetSelector.php
+
 # No RUN step on purpose: /app/bootstrap/cache holds no config.php, so there is
 # no cached config to invalidate, and a RUN here would need cross-arch emulation.

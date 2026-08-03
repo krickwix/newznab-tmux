@@ -380,6 +380,10 @@ final class NntmuxDeploymentManifestTest extends TestCase
             'app/Services/Binaries/CollectionHandler.php',
             'app/Services/Diagnostics/BraceTokenIdentityRepairService.php',
             'app/Console/Commands/RepairBraceTokenIdentity.php',
+            // Unrelated to brace-token keying, but the fleet cannot process any
+            // reclaimed collection while the orchestrator crashes into
+            // failClosed() every cycle, so the guard ships in the same image.
+            'app/Services/Orchestrator/BackfillTargetSelector.php',
         ] as $path) {
             self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
         }
