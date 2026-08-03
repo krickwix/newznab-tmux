@@ -4,6 +4,20 @@ ARG SOURCE_REVISION
 LABEL org.opencontainers.image.revision="$SOURCE_REVISION"
 LABEL org.opencontainers.image.base.name="docker.io/krickwix/nntmux:microservices-pods-20260803-obfuscated-config-regression-v217"
 
+# Supersedes v219, which was correct but incomplete: its repair could only select
+# cohorts with --limit, i.e. in collection-id order, so a staged drain could not
+# name the posting it had validated. v220 adds --posting=. v219 is left in the
+# registry with its own digest rather than retagged; the fleet convention is that
+# an image.revision label must always resolve to the source it was built from.
+
+# Supersedes v218, which is WITHDRAWN: it shipped a repair whose target state was
+# one collection per real file, and applying it destroyed 512 production
+# collections and ~541 MB of articles (see the note on the repair COPY below).
+# v218 is deliberately left in the registry rather than retagged -- the
+# orchestrator lane still runs that digest for its unrelated
+# BackfillTargetSelector guard, and its image.revision label has to stay
+# resolvable. Do not run nntmux:repair-brace-token-identity from a v218 pod.
+
 # Additive only: normalize() is byte-equivalent to v217's (the diff is a local
 # variable inlined), and the two new statics -- postingKey() and
 # postingIdentity() -- are called exclusively by the repair pass below. Shipping

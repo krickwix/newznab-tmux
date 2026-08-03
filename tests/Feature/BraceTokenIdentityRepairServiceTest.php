@@ -382,6 +382,50 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
         $this->assertSame(18, DB::table('parts')->count());
     }
 
+    /**
+     * A staged production drain has to name the posting it is draining. --limit
+     * admits cohorts in collection-id order, which is arbitrary with respect to
+     * which posting has been validated as safe to merge next.
+     */
+    public function test_a_named_posting_admits_only_that_cohort(): void
+    {
+        foreach (['Soulm8te.2026', 'Maddie\'s.Secret.2026', 'Supergirl.2026'] as $posting) {
+            $this->seedStrandedFile('{'.$posting.'.part01.rar} yEnc', 3);
+            $this->seedStrandedFile('{'.$posting.'.part02.rar} yEnc', 3);
+        }
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true, null, 'Maddie\'s.Secret.2026');
+
+        $this->assertSame(1, $summary['cohorts_found']);
+        $this->assertSame(1, $summary['cohorts_merged']);
+        $this->assertSame('Maddie\'s.Secret.2026', $summary['cohorts'][0]['posting']);
+        // Every collection is still scanned -- the filter selects cohorts, it
+        // does not narrow the SQL -- but only the named one is touched.
+        $this->assertSame(18, $summary['collections_scanned']);
+        $this->assertSame(6, $summary['collections_in_cohorts']);
+        $this->assertSame(1 + 12, DB::table('collections')->count());
+        $this->assertSame(
+            "{Maddie's.Secret.2026}",
+            (string) DB::table('collections')->where('totalfiles', 2)->value('subject')
+        );
+        $this->assertSame(18, DB::table('parts')->count());
+    }
+
+    public function test_a_named_posting_that_matches_nothing_is_a_clean_no_op(): void
+    {
+        $this->seedStrandedFile('{Soulm8te.2026.part01.rar} yEnc', 3);
+        $this->seedStrandedFile('{Soulm8te.2026.part02.rar} yEnc', 3);
+
+        // Near-miss on purpose: the stem must match exactly, so a typo cannot
+        // silently fall back to "everything".
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true, null, 'Soulm8te.2026.part01');
+
+        $this->assertSame(0, $summary['cohorts_found']);
+        $this->assertSame(0, $summary['cohorts_merged']);
+        $this->assertSame(6, DB::table('collections')->count());
+        $this->assertSame(6, DB::table('parts')->count());
+    }
+
     public function test_it_ignores_collections_that_are_not_brace_token(): void
     {
         $this->seedCollection(

@@ -15,6 +15,7 @@ final class RepairBraceTokenIdentity extends Command
                             {--limit=50 : Maximum cohorts (distinct postings) to consider}
                             {--before= : Optional collection dateadded upper bound}
                             {--min-files= : Effective minfilestoformrelease; read from settings when omitted}
+                            {--posting= : Repair only this exact posting stem, e.g. "Maddie\'s.Secret.2026"}
                             {--update : Apply the regrouping; default is dry-run}
                             {--json : Emit machine-readable JSON}';
 
@@ -28,7 +29,8 @@ final class RepairBraceTokenIdentity extends Command
                 (int) $this->option('limit'),
                 $this->option('before') === null ? null : (string) $this->option('before'),
                 (bool) $this->option('update'),
-                $this->minFiles()
+                $this->minFiles(),
+                $this->posting()
             );
         } catch (InvalidArgumentException $e) {
             if ((bool) $this->option('json')) {
@@ -115,5 +117,16 @@ final class RepairBraceTokenIdentity extends Command
         $option = $this->option('min-files');
 
         return $option === null || $option === '' ? null : (int) $option;
+    }
+
+    /**
+     * A staged drain names its target. --limit alone admits cohorts in
+     * collection-id order, which says nothing about which posting is next.
+     */
+    private function posting(): ?string
+    {
+        $option = $this->option('posting');
+
+        return $option === null || $option === '' ? null : (string) $option;
     }
 }

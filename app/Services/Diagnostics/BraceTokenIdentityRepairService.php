@@ -66,6 +66,12 @@ final class BraceTokenIdentityRepairService
     }
 
     /**
+     * @param  string|null  $posting  Repair only the posting with this exact
+     *                                stem. A staged production drain needs to
+     *                                name its target: $limit admits cohorts in
+     *                                collection-id order, which is arbitrary
+     *                                with respect to which posting is safe to
+     *                                merge next.
      * @param  int|null  $minFiles  Override for the effective
      *                              `minfilestoformrelease`; read from the live
      *                              settings and group override when null. A
@@ -81,7 +87,8 @@ final class BraceTokenIdentityRepairService
         int $limit,
         ?string $before,
         bool $update,
-        ?int $minFiles = null
+        ?int $minFiles = null,
+        ?string $posting = null
     ): array {
         if ($limit < 1) {
             throw new InvalidArgumentException('--limit must be at least 1.');
@@ -108,7 +115,7 @@ final class BraceTokenIdentityRepairService
             ));
         }
 
-        [$cohorts, $scanned, $truncated] = $this->candidateCohorts($groupId, $limit, $before);
+        [$cohorts, $scanned, $truncated] = $this->candidateCohorts($groupId, $limit, $before, $posting);
 
         $resolved = [];
         foreach ($cohorts as $posting => $cohort) {
@@ -184,7 +191,7 @@ final class BraceTokenIdentityRepairService
      *
      * @return array{0: array<string, array{collections: list<int>, files: array<string,true>, oldest_dateadded: string|null, oldest_date: string|null}>, 1: int, 2: bool}
      */
-    private function candidateCohorts(int $groupId, int $limit, ?string $before): array
+    private function candidateCohorts(int $groupId, int $limit, ?string $before, ?string $posting = null): array
     {
         $query = DB::table('collections')
             ->where('groups_id', $groupId)
@@ -208,9 +215,13 @@ final class BraceTokenIdentityRepairService
             }
 
             $file = $normalized['name'];
-            $posting = ObfuscatedSubjectNormalizer::postingIdentity($file)['posting'];
+            $cohortName = ObfuscatedSubjectNormalizer::postingIdentity($file)['posting'];
 
-            if (! isset($cohorts[$posting])) {
+            if ($posting !== null && $cohortName !== $posting) {
+                continue;
+            }
+
+            if (! isset($cohorts[$cohortName])) {
                 if (\count($cohorts) >= $limit) {
                     // Stop admitting NEW cohorts, but keep scanning so the
                     // cohorts already admitted stay complete.
@@ -219,7 +230,7 @@ final class BraceTokenIdentityRepairService
                     continue;
                 }
 
-                $cohorts[$posting] = [
+                $cohorts[$cohortName] = [
                     'collections' => [],
                     'files' => [],
                     'oldest_dateadded' => null,
@@ -227,14 +238,14 @@ final class BraceTokenIdentityRepairService
                 ];
             }
 
-            $cohorts[$posting]['collections'][] = (int) $row->id;
-            $cohorts[$posting]['files'][$file] = true;
-            $cohorts[$posting]['oldest_dateadded'] = $this->earliest(
-                $cohorts[$posting]['oldest_dateadded'],
+            $cohorts[$cohortName]['collections'][] = (int) $row->id;
+            $cohorts[$cohortName]['files'][$file] = true;
+            $cohorts[$cohortName]['oldest_dateadded'] = $this->earliest(
+                $cohorts[$cohortName]['oldest_dateadded'],
                 $row->dateadded === null ? null : (string) $row->dateadded
             );
-            $cohorts[$posting]['oldest_date'] = $this->earliest(
-                $cohorts[$posting]['oldest_date'],
+            $cohorts[$cohortName]['oldest_date'] = $this->earliest(
+                $cohorts[$cohortName]['oldest_date'],
                 $row->date === null ? null : (string) $row->date
             );
         }
