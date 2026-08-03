@@ -570,6 +570,49 @@ final class NntmuxDeploymentManifestTest extends TestCase
     }
 
     /**
+     * v225 is the one overlay allowed to carry config/nntmux.php, and only
+     * because the copy is a strict superset of what the image already has.
+     *
+     * Every other overlay is forbidden from copying it: v214/v215 shipped a
+     * config from microservices-pods while running feature-branch code, deleted
+     * the keys that code read, and turned it into a silent no-op. The direction
+     * matters. Here the image's payload IS microservices-pods, and the branch
+     * file was verified in-pod to add 4 orchestrator keys and remove none (94
+     * pod keys vs 98 branch keys; 0 pod-only; 176 whole-config leaves, none
+     * absent from the branch).
+     *
+     * The four keys are asserted by name rather than by counting, because the
+     * whole failure mode is a key that quietly is not there.
+     */
+    public function test_config_catchup_overlay_ships_the_orchestrator_keys_the_image_is_missing(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/orchestrator-config-catchup-v225.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260804-additional-pp-bucket-v224'
+            .'@sha256:48f46342da889194d11b279c9594fcd2f02b10b8efad0a896618cc6644eff188',
+            $dockerfile,
+        );
+        self::assertStringContainsString('COPY config/nntmux.php /app/config/nntmux.php', $dockerfile);
+
+        $config = (string) file_get_contents(dirname(__DIR__, 4).'/config/nntmux.php');
+        foreach ([
+            'NNTMUX_ORCHESTRATOR_BACKFILL_FAIR_SHARE_NEWEST_CURSOR',
+            'NNTMUX_ORCHESTRATOR_BACKFILL_FILL_QUANTITY',
+            'NNTMUX_ORCHESTRATOR_BACKFILL_FILL_GROUPS',
+            'NNTMUX_ORCHESTRATOR_BACKFILL_FILL_THREADS',
+        ] as $var) {
+            self::assertStringContainsString(
+                $var,
+                $config,
+                sprintf('%s has no reader in the config this overlay ships, so shipping it would not close the drift', $var),
+            );
+        }
+    }
+
+    /**
      * The guard itself, asserted against the image that ships it.
      *
      * A bracket-anchored pattern is the natural thing to write and it is wrong:
