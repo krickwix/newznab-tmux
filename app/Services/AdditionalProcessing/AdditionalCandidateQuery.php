@@ -151,15 +151,22 @@ final class AdditionalCandidateQuery
         $bucketExpr = DB::getDriverName() === 'sqlite'
             ? 'substr(r.leftguid, 1, 1)'
             : 'LEFT(r.leftguid, 1)';
+        // `toBase()` and the `bucket` alias are both load-bearing. The projection
+        // is a GUID character, not a key: aliasing it `id` on the Release model
+        // hands it to Eloquent's implicit primary-key cast (getCasts() merges
+        // [keyName => keyType] for incrementing models), so every hex-letter
+        // bucket came back as (int) 'e' === 0. The fan-out then dispatched every
+        // child onto bucket '0' and additional postprocessing silently idled.
         $rows = self::baseBuilder()
-            ->select(DB::raw('DISTINCT '.$bucketExpr.' AS id'))
+            ->toBase()
+            ->select(DB::raw('DISTINCT '.$bucketExpr.' AS bucket'))
             ->limit($effectiveLimit)
             ->get();
         $chars = [];
         foreach ($rows as $row) {
-            $id = (string) ($row->id ?? '');
-            if ($id !== '') {
-                $chars[] = substr($id, 0, 1);
+            $bucket = (string) ($row->bucket ?? '');
+            if ($bucket !== '') {
+                $chars[] = substr($bucket, 0, 1);
             }
         }
 
