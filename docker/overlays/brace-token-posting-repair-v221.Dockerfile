@@ -4,6 +4,17 @@ ARG SOURCE_REVISION
 LABEL org.opencontainers.image.revision="$SOURCE_REVISION"
 LABEL org.opencontainers.image.base.name="docker.io/krickwix/nntmux:microservices-pods-20260803-obfuscated-config-regression-v217"
 
+# Supersedes v220, whose --update aborted on the first cohort it tried to merge.
+# The repair parks survivor binaries on a scratch filenumber before renumbering
+# them densely (the final ordinals are a permutation of numbers the cohort's
+# members already hold, so a direct write collides under UNIQUE
+# (collections_id, filenumber)). v220 parked on the NEGATED binary id, but
+# `binaries.filenumber` is `int(10) unsigned`: MariaDB clamped it to 0 and the
+# second park collided on '<survivor>-0'. The transaction rolled back cleanly and
+# no production row was altered. It parks above MAX(filenumber) now, and the
+# sqlite fixtures carry a CHECK (filenumber >= 0) so the unsigned domain is
+# reachable in tests -- without it the tests were green while production failed.
+
 # Supersedes v219, which was correct but incomplete: its repair could only select
 # cohorts with --limit, i.e. in collection-id order, so a staged drain could not
 # name the posting it had validated. v220 adds --posting=. v219 is left in the

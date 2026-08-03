@@ -368,6 +368,8 @@ final class BraceTokenIdentityRepairService
                 static fn (int $id): bool => $id !== $survivor
             ));
 
+            $parkBase = $this->parkBase($memberIds, \count($files));
+
             DB::transaction(function () use (
                 $entry,
                 $groupId,
@@ -377,9 +379,11 @@ final class BraceTokenIdentityRepairService
                 $files,
                 $byFile,
                 $declaredParts,
+                $parkBase,
                 &$totals
             ): void {
                 $survivorBinaries = [];
+                $park = 0;
 
                 foreach ($files as $file) {
                     $binaryIds = $byFile[$file];
@@ -404,9 +408,10 @@ final class BraceTokenIdentityRepairService
 
                     // Park on a filenumber that cannot collide with any ordinal
                     // still held by a not-yet-renumbered sibling.
+                    $park++;
                     DB::table('binaries')->where('id', $survivorBinary)->update([
                         'collections_id' => $survivor,
-                        'filenumber' => -$survivorBinary,
+                        'filenumber' => $parkBase + $park,
                     ]);
                 }
 
@@ -465,6 +470,36 @@ final class BraceTokenIdentityRepairService
         }
 
         return $totals;
+    }
+
+    /**
+     * Start of a free filenumber band to park survivors on before renumbering.
+     *
+     * The final ordinals are a permutation of numbers the cohort's binaries
+     * already hold, so writing them directly collides under UNIQUE
+     * (collections_id, filenumber). Survivors therefore land on a scratch band
+     * first and are renumbered in a second pass.
+     *
+     * `binaries.filenumber` is `int(10) unsigned`, so the obvious scratch value
+     * -- the negated binary id -- is not available: MariaDB clamps it to 0 and
+     * the second park collides on '<survivor>-0'. That is not a hypothetical, it
+     * is how the first production run of this pass failed. The band is taken
+     * above MAX(filenumber) across the whole cohort instead, which is free by
+     * construction because nothing in the cohort holds a number that high, and
+     * it stays inside the unsigned range: the ceiling is 4,294,967,295 and real
+     * filenumbers here are part counts, in the hundreds.
+     *
+     * @param  list<int>  $memberIds
+     */
+    private function parkBase(array $memberIds, int $fileCount): int
+    {
+        $max = (int) (DB::table('binaries')
+            ->whereIn('collections_id', $memberIds)
+            ->max('filenumber') ?? 0);
+
+        // Also clear the ordinals about to be written, so a park cannot land on
+        // a number pass 2 is going to claim.
+        return max($max, $fileCount);
     }
 
     /**

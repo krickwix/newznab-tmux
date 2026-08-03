@@ -95,7 +95,9 @@ final class BraceTokenRepairSurvivesReleaseGatesTest extends TestCase
             binaryhash BLOB,
             name VARCHAR(1000),
             collections_id INT,
-            filenumber INT DEFAULT 0,
+            -- CHECK mirrors the MariaDB `int(10) unsigned`; see the note on the
+            -- same column in BraceTokenIdentityRepairServiceTest.
+            filenumber INT DEFAULT 0 CHECK (filenumber >= 0),
             totalparts INT DEFAULT 0,
             currentparts INT DEFAULT 0,
             partcheck INT DEFAULT 0,

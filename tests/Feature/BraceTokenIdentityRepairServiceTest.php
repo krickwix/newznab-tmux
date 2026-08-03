@@ -71,7 +71,11 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
             binaryhash BLOB,
             name VARCHAR(1000),
             collections_id INT,
-            filenumber INT DEFAULT 0,
+            -- CHECK mirrors the MariaDB `int(10) unsigned`. Without it sqlite
+            -- accepts a negative filenumber that production silently clamps to
+            -- 0, which is exactly how the first production run of this repair
+            -- failed while these tests were green.
+            filenumber INT DEFAULT 0 CHECK (filenumber >= 0),
             totalparts INT DEFAULT 0,
             currentparts INT DEFAULT 0,
             partcheck INT DEFAULT 0,
@@ -471,6 +475,39 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
 
         $this->expectException(InvalidArgumentException::class);
         (new BraceTokenIdentityRepairService)->repair(self::GROUP_ID, 50, null, true);
+    }
+
+    /**
+     * The shape that broke the first production run.
+     *
+     * Production carries `filenumber = partnumber` on these rows, so a cohort's
+     * members hold filenumbers spread across the whole part range -- 1..512 for
+     * a 512-part file. The final ordinals (1..N over the files) are therefore a
+     * subset of numbers the cohort already holds, so survivors must be parked
+     * before they are renumbered. The park value has to be a POSITIVE number
+     * outside that range: `binaries.filenumber` is `int(10) unsigned`, so a
+     * negative park is clamped to 0 by MariaDB and the second park collides on
+     * '<survivor>-0'. The CHECK on the fixture's filenumber column makes that
+     * failure reachable here instead of only in production.
+     */
+    public function test_survivors_are_parked_above_the_filenumbers_the_cohort_already_holds(): void
+    {
+        // Two files, six parts each, filenumber == partnumber: every ordinal the
+        // merge wants to write (1 and 2) is already taken by some member.
+        $this->seedStrandedFile('{Soulm8te.2026.part01.rar} yEnc', 6);
+        $this->seedStrandedFile('{Soulm8te.2026.part02.rar} yEnc', 6);
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $this->assertSame(1, $summary['cohorts_merged']);
+        $this->assertSame(0, $summary['cohorts_skipped']);
+        $this->assertSame(2, $summary['binaries_retained']);
+
+        $binaries = DB::table('binaries')->orderBy('filenumber')->get();
+        $this->assertSame([1, 2], $binaries->pluck('filenumber')->map(static fn ($v): int => (int) $v)->all());
+        $this->assertSame([6, 6], $binaries->pluck('currentparts')->map(static fn ($v): int => (int) $v)->all());
+        // No article is lost on the way through the scratch band.
+        $this->assertSame(12, DB::table('parts')->count());
     }
 
     public function test_unknown_group_is_rejected(): void

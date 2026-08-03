@@ -364,7 +364,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
     public function test_brace_token_residue_overlay_packages_the_repair_pass(): void
     {
-        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-posting-repair-v220.Dockerfile');
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-posting-repair-v221.Dockerfile');
 
         self::assertIsString($dockerfile);
         self::assertStringContainsString(
@@ -400,7 +400,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      */
     public function test_brace_token_overlay_does_not_ship_the_per_file_ingest_keying(): void
     {
-        $dockerfile = (string) file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-posting-repair-v220.Dockerfile');
+        $dockerfile = (string) file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-posting-repair-v221.Dockerfile');
 
         foreach ([
             'app/Services/Binaries/HeaderParser.php',
@@ -412,7 +412,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
 
     public function test_brace_token_overlay_does_not_copy_config_over_the_repaired_keys(): void
     {
-        $dockerfile = (string) file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-posting-repair-v220.Dockerfile');
+        $dockerfile = (string) file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-posting-repair-v221.Dockerfile');
 
         // v214/v215 shipped a config/nntmux.php from a branch that lacked the
         // obfuscated_* keys, which silently NULLed them out and made the
