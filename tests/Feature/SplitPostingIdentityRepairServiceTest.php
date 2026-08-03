@@ -7,6 +7,7 @@ namespace Tests\Feature;
 use App\Services\Diagnostics\SplitPostingIdentityRepairService;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -364,6 +365,103 @@ final class SplitPostingIdentityRepairServiceTest extends TestCase
         $this->assertSame(0, $summary['cohorts_merged']);
         $this->assertSame('declares_a_real_file_count', $summary['skipped'][0]['reason']);
         $this->assertSame(2, (int) DB::table('collections')->count());
+    }
+
+    /**
+     * The counter's delimiter is not a constant, and a bracket-only pattern
+     * passed 333 live collections straight through to a merge. Each case here is
+     * transcribed from a subject production actually holds.
+     *
+     * @return iterable<string, array{0: string, 1: int, 2: int}>
+     */
+    public static function undelimitedFileCounters(): iterable
+    {
+        // Found while picking the first apply target AFTER the bracket fix
+        // shipped: 62 files declared, 58 present.
+        yield 'parenthesised, mid-subject' => [
+            'The Borrowers (1997) ==(37/62) - yEnc "theBorrowers-faye-xvid.part32.rar"',
+            62,
+            2,
+        ];
+        // No space before the paren, so a `\s\(` anchor would miss it too.
+        yield 'parenthesised, glued to a tag' => [
+            'AMEq2(06/19) "Queen Greatest Video Hits 2a DTS 5.1 DVD9 by AME.part004.rar" - yEnc',
+            19,
+            2,
+        ];
+        // Ingest ate the opening bracket, leaving a counter with one delimiter.
+        yield 'half-eaten delimiter' => [
+            'star trek the next generation s3 d425/96] - "star trek the next generation s3 d4.part24.rar" yEnc',
+            137,
+            2,
+        ];
+        // Spaces inside the counter, as the TrollHD poster writes them.
+        yield 'spaced inside the brackets' => [
+            '[ 02813 ] - [ TrollHD ] - [ 19/34 ] - "Travelscope - Madhya Pradesh.part18.rar" yEnc',
+            34,
+            2,
+        ];
+    }
+
+    #[DataProvider('undelimitedFileCounters')]
+    public function test_a_file_counter_is_honoured_whatever_delimits_it(
+        string $subject,
+        int $declared,
+        int $files
+    ): void {
+        $a = $this->seedCollection('delim-a', $declared, '2026-07-31 04:00:00', null, self::POSTER, $subject);
+        $this->seedBinary($a, 'Delimited.Test.part01.rar', $declared, 3, 1, $subject.' " yEnc "Delimited.Test.part01.rar" yEnc');
+        $b = $this->seedCollection('delim-b', $declared, '2026-07-31 04:05:00', null, self::POSTER, $subject);
+        $this->seedBinary($b, 'Delimited.Test.part02.rar', $declared, 3, 1, $subject.' " yEnc "Delimited.Test.part02.rar" yEnc');
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $this->assertSame(1, $summary['cohorts_found']);
+        $this->assertSame(0, $summary['cohorts_merged']);
+        $this->assertSame('declares_a_real_file_count', $summary['skipped'][0]['reason']);
+        $this->assertSame(
+            ['declared_files' => $declared, 'files_present' => $files],
+            $summary['skipped'][0]['values']
+        );
+        $this->assertSame(2, (int) DB::table('collections')->count());
+    }
+
+    /**
+     * @return iterable<string, array{0: string}>
+     */
+    public static function subjectsWithoutAFileCounter(): iterable
+    {
+        // The real bug class: totalfiles holds a PART count and the subject
+        // carries no file counter at all. Measured live, none of the 5,413
+        // collections in this class contains an `n/m` substring anywhere -- which
+        // is what makes the loose pattern free.
+        yield 'the live cinemageddon layout' => [
+            'The Paper Boy (1994) Dvdrip by Helljahve " yEnc "The Paper Boy (1994) Dvdrip by Helljahve.avi" yEnc',
+        ];
+        // A ratio-looking token that is NOT a counter must still merge, or the
+        // loose pattern would quietly strand rows it was never meant to touch.
+        yield 'a resolution in the title' => [
+            'Some.Doc.2026 - "Some.Doc.2026.mkv.001" - 1440x1080 - yEnc',
+        ];
+        yield 'an audio channel tag' => [
+            'Another.Film.2026 DTS 5.1 - "Another.Film.2026.mkv.001" yEnc',
+        ];
+    }
+
+    #[DataProvider('subjectsWithoutAFileCounter')]
+    public function test_a_posting_with_no_file_counter_is_still_merged(string $subject): void
+    {
+        $a = $this->seedCollection('nc-a', 242, '2026-07-31 04:00:00', null, self::POSTER, $subject);
+        $this->seedBinary($a, 'Merge.Me.mkv.001', 242, 3, 1, $subject.' " yEnc "Merge.Me.mkv.001" yEnc');
+        $b = $this->seedCollection('nc-b', 63, '2026-07-31 04:05:00', null, self::POSTER, $subject);
+        $this->seedBinary($b, 'Merge.Me.mkv.002', 63, 3, 1, $subject.' " yEnc "Merge.Me.mkv.002" yEnc');
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $this->assertSame(1, $summary['cohorts_merged']);
+        $this->assertSame(0, $summary['cohorts_skipped']);
+        $this->assertSame(1, (int) DB::table('collections')->count());
+        $this->assertSame(2, (int) DB::table('collections')->first()->totalfiles);
     }
 
     public function test_the_file_counter_refusal_reads_the_same_in_a_dry_run(): void

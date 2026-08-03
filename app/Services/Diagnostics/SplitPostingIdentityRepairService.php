@@ -93,19 +93,31 @@ final class SplitPostingIdentityRepairService
      * A GENUINE file counter, e.g. `(Nativ) [58/93] - "Nativ.part57.rar" yEnc`.
      *
      * Its presence is disqualifying, and this guard is the difference between a
-     * repair and a corruption. When a subject carries `[n/m]`, `totalfiles`
-     * holds a real file count, so a collection with fewer binaries than that is
-     * GENUINELY INCOMPLETE -- articles were never downloaded -- and the stall is
-     * correct behaviour. Rewriting totalfiles to COUNT(binaries) there would
-     * publish a 36-of-93 archive as complete: unextractable, and worse than the
-     * stall because a release cannot be undone by waiting.
+     * repair and a corruption. When a subject carries an `n/m` counter,
+     * `totalfiles` holds a real file count, so a collection with fewer binaries
+     * than that is GENUINELY INCOMPLETE -- articles were never downloaded -- and
+     * the stall is correct behaviour. Rewriting totalfiles to COUNT(binaries)
+     * there would publish a 36-of-93 archive as complete: unextractable, and
+     * worse than the stall because a release cannot be undone by waiting.
      *
-     * Caught by a production dry-run, not by a test: every fixture seeded a
-     * subject WITHOUT a file counter, so the shape was unrepresented. Measured
-     * over the live residue, 3,608 of 7,822 candidate collections carry one and
-     * ALL of them have `totalfiles > COUNT(binaries)`.
+     * DELIBERATELY UNDELIMITED. The obvious pattern is `\[n/m\]`, and it is
+     * wrong: across the live residue the counter appears bracketed on 3,850
+     * collections, PARENTHESISED on 94 (`The Borrowers (1997) ==(37/62) -`), and
+     * on 239 with its opening delimiter already eaten by an ingest regex
+     * (`star trek ... s3 d425/96] - "...part24.rar"`). A bracket-only pattern
+     * passes all 333 of those through to a merge. Requiring a delimiter buys
+     * nothing either: the 5,413 collections of the real bug class contain no
+     * `n/m` substring ANYWHERE in their subject, so the loose form refuses
+     * strictly more corruption at zero cost to the class being reclaimed. A
+     * false positive here strands a row until retention; a false negative
+     * publishes a partial archive.
+     *
+     * Both delimiter gaps were caught by production dry-runs on named targets,
+     * not by tests -- the bracket case on `Nativ`, the paren case on
+     * `theBorrowers-faye-xvid` while picking the next target after the first fix.
+     * Every fixture had seeded subjects with no counter at all.
      */
-    private const string FILE_COUNTER_PATTERN = '/\[\d+\s*\/\s*\d+\]/';
+    private const string FILE_COUNTER_PATTERN = '/\d+\s*\/\s*\d+/';
 
     /**
      * @param  string|null  $posting  Repair only the posting with this exact
