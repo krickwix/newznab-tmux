@@ -14,7 +14,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
      * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
      */
-    private const FLEET_IMAGE = 'microservices-pods-20260803-obfuscated-config-regression-v217@sha256:f3825e86776d60952d5db28c98b87d3e9fe0ef5ceaa1258b4bf598eaa41f1494';
+    private const FLEET_IMAGE = 'microservices-pods-20260803-brace-token-residue-v218@sha256:a33149da9c55aea07b0b359ee583e52f2ef82c5286fb1d3d014093a8d7961ed3';
 
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
@@ -360,6 +360,40 @@ final class NntmuxDeploymentManifestTest extends TestCase
         ] as $path) {
             self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
         }
+    }
+
+    public function test_brace_token_residue_overlay_packages_the_per_file_key_and_the_repair_pass(): void
+    {
+        $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-residue-v218.Dockerfile');
+
+        self::assertIsString($dockerfile);
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260803-obfuscated-config-regression-v217@sha256:f3825e86776d60952d5db28c98b87d3e9fe0ef5ceaa1258b4bf598eaa41f1494',
+            $dockerfile,
+        );
+        // All three ingest files ship together or not at all: HeaderParser sets
+        // the brace-token flag that CollectionHandler consumes to call the
+        // normalizer's static key. Shipping any one alone is a silent no-op.
+        foreach ([
+            'app/Services/Binaries/ObfuscatedSubjectNormalizer.php',
+            'app/Services/Binaries/HeaderParser.php',
+            'app/Services/Binaries/CollectionHandler.php',
+            'app/Services/Diagnostics/BraceTokenIdentityRepairService.php',
+            'app/Console/Commands/RepairBraceTokenIdentity.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    public function test_brace_token_overlay_does_not_copy_config_over_the_repaired_keys(): void
+    {
+        $dockerfile = (string) file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-residue-v218.Dockerfile');
+
+        // v214/v215 shipped a config/nntmux.php from a branch that lacked the
+        // obfuscated_* keys, which silently NULLed them out and made the
+        // normalizers permanent no-ops. This overlay changes no config, so it
+        // must not carry that COPY at all.
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
     }
 
     public function test_lossless_body_preamble_repair_is_explicitly_enabled(): void
