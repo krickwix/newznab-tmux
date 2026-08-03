@@ -110,6 +110,12 @@ final class HeaderParser
                     $matches[1] = $normalized['name'];
                     $header['collection_file_number'] = $normalized['file_number'];
                     $header['collection_total_files'] = $normalized['total_files'];
+                    // The token is gone from matches[1] by design, so nothing
+                    // downstream can recognise this subject as brace-token any
+                    // more. Flag it here so CollectionHandler keys the
+                    // collection per real file instead of per cleaned name,
+                    // which would fuse part01..partNN into one collection.
+                    $header['collection_brace_token'] = true;
                     $this->obfuscationNormalized++;
                 }
             }
