@@ -64,7 +64,10 @@ class AdminGroupController extends BasePageController
             'id' => '',
             'name' => '',
             'description' => '',
-            'minfilestoformrelease' => 0,
+            // 1, not 0: 0 is a real override that DISABLES the min-files delete
+            // for the group (both predicates are `> 0` guarded), so the blank
+            // add-group form used to switch a pipeline stage off by default.
+            'minfilestoformrelease' => 1,
             'active' => 0,
             'backfill' => 0,
             'minsizetoformrelease' => 0,

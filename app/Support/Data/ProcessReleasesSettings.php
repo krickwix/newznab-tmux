@@ -26,7 +26,17 @@ final class ProcessReleasesSettings extends Data
         public int $collectionTimeout = 48,
         public int $maxSizeToFormRelease = 0,
         public int $minSizeToFormRelease = 0,
-        public int $minFilesToFormRelease = 0,
+        /**
+         * 1, not 0: a release must describe at least one file.
+         *
+         * 0 does not mean "no floor", it DISABLES the predicate -- both delete
+         * sites are guarded by `> 0` (see ReleaseProcessingService), and
+         * effectiveGroupThreshold() treats an explicit group 0 as a real
+         * override rather than a fall-through. So 0 silently switches off a
+         * pipeline stage instead of loosening it, which is not what a reader of
+         * "minimum files = 0" expects.
+         */
+        public int $minFilesToFormRelease = 1,
         public int $releaseRetentionDays = 0,
         public bool $deletePasswordedRelease = false,
         public int $miscOtherRetentionHours = 0,
@@ -60,7 +70,7 @@ final class ProcessReleasesSettings extends Data
             collectionTimeout: $getInt('collection_timeout', 48),
             maxSizeToFormRelease: $getInt('maxsizetoformrelease', 0),
             minSizeToFormRelease: $getInt('minsizetoformrelease', 0),
-            minFilesToFormRelease: $getInt('minfilestoformrelease', 0),
+            minFilesToFormRelease: $getInt('minfilestoformrelease', 1),
             releaseRetentionDays: $getInt('releaseretentiondays', 0),
             deletePasswordedRelease: ((int) ($dbSettings['deletepasswordedrelease'] ?? 0)) === 1,
             miscOtherRetentionHours: $getInt('miscotherretentionhours', 0),
