@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Services\Metrics;
 
+use App\Support\Data\ProcessReleasesSettings;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Yaml\Parser;
 
@@ -14,7 +15,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
      * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
      */
-    private const FLEET_IMAGE = 'microservices-pods-20260803-split-posting-repair-v222@sha256:aff3dae4d1160830a19d244b59da43628d0ccd139c471e36bdcddd421bb16623';
+    private const FLEET_IMAGE = 'microservices-pods-20260803-split-posting-guard-v223@sha256:90179ef0876e1e3608889755956d53cbb2f23f385cd01d44e62bf735162c4017';
 
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
@@ -535,6 +536,55 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringContainsString("FILE_COUNTER_PATTERN = '/\\d+\\s*\\/\\s*\\d+/'", $service);
         self::assertStringNotContainsString('\[\d+\s*\/\s*\d+\]', $service);
         self::assertStringContainsString("'declares_a_real_file_count'", $service);
+    }
+
+    /**
+     * The site's min-files floor is 1, declared where the fleet actually reads
+     * it -- the settings table -- and not merely as a PHP fallback.
+     *
+     * ProcessReleasesSettings' default only applies when the row is absent, and
+     * the row is present: production carried `2`, which is what gates the drain.
+     * Re-measured over the live residue, a floor of 2 lets 264 repaired cohorts
+     * survive both delete predicates against 1,452 at a floor of 1, and it
+     * deletes for real -- 9 collections and 48 of 8,277 releases sit below
+     * totalfiles/totalpart 2, while nothing at all sits below 1. So this job is
+     * the only place the change takes effect, and a code default without it is a
+     * no-op.
+     *
+     * The group-level reset is deliberately scoped to explicit 0s. Those are the
+     * values the admin form manufactured out of NULLs, and 0 DISABLES the delete
+     * rather than lowering it; a blanket wipe of every override would also erase
+     * a floor someone set on purpose, on every run of this job.
+     */
+    public function test_the_settings_job_declares_the_min_files_floor(): void
+    {
+        $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/processing-settings-job.yaml';
+        if (! is_file($path)) {
+            self::markTestSkipped('mediahome sibling checkout is required for the workspace manifest regression.');
+        }
+
+        $job = (new Parser)->parse((string) file_get_contents($path));
+        self::assertIsArray($job);
+        $arguments = $job['spec']['template']['spec']['containers'][0]['args'] ?? null;
+        self::assertIsArray($arguments);
+        $execute = implode("\n", array_filter(
+            $arguments,
+            static fn (mixed $argument): bool => is_string($argument) && str_contains($argument, '$settings'),
+        ));
+        self::assertNotSame('', $execute, 'The settings job no longer carries an inline $settings array.');
+
+        self::assertStringContainsString('"minfilestoformrelease" => "1"', $execute);
+        self::assertSame(
+            1,
+            (new ProcessReleasesSettings)->minFilesToFormRelease,
+            'The declared site floor must match the code default, or one of the two is dead weight.',
+        );
+        self::assertStringContainsString(
+            'DB::table("usenet_groups")->where("minfilestoformrelease", 0)->update(["minfilestoformrelease" => null]);',
+            $execute,
+        );
+        // A blanket reset would clear deliberate per-group floors every run.
+        self::assertStringNotContainsString('whereNotNull("minfilestoformrelease")', $execute);
     }
 
     public function test_lossless_body_preamble_repair_is_explicitly_enabled(): void
