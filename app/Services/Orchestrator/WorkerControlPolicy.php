@@ -588,8 +588,15 @@ final class WorkerControlPolicy
         // Queued collections and NZBs are unsettled work, not proof that opening
         // the raw-input valve produces useful output. Recover only from an
         // observed release yield or an effective, completed permit cohort.
-        $productive = $snapshot->releaseYieldPerMinute > 0.0
-            || ($snapshot->backfillPermitCompleted && $snapshot->backfillPermitEffective);
+        //
+        // Three-state on purpose. A null yield means the sample window was
+        // unusable, not that the pipeline produced nothing, so it must not be
+        // read as evidence either way: treating it as unproductive reset the
+        // recovery counter on every slow controller pass and could strand a
+        // healthy pipeline in starvation indefinitely.
+        $permitProductive = $snapshot->backfillPermitCompleted && $snapshot->backfillPermitEffective;
+        $productive = $permitProductive || ($snapshot->releaseYieldPerMinute ?? 0.0) > 0.0;
+        $yieldUnknown = ! $permitProductive && $snapshot->releaseYieldPerMinute === null;
         $minimumGrowth = max(0.0, $this->qualifiedSupplyGrowthMinPerMinute
             ?? (float) $this->orchestratorConfig('qualified_supply_growth_min_per_minute', 1.0));
         $growing = max(
@@ -600,6 +607,11 @@ final class WorkerControlPolicy
 
         $current['last_observed_at'] = $snapshot->observedAt;
         if ($state->qualifiedSupplyStarved) {
+            if ($yieldUnknown) {
+                // Hold the accumulated progress instead of discarding it; the
+                // next measurable sample decides.
+                return [$current, ['qualified_supply_starved', 'release_yield_unknown']];
+            }
             if (! $productive) {
                 $current['recovery_samples'] = 0;
 
@@ -627,6 +639,13 @@ final class WorkerControlPolicy
             $current['recovery_samples'] = 0;
 
             return [$current, []];
+        }
+
+        if ($yieldUnknown) {
+            // Never open a starvation candidacy on an unmeasured sample: that
+            // would let repeated stale readings accumulate dwell toward
+            // starving a pipeline that may well be producing.
+            return [$current, ['release_yield_unknown']];
         }
 
         $candidateSince = $state->qualifiedSupplyCandidateSince > 0
@@ -684,17 +703,20 @@ final class WorkerControlPolicy
         if (! $snapshot->telemetryConsistent || ($snapshot->highPressure && $snapshot->lowPressure)) {
             $reasons[] = 'telemetry_inconsistent';
         }
+        // Same fail-closed outcome either way, but name which one it was: an
+        // unanswered query and a genuine breach need opposite responses from
+        // whoever reads these reasons.
         if (! $snapshot->databaseMemorySafe) {
-            $reasons[] = 'database_memory_limit';
+            $reasons[] = $snapshot->databaseMemoryKnown ? 'database_memory_limit' : 'database_memory_unknown';
         }
         if (! $snapshot->databaseCpuSafe) {
-            $reasons[] = 'database_cpu_limit';
+            $reasons[] = $snapshot->databaseCpuKnown ? 'database_cpu_limit' : 'database_cpu_unknown';
         }
         if (! $snapshot->databaseWaitsSafe) {
             $reasons[] = 'database_wait_or_deadlock';
         }
         if (! $snapshot->storageSafe) {
-            $reasons[] = 'storage_floor';
+            $reasons[] = $snapshot->storageKnown ? 'storage_floor' : 'storage_unknown';
         }
         if ($reasons === []) {
             $reasons[] = 'invalid_backlog_telemetry';

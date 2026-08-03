@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Services\Orchestrator;
 
+use Illuminate\Container\Container;
+
 final readonly class WorkerControlProfile
 {
     public function __construct(
@@ -21,11 +23,27 @@ final readonly class WorkerControlProfile
 
     public static function for(ControlProfile $profile): self
     {
+        $container = \class_exists(Container::class)
+            ? Container::getInstance()
+            : null;
+        $configBound = $container !== null && $container->bound('config');
+        $fillGroups = $configBound
+            ? max(1, (int) config('nntmux.orchestrator.backfill_fill_groups', 1))
+            : 1;
+        $fillThreads = $configBound
+            ? max(1, (int) config('nntmux.orchestrator.backfill_fill_threads', 1))
+            : 1;
+        // Per-round backfill download quantity (header count per permit). Must be a
+        // multiple of 10000 (permit ranges are 10k-aligned); clamped up to that.
+        $fillQuantity = $configBound
+            ? max(10000, (int) round((int) config('nntmux.orchestrator.backfill_fill_quantity', 10000) / 10000) * 10000)
+            : 10000;
+
         return match ($profile) {
             ControlProfile::FailSafe => new self($profile, 300, 1800, 180, 180, 5, false, 0, 0, 0),
             ControlProfile::Drain => new self($profile, 160, 1800, 45, 55, 20, false, 0, 0, 0),
             ControlProfile::Balanced => new self($profile, 40, 900, 60, 55, 20, true, 1, 1, 10000),
-            ControlProfile::Fill => new self($profile, 20, 20, 20, 20, 20, true, 1, 1, 10000),
+            ControlProfile::Fill => new self($profile, 20, 20, 20, 20, 20, true, $fillGroups, $fillThreads, $fillQuantity),
         };
     }
 

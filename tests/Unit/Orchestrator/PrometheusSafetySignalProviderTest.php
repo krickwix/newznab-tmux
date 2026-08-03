@@ -47,6 +47,9 @@ final class PrometheusSafetySignalProviderTest extends TestCase
             'cpu_safe' => true,
             'storage_safe' => true,
             'storage_available_bytes' => 20_000,
+            'memory_known' => true,
+            'cpu_known' => true,
+            'storage_known' => true,
         ], (new PrometheusSafetySignalProvider)->signals());
 
         $queries = [];

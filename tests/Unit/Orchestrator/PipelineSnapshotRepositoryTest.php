@@ -949,20 +949,32 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             'release_created_total' => 100,
             'observed_at' => 1_000,
         ], 1_060));
-        self::assertSame(0.0, $method->invoke($repository, 99, [
+
+        // Each of the three below is unmeasurable, not idle, and must report
+        // null: a zero here is indistinguishable from a pipeline that genuinely
+        // produced nothing, which is what let a stale sample reset recovery
+        // progress on a healthy pipeline.
+        self::assertNull($method->invoke($repository, 99, [
             'schema_version' => 5,
             'release_created_total' => 100,
             'observed_at' => 1_000,
-        ], 1_060));
-        self::assertSame(0.0, $method->invoke($repository, 103, [
+        ], 1_060), 'A counter that moved backwards is a reset, not zero yield.');
+        self::assertNull($method->invoke($repository, 103, [
             'schema_version' => 4,
             'release_created_total' => 100,
             'observed_at' => 1_000,
-        ], 1_060));
-        self::assertSame(0.0, $method->invoke($repository, 103, [
+        ], 1_060), 'An older schema cannot be compared against.');
+        self::assertNull($method->invoke($repository, 103, [
             'schema_version' => 5,
             'release_created_total' => 100,
             'observed_at' => 800,
+        ], 1_060), 'A window beyond snapshot_max_age_seconds is stale, not zero.');
+
+        // A measured zero is still zero.
+        self::assertSame(0.0, $method->invoke($repository, 100, [
+            'schema_version' => 5,
+            'release_created_total' => 100,
+            'observed_at' => 1_000,
         ], 1_060));
     }
 

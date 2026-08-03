@@ -138,7 +138,7 @@ class WorkerControlStateStore
         return $counts;
     }
 
-    /** @return array<string, int|float>|null */
+    /** @return array<string, int|float|null>|null */
     public function previousSnapshot(): ?array
     {
         $value = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->get(self::SNAPSHOT_KEY);

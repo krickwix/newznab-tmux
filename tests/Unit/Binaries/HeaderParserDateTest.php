@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit\Binaries;
 
 use App\Services\Binaries\HeaderParser;
+use App\Services\Binaries\ObfuscatedSubjectNormalizer;
 use App\Services\BlacklistService;
 use PHPUnit\Framework\TestCase;
 
@@ -54,13 +55,17 @@ final class HeaderParserDateTest extends TestCase
 
     private function parser(): HeaderParser
     {
-        return new HeaderParser(new class extends BlacklistService
+        $blacklist = new class extends BlacklistService
         {
             public function isBlackListed(array $msg, string $groupName): bool
             {
                 return false;
             }
-        });
+        };
+
+        // No container is booted here, so the normalizer's config-reading
+        // default constructor would fail; these cases are about dates only.
+        return new HeaderParser($blacklist, new ObfuscatedSubjectNormalizer([]));
     }
 
     /** @return array<string, mixed> */
