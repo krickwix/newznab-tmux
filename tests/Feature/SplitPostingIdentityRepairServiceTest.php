@@ -287,6 +287,129 @@ final class SplitPostingIdentityRepairServiceTest extends TestCase
         $this->assertSame(26, (int) DB::table('parts')->count());
     }
 
+    public function test_a_cohort_declaring_a_real_file_count_is_refused_not_merged(): void
+    {
+        // The live `Nativ` posting in alt.binaries.cinemageddon, which a
+        // production dry-run named as the first apply target before this guard
+        // existed. Its subject carries a REAL file counter, so totalfiles=93 is
+        // correct and the 4 binaries present mean 89 files were never
+        // downloaded. Merging would rewrite totalfiles to 4 and publish a
+        // 4-of-93 archive as complete -- unextractable, and unlike a stall it
+        // cannot be undone by waiting. It clears min_files and is not par2-only,
+        // so nothing ELSE would have refused it.
+        $this->seedNativ();
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $this->assertSame(1, $summary['cohorts_found']);
+        $this->assertSame(0, $summary['cohorts_merged']);
+        $this->assertSame(1, $summary['cohorts_skipped']);
+        $this->assertSame('declares_a_real_file_count', $summary['skipped'][0]['reason']);
+        // The operator sees the gap that made it a refusal, not just a label.
+        $this->assertSame(
+            ['declared_files' => 93, 'files_present' => 4],
+            $summary['skipped'][0]['values']
+        );
+
+        // Untouched: every collection keeps its seeded hash, its part count and
+        // its declared totalfiles.
+        $this->assertSame(0, $summary['collections_removed']);
+        $this->assertSame(0, $summary['binaries_removed']);
+        $this->assertSame(3, (int) DB::table('collections')->count());
+        $this->assertSame(4, (int) DB::table('binaries')->count());
+        $this->assertSame(10, (int) DB::table('parts')->count());
+        $this->assertSame(
+            [93, 93, 93],
+            DB::table('collections')->orderBy('id')->pluck('totalfiles')
+                ->map(static fn ($v): int => (int) $v)->all()
+        );
+        $this->assertSame(
+            ['seed-nativ-a', 'seed-nativ-b', 'seed-nativ-c'],
+            $this->sorted(
+                DB::table('collections')->pluck('collectionhash')
+                    ->map(static fn ($v): string => (string) $v)->all()
+            )
+        );
+    }
+
+    public function test_one_member_carrying_a_file_counter_disqualifies_the_whole_cohort(): void
+    {
+        // The counter is a property of the POSTING, not of the row: ingest keys
+        // members separately, so a cohort can hold both shapes. Refusing only
+        // the annotated members would merge the rest and still write a file
+        // count for a posting whose real count is known and larger.
+        $counted = $this->seedCollection(
+            'mixed-counted',
+            93,
+            '2026-07-31 04:00:00',
+            null,
+            self::POSTER,
+            '(Nativ) [58/93] - "Nativ.part57.rar" yEnc'
+        );
+        $this->seedBinary($counted, 'Nativ.part57.rar', 93, 2, 57, '(Nativ) [58/93] - "Nativ.part57.rar" yEnc');
+
+        $bare = $this->seedCollection(
+            'mixed-bare',
+            226,
+            '2026-07-31 04:05:00',
+            null,
+            self::POSTER,
+            '(Nativ) - "Nativ.part58.rar" yEnc'
+        );
+        $this->seedBinary($bare, 'Nativ.part58.rar', 226, 2, 1, '(Nativ) - "Nativ.part58.rar" yEnc');
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $this->assertSame(1, $summary['cohorts_found']);
+        $this->assertSame(0, $summary['cohorts_merged']);
+        $this->assertSame('declares_a_real_file_count', $summary['skipped'][0]['reason']);
+        $this->assertSame(2, (int) DB::table('collections')->count());
+    }
+
+    public function test_the_file_counter_refusal_reads_the_same_in_a_dry_run(): void
+    {
+        // A dry-run that merged on paper and refused on apply -- or the reverse
+        // -- would make the operator's go/no-go read on the wrong plan. This
+        // refusal is the one where that read matters most.
+        $this->seedNativ();
+
+        $dry = $this->service()->repair(self::GROUP_ID, 50, null, false);
+        $applied = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $this->assertSame($dry['skipped'], $applied['skipped']);
+        $this->assertSame(
+            'declares_a_real_file_count',
+            $this->cohort($dry, 'Nativ')['refusal']
+        );
+    }
+
+    public function test_a_posting_without_a_file_counter_still_merges_beside_a_refused_one(): void
+    {
+        // The guard has to be narrow: the bug class it protects is the one where
+        // totalfiles holds a PART count and no file counter exists anywhere in
+        // the subject. Both shapes live in the same group, and refusing both
+        // would strand the residue this service exists to reclaim.
+        $this->seedNativ();
+        $this->seedPaperBoy();
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $reasons = array_column($summary['skipped'], 'reason', 'name');
+        $this->assertSame('declares_a_real_file_count', $reasons['Nativ'] ?? null);
+        $this->assertSame(1, $summary['cohorts_merged']);
+        $this->assertSame(3, $summary['collections_removed']);
+
+        // Paper Boy's 4 fragments collapsed to 1; Nativ's 3 and the two refused
+        // sidecars are all still there.
+        $survivor = DB::table('collections')
+            ->where('collectionhash', 'not like', 'seed-%')
+            ->first();
+        $this->assertNotNull($survivor);
+        $this->assertSame(6, (int) $survivor->totalfiles);
+        $this->assertSame(3, (int) DB::table('collections')->where('collectionhash', 'like', 'seed-nativ-%')->count());
+        $this->assertSame(6, (int) DB::table('collections')->count());
+    }
+
     public function test_dry_run_reports_the_same_refusals_as_apply(): void
     {
         $c = $this->seedCollection('lonely', 40, '2026-07-31 04:00:00');
@@ -650,6 +773,26 @@ final class SplitPostingIdentityRepairServiceTest extends TestCase
         $this->seedBinary($nzb, 'The Paper Boy (1994).nzb', 2, 2);
     }
 
+    /**
+     * The live `Nativ` posting: 3 collections, 4 real files, and a subject
+     * carrying `[58/93]`. It clears minfilestoformrelease and holds no par2, so
+     * only FILE_COUNTER_PATTERN stands between it and a 4-of-93 release.
+     */
+    private function seedNativ(): void
+    {
+        $subject = static fn (string $file): string => '(Nativ) [58/93] - "'.$file.'" yEnc';
+
+        $a = $this->seedCollection('nativ-a', 93, '2026-07-31 04:00:00', null, self::POSTER, $subject('Nativ.part57.rar'));
+        $this->seedBinary($a, 'Nativ.part57.rar', 93, 3, 57, $subject('Nativ.part57.rar'));
+        $this->seedBinary($a, 'Nativ.part58.rar', 93, 3, 58, $subject('Nativ.part58.rar'));
+
+        $b = $this->seedCollection('nativ-b', 93, '2026-07-31 04:05:00', null, self::POSTER, $subject('Nativ.part59.rar'));
+        $this->seedBinary($b, 'Nativ.part59.rar', 93, 2, 59, $subject('Nativ.part59.rar'));
+
+        $c = $this->seedCollection('nativ-c', 93, '2026-07-31 04:10:00', null, self::POSTER, $subject('Nativ.part60.rar'));
+        $this->seedBinary($c, 'Nativ.part60.rar', 93, 2, 60, $subject('Nativ.part60.rar'));
+    }
+
     private function seedCollection(
         string $hash,
         int $totalFiles,
@@ -680,7 +823,8 @@ final class SplitPostingIdentityRepairServiceTest extends TestCase
         string $file,
         int $declaredParts,
         int $parts,
-        ?int $fileNumber = null
+        ?int $fileNumber = null,
+        ?string $name = null
     ): int {
         $binaryId = $this->nextBinaryId++;
 
@@ -689,7 +833,7 @@ final class SplitPostingIdentityRepairServiceTest extends TestCase
             'binaryhash' => md5($file.$collectionId),
             // binaries.name holds the whole subject, quotes included -- which is
             // why the service extracts the filename rather than trusting it.
-            'name' => 'The Paper Boy (1994) Dvdrip by Helljahve " yEnc "'.$file.'" yEnc',
+            'name' => $name ?? 'The Paper Boy (1994) Dvdrip by Helljahve " yEnc "'.$file.'" yEnc',
             'collections_id' => $collectionId,
             'filenumber' => $fileNumber ?? 1,
             'totalparts' => $declaredParts,

@@ -49,6 +49,15 @@ use InvalidArgumentException;
  * because a fragment like Paper Boy's 16-file collection needs exactly that to
  * clear stage 1.
  *
+ * AND ONLY WHEN totalfiles IS ACTUALLY UNTRUSTWORTHY. A subject carrying a real
+ * `[n/m]` file counter is not this bug: its totalfiles is correct, so a
+ * shortfall means articles were never downloaded and the stall is right.
+ * FILE_COUNTER_PATTERN refuses those outright. Skipping that check does not
+ * strand data, it publishes a partial archive as complete -- the one failure
+ * mode here that waiting cannot undo. It was caught by a production dry-run on
+ * a named target, after every fixture had missed the shape; over the live
+ * residue it disqualifies 3,608 of 7,822 candidate collections.
+ *
  * Target state matches BraceTokenIdentityRepairService: ONE collection per
  * posting, one binary per real file, dense filenumbers 1..N.
  *
@@ -79,6 +88,24 @@ final class SplitPostingIdentityRepairService
      * fixtures, which is where the merge is actually proven safe.
      */
     private const string HASH_STYLE_PATTERN = '/[0-9a-f]{32,}/i';
+
+    /**
+     * A GENUINE file counter, e.g. `(Nativ) [58/93] - "Nativ.part57.rar" yEnc`.
+     *
+     * Its presence is disqualifying, and this guard is the difference between a
+     * repair and a corruption. When a subject carries `[n/m]`, `totalfiles`
+     * holds a real file count, so a collection with fewer binaries than that is
+     * GENUINELY INCOMPLETE -- articles were never downloaded -- and the stall is
+     * correct behaviour. Rewriting totalfiles to COUNT(binaries) there would
+     * publish a 36-of-93 archive as complete: unextractable, and worse than the
+     * stall because a release cannot be undone by waiting.
+     *
+     * Caught by a production dry-run, not by a test: every fixture seeded a
+     * subject WITHOUT a file counter, so the shape was unrepresented. Measured
+     * over the live residue, 3,608 of 7,822 candidate collections carry one and
+     * ALL of them have `totalfiles > COUNT(binaries)`.
+     */
+    private const string FILE_COUNTER_PATTERN = '/\[\d+\s*\/\s*\d+\]/';
 
     /**
      * @param  string|null  $posting  Repair only the posting with this exact
@@ -211,7 +238,7 @@ final class SplitPostingIdentityRepairService
      * $limit bounds COHORTS, not rows: a cohort must be complete to merge
      * safely, and a row limit would slice a posting across runs.
      *
-     * @return array{0: list<array{posting: string, fromname: string, collections: list<int>, binaries: array<string, list<int>>, declared_parts: array<string, int>, oldest_dateadded: string|null, oldest_date: string|null}>, 1: int, 2: bool}
+     * @return array{0: list<array{posting: string, fromname: string, collections: list<int>, binaries: array<string, list<int>>, declared_parts: array<string, int>, declared_file_counts: array<int, int>, oldest_dateadded: string|null, oldest_date: string|null}>, 1: int, 2: bool}
      */
     private function candidateCohorts(int $groupId, int $limit, ?string $before, ?string $posting): array
     {
@@ -228,6 +255,7 @@ final class SplitPostingIdentityRepairService
                 'b.totalparts',
                 'c.id as collection_id',
                 'c.subject',
+                'c.totalfiles',
                 'c.fromname',
                 'c.date',
                 'c.dateadded',
@@ -280,9 +308,19 @@ final class SplitPostingIdentityRepairService
                     'collections' => [],
                     'binaries' => [],
                     'declared_parts' => [],
+                    'declared_file_counts' => [],
                     'oldest_dateadded' => null,
                     'oldest_date' => null,
                 ];
+            }
+
+            // A member whose subject carries a real file counter makes the whole
+            // cohort untouchable: its totalfiles is trustworthy, so the shortfall
+            // is missing articles rather than a mis-key. Recorded rather than
+            // skipped here, so planCohort() can REPORT the refusal instead of the
+            // cohort silently shrinking and the dry-run disagreeing with reality.
+            if (preg_match(self::FILE_COUNTER_PATTERN, (string) $row->subject) === 1) {
+                $cohorts[$key]['declared_file_counts'][(int) $row->collection_id] = (int) $row->totalfiles;
             }
 
             $cohorts[$key]['collections'][(int) $row->collection_id] = true;
@@ -316,7 +354,7 @@ final class SplitPostingIdentityRepairService
      * Decide, once, what would happen to a cohort -- so the dry-run reports
      * exactly what the apply would do instead of looking like a clean pass.
      *
-     * @param  array{posting: string, fromname: string, collections: list<int>, binaries: array<string, list<int>>, declared_parts: array<string, int>, oldest_dateadded: string|null, oldest_date: string|null}  $cohort
+     * @param  array{posting: string, fromname: string, collections: list<int>, binaries: array<string, list<int>>, declared_parts: array<string, int>, declared_file_counts: array<int, int>, oldest_dateadded: string|null, oldest_date: string|null}  $cohort
      * @return array<string,mixed>
      */
     private function planCohort(array $cohort, int $minFiles): array
@@ -337,6 +375,21 @@ final class SplitPostingIdentityRepairService
             'refusal_values' => [],
             'duplicate_partnumber_binaries' => 0,
         ];
+
+        // Checked BEFORE the shape refusals, because it is the only refusal whose
+        // absence would corrupt rather than merely strand: this cohort is not a
+        // mis-key at all, and no amount of merging makes its missing articles
+        // appear. See FILE_COUNTER_PATTERN.
+        $declared = $cohort['declared_file_counts'] ?? [];
+        if ($declared !== []) {
+            $plan['refusal'] = 'declares_a_real_file_count';
+            $plan['refusal_values'] = [
+                'declared_files' => max($declared),
+                'files_present' => \count($files),
+            ];
+
+            return $plan;
+        }
 
         if ($plan['refusal'] !== null) {
             return $plan;
@@ -768,6 +821,15 @@ final class SplitPostingIdentityRepairService
      * A group override of NULL or '' falls back to the site setting. Read live
      * rather than assumed, because merging against the wrong floor deletes
      * collections.
+     *
+     * The max(1, ...) clamp is deliberately STRICTER than production. An explicit
+     * 0 is a real override to effectiveGroupThreshold()
+     * (ReleaseProcessingService.php:1761 -- only null/'' fall through), and both
+     * min-files delete predicates are guarded by `> 0`, so 0 DISABLES the delete
+     * for that group and nothing would be cascaded. Clamping to 1 anyway means we
+     * refuse a handful of single-file cohorts we could technically have merged,
+     * which errs toward stranding rather than deleting -- and 0 is a
+     * misconfiguration to be corrected in settings, not a floor to trust here.
      */
     private function effectiveMinFiles(int $groupId): int
     {
