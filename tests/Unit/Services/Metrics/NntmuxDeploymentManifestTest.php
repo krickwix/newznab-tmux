@@ -474,6 +474,69 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
     }
 
+    /**
+     * v223 layers the file-counter guard over v222, and v222 must never be the
+     * fleet image again.
+     *
+     * v222's repair rewrites totalfiles to COUNT(binaries) without checking
+     * whether the subject declares a real file count, so --update on a
+     * counter-bearing cohort publishes a partial archive as complete. Two
+     * production dry-runs found it -- `[58/93]` on Nativ, then `==(37/62)` on
+     * theBorrowers after the bracket-only fix. A sibling overlay that re-based on
+     * v221 or v222 would silently un-ship the guard.
+     */
+    public function test_split_posting_guard_overlay_layers_on_v222_and_ships_the_guard(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/split-posting-guard-v223.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260803-split-posting-repair-v222'
+            .'@sha256:aff3dae4d1160830a19d244b59da43628d0ccd139c471e36bdcddd421bb16623',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Diagnostics/SplitPostingIdentityRepairService.php',
+            // The min-files default and the admin form that was manufacturing
+            // explicit 0s: 0 disables the delete rather than lowering it.
+            'app/Support/Data/ProcessReleasesSettings.php',
+            'app/Http/Controllers/Admin/AdminGroupController.php',
+            'resources/views/admin/groups/edit.blade.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+
+        // The ingest cure is still withheld, for the same reason as in v222.
+        foreach ([
+            'app/Services/Binaries/HeaderParser.php',
+            'app/Services/Binaries/CollectionHandler.php',
+            'app/Services/ReleaseProcessingService.php',
+        ] as $path) {
+            self::assertStringNotContainsString("COPY {$path}", $dockerfile);
+        }
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
+    /**
+     * The guard itself, asserted against the image that ships it.
+     *
+     * A bracket-anchored pattern is the natural thing to write and it is wrong:
+     * over the live residue the counter is parenthesised on 94 collections and
+     * missing its opening delimiter on 239, so `\[\d+/\d+\]` passes 333
+     * collections through to a merge that would misreport their file counts.
+     */
+    public function test_the_shipped_repair_refuses_undelimited_file_counters(): void
+    {
+        $service = (string) file_get_contents(
+            dirname(__DIR__, 4).'/app/Services/Diagnostics/SplitPostingIdentityRepairService.php'
+        );
+
+        self::assertStringContainsString("FILE_COUNTER_PATTERN = '/\\d+\\s*\\/\\s*\\d+/'", $service);
+        self::assertStringNotContainsString('\[\d+\s*\/\s*\d+\]', $service);
+        self::assertStringContainsString("'declares_a_real_file_count'", $service);
+    }
+
     public function test_lossless_body_preamble_repair_is_explicitly_enabled(): void
     {
         $path = dirname(__DIR__, 5).'/mediahome/manifests/media/nntmux/infra.yaml';
