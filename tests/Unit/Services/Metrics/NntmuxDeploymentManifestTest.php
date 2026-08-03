@@ -362,7 +362,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
         }
     }
 
-    public function test_brace_token_residue_overlay_packages_the_per_file_key_and_the_repair_pass(): void
+    public function test_brace_token_residue_overlay_packages_the_repair_pass(): void
     {
         $dockerfile = file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-residue-v218.Dockerfile');
 
@@ -371,13 +371,11 @@ final class NntmuxDeploymentManifestTest extends TestCase
             'FROM docker.io/krickwix/nntmux:microservices-pods-20260803-obfuscated-config-regression-v217@sha256:f3825e86776d60952d5db28c98b87d3e9fe0ef5ceaa1258b4bf598eaa41f1494',
             $dockerfile,
         );
-        // All three ingest files ship together or not at all: HeaderParser sets
-        // the brace-token flag that CollectionHandler consumes to call the
-        // normalizer's static key. Shipping any one alone is a silent no-op.
         foreach ([
+            // The repair pass calls postingKey()/postingIdentity(), so the
+            // normalizer has to ship with it. Its normalize() is unchanged from
+            // v217, so this COPY does not alter ingest.
             'app/Services/Binaries/ObfuscatedSubjectNormalizer.php',
-            'app/Services/Binaries/HeaderParser.php',
-            'app/Services/Binaries/CollectionHandler.php',
             'app/Services/Diagnostics/BraceTokenIdentityRepairService.php',
             'app/Console/Commands/RepairBraceTokenIdentity.php',
             // Unrelated to brace-token keying, but the fleet cannot process any
@@ -386,6 +384,29 @@ final class NntmuxDeploymentManifestTest extends TestCase
             'app/Services/Orchestrator/BackfillTargetSelector.php',
         ] as $path) {
             self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
+    /**
+     * The ingest-side keying must NOT ship in this image.
+     *
+     * Routing brace-token subjects onto a per-real-file collection key fixes the
+     * cleaned-name collapse, but it yields one binary per collection -- the shape
+     * stage 6 + deleteCollectionsUnderThreshold() delete outright, cascading
+     * every part through FK_Collections. An earlier build shipped it and cost 512
+     * production collections and ~541 MB of articles. Ingest is left as v217
+     * (wrong, but only for a poster that has been silent since 2026-08-02) until
+     * a fix exists that survives the release gates.
+     */
+    public function test_brace_token_overlay_does_not_ship_the_per_file_ingest_keying(): void
+    {
+        $dockerfile = (string) file_get_contents(dirname(__DIR__, 4).'/docker/overlays/brace-token-residue-v218.Dockerfile');
+
+        foreach ([
+            'app/Services/Binaries/HeaderParser.php',
+            'app/Services/Binaries/CollectionHandler.php',
+        ] as $path) {
+            self::assertStringNotContainsString("COPY {$path}", $dockerfile);
         }
     }
 

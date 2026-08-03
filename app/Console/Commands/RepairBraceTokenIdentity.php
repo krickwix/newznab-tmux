@@ -12,12 +12,13 @@ final class RepairBraceTokenIdentity extends Command
 {
     protected $signature = 'nntmux:repair-brace-token-identity
                             {group : Group id or exact group name}
-                            {--limit=50 : Maximum cohorts (distinct real filenames) to consider}
+                            {--limit=50 : Maximum cohorts (distinct postings) to consider}
                             {--before= : Optional collection dateadded upper bound}
+                            {--min-files= : Effective minfilestoformrelease; read from settings when omitted}
                             {--update : Apply the regrouping; default is dry-run}
                             {--json : Emit machine-readable JSON}';
 
-    protected $description = 'Reclaim stranded brace-token collections into one collection per real file (dry-run by default)';
+    protected $description = 'Reclaim stranded brace-token collections into one collection per posting (dry-run by default)';
 
     public function handle(BraceTokenIdentityRepairService $service): int
     {
@@ -26,7 +27,8 @@ final class RepairBraceTokenIdentity extends Command
                 (string) $this->argument('group'),
                 (int) $this->option('limit'),
                 $this->option('before') === null ? null : (string) $this->option('before'),
-                (bool) $this->option('update')
+                (bool) $this->option('update'),
+                $this->minFiles()
             );
         } catch (InvalidArgumentException $e) {
             if ((bool) $this->option('json')) {
@@ -56,12 +58,15 @@ final class RepairBraceTokenIdentity extends Command
         $this->table(
             ['metric', 'value'],
             [
-                ['cohorts found (distinct real files)', $summary['cohorts_found']],
+                ['cohorts found (distinct postings)', $summary['cohorts_found']],
                 ['collections in those cohorts', $summary['collections_in_cohorts']],
+                ['real files in those cohorts', $summary['files_in_cohorts']],
+                ['effective minfilestoformrelease', $summary['min_files']],
                 ['cohorts merged', $summary['cohorts_merged']],
-                ['cohorts skipped (part clash)', $summary['cohorts_skipped']],
+                ['cohorts skipped', $summary['cohorts_skipped']],
                 ['collections removed', $summary['collections_removed']],
-                ['binaries removed', $summary['binaries_removed']],
+                ['binaries removed (duplicate articles)', $summary['binaries_removed']],
+                ['binaries retained (one per real file)', $summary['binaries_retained']],
                 ['parts rehomed', $summary['parts_moved']],
                 ['cohort limit reached', $summary['cohort_limit_reached'] ? 'yes' : 'no'],
             ]
@@ -76,9 +81,21 @@ final class RepairBraceTokenIdentity extends Command
 
         if ($summary['cohorts_skipped'] > 0) {
             $this->warn(sprintf(
-                '%d cohort(s) held colliding parts, so they are not one file; these were left untouched for inspection.',
+                '%d cohort(s) were left untouched. A merge is lossy and the release pipeline '
+                .'deletes some shapes outright (below_min_files, par2_only), so a stranded row '
+                .'is preferred over a merged-then-cascaded one:',
                 $summary['cohorts_skipped']
             ));
+
+            $this->table(
+                ['posting', 'reason', 'files', 'collections'],
+                array_map(static fn (array $row): array => [
+                    $row['name'],
+                    $row['reason'],
+                    \count($row['files'] ?? []),
+                    \count($row['collections'] ?? []),
+                ], $summary['skipped'])
+            );
         }
 
         if ($summary['cohort_limit_reached']) {
@@ -90,5 +107,13 @@ final class RepairBraceTokenIdentity extends Command
         }
 
         return self::SUCCESS;
+    }
+
+    /** Null lets the service read the live site setting and group override. */
+    private function minFiles(): ?int
+    {
+        $option = $this->option('min-files');
+
+        return $option === null || $option === '' ? null : (int) $option;
     }
 }

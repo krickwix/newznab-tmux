@@ -119,4 +119,74 @@ final class ObfuscatedSubjectNormalizer
     {
         return \sprintf('bracetoken:g%d:%s', $groupId, sha1(trim($normalizedName)));
     }
+
+    /**
+     * The collection key shared by every FILE of one brace-token posting.
+     *
+     * Keying per file (collectionKey() above) produces a collection holding a
+     * single binary, and the release pipeline deletes that shape twice over:
+     *
+     *  - runCollectionFileCheckStage6() rewrites totalfiles to COUNT(binaries),
+     *    so a one-binary collection lands below `minfilestoformrelease` and
+     *    deleteCollectionsUnderThreshold() removes it;
+     *  - a par2 file's lone binary is 100% par2, so createReleases()' par2-only
+     *    filter removes it even when the floor is cleared.
+     *
+     * Both deletes cascade through FK_Collections and take the parts with them.
+     * Grouping a posting's payload volumes and its par2 recovery set into one
+     * collection -- each file its own binary -- is what satisfies them, and is
+     * also the shape an unobfuscated post already has.
+     *
+     * @param  string  $postingName  The posting stem from postingIdentity().
+     */
+    public static function postingKey(string $postingName, int $groupId): string
+    {
+        return \sprintf('bracetokenpost:g%d:%s', $groupId, sha1(trim($postingName)));
+    }
+
+    /**
+     * Split a de-tokenised filename into its posting stem and file ordering.
+     *
+     * Only the *relative* order within a kind is derivable from one filename,
+     * which is why this returns a sort hint rather than a file number: dense
+     * ordinals need the payload count, so they can only be allocated once the
+     * whole cohort is known (see BraceTokenIdentityRepairService). Two gates
+     * read MAX(filenumber) as a file count, so sparse or high-band numbering
+     * would leave a collection permanently incomplete.
+     *
+     * 'kind' orders payload files ahead of the par2 set, matching how a normal
+     * post is laid out.
+     *
+     * @param  string  $normalizedName  Subject with its token already stripped.
+     * @return array{posting: string, kind: int, hint: int}
+     */
+    public static function postingIdentity(string $normalizedName): array
+    {
+        $name = trim($normalizedName);
+        // Work on the braced filename, keeping whatever trailer ('yEnc') follows
+        // so the reassembled posting subject stays in the same shape.
+        $inner = preg_match('/^\{(?P<inner>[^{}]+)\}/', $name, $braced) === 1
+            ? $braced['inner']
+            : $name;
+
+        if (preg_match('/^(?P<stem>.+)\.part(?P<n>\d+)\.rar$/i', $inner, $m) === 1) {
+            return ['posting' => $m['stem'], 'kind' => 0, 'hint' => (int) $m['n']];
+        }
+
+        if (preg_match('/^(?P<stem>.+)\.vol(?P<start>\d+)\+\d+\.par2$/i', $inner, $m) === 1) {
+            return ['posting' => $m['stem'], 'kind' => 1, 'hint' => (int) $m['start']];
+        }
+
+        if (preg_match('/^(?P<stem>.+)\.par2$/i', $inner, $m) === 1) {
+            return ['posting' => $m['stem'], 'kind' => 1, 'hint' => -1];
+        }
+
+        if (preg_match('/^(?P<stem>.+)\.(?:rar|r\d+|\d+)$/i', $inner, $m) === 1) {
+            return ['posting' => $m['stem'], 'kind' => 0, 'hint' => 1];
+        }
+
+        // Unrecognised layout: treat the file as its own posting rather than
+        // guessing a stem and fusing unrelated files.
+        return ['posting' => $inner, 'kind' => 0, 'hint' => 1];
+    }
 }

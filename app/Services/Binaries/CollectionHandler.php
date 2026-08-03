@@ -66,14 +66,6 @@ final class CollectionHandler
      * a cohort identity shared by every file of the post. All other subjects
      * keep the existing cleaned-name behaviour untouched.
      *
-     * Brace-token posts pull in the opposite direction: HeaderParser has
-     * already stripped their per-article token, and the cleaned name that
-     * remains is TOO coarse -- the cleaner strips digit runs, so part01..partNN
-     * and every par2 volume of a posting share one cleaned name. Keying on that
-     * would fuse distinct files into one collection, and because these subjects
-     * pin file_number to 1/1, into one binary as well. They are therefore keyed
-     * on the de-tokenised filename.
-     *
      * @param  array{name: string, id: int|string}  $collMatch
      */
     private function collectionIdentity(
@@ -82,13 +74,8 @@ final class CollectionHandler
         string $groupName,
         int $groupId,
         int $totalFiles,
-        int $articleUnixtime,
-        bool $isBraceToken = false
+        int $articleUnixtime
     ): string {
-        if ($isBraceToken) {
-            return ObfuscatedSubjectNormalizer::collectionKey($parsedSubject, $groupId);
-        }
-
         if (! isset($this->hashSetGroupApplies[$groupName])) {
             $this->hashSetGroupApplies[$groupName] = $this->hashSetNormalizer->appliesTo($groupName);
         }
@@ -143,8 +130,7 @@ final class CollectionHandler
             $groupName,
             $groupId,
             $totalFiles,
-            $unixtime,
-            (bool) ($header['collection_brace_token'] ?? false)
+            $unixtime
         );
 
         // Return cached ID if already processed this batch
@@ -242,8 +228,7 @@ final class CollectionHandler
                 $groupName,
                 $groupId,
                 $totalFiles,
-                $unixtime,
-                (bool) ($header['collection_brace_token'] ?? false)
+                $unixtime
             );
             if (isset($this->collectionIds[$collectionKey])) {
                 $resolved[$index] = $this->collectionIds[$collectionKey];

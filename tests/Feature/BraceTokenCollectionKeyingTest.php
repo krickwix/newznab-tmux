@@ -15,15 +15,35 @@ use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 /**
- * Brace-token postings must land one collection and one binary PER FILE.
+ * What ingest currently does with a brace-token posting -- INCLUDING the part
+ * that is still wrong.
  *
- * The regression this guards: HeaderParser strips the per-article token, and the
- * cleaned name that remains is too coarse -- CollectionsCleaningService strips
- * digit runs, so part01..partNN and every par2 volume of a posting clean to one
- * name. Keyed on that, all of them share a collection, and because these
- * subjects pin file_number to 1/1 against UNIQUE (collections_id, filenumber),
- * they then share a single binary and pile every part onto it. Measured against
- * the live cleaner, 98 real filenames collapsed onto 5 keys that way.
+ * These are characterisation tests, not a specification. HeaderParser strips the
+ * per-article token, which is correct and fixes the one-collection-per-article
+ * stall. But the cleaned name that then keys the collection is too coarse:
+ * CollectionsCleaningService strips digit runs, so part01..partNN and every par2
+ * volume of one posting clean to the same name. Two consequences, both asserted
+ * below so they cannot change unnoticed:
+ *
+ *  1. distinct real files share a collection AND -- because these subjects pin
+ *     file_number to 1/1 against UNIQUE (collections_id, filenumber) -- a single
+ *     binary, so parts of several files pile onto a binary carrying just one of
+ *     their names;
+ *  2. the resulting collection holds one binary, which the release pipeline
+ *     deletes (stage 6 rewrites totalfiles to COUNT(binaries), landing under
+ *     minfilestoformrelease) with FK_Collections cascading the parts away.
+ *
+ * An earlier revision of this branch fixed (1) by keying per real file. That was
+ * reverted: it leaves (2) fully intact, so it converts silent corruption into
+ * reliable deletion. Fixing this properly needs a per-file ordinal no single
+ * header can supply -- a par2 volume cannot be ranked without the payload count,
+ * and the gates reading MAX(filenumber) as a file count reject sparse or
+ * high-band numbering -- so it is scoped as separate work.
+ *
+ * Until then the historical residue is reclaimed by
+ * nntmux:repair-brace-token-identity, which sees a whole cohort at once and can
+ * therefore allocate dense ordinals; see BraceTokenIdentityRepairServiceTest and
+ * BraceTokenRepairSurvivesReleaseGatesTest.
  */
 final class BraceTokenCollectionKeyingTest extends TestCase
 {
@@ -101,74 +121,33 @@ final class BraceTokenCollectionKeyingTest extends TestCase
         )');
     }
 
-    public function test_header_parser_flags_brace_token_subjects(): void
+    public function test_header_parser_strips_the_token_and_pins_one_of_one(): void
     {
         $parsed = $this->parse([
             $this->rawHeader(1, '{Soulm8te.2026.part01.rar} {4e6V9vStTb1E} yEnc (7/512)'),
         ]);
 
         $this->assertCount(1, $parsed);
-        $this->assertTrue($parsed[0]['collection_brace_token']);
         $this->assertSame(1, $parsed[0]['collection_file_number']);
         $this->assertSame(1, $parsed[0]['collection_total_files']);
         $this->assertSame('{Soulm8te.2026.part01.rar} yEnc', $parsed[0]['matches'][1]);
     }
 
-    public function test_header_parser_does_not_flag_ordinary_subjects(): void
+    public function test_ordinary_subjects_are_left_alone(): void
     {
         $parsed = $this->parse([
             $this->rawHeader(1, 'Some.Normal.Release.2024 - [01/20] - "file.rar" yEnc (3/40)'),
         ]);
 
         $this->assertCount(1, $parsed);
-        $this->assertArrayNotHasKey('collection_brace_token', $parsed[0]);
+        $this->assertArrayNotHasKey('collection_file_number', $parsed[0]);
     }
 
-    public function test_distinct_files_of_one_posting_get_their_own_collection_and_binary(): void
-    {
-        // Every one of these cleans to the same name under the real cleaner.
-        $headers = $this->parse([
-            $this->rawHeader(11, '{Soulm8te.2026.part01.rar} {4e6V9vStTb1E} yEnc (1/512)'),
-            $this->rawHeader(12, '{Soulm8te.2026.part01.rar} {6zFxF8To7GWe} yEnc (2/512)'),
-            $this->rawHeader(13, '{Soulm8te.2026.part02.rar} {DIVfOxfTRBEY} yEnc (1/512)'),
-            $this->rawHeader(14, '{Soulm8te.2026.part35.rar} {P39URH0AB8CS} yEnc (1/512)'),
-            $this->rawHeader(15, '{Soulm8te.2026.vol000+01.par2} {stWsuZvUnzVX} yEnc (1/5)'),
-        ]);
-
-        $failed = $this->storage()->store($headers, self::GROUP, true);
-
-        $this->assertSame([], $failed);
-
-        // Four distinct real files -> four collections, four binaries.
-        $this->assertSame(4, DB::table('collections')->count());
-        $this->assertSame(4, DB::table('binaries')->count());
-        // Five articles, all retained: the two part01 articles share one binary.
-        $this->assertSame(5, DB::table('parts')->count());
-
-        $part01 = DB::table('collections')
-            ->where('collectionhash', sha1(ObfuscatedSubjectNormalizer::collectionKey(
-                '{Soulm8te.2026.part01.rar} yEnc',
-                self::GROUP['id'],
-            )))
-            ->first();
-        $this->assertNotNull($part01);
-        $this->assertSame(1, DB::table('binaries')->where('collections_id', $part01->id)->count());
-        $this->assertSame(
-            2,
-            DB::table('parts')
-                ->whereIn('binaries_id', DB::table('binaries')->where('collections_id', $part01->id)->pluck('id'))
-                ->count()
-        );
-
-        // Each collection holds exactly one file, keyed 1 of 1.
-        foreach (DB::table('binaries')->get() as $binary) {
-            $this->assertSame(1, (int) $binary->filenumber);
-        }
-        foreach (DB::table('collections')->get() as $collection) {
-            $this->assertSame(1, (int) $collection->totalfiles);
-        }
-    }
-
+    /**
+     * Every article of one file does share one collection and one binary -- the
+     * half of the fix that works, and the reason these posts no longer stall at
+     * currentparts=1.
+     */
     public function test_every_article_of_one_file_shares_one_collection(): void
     {
         $headers = $this->parse([
@@ -184,6 +163,89 @@ final class BraceTokenCollectionKeyingTest extends TestCase
         $this->assertSame(3, DB::table('parts')->count());
         $this->assertSame(3, (int) DB::table('binaries')->value('currentparts'));
         $this->assertSame(37, (int) DB::table('binaries')->value('totalparts'));
+    }
+
+    /**
+     * The known-bad half, pinned deliberately.
+     *
+     * Five real files of one posting collapse onto two collections holding one
+     * binary each, and a binary named for ONE file ends up owning the parts of
+     * three. No article is dropped at ingest -- but attribution is lost, and the
+     * one-binary collections are then deleted downstream, taking the parts with
+     * them.
+     *
+     * If this test starts failing, ingest behaviour changed: check which way.
+     * More binaries per collection is progress; fewer parts is data loss.
+     */
+    public function test_distinct_files_of_one_posting_currently_collapse_onto_one_binary(): void
+    {
+        $raw = [];
+        $article = 0;
+        foreach (['part01', 'part02', 'part03'] as $file) {
+            foreach ([1, 2, 3] as $part) {
+                $article++;
+                $raw[] = $this->rawHeader(
+                    $article,
+                    '{Soulm8te.2026.'.$file.'.rar} {tok'.str_pad((string) $article, 9, 'x').'} yEnc ('.$part.'/3)'
+                );
+            }
+        }
+        foreach (['vol000+01', 'vol001+02'] as $file) {
+            foreach ([1, 2] as $part) {
+                $article++;
+                $raw[] = $this->rawHeader(
+                    $article,
+                    '{Soulm8te.2026.'.$file.'.par2} {tok'.str_pad((string) $article, 9, 'x').'} yEnc ('.$part.'/2)'
+                );
+            }
+        }
+
+        $this->assertSame([], $this->storage()->store($this->parse($raw), self::GROUP, true));
+
+        // 5 real files in, 2 collections out: the payload volumes fuse, and so do
+        // the par2 volumes.
+        $this->assertSame(2, DB::table('collections')->count());
+        $this->assertSame(2, DB::table('binaries')->count());
+        // No article is lost at ingest; only the file it belongs to is.
+        $this->assertSame(13, DB::table('parts')->count());
+
+        foreach (DB::table('collections')->get() as $collection) {
+            $this->assertSame(
+                1,
+                DB::table('binaries')->where('collections_id', $collection->id)->count(),
+                'One binary per collection is the shape the release pipeline deletes.'
+            );
+        }
+
+        // A binary holding 9 parts is holding three files' worth of articles
+        // under a single file's name.
+        $this->assertSame(
+            [4, 9],
+            DB::table('binaries')
+                ->get()
+                ->map(static fn ($binary): int => DB::table('parts')->where('binaries_id', $binary->id)->count())
+                ->sort()
+                ->values()
+                ->all()
+        );
+    }
+
+    /**
+     * The repair pass's key must stay distinct from anything ingest computes, so
+     * a repaired posting cannot collide with a live collection.
+     */
+    public function test_the_posting_key_is_distinct_from_the_per_file_key(): void
+    {
+        $this->assertNotSame(
+            ObfuscatedSubjectNormalizer::postingKey('Soulm8te.2026', self::GROUP['id']),
+            ObfuscatedSubjectNormalizer::collectionKey('{Soulm8te.2026.part01.rar} yEnc', self::GROUP['id']),
+        );
+
+        // Same posting, different files -> one key.
+        $this->assertSame(
+            ObfuscatedSubjectNormalizer::postingIdentity('{Soulm8te.2026.part01.rar} yEnc')['posting'],
+            ObfuscatedSubjectNormalizer::postingIdentity('{Soulm8te.2026.vol000+01.par2} yEnc')['posting'],
+        );
     }
 
     /**

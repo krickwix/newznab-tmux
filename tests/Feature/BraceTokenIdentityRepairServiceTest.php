@@ -10,6 +10,13 @@ use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use Tests\TestCase;
 
+/**
+ * The merge itself. Whether the merged shape then SURVIVES the release pipeline
+ * is a separate question, asserted in BraceTokenRepairSurvivesReleaseGatesTest
+ * -- an earlier version of this service passed every test here and still had
+ * its output deleted, with 512 production collections and ~541 MB of articles
+ * cascaded away. Neither file is sufficient alone.
+ */
 final class BraceTokenIdentityRepairServiceTest extends TestCase
 {
     private const GROUP_ID = 6979;
@@ -33,7 +40,13 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
 
         DB::statement('CREATE TABLE usenet_groups (
             id INTEGER PRIMARY KEY,
-            name VARCHAR(255)
+            name VARCHAR(255),
+            minfilestoformrelease INT NULL
+        )');
+
+        DB::statement('CREATE TABLE settings (
+            name VARCHAR(255) PRIMARY KEY,
+            value VARCHAR(255)
         )');
 
         DB::statement('CREATE TABLE collections (
@@ -75,7 +88,14 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
             PRIMARY KEY (binaries_id, number)
         )');
 
-        DB::table('usenet_groups')->insert(['id' => self::GROUP_ID, 'name' => self::GROUP_NAME]);
+        DB::table('usenet_groups')->insert([
+            'id' => self::GROUP_ID,
+            'name' => self::GROUP_NAME,
+            'minfilestoformrelease' => null,
+        ]);
+        // Production site value; group 6979 has no override, so this is the floor
+        // the repair must measure postings against.
+        DB::table('settings')->insert(['name' => 'minfilestoformrelease', 'value' => '2']);
     }
 
     public function test_dry_run_reports_cohorts_without_touching_anything(): void
@@ -86,17 +106,21 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
         $summary = $this->service()->repair(self::GROUP_ID, 50, null, false);
 
         $this->assertFalse($summary['updated']);
-        $this->assertSame(2, $summary['cohorts_found']);
+        // Both files belong to ONE posting, which is the unit that has to reach a
+        // release: a per-file collection is deleted downstream.
+        $this->assertSame(1, $summary['cohorts_found']);
         $this->assertSame(1024, $summary['collections_in_cohorts']);
+        $this->assertSame(2, $summary['files_in_cohorts']);
         $this->assertSame(0, $summary['cohorts_merged']);
         $this->assertSame(0, $summary['collections_removed']);
+        $this->assertSame(0, $summary['cohorts_skipped']);
 
         // Nothing moved.
         $this->assertSame(1024, DB::table('collections')->count());
         $this->assertSame(1024, DB::table('binaries')->count());
     }
 
-    public function test_update_collapses_each_file_onto_one_collection_and_one_binary(): void
+    public function test_update_collapses_a_posting_onto_one_collection_with_one_binary_per_file(): void
     {
         $this->seedStrandedFile('{Soulm8te.2026.part01.rar} yEnc', 40);
         $this->seedStrandedFile('{Soulm8te.2026.part02.rar} yEnc', 12);
@@ -104,41 +128,57 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
 
         $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
 
-        $this->assertSame(3, $summary['cohorts_merged']);
+        $this->assertSame(1, $summary['cohorts_merged']);
         $this->assertSame(0, $summary['cohorts_skipped']);
-        $this->assertSame(57 - 3, $summary['collections_removed']);
+        $this->assertSame(57 - 1, $summary['collections_removed']);
         $this->assertSame(57 - 3, $summary['binaries_removed']);
+        $this->assertSame(3, $summary['binaries_retained']);
         $this->assertSame(57 - 3, $summary['parts_moved']);
 
-        $this->assertSame(3, DB::table('collections')->count());
+        $this->assertSame(1, DB::table('collections')->count());
+        // One binary per real file, so the NZB describes 3 files rather than
+        // collapsing them onto one.
         $this->assertSame(3, DB::table('binaries')->count());
         // Every part is retained -- the merge rehomes them, never drops them.
         $this->assertSame(57, DB::table('parts')->count());
 
-        foreach ([
+        $hash = sha1(ObfuscatedSubjectNormalizer::postingKey('Soulm8te.2026', self::GROUP_ID));
+        $collection = DB::table('collections')->where('collectionhash', $hash)->first();
+        $this->assertNotNull($collection);
+        $this->assertSame('{Soulm8te.2026}', $collection->subject);
+        $this->assertSame(3, (int) $collection->totalfiles);
+        $this->assertSame(0, (int) $collection->filecheck);
+
+        $expected = [
             '{Soulm8te.2026.part01.rar} yEnc' => 40,
             '{Soulm8te.2026.part02.rar} yEnc' => 12,
             '{Soulm8te.2026.vol000+01.par2} yEnc' => 5,
-        ] as $name => $parts) {
-            $hash = sha1(ObfuscatedSubjectNormalizer::collectionKey($name, self::GROUP_ID));
-            $collection = DB::table('collections')->where('collectionhash', $hash)->first();
+        ];
 
-            $this->assertNotNull($collection, $name);
-            $this->assertSame($name, $collection->subject);
-            $this->assertSame(1, (int) $collection->totalfiles);
-            $this->assertSame(0, (int) $collection->filecheck);
+        $binaries = DB::table('binaries')
+            ->where('collections_id', $collection->id)
+            ->orderBy('filenumber')
+            ->get();
 
-            $binaries = DB::table('binaries')->where('collections_id', $collection->id)->get();
-            $this->assertCount(1, $binaries, $name);
-            $binary = $binaries->first();
-            $this->assertSame(1, (int) $binary->filenumber);
-            $this->assertSame($parts, (int) $binary->currentparts);
-            $this->assertSame($parts, (int) $binary->totalparts);
+        // Payload volumes first, then the par2 set: the layout an unobfuscated
+        // post already has.
+        $this->assertSame(array_keys($expected), $binaries->pluck('name')->all());
+
+        $ordinal = 0;
+        foreach ($binaries as $binary) {
+            $ordinal++;
+            $parts = $expected[$binary->name];
+
+            // Dense 1..N. Two gates read MAX(filenumber) as a file count, so a
+            // gap or high-band offset leaves the collection never complete.
+            $this->assertSame($ordinal, (int) $binary->filenumber, $binary->name);
+            $this->assertSame($parts, (int) $binary->currentparts, $binary->name);
+            $this->assertSame($parts, (int) $binary->totalparts, $binary->name);
             $this->assertSame(0, (int) $binary->partcheck);
             $this->assertSame(
                 $parts,
                 DB::table('parts')->where('binaries_id', $binary->id)->count(),
-                $name
+                $binary->name
             );
             $this->assertSame(
                 (int) DB::table('parts')->where('binaries_id', $binary->id)->sum('size'),
@@ -149,9 +189,13 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
 
     public function test_survivor_keeps_the_oldest_member_timestamps(): void
     {
-        $this->seedStrandedFile('{Lioness.S03.vol007+08.par2} yEnc', 3, [
+        $this->seedStrandedFile('{Lioness.S03.part01.rar} yEnc', 3, [
             'dates' => ['2026-08-02 05:00:00', '2026-08-02 03:30:04', '2026-08-02 07:15:00'],
             'dateadded' => ['2026-08-02 06:00:00', '2026-08-02 04:00:00', '2026-08-02 08:00:00'],
+        ]);
+        $this->seedStrandedFile('{Lioness.S03.vol007+08.par2} yEnc', 2, [
+            'dates' => ['2026-08-02 09:00:00', '2026-08-02 09:30:00'],
+            'dateadded' => ['2026-08-02 09:00:00', '2026-08-02 09:30:00'],
         ]);
 
         $this->service()->repair(self::GROUP_ID, 50, null, true);
@@ -164,13 +208,14 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
     public function test_a_second_update_is_idempotent(): void
     {
         $this->seedStrandedFile('{Soulm8te.2026.part01.rar} yEnc', 6);
+        $this->seedStrandedFile('{Soulm8te.2026.part02.rar} yEnc', 4);
 
         $first = $this->service()->repair(self::GROUP_ID, 50, null, true);
         $this->assertSame(1, $first['cohorts_merged']);
 
         $before = [
             'collections' => DB::table('collections')->get()->toArray(),
-            'binaries' => DB::table('binaries')->get()->toArray(),
+            'binaries' => DB::table('binaries')->orderBy('id')->get()->toArray(),
             'parts' => DB::table('parts')->orderBy('number')->get()->toArray(),
         ];
 
@@ -184,44 +229,123 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
         $this->assertSame(0, $second['parts_moved']);
 
         $this->assertEquals($before['collections'], DB::table('collections')->get()->toArray());
-        $this->assertEquals($before['binaries'], DB::table('binaries')->get()->toArray());
+        $this->assertEquals($before['binaries'], DB::table('binaries')->orderBy('id')->get()->toArray());
         $this->assertEquals($before['parts'], DB::table('parts')->orderBy('number')->get()->toArray());
     }
 
-    public function test_a_cohort_whose_members_claim_the_same_partnumber_is_skipped(): void
+    public function test_a_posting_whose_file_members_claim_the_same_partnumber_is_skipped(): void
     {
-        // Two collections both holding part 1 are not one file; merging them
-        // would silently drop an article.
+        // Two collections both holding part 1 of the same file are not one file;
+        // merging them would silently drop an article.
         $this->seedStrandedFile('{Soulm8te.2026.part01.rar} yEnc', 2, [
             'partnumbers' => [1, 1],
         ]);
+        $this->seedStrandedFile('{Soulm8te.2026.part02.rar} yEnc', 2);
 
         $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
 
         $this->assertSame(0, $summary['cohorts_merged']);
         $this->assertSame(1, $summary['cohorts_skipped']);
         $this->assertSame('duplicate_partnumber', $summary['skipped'][0]['reason']);
+        $this->assertSame('{Soulm8te.2026.part01.rar} yEnc', $summary['skipped'][0]['file']);
         $this->assertSame([1], $summary['skipped'][0]['values']);
 
-        // Untouched.
-        $this->assertSame(2, DB::table('collections')->count());
-        $this->assertSame(2, DB::table('binaries')->count());
-        $this->assertSame(2, DB::table('parts')->count());
+        // The whole posting is left untouched: the clean file is not merged on
+        // its own, because a one-file collection is deleted downstream.
+        $this->assertSame(4, DB::table('collections')->count());
+        $this->assertSame(4, DB::table('binaries')->count());
+        $this->assertSame(4, DB::table('parts')->count());
+    }
+
+    /**
+     * A posting resolving to fewer real files than `minfilestoformrelease` is
+     * left stranded rather than merged: deleteCollectionsUnderThreshold() would
+     * delete the merged row and FK_Collections would take every part with it.
+     * Stranded rows are recoverable until retention; cascaded ones are not.
+     */
+    public function test_a_posting_below_the_min_files_floor_is_refused(): void
+    {
+        $this->seedStrandedFile('{Lioness.2023.S03E01.2160p.H.265-FLUX.rar} yEnc', 6);
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $this->assertSame(2, $summary['min_files']);
+        $this->assertSame(0, $summary['cohorts_merged']);
+        $this->assertSame(1, $summary['cohorts_skipped']);
+        $this->assertSame('below_min_files', $summary['skipped'][0]['reason']);
+
+        $this->assertSame(6, DB::table('collections')->count());
+        $this->assertSame(6, DB::table('parts')->count());
+    }
+
+    /**
+     * The Lioness.S03 case from production: eight par2 volumes whose payload
+     * carries an unrelated filename, so no filename-derived key groups them.
+     * createReleases()' $par2Only filter deletes an all-par2 collection even
+     * when it clears the file floor, so this must not be merged either.
+     */
+    public function test_an_all_par2_posting_is_refused_even_above_the_floor(): void
+    {
+        $this->seedStrandedFile('{Lioness.S03.vol000+01.par2} yEnc', 3);
+        $this->seedStrandedFile('{Lioness.S03.vol001+02.par2} yEnc', 3);
+        $this->seedStrandedFile('{Lioness.S03.vol003+04.par2} yEnc', 3);
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $this->assertSame(0, $summary['cohorts_merged']);
+        $this->assertSame(1, $summary['cohorts_skipped']);
+        $this->assertSame('par2_only', $summary['skipped'][0]['reason']);
+        $this->assertSame(3, \count($summary['skipped'][0]['files']));
+
+        $this->assertSame(9, DB::table('collections')->count());
+        $this->assertSame(9, DB::table('parts')->count());
+    }
+
+    /** A dry-run reports the same refusals, so it cannot read as a clean pass. */
+    public function test_a_dry_run_reports_the_refusals_it_would_make(): void
+    {
+        $this->seedStrandedFile('{Lioness.S03.vol000+01.par2} yEnc', 3);
+        $this->seedStrandedFile('{Lioness.S03.vol001+02.par2} yEnc', 3);
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, false);
+
+        $this->assertSame(1, $summary['cohorts_found']);
+        $this->assertSame(1, $summary['cohorts_skipped']);
+        $this->assertSame('par2_only', $summary['skipped'][0]['reason']);
+    }
+
+    /** A group override wins over the site setting, as in the release pipeline. */
+    public function test_a_group_override_relaxes_the_floor(): void
+    {
+        DB::table('usenet_groups')->where('id', self::GROUP_ID)->update(['minfilestoformrelease' => 1]);
+        $this->seedStrandedFile('{Lioness.2023.S03E01.2160p.H.265-FLUX.rar} yEnc', 4);
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $this->assertSame(1, $summary['min_files']);
+        $this->assertSame(1, $summary['cohorts_merged']);
+        $this->assertSame(0, $summary['cohorts_skipped']);
+        $this->assertSame(1, DB::table('collections')->count());
+        $this->assertSame(4, DB::table('parts')->count());
     }
 
     public function test_it_adopts_a_collection_ingest_already_created_under_the_repaired_key(): void
     {
-        $name = '{Soulm8te.2026.part01.rar} yEnc';
-        // The stranded rows, plus a row the fixed ingest path minted later under
-        // the correct key with a HIGHER id than any of them.
-        $this->seedStrandedFile($name, 4);
+        $posting = 'Soulm8te.2026';
+        $part01 = '{Soulm8te.2026.part01.rar} yEnc';
+        $part02 = '{Soulm8te.2026.part02.rar} yEnc';
+
+        // The stranded rows for one file, plus a row the fixed ingest path minted
+        // later under the correct posting key with a HIGHER id -- already holding
+        // a binary for the OTHER file at filenumber 1.
+        $this->seedStrandedFile($part01, 4);
         $ingestId = $this->seedCollection(
-            $name,
-            sha1(ObfuscatedSubjectNormalizer::collectionKey($name, self::GROUP_ID)),
+            '{'.$posting.'}',
+            sha1(ObfuscatedSubjectNormalizer::postingKey($posting, self::GROUP_ID)),
             '2026-08-03 10:00:00',
             '2026-08-03 10:00:00',
         );
-        $this->seedBinary($ingestId, $name, 1, 4, [99]);
+        $this->seedBinary($ingestId, $part02, 1, 2, [99, 100]);
 
         $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
 
@@ -229,26 +353,33 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
         $this->assertSame(1, DB::table('collections')->count());
         // The pre-existing owner of the hash survives, not the lowest id.
         $this->assertSame($ingestId, (int) DB::table('collections')->value('id'));
-        $this->assertSame(1, DB::table('binaries')->count());
-        $this->assertSame(5, DB::table('parts')->count());
-        $this->assertSame(5, (int) DB::table('binaries')->value('currentparts'));
+        $this->assertSame(6, DB::table('parts')->count());
+
+        // The adopted binary keeps its parts and is renumbered into the dense
+        // sequence. Assigning ordinals directly would have collided with the
+        // filenumber 1 it already held, which is why survivors are parked first.
+        $binaries = DB::table('binaries')->orderBy('filenumber')->get();
+        $this->assertSame([$part01, $part02], $binaries->pluck('name')->all());
+        $this->assertSame([1, 2], $binaries->pluck('filenumber')->map(static fn ($v): int => (int) $v)->all());
+        $this->assertSame([4, 2], $binaries->pluck('currentparts')->map(static fn ($v): int => (int) $v)->all());
     }
 
     public function test_the_cohort_limit_bounds_cohorts_and_reports_the_truncation(): void
     {
-        $this->seedStrandedFile('{Soulm8te.2026.part01.rar} yEnc', 3);
-        $this->seedStrandedFile('{Soulm8te.2026.part02.rar} yEnc', 3);
-        $this->seedStrandedFile('{Soulm8te.2026.part03.rar} yEnc', 3);
+        foreach (['Soulm8te.2026', 'Maddie\'s.Secret.2026', 'Supergirl.2026'] as $posting) {
+            $this->seedStrandedFile('{'.$posting.'.part01.rar} yEnc', 3);
+            $this->seedStrandedFile('{'.$posting.'.part02.rar} yEnc', 3);
+        }
 
         $summary = $this->service()->repair(self::GROUP_ID, 2, null, true);
 
         $this->assertTrue($summary['cohort_limit_reached']);
         $this->assertSame(2, $summary['cohorts_found']);
         $this->assertSame(2, $summary['cohorts_merged']);
-        // The two merged cohorts collapse to 1 collection each; the third is
+        // The two merged postings collapse to 1 collection each; the third is
         // left whole, not half-merged.
-        $this->assertSame(2 + 3, DB::table('collections')->count());
-        $this->assertSame(9, DB::table('parts')->count());
+        $this->assertSame(2 + 6, DB::table('collections')->count());
+        $this->assertSame(18, DB::table('parts')->count());
     }
 
     public function test_it_ignores_collections_that_are_not_brace_token(): void
@@ -308,6 +439,12 @@ final class BraceTokenIdentityRepairServiceTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         $this->service()->repair(self::GROUP_ID, 0, null, false);
+    }
+
+    public function test_min_files_below_one_is_rejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->service()->repair(self::GROUP_ID, 50, null, false, 0);
     }
 
     private function service(): BraceTokenIdentityRepairService
