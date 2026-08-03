@@ -278,9 +278,17 @@ final readonly class BackfillTargetSelector
             return $dueRetries[0];
         }
 
+        // Last-resort round-robin. Reached only when every earlier branch
+        // declined, which happens precisely when no candidate has a clean
+        // ineffective-permit count -- and a candidate with no history at all is
+        // the likeliest one to be in that pool. Reading its entry unguarded
+        // raised an ErrorException that propagated to WorkerOrchestrator's
+        // catch-all and called failClosed(), so one historyless candidate
+        // pinned the whole fleet into fail_safe every cycle until an operator
+        // noticed. A missing entry means never attempted: sort it first.
         usort($candidates, static function (array $left, array $right) use ($history): int {
-            $attempt = (int) $history[$left['name']]['last_attempt_at']
-                <=> (int) $history[$right['name']]['last_attempt_at'];
+            $attempt = (int) ($history[$left['name']]['last_attempt_at'] ?? 0)
+                <=> (int) ($history[$right['name']]['last_attempt_at'] ?? 0);
 
             return $attempt !== 0 ? $attempt : $left['name'] <=> $right['name'];
         });
