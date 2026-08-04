@@ -105,7 +105,13 @@ final class HeaderStorageService
      * That ordering matters, because the number is what sizes the keying change
      * before it is written -- enabling a group here has no effect on ingest.
      *
-     * Mirrors nntmux.obfuscated_brace_token_groups; a group is named in full.
+     * Mirrors nntmux.obfuscated_brace_token_groups; a group is named in full,
+     * or `all` for every group -- the same sentinel
+     * NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS already uses.
+     *
+     * `all` is for a measurement window, not a resting state: this logs once
+     * per batch per group, and ingest runs continuously. Narrow it back to the
+     * groups of interest, or unset it, once the numbers are in.
      */
     private function reportPartCounterKeying(string $groupName): void
     {
@@ -118,7 +124,13 @@ final class HeaderStorageService
             (array) config('nntmux.ingest_partcount_key_groups', []),
         )));
 
-        if (! \in_array(strtolower(trim($groupName)), $groups, true)) {
+        if ($groups === []) {
+            return;
+        }
+
+        if (! \in_array('all', $groups, true)
+            && ! \in_array(strtolower(trim($groupName)), $groups, true)
+        ) {
             return;
         }
 

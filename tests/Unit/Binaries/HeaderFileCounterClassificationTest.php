@@ -5,9 +5,10 @@ declare(strict_types=1);
 namespace Tests\Unit\Binaries;
 
 use App\Services\Binaries\HeaderStorageService;
+use Illuminate\Support\Facades\Log;
 use PHPUnit\Framework\Attributes\DataProvider;
-use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
+use Tests\TestCase;
 
 /**
  * Phase 1 of docs/design/2026-08-04-ingest-collection-keying.md.
@@ -142,6 +143,56 @@ final class HeaderFileCounterClassificationTest extends TestCase
 
             self::assertSame($file, $fileNumber, sprintf('file number changed for: %s', $subject));
             self::assertSame($total, $totalFiles, sprintf('file count changed for: %s', $subject));
+        }
+    }
+
+    /**
+     * @return array<string, array{0: list<string>, 1: string, 2: bool}>
+     */
+    public static function allowlists(): array
+    {
+        return [
+            'unset reports nothing' => [[], 'alt.binaries.cinemageddon', false],
+            'named group reports' => [['alt.binaries.cinemageddon'], 'alt.binaries.cinemageddon', true],
+            'other group stays quiet' => [['alt.binaries.cinemageddon'], 'alt.binaries.hdtv', false],
+            'all reports every group' => [['all'], 'alt.binaries.hdtv', true],
+            'all alongside a name' => [['alt.binaries.cinemageddon', 'all'], 'alt.binaries.moovee', true],
+            'case and padding ignored' => [['  ALL  '], 'alt.binaries.moovee', true],
+        ];
+    }
+
+    /**
+     * The allowlist decides whether the count is SAID OUT LOUD, never whether
+     * it is computed, and never anything about ingest. `all` is the sentinel
+     * NNTMUX_ORCHESTRATOR_BACKFILL_PROBE_GROUPS already established.
+     *
+     * @param  list<string>  $configured
+     */
+    #[DataProvider('allowlists')]
+    public function test_the_allowlist_decides_only_whether_the_count_is_reported(
+        array $configured,
+        string $groupName,
+        bool $expected,
+    ): void {
+        $method = new ReflectionMethod(HeaderStorageService::class, 'reportPartCounterKeying');
+        $service = $this->headerStorageServiceWithoutConstructor();
+
+        $counter = new \ReflectionProperty(HeaderStorageService::class, 'partCounterKeyedHeaders');
+        $counter->setValue($service, 7);
+
+        $logged = [];
+        Log::shouldReceive('info')
+            ->andReturnUsing(static function (string $message, array $context) use (&$logged): void {
+                $logged[] = $context;
+            });
+
+        config()->set('nntmux.ingest_partcount_key_groups', $configured);
+        $method->invoke($service, $groupName);
+
+        self::assertSame($expected, $logged !== [], 'reporting decision');
+        if ($expected) {
+            self::assertSame(7, $logged[0]['headers']);
+            self::assertSame($groupName, $logged[0]['group']);
         }
     }
 
