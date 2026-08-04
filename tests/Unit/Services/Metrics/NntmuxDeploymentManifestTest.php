@@ -15,7 +15,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
      * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
      */
-    private const FLEET_IMAGE = 'microservices-pods-20260804-split-repair-park-retained-v228@sha256:42dc29cfea256f6c1b991605c03b320737de0037f7f0f1206200eb298f678b4c';
+    private const FLEET_IMAGE = 'microservices-pods-20260804-ingest-partcount-classifier-v229@sha256:a13944a98097cac5d3e796bd9eaf62cb767a3a43878a997c0fe8f69423d95354';
 
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
@@ -567,6 +567,42 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringContainsString('->toBase()', $query);
         self::assertStringContainsString('AS bucket', $query);
         self::assertStringNotContainsString('AS id', $query);
+    }
+
+    /**
+     * v229 is the second overlay allowed to carry config/nntmux.php.
+     *
+     * The standing rule is that overlays must not, because v214/v215 shipped a
+     * config MISSING keys the running code read and turned it into a silent
+     * no-op. The direction is what matters: verified in-pod against v228 before
+     * the build, 180 live leaf keys with zero absent from the branch file, and
+     * the branch adds `ingest_partcount_key_groups`. Strict superset.
+     *
+     * Without the copy the new key would not exist in the image, config() would
+     * return [] for it, and the manifest variable would resolve to a default --
+     * the v225 failure repeated.
+     */
+    public function test_partcount_classifier_overlay_ships_the_config_key_it_reads(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/ingest-partcount-classifier-v229.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260804-split-repair-park-retained-v228'
+            .'@sha256:42dc29cfea256f6c1b991605c03b320737de0037f7f0f1206200eb298f678b4c',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/Binaries/HeaderStorageService.php',
+            $dockerfile,
+        );
+        self::assertStringContainsString('COPY config/nntmux.php /app/config/nntmux.php', $dockerfile);
+
+        // The reader has to be in the config this overlay ships, or the flag is
+        // inert for the wrong reason.
+        $config = (string) file_get_contents(dirname(__DIR__, 4).'/config/nntmux.php');
+        self::assertStringContainsString('NNTMUX_INGEST_PARTCOUNT_KEY_GROUPS', $config);
     }
 
     /**
