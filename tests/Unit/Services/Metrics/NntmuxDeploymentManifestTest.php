@@ -15,7 +15,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
      * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
      */
-    private const FLEET_IMAGE = 'microservices-pods-20260803-split-posting-guard-v223@sha256:90179ef0876e1e3608889755956d53cbb2f23f385cd01d44e62bf735162c4017';
+    private const FLEET_IMAGE = 'microservices-pods-20260804-split-repair-park-retained-v228@sha256:42dc29cfea256f6c1b991605c03b320737de0037f7f0f1206200eb298f678b4c';
 
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
@@ -517,6 +517,192 @@ final class NntmuxDeploymentManifestTest extends TestCase
             self::assertStringNotContainsString("COPY {$path}", $dockerfile);
         }
         self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
+    /**
+     * v224 layers the additional-postprocess bucket fix over v223.
+     *
+     * The fan-out that feeds additional postprocessing collapsed every GUID
+     * bucket onto '0' -- a projection aliased `id` on the Release model picked
+     * up Eloquent's primary-key int cast, so (int) 'e' === 0. It logged the
+     * right number of jobs the whole time, which is why it survived ten weeks.
+     * Re-basing this overlay on anything below v223 would un-ship the
+     * file-counter guard, so the base is asserted as well as the payload.
+     */
+    public function test_additional_pp_bucket_overlay_layers_on_v223_and_ships_the_query(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/additional-pp-bucket-v224.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260803-split-posting-guard-v223'
+            .'@sha256:90179ef0876e1e3608889755956d53cbb2f23f385cd01d44e62bf735162c4017',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/AdditionalProcessing/AdditionalCandidateQuery.php'
+            .' /app/app/Services/AdditionalProcessing/AdditionalCandidateQuery.php',
+            $dockerfile,
+        );
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
+    /**
+     * The bucket projection must never be aliased `id` again.
+     *
+     * Eloquent merges [getKeyName() => getKeyType()] into the casts for any
+     * incrementing model, so a hex character selected AS `id` off the Release
+     * model is silently integer-cast on read. The failure is invisible from the
+     * outside -- the right number of buckets comes back, every one of them 0 --
+     * so this asserts the shape of the query rather than waiting for the
+     * symptom.
+     */
+    public function test_the_shipped_bucket_query_cannot_be_primary_key_cast(): void
+    {
+        $query = (string) file_get_contents(
+            dirname(__DIR__, 4).'/app/Services/AdditionalProcessing/AdditionalCandidateQuery.php'
+        );
+
+        self::assertStringContainsString('->toBase()', $query);
+        self::assertStringContainsString('AS bucket', $query);
+        self::assertStringNotContainsString('AS id', $query);
+    }
+
+    /**
+     * v228 carries the split-repair parking fix and nothing else.
+     *
+     * The scheduled sweep is what found the defect, so the overlay must not
+     * quietly widen while fixing it: a single COPY, and specifically NOT the
+     * fragmented pass, whose own par2 guard was already corrected in v227.
+     */
+    public function test_split_repair_park_overlay_layers_on_v227_and_ships_only_the_split_service(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/split-repair-park-retained-v228.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260804-fragmented-posting-par2-guard-v227'
+            .'@sha256:64f3d356162b5f44a242bf35ae5f41a78470c85f82bdc3f41778c412e6128cd9',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/Diagnostics/SplitPostingIdentityRepairService.php',
+            $dockerfile,
+        );
+        self::assertStringNotContainsString(
+            'COPY app/Services/Diagnostics/FragmentedPostingIdentityRepairService.php',
+            $dockerfile,
+        );
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
+    /**
+     * v226 layers the third fragmentation repair over v225.
+     *
+     * Diagnostics only -- nothing in that layer runs on its own and the command
+     * is dry-run unless given --update. The base is asserted because re-basing
+     * below v225 would un-ship the orchestrator config catch-up, and the
+     * absence of the split-posting service is asserted because the temptation
+     * when adding a third pass is to "fix" the second one's guard on the way
+     * past. That guard was measured against the live residue and is nearly
+     * exact; the new pass reaches its targets by a different cohort key.
+     */
+    public function test_fragmented_posting_overlay_layers_on_v225_and_ships_only_the_new_pass(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/fragmented-posting-repair-v226.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260804-orchestrator-config-catchup-v225'
+            .'@sha256:883030980663d595bbadfd47b5aeb484c5932082411d08388c934b1a2b7d1e7b',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Diagnostics/FragmentedPostingIdentityRepairService.php',
+            'app/Console/Commands/RepairFragmentedPostingIdentity.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path}", $dockerfile);
+        }
+        foreach ([
+            'app/Services/Diagnostics/SplitPostingIdentityRepairService.php',
+            'app/Services/Binaries/CollectionHandler.php',
+            'app/Services/ReleaseProcessingService.php',
+        ] as $path) {
+            self::assertStringNotContainsString("COPY {$path}", $dockerfile);
+        }
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
+    /**
+     * The bijection is the entire safety argument for the new pass, so the
+     * shipped source has to keep all four of its terms. Dropping any one of
+     * them silently re-admits either a hole (a file that was never downloaded)
+     * or a duplicate (two postings merged into a chimera).
+     */
+    public function test_the_shipped_fragmented_repair_keeps_every_term_of_the_bijection(): void
+    {
+        $service = (string) file_get_contents(
+            dirname(__DIR__, 4).'/app/Services/Diagnostics/FragmentedPostingIdentityRepairService.php'
+        );
+
+        foreach ([
+            'binaries = declared_files',
+            'distinct_filenumbers = declared_files',
+            'min_filenumber = 1',
+            'max_filenumber = declared_files',
+        ] as $term) {
+            self::assertStringContainsString($term, $service, sprintf('bijection term "%s" is missing', $term));
+        }
+
+        // It must never write a file count it has not proven -- that is the
+        // distinction from the split-posting pass, and the 2026-08-03 failure.
+        self::assertStringNotContainsString("'totalfiles' =>", $service);
+    }
+
+    /**
+     * v225 is the one overlay allowed to carry config/nntmux.php, and only
+     * because the copy is a strict superset of what the image already has.
+     *
+     * Every other overlay is forbidden from copying it: v214/v215 shipped a
+     * config from microservices-pods while running feature-branch code, deleted
+     * the keys that code read, and turned it into a silent no-op. The direction
+     * matters. Here the image's payload IS microservices-pods, and the branch
+     * file was verified in-pod to add 4 orchestrator keys and remove none (94
+     * pod keys vs 98 branch keys; 0 pod-only; 176 whole-config leaves, none
+     * absent from the branch).
+     *
+     * The four keys are asserted by name rather than by counting, because the
+     * whole failure mode is a key that quietly is not there.
+     */
+    public function test_config_catchup_overlay_ships_the_orchestrator_keys_the_image_is_missing(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/orchestrator-config-catchup-v225.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260804-additional-pp-bucket-v224'
+            .'@sha256:48f46342da889194d11b279c9594fcd2f02b10b8efad0a896618cc6644eff188',
+            $dockerfile,
+        );
+        self::assertStringContainsString('COPY config/nntmux.php /app/config/nntmux.php', $dockerfile);
+
+        $config = (string) file_get_contents(dirname(__DIR__, 4).'/config/nntmux.php');
+        foreach ([
+            'NNTMUX_ORCHESTRATOR_BACKFILL_FAIR_SHARE_NEWEST_CURSOR',
+            'NNTMUX_ORCHESTRATOR_BACKFILL_FILL_QUANTITY',
+            'NNTMUX_ORCHESTRATOR_BACKFILL_FILL_GROUPS',
+            'NNTMUX_ORCHESTRATOR_BACKFILL_FILL_THREADS',
+        ] as $var) {
+            self::assertStringContainsString(
+                $var,
+                $config,
+                sprintf('%s has no reader in the config this overlay ships, so shipping it would not close the drift', $var),
+            );
+        }
     }
 
     /**
