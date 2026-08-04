@@ -500,7 +500,29 @@ final class SplitPostingIdentityRepairService
                 static fn (int $id): bool => $id !== $survivor
             ));
 
-            $parkBase = $this->parkBase($memberIds, \count($files));
+            // Binaries the scan never recorded -- fileNameOf() or postingStem()
+            // returned null for them -- but whose COLLECTION joined the cohort
+            // through its siblings. They are not in $byFile, so without this they
+            // are never parked and pass 2 writes the dense ordinals straight onto
+            // the numbers they already hold. Production hit exactly that on
+            // alt.binaries.movie.hd: Duplicate entry '474946-1'.
+            $plannedBinaryIds = [];
+            foreach ($byFile as $binaryIds) {
+                foreach ($binaryIds as $binaryId) {
+                    $plannedBinaryIds[] = $binaryId;
+                }
+            }
+            $retained = DB::table('binaries')
+                ->where('collections_id', $survivor)
+                ->when($plannedBinaryIds !== [], static fn ($q) => $q->whereNotIn('id', $plannedBinaryIds))
+                ->orderBy('filenumber')
+                ->pluck('id')
+                ->map(static fn ($id): int => (int) $id)
+                ->all();
+
+            // The park band has to clear every ordinal pass 2 will claim, which
+            // is now one per file PLUS one per retained binary.
+            $parkBase = $this->parkBase($memberIds, \count($files) + \count($retained));
 
             DB::transaction(function () use (
                 $plan,
@@ -512,6 +534,7 @@ final class SplitPostingIdentityRepairService
                 $byFile,
                 $declaredParts,
                 $parkBase,
+                $retained,
                 &$totals
             ): void {
                 $survivorBinaries = [];
@@ -546,6 +569,15 @@ final class SplitPostingIdentityRepairService
                     ]);
                 }
 
+                // Park the scan-skipped binaries into the same band. They are
+                // already in the survivor, so only the filenumber moves.
+                foreach ($retained as $retainedBinary) {
+                    $park++;
+                    DB::table('binaries')->where('id', $retainedBinary)->update([
+                        'filenumber' => $parkBase + $park,
+                    ]);
+                }
+
                 $ordinal = 0;
                 foreach ($files as $file) {
                     $ordinal++;
@@ -575,12 +607,27 @@ final class SplitPostingIdentityRepairService
                     $totals['files']++;
                 }
 
+                // Continue the dense run over the scan-skipped binaries. Only
+                // the ordinal is written: their name, parts and part counts were
+                // never in question, they were simply invisible to the scan.
+                foreach ($retained as $retainedBinary) {
+                    $ordinal++;
+                    DB::table('binaries')->where('id', $retainedBinary)->update([
+                        'filenumber' => $ordinal,
+                    ]);
+                }
+
                 DB::table('collections')->where('id', $survivor)->update([
                     'collectionhash' => $hash,
                     'groups_id' => $groupId,
                     // Safe only because unsurvivableShape() has already refused
-                    // every shape the delete predicates would take.
-                    'totalfiles' => \count($files),
+                    // every shape the delete predicates would take. Retained
+                    // binaries are counted because MAX(filenumber) now covers
+                    // them; leaving them out would put the collection
+                    // permanently below its own completion bar. They can only
+                    // raise the count, so a shape that cleared the min-files
+                    // floor and the par2-only filter still clears both.
+                    'totalfiles' => \count($files) + \count($retained),
                     'filecheck' => 0,
                     // Keep the oldest member's timestamps: the collection really
                     // is that old, and back-dating dateadded clears the

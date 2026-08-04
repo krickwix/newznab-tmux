@@ -644,6 +644,51 @@ final class SplitPostingIdentityRepairServiceTest extends TestCase
         $this->assertSame(10, (int) DB::table('parts')->count());
     }
 
+    /**
+     * The survivor can hold binaries the cohort scan never saw.
+     *
+     * candidateCohorts() skips a row whose binary name yields no filename
+     * (fileNameOf()) or no stem (postingStem()), but the COLLECTION still joins
+     * the cohort through its other binaries. Those skipped binaries are never
+     * parked, so when pass 2 writes the dense ordinals onto the survivor they
+     * land on numbers the skipped binaries already hold.
+     *
+     * Production, 2026-08-04, alt.binaries.movie.hd under the hourly sweep:
+     *
+     *   SQLSTATE[23000]: Duplicate entry '474946-1'
+     *   for key 'ux_collection_id_filenumber'
+     *   at SplitPostingIdentityRepairService.php:559
+     *
+     * The transaction rolls back, so nothing is corrupted -- but the cohort can
+     * never merge and the job reports red on every run.
+     */
+    public function test_a_binary_the_scan_skipped_does_not_collide_with_the_dense_ordinals(): void
+    {
+        $survivor = $this->seedCollection('skip-survivor', 3, '2026-07-31 04:00:00', 'Skip.Test');
+        // Unparseable: no quoted run, so fileNameOf() returns null and the scan
+        // never records it -- yet it sits on filenumber 1, which pass 2 claims.
+        $this->seedBinary($survivor, 'ignored', 1, 1, 1, 'a loose note about the posting');
+        $this->seedBinary($survivor, 'Skip.Test.mkv.001', 3, 3, 2);
+        $absorbed = $this->seedCollection('skip-absorbed', 4, '2026-07-31 04:05:00', 'Skip.Test');
+        $this->seedBinary($absorbed, 'Skip.Test.mkv.002', 4, 4, 1);
+
+        $summary = $this->service()->repair(self::GROUP_ID, 50, null, true);
+
+        $this->assertSame(1, $summary['cohorts_merged']);
+
+        // One collection, and every binary it holds -- including the one the
+        // scan skipped -- carries a distinct, dense ordinal.
+        $this->assertSame(1, (int) DB::table('collections')->count());
+        $filenumbers = DB::table('binaries')->orderBy('filenumber')->pluck('filenumber')
+            ->map(static fn ($v): int => (int) $v)->all();
+        $this->assertSame([1, 2, 3], $filenumbers);
+
+        // Two gates read MAX(filenumber) as a file count, so the skipped binary
+        // has to be counted rather than merely survive.
+        $this->assertSame(3, (int) DB::table('collections')->value('totalfiles'));
+        $this->assertSame(3, (int) DB::table('binaries')->count());
+    }
+
     public function test_two_binaries_of_one_file_are_folded_and_their_parts_rehomed(): void
     {
         // A file split across two collections: both hold a binary for it, and
