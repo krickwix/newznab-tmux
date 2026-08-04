@@ -65,11 +65,16 @@ class WorkerProfileApplier
                 && DB::table('current_forward_windows')
                     ->whereIn('state', ['OFFERED', 'CLAIMED', 'INGESTED', 'ATTRIBUTING', 'CONTINUATION_PENDING'])
                     ->exists();
-            if ($currentForwardUnsettled) {
+            // Free-run ignores the unsettled-window clamp too. It is the last
+            // gate that can hold backfill off, and leaving it in place would
+            // make free-run stall behind current-forward attribution -- the
+            // exact "permitted but nothing happens" state it exists to remove.
+            $freeRun = $profile->profile === ControlProfile::FreeRun;
+            if ($currentForwardUnsettled && ! $freeRun) {
                 $grantPermit = false;
                 $preserveUnclaimedPermit = false;
             }
-            $backfillAdmissionOpen = $decision->backfillPermitted && ! $currentForwardUnsettled;
+            $backfillAdmissionOpen = $decision->backfillPermitted && ($freeRun || ! $currentForwardUnsettled);
             $backfillStop = $grantPermit && $backfillGroup !== null
                 ? ((new BackfillStopCursorPolicy)->stopCursor($backfillGroup) ?? 0)
                 : $existingPinnedStop;
