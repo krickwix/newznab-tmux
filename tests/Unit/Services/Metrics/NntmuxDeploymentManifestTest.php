@@ -15,7 +15,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
      * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
      */
-    private const FLEET_IMAGE = 'microservices-pods-20260804-ingest-partcount-all-groups-v230@sha256:1984fa2aefacb80f975675ca8bbdf7df313bb7edacf53b09e316221a23e07089';
+    private const FLEET_IMAGE = 'microservices-pods-20260805-orchestrator-fill-profile-config-v231@sha256:a33faa6070881f5217c7d083d708c07456c5880a820bcbd60dc25f94094f7cc6';
 
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
