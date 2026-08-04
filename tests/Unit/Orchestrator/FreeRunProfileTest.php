@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Orchestrator;
 
+use App\Services\Orchestrator\AdaptiveWorkerControlPlanner;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlState;
 use App\Services\Orchestrator\PipelineSnapshot;
@@ -93,6 +94,30 @@ final class FreeRunProfileTest extends TestCase
             self::assertTrue($decision->backfillPermitted, $label);
             self::assertSame(['free_run_operator_override'], $decision->reasons, $label);
         }
+    }
+
+    /**
+     * The bug the first deployment shipped.
+     *
+     * WorkerControlPolicy handed back a profile with every timer at zero, and
+     * AdaptiveWorkerControlPlanner -- which only skipped FailSafe -- floored
+     * them straight back up: releases and nzb to 60s, backfill to 10s. The
+     * orchestrator reported profile=free_run while the workers kept sleeping,
+     * which is the worst of both (no brakes, no speed). Caught in production by
+     * reading worker_controls rather than trusting the profile name.
+     */
+    public function test_the_adaptive_planner_does_not_re_floor_free_run_timers(): void
+    {
+        config()->set('nntmux.orchestrator.free_run', true);
+
+        $decision = (new WorkerControlPolicy)->decide($this->snapshot(), new ControlState, time());
+        $planned = (new AdaptiveWorkerControlPlanner)->plan($decision, $this->snapshot());
+
+        self::assertSame(ControlProfile::FreeRun, $planned->profile->profile);
+        self::assertSame(0, $planned->profile->binariesSleepSeconds);
+        self::assertSame(0, $planned->profile->backfillSleepSeconds);
+        self::assertSame(0, $planned->profile->releasesSleepSeconds);
+        self::assertSame(0, $planned->profile->nzbSleepSeconds);
     }
 
     public function test_free_run_releases_the_backfill_lock(): void

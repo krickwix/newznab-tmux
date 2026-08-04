@@ -20,7 +20,14 @@ final class AdaptiveWorkerControlPlanner
         bool $backfillAttributionPending = false,
     ): ControlDecision {
         $base = $decision->profile;
-        if ($base->profile === ControlProfile::FailSafe) {
+        // FailSafe is authoritative because nothing may accelerate past it.
+        // FreeRun is authoritative for the mirror-image reason: every sleep
+        // below is a `max($base->..., floor)`, so an operator's zeros would be
+        // floored straight back up -- releases and nzb to 60s, backfill to 10s
+        // -- and free-run would report profile=free_run while the workers kept
+        // sleeping. Adaptive modulation is precisely what this mode exists to
+        // switch off.
+        if ($base->profile === ControlProfile::FailSafe || $base->profile === ControlProfile::FreeRun) {
             return $decision;
         }
 
