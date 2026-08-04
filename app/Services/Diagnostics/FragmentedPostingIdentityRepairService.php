@@ -353,9 +353,22 @@ final class FragmentedPostingIdentityRepairService
         return true;
     }
 
+    /**
+     * Deliberately UNANCHORED, and transcribed from the predicate it has to
+     * mirror -- ReleaseProcessingService's $par2Only filter, which is
+     * `b.name REGEXP '\.(vol[0-9]+\+[0-9]+\.par2|par2)'` with no `$`.
+     *
+     * An end-anchored version is the natural thing to write and it is strictly
+     * weaker than the gate it is protecting against, which is the worst
+     * possible direction for a guard to be wrong in. Caught in production on
+     * the first apply against alt.binaries.movies: brace-token binaries are
+     * named `{Lioness.S03.vol063+64.par2} {sraBl51wo8je} yEnc`, so the `.par2`
+     * sits mid-string and `$` missed all 616 of them. Two par2-only cohorts
+     * merged that BraceTokenIdentityRepairService had already refused by name.
+     */
     private function isPar2(string $file): bool
     {
-        return preg_match('/\.(?:vol\d+\+\d+\.par2|par2)$/i', trim($file)) === 1;
+        return preg_match('/\.(?:vol\d+\+\d+\.par2|par2)/i', trim($file)) === 1;
     }
 
     /**

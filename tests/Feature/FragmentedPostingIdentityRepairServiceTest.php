@@ -246,6 +246,49 @@ final class FragmentedPostingIdentityRepairServiceTest extends TestCase
         self::assertSame(3, DB::table('collections')->count());
     }
 
+    /**
+     * The shape that got past the guard in production on the first apply.
+     *
+     * Brace-token binaries carry the token AFTER the extension --
+     * `{Lioness.S03.vol063+64.par2} {sraBl51wo8je} yEnc` -- so an end-anchored
+     * par2 test misses every one of them. 616 collections across two cohorts
+     * merged that BraceTokenIdentityRepairService had already refused by name,
+     * and only ReleaseProcessingService's own unanchored predicate stopped a
+     * par2-only release from being published. A guard that is weaker than the
+     * gate it mirrors is worse than no guard, because it reads as coverage.
+     */
+    public function test_a_par2_only_cohort_is_refused_when_the_extension_is_not_at_the_end(): void
+    {
+        foreach ([1, 2, 3] as $filenumber) {
+            $collectionId = (int) DB::table('collections')->insertGetId([
+                'subject' => sprintf('{Lioness.S03.vol063+64.par2} {tok%02d} yEnc', $filenumber),
+                'fromname' => self::POSTER,
+                'date' => '2026-08-01 10:00:00',
+                'groups_id' => self::GROUP_ID,
+                'totalfiles' => 3,
+                'collectionhash' => sha1('brace'.$filenumber),
+                'dateadded' => '2026-08-01 10:00:00',
+                'filecheck' => 0,
+            ]);
+            DB::table('binaries')->insert([
+                'binaryhash' => sha1('bb'.$collectionId),
+                'name' => sprintf('{Lioness.S03.vol063+64.par2} {tok%02d} yEnc', $filenumber),
+                'collections_id' => $collectionId,
+                'filenumber' => $filenumber,
+                'totalparts' => 1,
+                'currentparts' => 1,
+                'partcheck' => 1,
+                'partsize' => 100,
+            ]);
+        }
+
+        $summary = $this->repair(true);
+
+        self::assertSame(0, $summary['cohorts_merged']);
+        self::assertSame('par2_only', $summary['skipped'][0]['refusal'] ?? null);
+        self::assertSame(3, DB::table('collections')->count());
+    }
+
     public function test_a_dry_run_changes_nothing(): void
     {
         $this->seedFragments(range(1, 5), 5);
