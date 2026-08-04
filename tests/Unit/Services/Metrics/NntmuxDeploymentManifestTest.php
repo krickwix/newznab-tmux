@@ -15,7 +15,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
      * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
      */
-    private const FLEET_IMAGE = 'microservices-pods-20260804-orchestrator-config-catchup-v225@sha256:883030980663d595bbadfd47b5aeb484c5932082411d08388c934b1a2b7d1e7b';
+    private const FLEET_IMAGE = 'microservices-pods-20260804-fragmented-posting-repair-v226@sha256:a9015bfcdc7ea780b5716d3e6d1e34f453797a37ced924122596d294168b3dae';
 
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
@@ -567,6 +567,70 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringContainsString('->toBase()', $query);
         self::assertStringContainsString('AS bucket', $query);
         self::assertStringNotContainsString('AS id', $query);
+    }
+
+    /**
+     * v226 layers the third fragmentation repair over v225.
+     *
+     * Diagnostics only -- nothing in that layer runs on its own and the command
+     * is dry-run unless given --update. The base is asserted because re-basing
+     * below v225 would un-ship the orchestrator config catch-up, and the
+     * absence of the split-posting service is asserted because the temptation
+     * when adding a third pass is to "fix" the second one's guard on the way
+     * past. That guard was measured against the live residue and is nearly
+     * exact; the new pass reaches its targets by a different cohort key.
+     */
+    public function test_fragmented_posting_overlay_layers_on_v225_and_ships_only_the_new_pass(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/fragmented-posting-repair-v226.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260804-orchestrator-config-catchup-v225'
+            .'@sha256:883030980663d595bbadfd47b5aeb484c5932082411d08388c934b1a2b7d1e7b',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Services/Diagnostics/FragmentedPostingIdentityRepairService.php',
+            'app/Console/Commands/RepairFragmentedPostingIdentity.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path}", $dockerfile);
+        }
+        foreach ([
+            'app/Services/Diagnostics/SplitPostingIdentityRepairService.php',
+            'app/Services/Binaries/CollectionHandler.php',
+            'app/Services/ReleaseProcessingService.php',
+        ] as $path) {
+            self::assertStringNotContainsString("COPY {$path}", $dockerfile);
+        }
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
+    }
+
+    /**
+     * The bijection is the entire safety argument for the new pass, so the
+     * shipped source has to keep all four of its terms. Dropping any one of
+     * them silently re-admits either a hole (a file that was never downloaded)
+     * or a duplicate (two postings merged into a chimera).
+     */
+    public function test_the_shipped_fragmented_repair_keeps_every_term_of_the_bijection(): void
+    {
+        $service = (string) file_get_contents(
+            dirname(__DIR__, 4).'/app/Services/Diagnostics/FragmentedPostingIdentityRepairService.php'
+        );
+
+        foreach ([
+            'binaries = declared_files',
+            'distinct_filenumbers = declared_files',
+            'min_filenumber = 1',
+            'max_filenumber = declared_files',
+        ] as $term) {
+            self::assertStringContainsString($term, $service, sprintf('bijection term "%s" is missing', $term));
+        }
+
+        // It must never write a file count it has not proven -- that is the
+        // distinction from the split-posting pass, and the 2026-08-03 failure.
+        self::assertStringNotContainsString("'totalfiles' =>", $service);
     }
 
     /**
