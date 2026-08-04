@@ -270,6 +270,14 @@ return [
         'trim',
         explode(',', (string) env('NNTMUX_OBFUSCATED_BRACE_TOKEN_GROUPS', '')),
     )))),
+    // Groups for which HeaderStorageService reports how many headers were keyed
+    // on a PART count mistaken for a file count. Reporting only -- it does not
+    // change ingest. Sizing data for the keying change; see
+    // docs/design/2026-08-04-ingest-collection-keying.md.
+    'ingest_partcount_key_groups' => array_values(array_unique(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('NNTMUX_INGEST_PARTCOUNT_KEY_GROUPS', '')),
+    )))),
     'obfuscated_hash_set_groups' => array_values(array_unique(array_filter(array_map(
         'trim',
         explode(',', (string) env('NNTMUX_OBFUSCATED_HASH_SET_GROUPS', '')),
