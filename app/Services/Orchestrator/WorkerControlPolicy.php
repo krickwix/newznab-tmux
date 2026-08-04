@@ -54,8 +54,56 @@ final class WorkerControlPolicy
             ?? (int) $this->orchestratorConfig('ineffective_backfill_limit', self::INEFFECTIVE_BACKFILL_LIMIT));
     }
 
+    /**
+     * Operator override: run everything flat out, ignoring every governor.
+     *
+     * Checked BEFORE telemetry validity and hard safety on purpose. A mode
+     * whose entire point is "do not stop" cannot be gated on the same signals
+     * it exists to ignore -- if it were checked after, a stale Prometheus
+     * sample or a busy database would drop the fleet back into fail_safe and
+     * free-run would silently not be free.
+     *
+     * That is also exactly why it is dangerous, and why it is opt-in by an
+     * explicit env var with no default and no path from the adaptive ladder.
+     */
+    private function freeRunEnabled(): bool
+    {
+        return (bool) $this->orchestratorConfig('free_run', false);
+    }
+
     public function decide(PipelineSnapshot $snapshot, ControlState $state, int $now): ControlDecision
     {
+        if ($this->freeRunEnabled()) {
+            return new ControlDecision(
+                profile: WorkerControlProfile::for(ControlProfile::FreeRun),
+                backfillPermitted: true,
+                reasons: ['free_run_operator_override'],
+                nextState: new ControlState(
+                    profile: ControlProfile::FreeRun,
+                    lastTransitionAt: $state->profile === ControlProfile::FreeRun ? $state->lastTransitionAt : $now,
+                    // No cooldown: free-run never steps itself down, so a
+                    // cooldown would only delay the ladder resuming once the
+                    // operator turns it off.
+                    cooldownUntil: 0,
+                    consecutiveIneffectiveBackfillPermits: 0,
+                    // Releasing the backfill lock is the point: an ineffective
+                    // permit must not be able to park a target while free-run
+                    // is on.
+                    backfillLocked: false,
+                    ineffectiveBackfillPermitsByTarget: [],
+                    failSafeCause: null,
+                    failSafeLastObservedAt: 0,
+                    processedBackfillPermitGenerations: $state->processedBackfillPermitGenerations,
+                    qualifiedSupplyStarved: false,
+                    qualifiedSupplyCandidateSince: 0,
+                    qualifiedSupplyStarvedSince: 0,
+                    qualifiedSupplyLastObservedAt: $snapshot->observedAt,
+                    qualifiedSupplyRecoverySamples: 0,
+                ),
+                transitioned: $state->profile !== ControlProfile::FreeRun,
+            );
+        }
+
         $permitOutcomeAlreadyApplied = $snapshot->backfillPermitCompleted
             && $snapshot->backfillPermitGeneration > 0
             && in_array($snapshot->backfillPermitGeneration, $state->processedBackfillPermitGenerations, true);

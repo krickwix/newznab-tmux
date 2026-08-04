@@ -38,12 +38,23 @@ final readonly class WorkerControlProfile
         $fillQuantity = $configBound
             ? max(10000, (int) round((int) config('nntmux.orchestrator.backfill_fill_quantity', 10000) / 10000) * 10000)
             : 10000;
+        // Free-run drains the NZB queue in larger bites; there is no reason to
+        // hold it at the adaptive batch size once the timers are gone.
+        $fillNzbBatch = $configBound
+            ? max(1, (int) config('nntmux.orchestrator.free_run_nzb_batch_size', 100))
+            : 100;
 
         return match ($profile) {
             ControlProfile::FailSafe => new self($profile, 300, 1800, 180, 180, 5, false, 0, 0, 0),
             ControlProfile::Drain => new self($profile, 160, 1800, 45, 55, 20, false, 0, 0, 0),
             ControlProfile::Balanced => new self($profile, 40, 900, 60, 55, 20, true, 1, 1, 10000),
             ControlProfile::Fill => new self($profile, 20, 20, 20, 20, 20, true, $fillGroups, $fillThreads, $fillQuantity),
+            // Every timer at zero and backfill always enabled. Groups, threads
+            // and quantity still come from config so free-run is "no waiting",
+            // not "no limits" -- the connection budget is still whatever
+            // FILL_THREADS says, because exceeding the provider's allowance
+            // fails the fetch rather than speeding it up.
+            ControlProfile::FreeRun => new self($profile, 0, 0, 0, 0, max(20, $fillNzbBatch), true, $fillGroups, $fillThreads, $fillQuantity),
         };
     }
 
