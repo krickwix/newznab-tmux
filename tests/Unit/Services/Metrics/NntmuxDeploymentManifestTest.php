@@ -15,7 +15,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
      * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
      */
-    private const FLEET_IMAGE = 'microservices-pods-20260804-fragmented-posting-par2-guard-v227@sha256:64f3d356162b5f44a242bf35ae5f41a78470c85f82bdc3f41778c412e6128cd9';
+    private const FLEET_IMAGE = 'microservices-pods-20260804-split-repair-park-retained-v228@sha256:42dc29cfea256f6c1b991605c03b320737de0037f7f0f1206200eb298f678b4c';
 
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
@@ -567,6 +567,35 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertStringContainsString('->toBase()', $query);
         self::assertStringContainsString('AS bucket', $query);
         self::assertStringNotContainsString('AS id', $query);
+    }
+
+    /**
+     * v228 carries the split-repair parking fix and nothing else.
+     *
+     * The scheduled sweep is what found the defect, so the overlay must not
+     * quietly widen while fixing it: a single COPY, and specifically NOT the
+     * fragmented pass, whose own par2 guard was already corrected in v227.
+     */
+    public function test_split_repair_park_overlay_layers_on_v227_and_ships_only_the_split_service(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/split-repair-park-retained-v228.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260804-fragmented-posting-par2-guard-v227'
+            .'@sha256:64f3d356162b5f44a242bf35ae5f41a78470c85f82bdc3f41778c412e6128cd9',
+            $dockerfile,
+        );
+        self::assertStringContainsString(
+            'COPY app/Services/Diagnostics/SplitPostingIdentityRepairService.php',
+            $dockerfile,
+        );
+        self::assertStringNotContainsString(
+            'COPY app/Services/Diagnostics/FragmentedPostingIdentityRepairService.php',
+            $dockerfile,
+        );
+        self::assertStringNotContainsString('config/nntmux.php', $dockerfile);
     }
 
     /**
