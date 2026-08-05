@@ -220,6 +220,7 @@ class PipelineSnapshotRepository
             databaseMemoryKnown: $signals['memory_known'],
             databaseCpuKnown: $signals['cpu_known'],
             storageKnown: $signals['storage_known'],
+            profileOverride: (new ControlProfileOverride)->effective(),
         );
     }
 

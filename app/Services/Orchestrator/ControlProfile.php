@@ -23,6 +23,31 @@ enum ControlProfile: string
      */
     case FreeRun = 'free_run';
 
+    /**
+     * Operator-facing summary, shown by `nntmux:orchestrator-mode list`.
+     */
+    public function description(): string
+    {
+        return match ($this) {
+            self::FailSafe => 'Everything parked. Backfill off, long sleeps. The floor the safety gates force.',
+            self::Drain => 'Work the existing backlog down. Backfill off, no new headers admitted.',
+            self::Balanced => 'Steady state. Backfill on at one group/thread, moderate sleeps.',
+            self::Fill => 'Top of the adaptive ladder. Backfill at the configured fill width, short sleeps.',
+            self::FreeRun => 'Every governor off: no sleeps, no permit gating, no safety demotion. Operator only.',
+        };
+    }
+
+    /**
+     * Whether this mode ignores the hard-safety gates.
+     *
+     * Only free-run does. Pinning any other mode still yields to a database or
+     * disk in trouble -- the pin replaces the ladder's choice, not the brakes.
+     */
+    public function bypassesSafety(): bool
+    {
+        return $this === self::FreeRun;
+    }
+
     public function rung(): int
     {
         return match ($this) {

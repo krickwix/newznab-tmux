@@ -88,6 +88,12 @@ class WorkerProfileApplier
                     || $safeHighPressureRecovery) ? '1' : '0',
                 'orchestrator_lease_until' => (string) ($now + 600),
                 'orchestrator_generation' => (string) $generation,
+                // Published so any pod can answer "what happens if I reset the
+                // pin". NNTMUX_ORCHESTRATOR_FREE_RUN is set on the orchestrator
+                // deployment alone, so config() reads false everywhere else --
+                // a mode CLI run from a worker pod would otherwise promise the
+                // adaptive ladder and hand the fleet back to free-run.
+                'orchestrator_free_run' => config('nntmux.orchestrator.free_run', false) ? '1' : '0',
                 'orchestrator_bins_timer' => (string) ($safeHighPressureRecovery
                     ? ($acceleratedRecovery
                         ? self::ACCELERATED_RECOVERY_TIMER_SECONDS
