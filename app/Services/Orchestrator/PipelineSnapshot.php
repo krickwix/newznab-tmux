@@ -87,6 +87,10 @@ final readonly class PipelineSnapshot
         public bool $databaseMemoryKnown = true,
         public bool $databaseCpuKnown = true,
         public bool $storageKnown = true,
+        // The operator's pinned mode, observed alongside everything else so the
+        // policy stays a pure function of its snapshot and needs no store of
+        // its own. Null means "no pin" -- run the adaptive ladder.
+        public ?ControlProfile $profileOverride = null,
     ) {}
 
     public function withPermitOutcome(
@@ -173,6 +177,10 @@ final readonly class PipelineSnapshot
             databaseMemoryKnown: $this->databaseMemoryKnown,
             databaseCpuKnown: $this->databaseCpuKnown,
             storageKnown: $this->storageKnown,
+            // Must be carried: this rebuild runs on every permit outcome, so
+            // dropping it here would silently un-pin the fleet the moment a
+            // backfill permit completed.
+            profileOverride: $this->profileOverride,
         );
     }
 

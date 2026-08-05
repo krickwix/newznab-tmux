@@ -15,7 +15,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
      * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
      */
-    private const FLEET_IMAGE = 'microservices-pods-20260805-omdb-quota-cooldown-v237@sha256:6e47f42e757c4ced631647215d1580ec033befc1263d703c7fc5be67435e1342';
+    private const FLEET_IMAGE = 'microservices-pods-20260805-orchestrator-mode-cli-v238@sha256:01a42082b11033adfe9acbebfa6df891cbbe7020bf93aa3c4f8ad9b4e2479218';
 
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
@@ -612,6 +612,41 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * quietly widen while fixing it: a single COPY, and specifically NOT the
      * fragmented pass, whose own par2 guard was already corrected in v227.
      */
+    /**
+     * v238 adds the operator CLI for the control mode.
+     *
+     * The base is asserted because re-basing below v237 would un-ship the OMDB
+     * quota cooldown and put the fleet back to hammering a spent API. The
+     * COPY set is asserted whole because the pin is threaded through four
+     * collaborators -- the enum that names the modes, the snapshot that
+     * observes the pin, the repository that reads it and the policy that acts
+     * on it -- and shipping any subset gives an image whose CLI accepts a mode
+     * the control loop then ignores. That failure is silent: the command exits
+     * 0 and the orchestrator carries on in the old mode.
+     */
+    public function test_orchestrator_mode_cli_overlay_layers_on_v237_and_ships_the_whole_pin_path(): void
+    {
+        $dockerfile = (string) file_get_contents(
+            dirname(__DIR__, 4).'/docker/overlays/orchestrator-mode-cli-v238.Dockerfile'
+        );
+
+        self::assertStringContainsString(
+            'FROM docker.io/krickwix/nntmux:microservices-pods-20260805-omdb-quota-cooldown-v237'
+            .'@sha256:6e47f42e757c4ced631647215d1580ec033befc1263d703c7fc5be67435e1342',
+            $dockerfile,
+        );
+        foreach ([
+            'app/Console/Commands/NntmuxOrchestratorMode.php',
+            'app/Services/Orchestrator/ControlProfileOverride.php',
+            'app/Services/Orchestrator/ControlProfile.php',
+            'app/Services/Orchestrator/WorkerControlPolicy.php',
+            'app/Services/Orchestrator/PipelineSnapshot.php',
+            'app/Services/Orchestrator/PipelineSnapshotRepository.php',
+        ] as $path) {
+            self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
+        }
+    }
+
     public function test_split_repair_park_overlay_layers_on_v227_and_ships_only_the_split_service(): void
     {
         $dockerfile = (string) file_get_contents(

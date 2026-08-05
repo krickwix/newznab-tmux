@@ -1247,4 +1247,12 @@ class WorkerControlStateStore
     {
         Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->forever(self::DECISION_KEY, $decision);
     }
+
+    /** @return array<string, mixed> */
+    public function lastDecision(): array
+    {
+        $decision = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->get(self::DECISION_KEY);
+
+        return is_array($decision) ? $decision : [];
+    }
 }

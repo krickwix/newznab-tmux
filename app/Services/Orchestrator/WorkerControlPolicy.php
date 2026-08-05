@@ -71,9 +71,24 @@ final class WorkerControlPolicy
         return (bool) $this->orchestratorConfig('free_run', false);
     }
 
+    /**
+     * The mode an operator has pinned, if any.
+     *
+     * Observed on the snapshot rather than read here, so this class stays a
+     * pure function of its inputs. The config fallback keeps the original
+     * env-var free-run working for callers that build a snapshot without it.
+     */
+    private function pinnedProfile(PipelineSnapshot $snapshot): ?ControlProfile
+    {
+        return $snapshot->profileOverride
+            ?? ($this->freeRunEnabled() ? ControlProfile::FreeRun : null);
+    }
+
     public function decide(PipelineSnapshot $snapshot, ControlState $state, int $now): ControlDecision
     {
-        if ($this->freeRunEnabled()) {
+        $pinned = $this->pinnedProfile($snapshot);
+
+        if ($pinned === ControlProfile::FreeRun) {
             return new ControlDecision(
                 profile: WorkerControlProfile::for(ControlProfile::FreeRun),
                 backfillPermitted: true,
@@ -176,7 +191,18 @@ final class WorkerControlPolicy
         $transitioned = false;
         $reasons = [$pressureReason];
 
-        if ($profile === ControlProfile::FailSafe) {
+        // A pin replaces the ladder's SELECTION, nothing else. It is read here,
+        // below the hard-safety block, so a pinned `fill` still yields to a
+        // database in trouble -- free-run, checked at the top of decide(), is
+        // the only mode that overrides safety, and it stays that way on
+        // purpose. A pin also outranks the fail-safe recovery climb, since
+        // reaching this line already means safety and telemetry are green and
+        // the operator has said where they want the fleet.
+        if ($pinned !== null) {
+            $transitioned = $profile !== $pinned;
+            $profile = $pinned;
+            $reasons[] = 'profile_pinned_by_operator';
+        } elseif ($profile === ControlProfile::FailSafe) {
             return $this->recoverFromFailSafe(
                 $snapshot,
                 $state,
@@ -190,9 +216,7 @@ final class WorkerControlPolicy
                 $qualifiedSupply,
                 $qualifiedSupplyReasons,
             );
-        }
-
-        if ($this->mayTransition($state, $now)) {
+        } elseif ($this->mayTransition($state, $now)) {
             if ($highSamples >= self::HIGH_SAMPLES_TO_DRAIN) {
                 $nextProfile = $profile->stepDown();
                 $transitioned = $nextProfile !== $profile;
@@ -222,7 +246,11 @@ final class WorkerControlPolicy
             consecutiveIneffectiveBackfillPermits: $ineffectivePermits,
             backfillLocked: $backfillLocked,
             ineffectiveBackfillPermitsByTarget: $targetIneffectivePermits,
-            failSafeCause: $profile === ControlProfile::FailSafe ? FailSafeCause::Telemetry : null,
+            failSafeCause: match (true) {
+                $profile !== ControlProfile::FailSafe => null,
+                $pinned === ControlProfile::FailSafe => FailSafeCause::Pinned,
+                default => FailSafeCause::Telemetry,
+            },
             failSafeLastObservedAt: $profile === ControlProfile::FailSafe ? $snapshot->observedAt : 0,
             processedBackfillPermitGenerations: $processedPermitGenerations,
             qualifiedSupplyStarved: $qualifiedSupply['starved'],
