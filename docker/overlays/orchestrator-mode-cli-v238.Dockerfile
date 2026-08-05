@@ -37,6 +37,14 @@ LABEL org.opencontainers.image.base.name="docker.io/krickwix/nntmux:microservice
 # The pin lives in `settings`, not in the orchestrator's Redis state: a Redis
 # flush restarting the ladder is recoverable, a Redis flush silently un-pinning
 # the fleet is not.
+#
+# WorkerProfileApplier is in here because NNTMUX_ORCHESTRATOR_FREE_RUN is set on
+# the orchestrator deployment alone -- verified in-pod, config() reads false on
+# every worker while the orchestrator applies profile=free_run. Without the
+# orchestrator publishing that default, `reset` run from a worker pod would
+# promise the adaptive ladder at the exact moment it handed the fleet back to
+# free-run. Both setting names are kept under the live varchar(25) on
+# settings.name.
 COPY app/Console/Commands/NntmuxOrchestratorMode.php /app/app/Console/Commands/NntmuxOrchestratorMode.php
 COPY app/Services/Orchestrator/ControlProfileOverride.php /app/app/Services/Orchestrator/ControlProfileOverride.php
 COPY app/Services/Orchestrator/ControlProfile.php /app/app/Services/Orchestrator/ControlProfile.php
@@ -45,3 +53,4 @@ COPY app/Services/Orchestrator/WorkerControlPolicy.php /app/app/Services/Orchest
 COPY app/Services/Orchestrator/WorkerControlStateStore.php /app/app/Services/Orchestrator/WorkerControlStateStore.php
 COPY app/Services/Orchestrator/PipelineSnapshot.php /app/app/Services/Orchestrator/PipelineSnapshot.php
 COPY app/Services/Orchestrator/PipelineSnapshotRepository.php /app/app/Services/Orchestrator/PipelineSnapshotRepository.php
+COPY app/Services/Orchestrator/WorkerProfileApplier.php /app/app/Services/Orchestrator/WorkerProfileApplier.php

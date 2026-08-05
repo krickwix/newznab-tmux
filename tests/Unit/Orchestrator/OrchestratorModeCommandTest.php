@@ -149,6 +149,61 @@ final class OrchestratorModeCommandTest extends TestCase
     }
 
     /**
+     * Caught live, not by inspection.
+     *
+     * NNTMUX_ORCHESTRATOR_FREE_RUN is set on the orchestrator deployment alone
+     * -- checked in-pod, config('nntmux.orchestrator.free_run') reads false on
+     * every worker while the orchestrator was applying profile=free_run. Read
+     * locally, `reset` would have told an operator they were handing the fleet
+     * back to the adaptive ladder at the exact moment it went back to free-run.
+     * The orchestrator publishes the value so any pod can answer truthfully.
+     */
+    public function test_the_published_default_beats_local_config_which_other_pods_do_not_have(): void
+    {
+        config()->set('nntmux.orchestrator.free_run', false);
+        Settings::query()->updateOrCreate(
+            ['name' => ControlProfileOverride::FREE_RUN_DEFAULT_SETTING],
+            ['value' => '1'],
+        );
+
+        self::assertSame(ControlProfile::FreeRun, $this->override()->configuredDefault());
+        self::assertSame(ControlProfile::FreeRun, $this->override()->effective());
+
+        $this->artisan('nntmux:orchestrator-mode reset')
+            ->expectsOutputToContain('free_run')
+            ->assertSuccessful();
+    }
+
+    /**
+     * And the published value wins in the other direction too, so an
+     * orchestrator that has since had free-run switched off is not reported as
+     * still defaulting to it.
+     */
+    public function test_a_published_zero_means_the_adaptive_ladder(): void
+    {
+        config()->set('nntmux.orchestrator.free_run', true);
+        Settings::query()->updateOrCreate(
+            ['name' => ControlProfileOverride::FREE_RUN_DEFAULT_SETTING],
+            ['value' => '0'],
+        );
+
+        self::assertNull($this->override()->configuredDefault());
+        self::assertNull($this->override()->effective());
+    }
+
+    /**
+     * Before the orchestrator has ever published (a fresh database, or a
+     * rollout where the CLI lands first), fall back to local config rather than
+     * silently claiming the adaptive ladder.
+     */
+    public function test_an_unpublished_default_falls_back_to_local_config(): void
+    {
+        config()->set('nntmux.orchestrator.free_run', true);
+
+        self::assertSame(ControlProfile::FreeRun, $this->override()->configuredDefault());
+    }
+
+    /**
      * A blank stored value is "no pin", not an invalid mode. `clear()` writes
      * one rather than deleting the row, so this is the normal post-reset state
      * and must not be mistaken for a corrupt setting.

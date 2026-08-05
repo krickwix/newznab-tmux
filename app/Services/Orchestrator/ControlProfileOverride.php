@@ -20,7 +20,14 @@ use App\Models\Settings;
  */
 final class ControlProfileOverride
 {
-    public const string SETTING = 'orchestrator_profile_override';
+    public const string SETTING = 'orchestrator_mode_pin';
+
+    /**
+     * Where the orchestrator publishes its own FREE_RUN default, so pods that
+     * do not carry that env var can still report it. Written every control
+     * cycle by WorkerProfileApplier.
+     */
+    public const string FREE_RUN_DEFAULT_SETTING = 'orchestrator_free_run';
 
     /**
      * The pin an operator has explicitly set, if any.
@@ -42,17 +49,27 @@ final class ControlProfileOverride
      */
     public function effective(): ?ControlProfile
     {
-        return $this->stored()
-            ?? ((bool) config('nntmux.orchestrator.free_run', false) ? ControlProfile::FreeRun : null);
+        return $this->stored() ?? $this->configuredDefault();
     }
 
     /**
      * The mode `reset` would leave the fleet in: the deployed default, or null
      * for adaptive control.
+     *
+     * Prefers the value the orchestrator publishes over the local config,
+     * because NNTMUX_ORCHESTRATOR_FREE_RUN is set on the orchestrator
+     * deployment alone. Read locally from a worker pod it is false, so the CLI
+     * would tell an operator that reset returns them to the adaptive ladder
+     * while the orchestrator went straight back to free-run.
      */
     public function configuredDefault(): ?ControlProfile
     {
-        return (bool) config('nntmux.orchestrator.free_run', false) ? ControlProfile::FreeRun : null;
+        $published = Settings::settingValue(self::FREE_RUN_DEFAULT_SETTING);
+        $freeRun = $published === null
+            ? (bool) config('nntmux.orchestrator.free_run', false)
+            : (bool) $published;
+
+        return $freeRun ? ControlProfile::FreeRun : null;
     }
 
     public function set(ControlProfile $profile): void

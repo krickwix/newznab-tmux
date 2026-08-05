@@ -15,7 +15,7 @@ final class NntmuxDeploymentManifestTest extends TestCase
      * per-arch digest cannot be substituted on this mixed arm64/amd64 cluster.
      * nntmux-web is excluded: it keeps its own amd64 imdb-identity lineage.
      */
-    private const FLEET_IMAGE = 'microservices-pods-20260805-orchestrator-mode-cli-v238@sha256:01a42082b11033adfe9acbebfa6df891cbbe7020bf93aa3c4f8ad9b4e2479218';
+    private const FLEET_IMAGE = 'microservices-pods-20260805-orchestrator-mode-cli-v238@sha256:652997db5ed2ad3418c9fe871fd668ae65f95ea1e70789f1b5211d37d1a0cbb8';
 
     public function test_worker_orchestrator_overlay_packages_the_backfill_source_activation_command(): void
     {
@@ -642,6 +642,9 @@ final class NntmuxDeploymentManifestTest extends TestCase
             'app/Services/Orchestrator/WorkerControlPolicy.php',
             'app/Services/Orchestrator/PipelineSnapshot.php',
             'app/Services/Orchestrator/PipelineSnapshotRepository.php',
+            // Publishes the orchestrator's FREE_RUN default for pods that do
+            // not carry that env var. Omitting it makes `reset` misreport.
+            'app/Services/Orchestrator/WorkerProfileApplier.php',
         ] as $path) {
             self::assertStringContainsString("COPY {$path} /app/{$path}", $dockerfile);
         }
