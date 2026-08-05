@@ -456,7 +456,25 @@ class WorkerOrchestrator
                     && (int) $generation > 0
                     && (! Schema::hasTable('current_forward_windows')
                         || (int) Settings::settingValue('orchestrator_bf_permit') === (int) $generation);
-                if ($backfillPermitGranted) {
+                // Free-run opens no permit observation, and that is what keeps
+                // backfill moving rather than merely permitted.
+                //
+                // An observation is the head of a chain: it completes, the
+                // completion path defers attribution, queueBackfillDelayedAttribution()
+                // records a pending group, and selectBackfillTarget() then
+                // returns NULL outright for as long as any group is pending
+                // without a continuation. So free-run granted a permit, ran it,
+                // and then had no target at all for the next ~600s -- the
+                // "permitted but nothing happens" state it exists to remove,
+                // reintroduced one layer down.
+                //
+                // Skipping the observation cuts the chain at its source instead
+                // of teaching the selector to ignore pending groups, which
+                // would leave real attribution state accumulating unread. Yield
+                // attribution is already forfeit in this mode -- $autoGrant
+                // ignores the observation window anyway -- so nothing is lost
+                // that free-run had not already given up.
+                if ($backfillPermitGranted && ! $freeRun) {
                     $this->store->beginPermitObservation(
                         $snapshot,
                         $generation,

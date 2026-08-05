@@ -163,6 +163,14 @@ final class FreeRunProfileTest extends TestCase
             "trim((string) \$snapshot->backfillGroup) !== ''",
             $source,
         );
+        // And it must open no permit observation. An observation completes,
+        // the completion path defers attribution, that records a pending group,
+        // and selectBackfillTarget() then returns NULL for as long as any group
+        // is pending without a continuation -- so free-run granted a permit,
+        // ran it, and had no target at all for the next ~600s. Cutting the
+        // chain at its source is what keeps backfill moving rather than merely
+        // permitted.
+        self::assertStringContainsString('if ($backfillPermitGranted && ! $freeRun) {', $source);
     }
 
     public function test_free_run_releases_the_backfill_lock(): void
