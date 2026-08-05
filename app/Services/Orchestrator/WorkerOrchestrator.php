@@ -388,14 +388,35 @@ class WorkerOrchestrator
             );
             $generation = null;
             $backfillPermitGranted = false;
+            // Free-run re-grants as soon as the last permit is consumed. The
+            // two waits it skips are measurement, not safety: an open permit
+            // observation (up to permit_observation_seconds, 1200 by default)
+            // and the delayed-attribution settle. Under the adaptive ladder
+            // those are what make yield learning honest -- they are also why
+            // backfill sat at ~10 permits/hour, spending 94% of cycles waiting.
+            //
+            // The cost is explicit: with no observation there is no yield
+            // attribution, so fair-share target ranking and quantityForYield
+            // stop learning while free-run is on. That is the mode's contract.
+            // orchestrator_bf_permit === 0 is still required, so a permit that
+            // has been granted and not yet claimed is never overwritten.
+            $freeRun = $decision->profile->profile === ControlProfile::FreeRun;
             $autoGrant = ! $shadow
                 && (bool) config('nntmux.orchestrator.auto_backfill', false)
                 && $decision->backfillPermitted
-                && $permitObservation === null
-                && $delayedAttributionSettled === null
+                // A permit with no target group is unclaimable and
+                // un-reissuable: claimGeneration() refuses `$group === ''`,
+                // and $autoGrant below needs orchestrator_bf_permit === 0,
+                // which only clears once a claim completes. Under the adaptive
+                // ladder the observation window made this vanishingly rare;
+                // free-run grants every cycle, so it wedged backfill within
+                // minutes. Never issue against an empty target.
+                && trim((string) $snapshot->backfillGroup) !== ''
+                && ($freeRun || $permitObservation === null)
+                && ($freeRun || $delayedAttributionSettled === null)
                 && (int) Settings::settingValue('orchestrator_bf_permit') === 0;
             $issuePermit = ($grantPermit || $autoGrant)
-                && $delayedAttributionSettled === null
+                && ($freeRun || $delayedAttributionSettled === null)
                 && ! $currentForwardSettlementTransitioned;
             $backfillQuantity = $decision->profile->quantityForYield(
                 $snapshot->backfillYieldNzbsPer10k,
@@ -435,7 +456,25 @@ class WorkerOrchestrator
                     && (int) $generation > 0
                     && (! Schema::hasTable('current_forward_windows')
                         || (int) Settings::settingValue('orchestrator_bf_permit') === (int) $generation);
-                if ($backfillPermitGranted) {
+                // Free-run opens no permit observation, and that is what keeps
+                // backfill moving rather than merely permitted.
+                //
+                // An observation is the head of a chain: it completes, the
+                // completion path defers attribution, queueBackfillDelayedAttribution()
+                // records a pending group, and selectBackfillTarget() then
+                // returns NULL outright for as long as any group is pending
+                // without a continuation. So free-run granted a permit, ran it,
+                // and then had no target at all for the next ~600s -- the
+                // "permitted but nothing happens" state it exists to remove,
+                // reintroduced one layer down.
+                //
+                // Skipping the observation cuts the chain at its source instead
+                // of teaching the selector to ignore pending groups, which
+                // would leave real attribution state accumulating unread. Yield
+                // attribution is already forfeit in this mode -- $autoGrant
+                // ignores the observation window anyway -- so nothing is lost
+                // that free-run had not already given up.
+                if ($backfillPermitGranted && ! $freeRun) {
                     $this->store->beginPermitObservation(
                         $snapshot,
                         $generation,
