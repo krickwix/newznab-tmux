@@ -8,6 +8,7 @@ use GuzzleHttp\Client;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Psr\Http\Message\ResponseInterface;
 use voku\helper\HtmlDomParser;
 
 class ImdbScraper
@@ -19,6 +20,18 @@ class ImdbScraper
     protected const string IMDBAPI_DEV_INTERVAL_CACHE_KEY = 'imdbapi_dev:min_interval';
 
     protected const string IMDBAPI_DEV_COOLDOWN_CACHE_KEY = 'imdbapi_dev:cooldown';
+
+    /**
+     * Set when OMDB answers "Request limit reached!". Its quota is daily, and
+     * once spent EVERY lookup gets the same 401 -- so without this the fleet
+     * keeps calling an API that has explicitly told it to stop, which is both
+     * pointless and a good way to get a key banned.
+     *
+     * It matters more than it looks: IMDb HTML is WAF-blocked, so every single
+     * movie lookup falls through to OMDB. With the classics archives running,
+     * that is thousands of refused calls an hour.
+     */
+    protected const string OMDB_COOLDOWN_CACHE_KEY = 'omdb:cooldown';
 
     protected Client $client;
 
@@ -423,6 +436,12 @@ class ImdbScraper
             return false;
         }
 
+        if (Cache::has(self::OMDB_COOLDOWN_CACHE_KEY)) {
+            $this->lastFallbackFailureReason = 'omdb_fallback_cooldown_active';
+
+            return false;
+        }
+
         try {
             $response = $this->client->get('https://www.omdbapi.com/', [
                 'query' => [
@@ -438,6 +457,17 @@ class ImdbScraper
             ]);
 
             if ($response->getStatusCode() !== 200) {
+                // OMDB reports an exhausted quota as 401 with
+                // {"Response":"False","Error":"Request limit reached!"}, not as
+                // 429. Read the body rather than the status so a spent daily
+                // allowance is not mistaken for a bad key.
+                if ($this->omdbReportsExhaustedQuota($response)) {
+                    $this->activateOmdbCooldown();
+                    $this->lastFallbackFailureReason = 'omdb_fallback_quota_exhausted';
+
+                    return false;
+                }
+
                 $this->lastFallbackFailureReason = 'omdb_fallback_http_failure';
 
                 return false;
@@ -602,6 +632,45 @@ class ImdbScraper
         }
 
         Cache::put(self::IMDBAPI_DEV_INTERVAL_CACHE_KEY, true, now()->addSeconds($minInterval));
+    }
+
+    /**
+     * True when a non-200 OMDB response is a spent daily allowance rather than
+     * a bad key or a transient error.
+     */
+    private function omdbReportsExhaustedQuota(ResponseInterface $response): bool
+    {
+        $body = (string) $response->getBody();
+        if (trim($body) === '') {
+            return false;
+        }
+
+        $payload = json_decode($body, true);
+        $error = is_array($payload) && is_string($payload['Error'] ?? null)
+            ? $payload['Error']
+            : $body;
+
+        return stripos($error, 'request limit reached') !== false
+            || stripos($error, 'limit reached') !== false;
+    }
+
+    /**
+     * OMDB's quota is DAILY, so the cooldown default is an hour rather than the
+     * five minutes imdbapi.dev uses: retrying every few minutes against a spent
+     * daily allowance is the behaviour this exists to stop, while an hour still
+     * picks the reset up promptly.
+     */
+    private function activateOmdbCooldown(): void
+    {
+        $cooldownSeconds = max(0, (int) config('nntmux_api.omdb_cooldown_seconds', 3600));
+        if ($cooldownSeconds <= 0) {
+            return;
+        }
+
+        Cache::put(self::OMDB_COOLDOWN_CACHE_KEY, true, now()->addSeconds($cooldownSeconds));
+        Log::info('OMDB daily quota exhausted; pausing the fallback', [
+            'cooldown_seconds' => $cooldownSeconds,
+        ]);
     }
 
     private function activateImdbApiDevCooldown(): void
