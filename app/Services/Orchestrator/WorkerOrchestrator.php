@@ -388,14 +388,35 @@ class WorkerOrchestrator
             );
             $generation = null;
             $backfillPermitGranted = false;
+            // Free-run re-grants as soon as the last permit is consumed. The
+            // two waits it skips are measurement, not safety: an open permit
+            // observation (up to permit_observation_seconds, 1200 by default)
+            // and the delayed-attribution settle. Under the adaptive ladder
+            // those are what make yield learning honest -- they are also why
+            // backfill sat at ~10 permits/hour, spending 94% of cycles waiting.
+            //
+            // The cost is explicit: with no observation there is no yield
+            // attribution, so fair-share target ranking and quantityForYield
+            // stop learning while free-run is on. That is the mode's contract.
+            // orchestrator_bf_permit === 0 is still required, so a permit that
+            // has been granted and not yet claimed is never overwritten.
+            $freeRun = $decision->profile->profile === ControlProfile::FreeRun;
             $autoGrant = ! $shadow
                 && (bool) config('nntmux.orchestrator.auto_backfill', false)
                 && $decision->backfillPermitted
-                && $permitObservation === null
-                && $delayedAttributionSettled === null
+                // A permit with no target group is unclaimable and
+                // un-reissuable: claimGeneration() refuses `$group === ''`,
+                // and $autoGrant below needs orchestrator_bf_permit === 0,
+                // which only clears once a claim completes. Under the adaptive
+                // ladder the observation window made this vanishingly rare;
+                // free-run grants every cycle, so it wedged backfill within
+                // minutes. Never issue against an empty target.
+                && trim((string) $snapshot->backfillGroup) !== ''
+                && ($freeRun || $permitObservation === null)
+                && ($freeRun || $delayedAttributionSettled === null)
                 && (int) Settings::settingValue('orchestrator_bf_permit') === 0;
             $issuePermit = ($grantPermit || $autoGrant)
-                && $delayedAttributionSettled === null
+                && ($freeRun || $delayedAttributionSettled === null)
                 && ! $currentForwardSettlementTransitioned;
             $backfillQuantity = $decision->profile->quantityForYield(
                 $snapshot->backfillYieldNzbsPer10k,

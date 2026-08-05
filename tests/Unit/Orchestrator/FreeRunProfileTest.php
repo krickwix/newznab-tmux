@@ -120,6 +120,51 @@ final class FreeRunProfileTest extends TestCase
         self::assertSame(0, $planned->profile->nzbSleepSeconds);
     }
 
+    /**
+     * Free-run must not stall between permits.
+     *
+     * WorkerOrchestrator gates a re-grant on there being no open permit
+     * observation and no pending delayed attribution. Those windows are
+     * measurement -- 1200s and 600s by default -- and under the ladder they are
+     * why backfill ran at ~10 permits/hour with 94% of cycles spent waiting.
+     * In free-run the worker would finish a permit and then sit on "adaptive
+     * orchestrator has not granted a fresh permit" until the observation aged
+     * out, which is the same "permitted but nothing happens" state free-run
+     * exists to remove.
+     *
+     * Asserted on the shape rather than by driving WorkerOrchestrator, which
+     * needs the whole snapshot/telemetry stack: the profile is what the
+     * orchestrator branches on.
+     */
+    public function test_free_run_is_the_profile_the_orchestrator_can_branch_on_for_regrants(): void
+    {
+        config()->set('nntmux.orchestrator.free_run', true);
+
+        $decision = (new WorkerControlPolicy)->decide($this->snapshot(), new ControlState, time());
+
+        self::assertSame(ControlProfile::FreeRun, $decision->profile->profile);
+        self::assertTrue($decision->backfillPermitted);
+
+        $source = (string) file_get_contents(
+            \dirname(__DIR__, 3).'/app/Services/Orchestrator/WorkerOrchestrator.php'
+        );
+        // The re-grant must skip BOTH measurement waits, and must still refuse
+        // to overwrite a permit that has been granted and not yet claimed.
+        self::assertStringContainsString('$freeRun || $permitObservation === null', $source);
+        self::assertStringContainsString('$freeRun || $delayedAttributionSettled === null', $source);
+        self::assertStringContainsString("Settings::settingValue('orchestrator_bf_permit') === 0", $source);
+        // And it must never issue against an empty target. Such a permit is
+        // unclaimable (claimGeneration() refuses `$group === ''`) AND
+        // un-reissuable (the check above needs the permit back at 0), so it
+        // wedges backfill permanently. Granting every cycle turns a rare race
+        // into a certainty, which is exactly what happened on the first
+        // free-run re-grant build.
+        self::assertStringContainsString(
+            "trim((string) \$snapshot->backfillGroup) !== ''",
+            $source,
+        );
+    }
+
     public function test_free_run_releases_the_backfill_lock(): void
     {
         config()->set('nntmux.orchestrator.free_run', true);
