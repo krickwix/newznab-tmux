@@ -91,8 +91,8 @@ final class HeaderFileCounterClassificationTest extends TestCase
         return [
             // The live alt.binaries.cinemageddon posting that motivated this:
             // two files, two different "file counts", one collection each.
-            'cinemageddon vol001' => ["60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol001+01.PAR2) yEnc (1/2)"],
-            'cinemageddon vol009' => ["60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol009+06.PAR2) yEnc (1/7)"],
+            'cinemageddon vol001' => ['60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol001+01.PAR2) yEnc (1/2)'],
+            'cinemageddon vol009' => ['60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol009+06.PAR2) yEnc (1/7)'],
             'bare random name' => ['"gjX3QVMbjFGuo7IXAfp" yEnc (1/158)'],
         ];
     }
@@ -112,8 +112,8 @@ final class HeaderFileCounterClassificationTest extends TestCase
      */
     public function test_the_two_files_of_one_posting_still_disagree_on_the_count(): void
     {
-        [, $first] = $this->classify("60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol001+01.PAR2) yEnc (1/2)");
-        [, $second] = $this->classify("60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol009+06.PAR2) yEnc (1/7)");
+        [, $first] = $this->classify('60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol001+01.PAR2) yEnc (1/2)');
+        [, $second] = $this->classify('60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol009+06.PAR2) yEnc (1/7)');
 
         self::assertNotSame($first, $second);
         self::assertSame(2, $first);
@@ -133,8 +133,8 @@ final class HeaderFileCounterClassificationTest extends TestCase
         $expected = [
             'Some.Release [03/11] - "x.part02.rar" yEnc (1/500)' => [3, 11],
             'Some.Release File 3 of 11 - "x.rar" yEnc (1/500)' => [3, 11],
-            "60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol001+01.PAR2) yEnc (1/2)" => [1, 2],
-            "60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol009+06.PAR2) yEnc (1/7)" => [1, 7],
+            '60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol001+01.PAR2) yEnc (1/2)' => [1, 2],
+            '60s_Sleaze_-_Submission_(1969)_repost_(Submission.vol009+06.PAR2) yEnc (1/7)' => [1, 7],
             '"gjX3QVMbjFGuo7IXAfp" yEnc (1/158)' => [1, 158],
         ];
 

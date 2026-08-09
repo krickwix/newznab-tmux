@@ -21,7 +21,9 @@ use Mockery;
 use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionClass;
 use ReflectionMethod;
+use RuntimeException;
 use Tests\TestCase;
+use Throwable;
 
 final class PipelineSnapshotRepositoryTest extends TestCase
 {
@@ -892,6 +894,58 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame(0.0, $rates['collections']);
         self::assertSame(0.0, $ewma['parts']);
         self::assertEquals(1.0, $rates['releases']);
+    }
+
+    public function test_binaries_capacity_never_reads_the_innodb_sampled_row_estimate(): void
+    {
+        // 2026-08-07: information_schema.TABLES.TABLE_ROWS is an InnoDB sample.
+        // It read 1,006,566 against an exact 959,687 and pushed a table that was
+        // 40k rows under its 1,000,000 watermark 6,566 rows over it, which zeroed
+        // the backfill headroom, emptied the candidate list and killed backfill
+        // fleet-wide while still reporting backfill_permitted=true.
+        //
+        // capture() cannot run end to end here -- information_schema does not
+        // exist on sqlite -- so this asserts on the SQL it actually issues.
+        // Keep body recovery out of the way so the information_schema read is
+        // the first statement capture() issues.
+        config()->set('nntmux.orchestrator.body_recovery_source_groups', []);
+        config()->set('nntmux.orchestrator.body_recovery_source_regex_ids', []);
+
+        $statements = [];
+        DB::shouldReceive('selectOne')->andReturnUsing(
+            function (string $sql) use (&$statements) {
+                $statements[] = $sql;
+
+                throw new RuntimeException('capture aborted after statement capture');
+            }
+        );
+        DB::shouldReceive('select')->andReturn([]);
+        DB::shouldReceive('scalar')->andReturn(0);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        try {
+            $repository->capture();
+        } catch (Throwable) {
+            // Expected: the capture is aborted once the statements are recorded.
+        }
+
+        $informationSchema = array_values(array_filter(
+            $statements,
+            static fn (string $sql): bool => str_contains($sql, 'information_schema.TABLES'),
+        ));
+
+        self::assertNotSame([], $informationSchema, 'capture() no longer reads information_schema at all.');
+        foreach ($informationSchema as $sql) {
+            self::assertStringNotContainsString(
+                'binaries',
+                $sql,
+                'The binaries watermark must never be fed from a sampled row estimate again.',
+            );
+        }
     }
 
     public function test_physical_collection_fences_remain_hard_after_routine_pressure_becomes_schedulable(): void
