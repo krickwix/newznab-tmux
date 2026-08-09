@@ -3,11 +3,24 @@
         "enabled": true,
         "actions": [
             {
-                "action": "\\CaptainHook\\App\\Hook\\Message\\Action\\Beams",
-                "options": {
-                    "subjectLength": 200,
-                    "bodyLineLength": 72
-                },
+                "action": "\\CaptainHook\\App\\Hook\\Message\\Action\\Rules",
+                "options": [
+                    [
+                        "\\CaptainHook\\App\\Hook\\Message\\Rule\\LimitSubjectLength",
+                        [
+                            200
+                        ]
+                    ],
+                    "\\CaptainHook\\App\\Hook\\Message\\Rule\\NoPeriodOnSubjectEnd",
+                    [
+                        "\\CaptainHook\\App\\Hook\\Message\\Rule\\LimitBodyLineLength",
+                        [
+                            72
+                        ]
+                    ],
+                    "\\CaptainHook\\App\\Hook\\Message\\Rule\\SeparateSubjectFromBodyWithBlankLine",
+                    "\\CaptainHook\\App\\Hook\\Message\\Rule\\MsgNotEmpty"
+                ],
                 "conditions": []
             }
         ]
@@ -60,7 +73,10 @@
                     {
                         "exec": "\\CaptainHook\\App\\Hook\\Condition\\FileChanged\\Any",
                         "args": [
-                            ["composer.json", "composer.lock"]
+                            [
+                                "composer.json",
+                                "composer.lock"
+                            ]
                         ]
                     }
                 ]
@@ -77,7 +93,10 @@
                     {
                         "exec": "\\CaptainHook\\App\\Hook\\Condition\\FileChanged\\Any",
                         "args": [
-                            ["composer.json", "composer.lock"]
+                            [
+                                "composer.json",
+                                "composer.lock"
+                            ]
                         ]
                     }
                 ]
