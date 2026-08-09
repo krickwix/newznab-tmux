@@ -9,6 +9,7 @@ use App\Services\Orchestrator\ControlState;
 use App\Services\Orchestrator\FailSafeCause;
 use App\Services\Orchestrator\PipelineSnapshot;
 use App\Services\Orchestrator\WorkerControlPolicy;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 /**
@@ -69,7 +70,7 @@ final class ControlProfileOverrideTest extends TestCase
         ];
     }
 
-    #[\PHPUnit\Framework\Attributes\DataProvider('pinnableModes')]
+    #[DataProvider('pinnableModes')]
     public function test_every_mode_can_be_pinned(ControlProfile $mode): void
     {
         $decision = $this->decide($this->snapshot(['profileOverride' => $mode]));

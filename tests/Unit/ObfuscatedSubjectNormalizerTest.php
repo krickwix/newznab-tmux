@@ -17,7 +17,7 @@ final class ObfuscatedSubjectNormalizerTest extends TestCase
         $this->enabled = new ObfuscatedSubjectNormalizer(['alt.binaries.movies', 'alt.binaries.hdtv']);
     }
 
-    public function testOnlyAppliesToConfiguredGroups(): void
+    public function test_only_applies_to_configured_groups(): void
     {
         $this->assertTrue($this->enabled->appliesTo('alt.binaries.movies'));
         $this->assertTrue($this->enabled->appliesTo('ALT.BINARIES.HDTV'));
@@ -25,12 +25,12 @@ final class ObfuscatedSubjectNormalizerTest extends TestCase
         $this->assertFalse($this->enabled->appliesTo('alt.binaries.teevee'));
     }
 
-    public function testIsInertWhenNoGroupsAreConfigured(): void
+    public function test_is_inert_when_no_groups_are_configured(): void
     {
         $this->assertFalse((new ObfuscatedSubjectNormalizer([]))->appliesTo('alt.binaries.movies'));
     }
 
-    public function testCollapsesEveryArticleOfOneFileOntoASingleIdentity(): void
+    public function test_collapses_every_article_of_one_file_onto_a_single_identity(): void
     {
         $articles = [
             '{Supergirl.2026.vol127+72.par2} {5Zn03jrjsly2} yEnc',
@@ -49,7 +49,7 @@ final class ObfuscatedSubjectNormalizerTest extends TestCase
         $this->assertSame('{Supergirl.2026.vol127+72.par2} yEnc', $names[0]);
     }
 
-    public function testPinsCollectionFileNumbersToASingleFile(): void
+    public function test_pins_collection_file_numbers_to_a_single_file(): void
     {
         // The subject carries only a part counter; it must not be read as a file count.
         $result = $this->enabled->normalize('{Lioness.S02E07.2160p.AMZN.WEB-DL.H.265-FLUX.rar} {k6SDjjsQ3MmW} yEnc');
@@ -59,7 +59,7 @@ final class ObfuscatedSubjectNormalizerTest extends TestCase
         $this->assertSame(1, $result['total_files']);
     }
 
-    public function testKeepsDistinctFilesInAPostingDistinct(): void
+    public function test_keeps_distinct_files_in_a_posting_distinct(): void
     {
         $rar = $this->enabled->normalize('{Supergirl.2026.part01.rar} {stWsuZvUnzVX} yEnc');
         $par = $this->enabled->normalize('{Supergirl.2026.vol127+72.par2} {5Zn03jrjsly2} yEnc');
@@ -69,7 +69,7 @@ final class ObfuscatedSubjectNormalizerTest extends TestCase
         $this->assertNotSame($rar['name'], $par['name']);
     }
 
-    public function testEveryArticleOfOneFileSharesOneCollectionKey(): void
+    public function test_every_article_of_one_file_shares_one_collection_key(): void
     {
         $keys = [];
         foreach ([
@@ -85,7 +85,7 @@ final class ObfuscatedSubjectNormalizerTest extends TestCase
         $this->assertCount(1, array_unique($keys));
     }
 
-    public function testDistinctFilesOfOnePostGetDistinctCollectionKeys(): void
+    public function test_distinct_files_of_one_post_get_distinct_collection_keys(): void
     {
         // These are precisely the subjects CollectionsCleaningService fuses: it
         // strips digit runs, so all of them clean to '{Soulm8te. } yEnc'. Keying
@@ -109,7 +109,7 @@ final class ObfuscatedSubjectNormalizerTest extends TestCase
         $this->assertCount(\count($subjects), array_unique($keys));
     }
 
-    public function testCollectionKeyIsScopedToTheGroup(): void
+    public function test_collection_key_is_scoped_to_the_group(): void
     {
         $this->assertNotSame(
             ObfuscatedSubjectNormalizer::collectionKey('{Soulm8te.2026.part01.rar} yEnc', 6979),
@@ -117,7 +117,7 @@ final class ObfuscatedSubjectNormalizerTest extends TestCase
         );
     }
 
-    public function testCollectionKeyIgnoresSurroundingWhitespace(): void
+    public function test_collection_key_ignores_surrounding_whitespace(): void
     {
         $this->assertSame(
             ObfuscatedSubjectNormalizer::collectionKey('{Soulm8te.2026.part01.rar} yEnc', 6979),
@@ -125,7 +125,7 @@ final class ObfuscatedSubjectNormalizerTest extends TestCase
         );
     }
 
-    public function testLeavesNonObfuscatedSubjectsUntouched(): void
+    public function test_leaves_non_obfuscated_subjects_untouched(): void
     {
         $subjects = [
             'Some.Normal.Release.2024.1080p.rar - [01/20] - "file.rar" yEnc',
@@ -139,7 +139,7 @@ final class ObfuscatedSubjectNormalizerTest extends TestCase
         }
     }
 
-    public function testDoesNotStripBracedMetadataThatIsNotARandomToken(): void
+    public function test_does_not_strip_braced_metadata_that_is_not_a_random_token(): void
     {
         // Real metadata carries separators; tokens are bare alphanumeric runs.
         $this->assertNull($this->enabled->normalize('{Movie.Name.2024.rar} {Some.Group.Name} yEnc'));
