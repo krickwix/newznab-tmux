@@ -659,7 +659,16 @@ final class WorkerOrchestratorTest extends TestCase
             'alt.console',
             false,
         )->andReturn(8, 9);
-        $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
+        // Pin the ineffective-backfill limit this scenario depends on. eec6573b0 made
+        // it env-tunable and raised the default 2 -> 6 so a cold backlog is not locked
+        // before it can produce output; this test is about the lock-then-no-regrant
+        // behaviour at the limit, not about the default's value.
+        $orchestrator = new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy(ineffectiveBackfillLimitOverride: WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT),
+            $store,
+            $applier,
+        );
 
         $shadow = $orchestrator->runOnce(true);
 
