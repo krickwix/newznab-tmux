@@ -43,11 +43,19 @@ class PipelineSnapshotRepository
     {
         $recoveryCriteria = $this->bodyRecoveryCriteria();
         $recoverySources = $this->bodyRecoverySourceSnapshot($recoveryCriteria);
+        // parts keeps InnoDB's sampled row estimate: an exact COUNT(*) over
+        // ~50M rows is not affordable on a loop this hot, and no cheap exact
+        // analogue exists (schedulable_parts_backlog is a subset, not a
+        // substitute). This is a known, bounded-by-luck risk rather than a
+        // solved one -- parts currently runs ~50M against a 300M watermark, so
+        // a few percent of sampling error is nowhere near the cliff. If that
+        // margin ever closes, this reintroduces exactly the failure documented
+        // on $binariesBacklog below, and the answer then is a cheaper exact
+        // counter, not a wider tolerance.
         $tables = DB::selectOne("SELECT
-            COALESCE(MAX(CASE WHEN TABLE_NAME = 'parts' THEN TABLE_ROWS END), 0) AS parts_count,
-            COALESCE(MAX(CASE WHEN TABLE_NAME = 'binaries' THEN TABLE_ROWS END), 0) AS binaries_count
+            COALESCE(MAX(CASE WHEN TABLE_NAME = 'parts' THEN TABLE_ROWS END), 0) AS parts_count
             FROM information_schema.TABLES
-            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('parts', 'binaries')");
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'parts'");
         $pipeline = DB::selectOne('SELECT
             (SELECT COUNT(*) FROM collections WHERE filecheck IN (0, 1, 2, 15, 16)) AS collections_backlog,
             (SELECT COUNT(*) FROM binaries WHERE partcheck = 0) AS binaries_backlog,
@@ -79,7 +87,25 @@ class PipelineSnapshotRepository
         $ordinaryCollections = max(0, $totalCollections - $recoverySourceCollections);
         $splitConsistent = $recoverySourceCollections <= $totalCollections;
         $physicalParts = (int) ($tables->parts_count ?? 0);
-        $physicalBinaries = (int) ($tables->binaries_count ?? $pipeline->binaries_backlog ?? 0);
+        // Exact, not information_schema.TABLES.TABLE_ROWS. That column is an
+        // InnoDB sample, and on 2026-08-07 it read 1,006,566 against an exact
+        // 959,687 -- a 4.9% overshoot that put a table 40k rows *under* its
+        // 1,000,000 watermark 6,566 rows over it. Everything downstream is a
+        // cliff: safeBackfillQuantity() saw zero headroom, so every candidate
+        // group fell below the 10,000 floor, so selectBackfillTarget() returned
+        // null and backfill was dead fleet-wide while still reporting
+        // backfill_permitted=true; physicalCapacityHigh() latched high pressure
+        // on the same reading, which also holds the current-forward gate shut.
+        // The error is unbounded in both directions and re-accumulates as the
+        // table churns -- ANALYZE TABLE moved it to 925,542, 3.6% low -- so a
+        // tolerance would only move the cliff rather than remove it.
+        //
+        // This costs nothing: binaries_backlog is already selected in the same
+        // capture(), and it was already the declared fallback below. Preferring
+        // the estimate meant the primary and its fallback measured different
+        // quantities -- every row versus partcheck = 0 -- so the fallback path
+        // was never the same guard, just a quieter one.
+        $binariesBacklog = (int) ($pipeline->binaries_backlog ?? 0);
         $schedulableParts = (int) ($pipeline->schedulable_parts_backlog ?? 0);
         $schedulableBinaries = (int) ($pipeline->schedulable_binaries_backlog ?? 0);
         $schedulableCollections = (int) ($pipeline->schedulable_collections_backlog ?? 0);
@@ -92,7 +118,7 @@ class PipelineSnapshotRepository
         ];
         $capacityBacklogs = [
             'parts' => $physicalParts,
-            'binaries' => $physicalBinaries,
+            'binaries' => $binariesBacklog,
             'collections' => $ordinaryCollections,
             'collections_total' => $totalCollections,
             'recovery_sources' => $recoverySourceCollections,
@@ -129,7 +155,7 @@ class PipelineSnapshotRepository
         [$rates, $ewma] = $this->rates($backlogs, $previous);
         $physicalCapacityHigh = $this->physicalCapacityHigh(
             $physicalParts,
-            $physicalBinaries,
+            $binariesBacklog,
             $ordinaryCollections,
             $totalCollections,
             $recoverySourceCollections,
@@ -156,7 +182,7 @@ class PipelineSnapshotRepository
 
         return new PipelineSnapshot(
             partsBacklog: $physicalParts,
-            binariesBacklog: $physicalBinaries,
+            binariesBacklog: $binariesBacklog,
             collectionsBacklog: $ordinaryCollections,
             releasesBacklog: $backlogs['releases'],
             nzbsBacklog: $backlogs['nzbs'],
