@@ -37,6 +37,8 @@ class ImdbScraper
 
     protected string $imdbApiDevBaseUrl;
 
+    protected string $localMetadataBaseUrl;
+
     protected bool $lastRequestWasBlocked = false;
 
     protected ?string $lastFetchSource = null;
@@ -48,6 +50,7 @@ class ImdbScraper
     public function __construct(?Client $client = null)
     {
         $this->imdbApiDevBaseUrl = rtrim((string) config('nntmux_api.imdbapi_dev_base_url', 'https://api.imdbapi.dev'), '/');
+        $this->localMetadataBaseUrl = rtrim((string) config('nntmux_api.local_imdb_metadata_url', ''), '/');
         $this->client = $client ?? new Client([
             'timeout' => 10,
             'connect_timeout' => 10,
@@ -117,6 +120,19 @@ class ImdbScraper
             }
 
             return is_array($cached) ? $cached : false;
+        }
+
+        // The in-cluster dataset first: it is authoritative for identity and base facts, answers in
+        // milliseconds, and cannot be WAF-blocked. Plot and cover are not in the IMDb dumps, so they
+        // stay empty here and updateMovieInfo fills them from TMDB/Trakt/OMDb as it always has.
+        $localData = $this->fetchFromLocalMetadata($id);
+        if ($localData !== false) {
+            $this->lastFetchSource = 'local_metadata';
+            $this->lastFailureReason = null;
+            Cache::put($cacheKey, $localData, now()->addDays(7));
+            $this->recordLookupMetric('success');
+
+            return $localData;
         }
 
         $url = 'https://www.imdb.com/title/tt'.$id.'/';
@@ -353,6 +369,74 @@ class ImdbScraper
             'language' => $language,
             'type' => $type,
         ];
+    }
+
+    /**
+     * Fetches base facts from the in-cluster IMDb metadata service.
+     *
+     * Deliberately quiet on failure: the service being down or the id being absent from the local
+     * dataset are both reasons to fall through to the existing web chain, not errors to surface.
+     *
+     * @return array<string, mixed>
+     */
+    private function fetchFromLocalMetadata(string $id): array|false
+    {
+        if ($this->localMetadataBaseUrl === '') {
+            return false;
+        }
+
+        try {
+            $response = $this->client->get($this->localMetadataBaseUrl.'/titles/tt'.$id, [
+                'headers' => ['Accept' => 'application/json'],
+                'timeout' => 5,
+                'connect_timeout' => 2,
+            ]);
+
+            if ($response->getStatusCode() >= 400) {
+                return false;
+            }
+
+            $payload = json_decode((string) $response->getBody(), true);
+            if (! is_array($payload) || empty($payload['title'])) {
+                return false;
+            }
+
+            $rating = $payload['rating'] ?? null;
+
+            return [
+                'imdbid' => $id,
+                'title' => (string) $payload['title'],
+                'year' => isset($payload['year']) ? (string) $payload['year'] : '',
+                'plot' => '',
+                'rating' => $rating !== null ? number_format((float) $rating, 1, '.', '') : '',
+                'cover' => '',
+                'genre' => array_values(array_filter((array) ($payload['genres'] ?? []), 'is_string')),
+                'director' => array_values(array_filter((array) ($payload['directors'] ?? []), 'is_string')),
+                'actors' => array_values(array_filter((array) ($payload['actors'] ?? []), 'is_string')),
+                'language' => '',
+                'type' => $this->mapLocalTitleType((string) ($payload['titleType'] ?? '')),
+            ];
+        } catch (\Throwable $e) {
+            Log::debug('Local IMDb metadata lookup failed; falling through to web sources.', [
+                'imdb_id' => $id,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    /**
+     * The dataset's title_type in the vocabulary the media-type gate expects, so a tvSeries id is
+     * rejected by the same rule regardless of which source answered.
+     */
+    private function mapLocalTitleType(string $titleType): string
+    {
+        return match ($titleType) {
+            'movie', 'tvMovie', 'video' => 'movie',
+            'tvSeries', 'tvMiniSeries', 'tvEpisode' => 'tvSeries',
+            default => 'unknown',
+        };
     }
 
     /**

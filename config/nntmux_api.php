@@ -8,6 +8,9 @@ return [
     // Disabled: imdbapi.dev is an unrelated third-party endpoint and is currently unavailable.
     'imdbapi_dev_enabled' => env('IMDBAPI_DEV_ENABLED', false),
     'imdbapi_dev_base_url' => env('IMDBAPI_DEV_BASE_URL', 'https://api.imdbapi.dev'),
+    // In-cluster IMDb metadata service (imdb-metadata.media.svc). Consulted before any web source:
+    // it answers from the local dataset in milliseconds and cannot be WAF-blocked. Empty disables it.
+    'local_imdb_metadata_url' => env('LOCAL_IMDB_METADATA_URL', ''),
     'imdbapi_dev_min_interval_seconds' => env('IMDBAPI_DEV_MIN_INTERVAL_SECONDS', 15),
     'imdbapi_dev_cooldown_seconds' => env('IMDBAPI_DEV_COOLDOWN_SECONDS', 300),
     'movie_lookup_max_attempts' => env('MOVIE_LOOKUP_MAX_ATTEMPTS', 3),
