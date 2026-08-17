@@ -111,6 +111,57 @@ HTML;
         $this->assertSame('tvSeries', $result['type']);
     }
 
+    public function test_a_video_id_is_not_typed_as_a_movie(): void
+    {
+        // IMDb's "video" type is overwhelmingly shorts, adult content and music videos --
+        // 135,511 Short and 114,651 Adult of 324,200 in the dataset, with only 1,564 above
+        // 1,000 votes. MovieService::isExplicitNonMovieMediaType() has always listed it as
+        // non-movie; the local provider must not be the one source that lets them through.
+        config(['nntmux_api.local_imdb_metadata_url' => 'http://imdb-metadata.media.svc']);
+
+        $mock = new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'title' => 'Some Direct To Video Thing',
+                'year' => 2011,
+                'titleType' => 'video',
+                'genres' => [],
+                'directors' => [],
+                'actors' => [],
+            ])),
+        ]);
+        $scraper = new ImdbScraper(new Client(['handler' => HandlerStack::create($mock)]));
+
+        $result = $scraper->fetchById('1234567');
+
+        $this->assertIsArray($result);
+        $this->assertNotSame('movie', $result['type']);
+        $this->assertSame('video', $result['type']);
+    }
+
+    public function test_a_tv_movie_id_is_still_typed_as_a_movie(): void
+    {
+        // The counterpart: tvMovie is a film the gate accepts, so collapsing it to 'movie'
+        // is correct and must survive the video change.
+        config(['nntmux_api.local_imdb_metadata_url' => 'http://imdb-metadata.media.svc']);
+
+        $mock = new MockHandler([
+            new Response(200, ['Content-Type' => 'application/json'], json_encode([
+                'title' => 'A Television Film',
+                'year' => 1999,
+                'titleType' => 'tvMovie',
+                'genres' => [],
+                'directors' => [],
+                'actors' => [],
+            ])),
+        ]);
+        $scraper = new ImdbScraper(new Client(['handler' => HandlerStack::create($mock)]));
+
+        $result = $scraper->fetchById('7654321');
+
+        $this->assertIsArray($result);
+        $this->assertSame('movie', $result['type']);
+    }
+
     public function test_unconfigured_local_service_changes_nothing(): void
     {
         config(['nntmux_api.local_imdb_metadata_url' => '']);
