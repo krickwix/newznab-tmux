@@ -427,14 +427,30 @@ class ImdbScraper
     }
 
     /**
-     * The dataset's title_type in the vocabulary the media-type gate expects, so a tvSeries id is
-     * rejected by the same rule regardless of which source answered.
+     * The dataset's title_type in the vocabulary the media-type gate expects, so a given id is
+     * judged by the same rule regardless of which source answered.
+     *
+     * Only the two types the gate accepts as films are collapsed to 'movie'; everything else is
+     * passed through under the name MovieService::isExplicitNonMovieMediaType() already knows,
+     * so the gate keeps its own opinion rather than this mapper substituting one.
+     *
+     * 'video' notably is NOT a movie here, despite naming a few direct-to-video features. Of the
+     * 324,200 such titles in the dataset, 135,511 are tagged Short and 114,651 Adult, and just
+     * 1,564 have 1,000+ votes -- it is overwhelmingly shorts, adult content and music videos.
+     * isExplicitNonMovieMediaType() has listed 'video' as non-movie all along; mapping it to
+     * 'movie' made the local provider the one source that could sneak them past the gate.
      */
     private function mapLocalTitleType(string $titleType): string
     {
         return match ($titleType) {
-            'movie', 'tvMovie', 'video' => 'movie',
-            'tvSeries', 'tvMiniSeries', 'tvEpisode' => 'tvSeries',
+            'movie', 'tvMovie' => 'movie',
+            'video' => 'video',
+            'short', 'tvShort' => 'short',
+            'tvSeries' => 'tvSeries',
+            'tvMiniSeries' => 'tvMiniSeries',
+            'tvEpisode' => 'tvEpisode',
+            'tvSpecial' => 'tvSpecial',
+            'videoGame' => 'videoGame',
             default => 'unknown',
         };
     }
