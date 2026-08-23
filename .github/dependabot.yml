@@ -9,3 +9,31 @@ updates:
     directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
+
+  # Base images. Nothing updated these before, so dunglas/frankenphp and the
+  # Sail runtime bases drifted silently.
+  #
+  # The `ignore` below is load-bearing. Alongside the real Dockerfile, this repo
+  # holds ~90 single-layer overlay Dockerfiles (Dockerfile.v136-.v149 here and
+  # docker/overlays/*.Dockerfile) that each FROM a previously published
+  # krickwix/nntmux digest and COPY a few PHP files on top. Those references are
+  # build history, not dependencies -- bumping them would rewrite the overlay
+  # chain and produce meaningless PRs.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "container-images"
+    ignore:
+      - dependency-name: "docker.io/krickwix/nntmux"
+      - dependency-name: "krickwix/nntmux"
+
+  - package-ecosystem: "docker"
+    directory: "/docker/8.5"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "container-images"
