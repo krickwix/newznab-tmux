@@ -1,6 +1,6 @@
 
-FROM composer:latest AS composer-base
-FROM dunglas/frankenphp:1-php8.5
+FROM composer:2.10.2 AS composer-base
+FROM dunglas/frankenphp:1.12.7-php8.5
 LABEL maintainer="PyRowMan"
 ARG APP_PORT=80
 ENV SERVER_NAME=:${APP_PORT}
