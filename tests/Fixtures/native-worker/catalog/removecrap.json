@@ -1,0 +1,139 @@
+{
+    "version": 1,
+    "generated_at": "2026-06-15T12:00:00.000000Z",
+    "mode": "shadow",
+    "job": {
+        "name": "removecrap",
+        "description": "Remove configured unwanted releases",
+        "enabled": true,
+        "disabled_reason": null,
+        "sleep": 300
+    },
+    "lock": {
+        "name": "nntmux:distributed-worker:removecrap",
+        "redis_key": "nntmux_database_nntmux-cache-nntmux:distributed-worker:removecrap",
+        "seconds": 42
+    },
+    "commands": [
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "gibberish",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "executable",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "hashed",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "short",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "installbin",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "passwordurl",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "nzb",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "scr",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "passworded",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "sample",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "size",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "codec",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "blfiles",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "blacklist",
+                "--time": "4",
+                "--delete": true
+            }
+        },
+        {
+            "command": "releases:remove-crap",
+            "arguments": {
+                "--type": "par2only",
+                "--time": "4",
+                "--delete": true
+            }
+        }
+    ]
+}

@@ -1,0 +1,119 @@
+{
+    "version": 1,
+    "generated_at": "2026-06-15T12:00:00.000000Z",
+    "mode": "shadow",
+    "job": {
+        "name": "hashed-fixnames",
+        "description": "Run full-history name fixing passes for Other > Hashed backlogs",
+        "enabled": true,
+        "disabled_reason": null,
+        "sleep": 300
+    },
+    "lock": {
+        "name": "nntmux:distributed-worker:hashed-fixnames",
+        "redis_key": "nntmux_database_nntmux-cache-nntmux:distributed-worker:hashed-fixnames",
+        "seconds": 42
+    },
+    "commands": [
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "4",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "6",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "21",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "18",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "10",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "14",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "16",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "20",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "12",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "8",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--show": true
+            }
+        }
+    ]
+}

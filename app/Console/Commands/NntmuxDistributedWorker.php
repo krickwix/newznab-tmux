@@ -6,6 +6,8 @@ namespace App\Console\Commands;
 
 use App\Services\Distributed\DistributedJobCatalog;
 use App\Services\Distributed\DistributedJobWorker;
+use App\Services\Distributed\NativeWorkerPlanExporter;
+use App\Services\Tmux\TmuxMonitorService;
 use Illuminate\Console\Command;
 
 class NntmuxDistributedWorker extends Command
@@ -16,6 +18,7 @@ class NntmuxDistributedWorker extends Command
                             {--sleep= : Override sleep seconds between cycles}
                             {--lock-seconds= : Cache lock TTL for one job cycle}
                             {--stop-on-disabled : Exit instead of sleeping when a job is disabled/no work}
+                            {--native-plan : Print a native worker shadow plan as JSON without running the job}
                             {--list : List available distributed jobs}';
 
     protected $description = 'Run one NNTmux processing lane without tmux, suitable for one Kubernetes pod per former pane';
@@ -44,8 +47,6 @@ class NntmuxDistributedWorker extends Command
             return self::FAILURE;
         }
 
-        $worker = app(DistributedJobWorker::class);
-
         $sleep = $this->option('sleep');
         $lockSecondsOption = $this->option('lock-seconds');
         if (is_numeric($lockSecondsOption)) {
@@ -55,6 +56,25 @@ class NntmuxDistributedWorker extends Command
         } else {
             $lockSeconds = max(1, (int) config('nntmux.distributed_lock_seconds', 3600));
         }
+
+        if ((bool) $this->option('native-plan')) {
+            $monitorService = app(TmuxMonitorService::class);
+            $monitorService->initializeMonitor();
+            $plan = $catalog->resolve($job, $monitorService->collectStatistics());
+
+            if (is_numeric($sleep)) {
+                $plan['sleep'] = max(1, (int) $sleep);
+            }
+
+            $this->line(json_encode(
+                app(NativeWorkerPlanExporter::class)->export($plan, $lockSeconds),
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+            ));
+
+            return self::SUCCESS;
+        }
+
+        $worker = app(DistributedJobWorker::class);
 
         return $worker->run(
             job: $job,

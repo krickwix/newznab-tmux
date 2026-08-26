@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Distributed\NativeLeafStartupSmoke;
 use App\Services\NameFixing\ExternalSources\ExternalMetadataRefreshService;
 use Illuminate\Console\Command;
 
@@ -26,6 +27,22 @@ class PredbRefreshExternalMetadata extends Command
         $queries = is_array($queries) ? array_values(array_filter(array_map('strval', $queries))) : [];
         $limit = is_numeric($this->option('limit')) ? max(1, (int) $this->option('limit')) : (int) config('external_metadata.limit', 25);
         $sleepMs = is_numeric($this->option('sleep-ms')) ? max(0, (int) $this->option('sleep-ms')) : (int) config('external_metadata.sleep_ms', 500);
+
+        $smokeArguments = [];
+        foreach ($sources as $source) {
+            $smokeArguments[] = '--source='.(string) $source;
+        }
+        foreach ($queries as $query) {
+            $smokeArguments[] = '--query='.(string) $query;
+        }
+        $smokeArguments[] = '--limit='.$limit;
+        $smokeArguments[] = '--sleep-ms='.$sleepMs;
+        if ((bool) $this->option('dry-run')) {
+            $smokeArguments[] = '--dry-run';
+        }
+        if (NativeLeafStartupSmoke::recordIfEnabled('predb:refresh-external-metadata', $smokeArguments)) {
+            return self::SUCCESS;
+        }
 
         $summary = $service->refresh(
             sources: array_map('strval', $sources),

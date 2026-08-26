@@ -9,6 +9,7 @@ use App\Models\UsenetGroup;
 use App\Services\AdditionalProcessing\AdditionalProcessingOrchestrator;
 use App\Services\Backfill\BackfillService;
 use App\Services\Binaries\BinariesService;
+use App\Services\Distributed\NativeLeafStartupSmoke;
 use App\Services\NfoService;
 use App\Services\NNTP\NNTPService;
 use App\Services\ReleaseProcessingService;
@@ -48,6 +49,10 @@ class UpdatePerGroup extends Command
             $this->error('Group ID must be numeric.');
 
             return self::FAILURE;
+        }
+
+        if (NativeLeafStartupSmoke::recordIfEnabled('group:update-all', [(string) $groupId])) {
+            return self::SUCCESS;
         }
 
         try {

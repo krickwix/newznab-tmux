@@ -1,0 +1,25 @@
+{
+    "version": 1,
+    "generated_at": "2026-06-15T12:00:00.000000Z",
+    "mode": "shadow",
+    "job": {
+        "name": "binaries",
+        "description": "Download new headers for active groups",
+        "enabled": true,
+        "disabled_reason": null,
+        "sleep": 60
+    },
+    "lock": {
+        "name": "nntmux:distributed-worker:binaries",
+        "redis_key": "nntmux_database_nntmux-cache-nntmux:distributed-worker:binaries",
+        "seconds": 42
+    },
+    "commands": [
+        {
+            "command": "multiprocessing:safe",
+            "arguments": {
+                "type": "binaries"
+            }
+        }
+    ]
+}

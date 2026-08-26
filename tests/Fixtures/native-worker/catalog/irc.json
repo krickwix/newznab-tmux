@@ -1,0 +1,23 @@
+{
+    "version": 1,
+    "generated_at": "2026-06-15T12:00:00.000000Z",
+    "mode": "shadow",
+    "job": {
+        "name": "irc",
+        "description": "Run the IRC scraper",
+        "enabled": true,
+        "disabled_reason": null,
+        "sleep": 10
+    },
+    "lock": {
+        "name": "nntmux:distributed-worker:irc",
+        "redis_key": "nntmux_database_nntmux-cache-nntmux:distributed-worker:irc",
+        "seconds": 42
+    },
+    "commands": [
+        {
+            "command": "irc:scrape",
+            "arguments": []
+        }
+    ]
+}

@@ -6,6 +6,7 @@ namespace App\Console\Commands;
 
 use App\Models\UsenetGroup;
 use App\Services\Binaries\BinariesService;
+use App\Services\Distributed\NativeLeafStartupSmoke;
 use App\Services\NNTP\NNTPService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -32,6 +33,10 @@ class PartRepair extends Command
     public function handle(): int
     {
         $groupName = $this->argument('group');
+
+        if (NativeLeafStartupSmoke::recordIfEnabled('binaries:part-repair', [(string) $groupName])) {
+            return self::SUCCESS;
+        }
 
         try {
             $groupMySQL = UsenetGroup::getByName($groupName)->toArray();

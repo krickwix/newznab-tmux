@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Distributed\NativeLeafStartupSmoke;
 use App\Services\NameFixing\NameFixingService;
 use App\Services\NNTP\NNTPService;
 use Illuminate\Console\Command;
@@ -52,6 +53,23 @@ class FixReleaseNames extends Command
             $other = 4;
         } elseif ($categoryOption === 'hashed') {
             $other = 5;
+        }
+
+        $smokeArguments = [(string) $method, '--category='.(string) $categoryOption];
+        if ($limit > 0) {
+            $smokeArguments[] = '--limit='.$limit;
+        }
+        if ($update) {
+            $smokeArguments[] = '--update';
+        }
+        if ($setStatus) {
+            $smokeArguments[] = '--set-status';
+        }
+        if ($show) {
+            $smokeArguments[] = '--show';
+        }
+        if (NativeLeafStartupSmoke::recordIfEnabled('releases:fix-names', $smokeArguments)) {
+            return self::SUCCESS;
         }
 
         // Connect to NNTP if method requires it

@@ -336,6 +336,306 @@ class DistributedJobCatalogTest extends TestCase
         }
     }
 
+    public function test_native_worker_coverage_lists_stay_in_sync_with_catalog(): void
+    {
+        $catalogJobs = array_keys((new DistributedJobCatalog)->jobs());
+        sort($catalogJobs);
+
+        $goNativeJobs = $this->goSupportsNativeLaneJobs();
+        sort($goNativeJobs);
+        $this->assertSame($catalogJobs, $goNativeJobs, 'Go native --run-lane support must cover every catalog worker.');
+
+        $evalAuditJobs = $this->evalAuditDefaultJobs();
+        sort($evalAuditJobs);
+        $this->assertSame($catalogJobs, $evalAuditJobs, 'Compose eval audit must validate every catalog worker.');
+
+        $evalRunJobs = $this->evalRunDefaultJobs();
+        sort($evalRunJobs);
+        $this->assertSame($catalogJobs, $evalRunJobs, 'Compose eval execution must exercise every catalog worker.');
+
+        $evalFixtureJobs = $this->evalFixtureRunDefaultJobs();
+        sort($evalFixtureJobs);
+        $this->assertSame($catalogJobs, $evalFixtureJobs, 'Fixture-backed Compose eval execution must exercise every catalog worker.');
+
+        $composeServiceJobs = $this->evalComposeServiceRunDefaultJobs();
+        sort($composeServiceJobs);
+        $this->assertSame($catalogJobs, $composeServiceJobs, 'Compose native worker services must be runnable for every catalog worker.');
+
+        $smokedJobs = $this->phpSmokeJobs();
+        sort($smokedJobs);
+        $this->assertSame($catalogJobs, $smokedJobs, 'PHP-orchestrated native smoke must cover every catalog worker.');
+    }
+
+    public function test_native_eval_compose_declares_one_shot_worker_services_for_every_catalog_job(): void
+    {
+        $catalogJobs = array_keys((new DistributedJobCatalog)->jobs());
+        sort($catalogJobs);
+
+        $composeJobs = $this->nativeEvalComposeWorkerJobs();
+        sort($composeJobs);
+
+        $this->assertSame($catalogJobs, $composeJobs, 'Compose native worker services must cover every catalog worker.');
+
+        $source = (string) file_get_contents(base_path('docker-compose.native-eval.yml'));
+        $this->assertStringContainsString('native-workers', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_WORKER_LANE_EXECUTION_ENABLED', $source);
+
+        foreach ($catalogJobs as $job) {
+            $service = 'native-'.$job.'-worker';
+            $this->assertStringContainsString($service.':', $source);
+            $this->assertMatchesRegularExpression(
+                '/'.preg_quote($service.':', '/').'.*?nntmux:worker.*?'.preg_quote($job, '/').'.*?--once.*?--stop-on-disabled.*?--lock-seconds=/s',
+                $source,
+                $service,
+            );
+        }
+    }
+
+    public function test_native_eval_compose_service_runner_executes_every_catalog_worker_service(): void
+    {
+        $source = $this->scriptSource('native/scripts/run-native-eval-compose-workers.sh');
+
+        $this->assertStringContainsString('source native/scripts/native-eval-common.sh', $source);
+        $this->assertStringContainsString('--profile native-workers', $source);
+        $this->assertStringContainsString('config --services', $source);
+        $this->assertStringContainsString('Missing compose native worker service', $source);
+        $this->assertStringContainsString('seed_eval_worker_data', $source);
+        $this->assertStringContainsString('configure_eval_lane', $source);
+        $this->assertStringContainsString('native-${lane}-worker', $source);
+        $this->assertStringContainsString('native lane completed', $source);
+        $this->assertStringContainsString("redis-cli --scan --pattern '*nntmux:distributed-worker*'", $source);
+    }
+
+    public function test_native_eval_fixture_runner_uses_redis_cli_for_held_lock_setup(): void
+    {
+        $source = $this->scriptSource('native/scripts/run-native-eval-fixture-workers.sh');
+
+        $this->assertStringContainsString('plan_lock_metadata()', $source);
+        $this->assertStringContainsString('redis-cli SETEX "${lock_key}" "${lock_seconds}" "${owner}"', $source);
+        $this->assertStringContainsString('redis-cli GET "${lock_key}"', $source);
+        $this->assertStringContainsString('redis-cli DEL "${lock_key}"', $source);
+        $this->assertStringNotContainsString('new Redis()', $source);
+        $this->assertStringNotContainsString('maintnotifications', $source);
+    }
+
+    public function test_removecrap_production_commit_smoke_clears_native_test_guards(): void
+    {
+        $source = $this->scriptSource('native/scripts/verify-php-native-removecrap-production-commit-smoke.sh');
+
+        $this->assertStringContainsString('nntmux-test-fixture --fixture removecrap', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_REMOVECRAP_PRODUCTION_COMMIT_SMOKE=1', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_WORKER_COMMIT_TEST_ENABLED=0', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_ALLOW_DESTRUCTIVE_TEST_DB=', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_ALLOW_COMMITTED_TEST_DB=', $source);
+        $this->assertStringContainsString('php-orchestrated native removecrap production opt-in commit smoke verified', $source);
+    }
+
+    public function test_native_eval_nntp_k3s_sync_helper_is_secret_safe_and_repeatable(): void
+    {
+        $source = $this->scriptSource('native/scripts/sync-native-eval-nntp-from-k3s.sh');
+        $gitignore = (string) file_get_contents(base_path('.gitignore'));
+
+        $this->assertStringContainsString('--mode check|apply', $source);
+        $this->assertStringContainsString('secretKeyRef', $source);
+        $this->assertStringContainsString('configMapKeyRef', $source);
+        $this->assertStringContainsString('envFrom', $source);
+        $this->assertStringContainsString('NNTP_USERNAME', $source);
+        $this->assertStringContainsString('NNTP_PASSWORD', $source);
+        $this->assertStringContainsString('redacted', $source);
+        $this->assertStringNotContainsString('print(value)', $source);
+        $this->assertStringNotContainsString('echo "$value"', $source);
+        $this->assertStringContainsString('.env.*', $gitignore);
+    }
+
+    public function test_eval_all_worker_runner_enables_every_lane_instead_of_skipping_disabled_plans(): void
+    {
+        $runner = $this->scriptSource('native/scripts/run-native-eval-all-workers.sh');
+        $source = $runner
+            ."\n"
+            .$this->scriptSource('native/scripts/native-eval-common.sh');
+
+        $this->assertStringContainsString('seed_eval_worker_data', $source);
+        $this->assertStringContainsString('configure_eval_lane', $source);
+        $this->assertStringContainsString('source native/scripts/native-eval-common.sh', $runner);
+        $this->assertStringContainsString('require_native_eval_database "all-worker eval run"', $runner);
+        $this->assertStringContainsString('NNTMUX_NATIVE_LEAF_STARTUP_SMOKE=1', $source);
+        $this->assertStringContainsString('fix_crap_opt", "Custom"', $source);
+        $this->assertStringContainsString('metadata_refresh", "1"', $source);
+        $this->assertStringContainsString('run_ircscraper", "1"', $source);
+        $this->assertStringContainsString('sequential="2"', $source);
+        $this->assertStringNotContainsString('env_value() {', $runner);
+        $this->assertStringNotContainsString('INSERT INTO settings', $runner);
+        $this->assertStringNotContainsString('skipped_lanes', $source);
+        $this->assertStringNotContainsString('continue', $source);
+    }
+
+    public function test_eval_runners_clear_startup_smoke_environment_when_real_leaves_are_requested(): void
+    {
+        foreach ([
+            'native/scripts/run-native-eval-first-lanes.sh',
+            'native/scripts/run-native-eval-all-workers.sh',
+            'native/scripts/run-native-eval-compose-workers.sh',
+        ] as $path) {
+            $source = $this->scriptSource($path)
+                ."\n"
+                .$this->scriptSource('native/scripts/native-eval-common.sh');
+
+            $this->assertStringContainsString('allow_real_leaves', $source, $path);
+            $this->assertStringContainsString('real_leaf_exec_environment_args', $source, $path);
+            $this->assertStringContainsString('NNTMUX_NATIVE_LEAF_STARTUP_SMOKE=', $source, $path);
+            $this->assertStringContainsString('NNTMUX_NATIVE_LEAF_STARTUP_SMOKE_LOG=', $source, $path);
+        }
+    }
+
+    public function test_eval_seed_can_target_a_real_nntp_group_for_real_leaf_runs(): void
+    {
+        $source = $this->scriptSource('native/scripts/native-eval-common.sh');
+
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_GROUP_NAME', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_GROUP_FIRST_RECORD', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_GROUP_LAST_RECORD', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_SHORT_GROUP_FIRST_RECORD', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_SHORT_GROUP_LAST_RECORD', $source);
+        $this->assertStringContainsString('env_unsigned_int', $source);
+        $this->assertStringContainsString('sql_literal', $source);
+        $this->assertStringContainsString('@eval_group_name', $source);
+        $this->assertStringContainsString("description LIKE 'native eval%'", $source);
+        $this->assertStringContainsString('DELETE FROM short_groups WHERE name = @eval_group_name', $source);
+        $this->assertStringContainsString('alt.binaries.native.eval', $source);
+    }
+
+    public function test_eval_seed_includes_completed_release_creation_fixture(): void
+    {
+        $source = $this->scriptSource('native/scripts/native-eval-common.sh');
+
+        $this->assertStringContainsString('Native Eval Release Proof', $source);
+        $this->assertStringContainsString('native-eval-release-proof-collection', $source);
+        $this->assertStringContainsString('DELETE FROM releases', $source);
+        $this->assertStringContainsString('INSERT INTO binaries', $source);
+        $this->assertStringContainsString('INSERT IGNORE INTO parts', $source);
+        $this->assertStringContainsString('filecheck = VALUES(filecheck)', $source);
+        $this->assertStringContainsString('releases_id = NULL', $source);
+    }
+
+    public function test_eval_all_worker_audit_enables_every_lane_instead_of_accepting_disabled_plans(): void
+    {
+        $source = (string) file_get_contents(base_path('native/scripts/audit-native-eval-all-workers.sh'))
+            ."\n"
+            .(string) file_get_contents(base_path('native/scripts/native-eval-common.sh'));
+
+        $this->assertStringContainsString('seed_eval_worker_data', $source);
+        $this->assertStringContainsString('configure_eval_lane', $source);
+        $this->assertStringContainsString('metadata_refresh", "1"', $source);
+        $this->assertStringContainsString('run_ircscraper", "1"', $source);
+        $this->assertStringContainsString('sequential="2"', $source);
+        $this->assertStringContainsString('if (! $enabled)', $source);
+        $this->assertStringContainsString('exit(2)', $source);
+        $this->assertStringContainsString('native_worker', $source);
+        $this->assertStringContainsString('replacement_ready', $source);
+        $this->assertStringContainsString('replacement_readiness', $source);
+        $this->assertStringContainsString('blockers', $source);
+        $this->assertStringContainsString('dry_run', $source);
+        $this->assertStringContainsString('writes', $source);
+    }
+
+    public function test_replacement_readiness_audit_checks_lane_specific_blockers(): void
+    {
+        $source = $this->scriptSource('native/scripts/audit-native-replacement-readiness.sh');
+
+        foreach ([
+            'production backfill acquisition, full header persistence, and cursor ownership remain PHP-owned',
+            'production binary header acquisition, full header persistence, and cursor ownership remain PHP-owned',
+            'remaining regular fix-name methods are deferred to PHP',
+            'release rename, category, event, and search side effects remain PHP-owned',
+            'native IRC replacement still requires live deployment verification',
+            'metadata-refresh embedded hashed fix-name commands are deferred to PHP',
+            'group update, backfill, release creation, and post-processing side effects remain PHP-owned',
+            'additional/NFO provider processing, NNTP/NZB/NFO reads, release events, and deferred metadata-refresh/hashed-fixnames side effects remain PHP-owned',
+            'metadata-provider lookups, NZB/NFO reads, release events, and full postprocess side effects remain PHP-owned',
+            'full release creation, categorization, and release-processing side effects remain PHP-owned',
+            'removecrap production commit requires live rollout proof',
+        ] as $blocker) {
+            $this->assertStringContainsString($blocker, $source);
+        }
+
+        $this->assertStringContainsString('expected_blocker()', $source);
+        $this->assertStringContainsString('missing expected replacement readiness blocker', $source);
+        $this->assertStringContainsString('has_forbidden_detail', $source);
+    }
+
+    public function test_native_worker_image_smoke_checks_catalog_readiness_metadata(): void
+    {
+        $source = $this->scriptSource('native/scripts/verify-native-worker-image.sh');
+
+        $this->assertStringContainsString('tests/Fixtures/native-worker/catalog/*.json', $source);
+        $this->assertStringContainsString('native_worker.writes 0', $source);
+        $this->assertStringContainsString('replacement_ready', $source);
+        $this->assertStringContainsString('replacement_readiness', $source);
+        $this->assertStringContainsString('blockers', $source);
+        $this->assertStringContainsString('image report is missing replacement_ready=false', $source);
+        $this->assertStringContainsString('image report is missing replacement readiness blockers', $source);
+        $this->assertStringContainsString('--require-replacement-ready', $source);
+        $this->assertStringContainsString('accepted replacement readiness', $source);
+        $this->assertStringContainsString('catalog is not replacement-ready', $source);
+    }
+
+    public function test_native_eval_deploy_helper_uses_shared_env_overrides(): void
+    {
+        $source = $this->scriptSource('native/scripts/deploy-native-eval-compose.sh');
+
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_ENV_FILE', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_COMPOSE_FILE', $source);
+        $this->assertStringContainsString('source native/scripts/native-eval-common.sh', $source);
+        $this->assertStringContainsString('docker compose --env-file "${env_file}" -f "${compose_file}"', $source);
+        $this->assertStringContainsString('require_native_eval_database "native eval compose deploy"', $source);
+        $this->assertStringContainsString('seed_eval_worker_data', $source);
+        $this->assertStringContainsString('configure_eval_lane metadata-refresh', $source);
+        $this->assertStringContainsString('metadata-refresh deploy smoke resolved disabled/no-op plan', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_RUN_FIRST_LANES', $source);
+        $this->assertStringContainsString('native/scripts/run-native-eval-first-lanes.sh', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_RUN_FIRST_LANES must be 0 or 1', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_RUN_ALL_WORKERS', $source);
+        $this->assertStringContainsString('native/scripts/run-native-eval-all-workers.sh', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_RUN_ALL_WORKERS must be 0 or 1', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_RUN_COMPOSE_WORKERS', $source);
+        $this->assertStringContainsString('native/scripts/run-native-eval-compose-workers.sh', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_EVAL_RUN_COMPOSE_WORKERS must be 0 or 1', $source);
+        $this->assertStringContainsString('selected_runners', $source);
+        $this->assertStringContainsString('mutually exclusive', $source);
+        $this->assertStringNotContainsString('env_value() {', $source);
+        $this->assertStringNotContainsString('--env-file .env.native-eval -f docker-compose.native-eval.yml', $source);
+    }
+
+    public function test_first_lane_runner_reuses_shared_eval_seed_helpers(): void
+    {
+        $source = (string) file_get_contents(base_path('native/scripts/run-native-eval-first-lanes.sh'));
+
+        $this->assertStringContainsString('source native/scripts/native-eval-common.sh', $source);
+        $this->assertStringContainsString('seed_eval_worker_data', $source);
+        $this->assertStringContainsString('require_native_eval_database "first-lane eval run"', $source);
+        $this->assertStringNotContainsString('env_value() {', $source);
+        $this->assertStringNotContainsString('INSERT INTO settings', $source);
+    }
+
+    public function test_first_lane_commit_compose_runner_uses_native_commit_guards_and_fake_nntp(): void
+    {
+        $source = $this->scriptSource('native/scripts/run-native-eval-first-lane-commit-workers.sh');
+
+        $this->assertStringContainsString('source native/scripts/native-eval-common.sh', $source);
+        $this->assertStringContainsString('binaries backfill releases', $source);
+        $this->assertStringContainsString('First-lane native commit eval supports only binaries, backfill, and releases', $source);
+        $this->assertStringContainsString('config --services', $source);
+        $this->assertStringContainsString('nntmux-fake-nntp', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_WORKER_FIRST_LANE_COMMIT_ENABLED=true', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_WORKER_COMMIT_TEST_ENABLED=true', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_ALLOW_DESTRUCTIVE_TEST_DB=1', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_ALLOW_COMMITTED_TEST_DB=1', $source);
+        $this->assertStringContainsString('NNTMUX_NATIVE_WORKER_NNTP_OVERVIEW_SAMPLE=2', $source);
+        $this->assertStringContainsString('NNTP_SERVER="${fake_nntp_container}"', $source);
+        $this->assertStringContainsString('native lane commit completed ${lane}', $source);
+        $this->assertStringContainsString("redis-cli --scan --pattern '*nntmux:distributed-worker*'", $source);
+    }
+
     /**
      * @param  array<string, mixed>  $settings
      * @param  array<string, mixed>  $counts
@@ -392,5 +692,97 @@ class DistributedJobCatalogTest extends TestCase
             static fn (array $command): string => (string) $command['arguments'][$key],
             $plan['commands'],
         );
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function goSupportsNativeLaneJobs(): array
+    {
+        $source = (string) file_get_contents(base_path('native/cmd/nntmux-worker/main.go'));
+        $this->assertMatchesRegularExpression('/func supportsNativeLaneExecution\(job string\) bool \{(?P<body>.*?)\n\}/s', $source);
+        preg_match('/func supportsNativeLaneExecution\(job string\) bool \{(?P<body>.*?)\n\}/s', $source, $matches);
+        preg_match_all('/"([^"]+)"/', $matches['body'], $quoted);
+
+        return array_values(array_unique($quoted[1]));
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function evalAuditDefaultJobs(): array
+    {
+        $source = (string) file_get_contents(base_path('native/scripts/audit-native-eval-all-workers.sh'));
+
+        return $this->defaultNativeEvalJobs($source);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function evalRunDefaultJobs(): array
+    {
+        $source = (string) file_get_contents(base_path('native/scripts/run-native-eval-all-workers.sh'));
+
+        return $this->defaultNativeEvalJobs($source);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function evalFixtureRunDefaultJobs(): array
+    {
+        $source = (string) file_get_contents(base_path('native/scripts/run-native-eval-fixture-workers.sh'));
+
+        return $this->defaultNativeEvalJobs($source);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function evalComposeServiceRunDefaultJobs(): array
+    {
+        return $this->defaultNativeEvalJobs($this->scriptSource('native/scripts/run-native-eval-compose-workers.sh'));
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function defaultNativeEvalJobs(string $source): array
+    {
+        $this->assertMatchesRegularExpression('/lanes="\$\{NNTMUX_NATIVE_EVAL_LANES:-(?P<jobs>[^}]*)\}"/', $source);
+        preg_match('/lanes="\$\{NNTMUX_NATIVE_EVAL_LANES:-(?P<jobs>[^}]*)\}"/', $source, $matches);
+
+        return preg_split('/\s+/', trim($matches['jobs'])) ?: [];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function phpSmokeJobs(): array
+    {
+        $source = (string) file_get_contents(base_path('native/scripts/verify-php-native-lanes-smoke.sh'));
+        preg_match_all('/^run_lane_smoke\s+([a-z-]+)/m', $source, $matches);
+
+        return array_values(array_unique($matches[1]));
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function nativeEvalComposeWorkerJobs(): array
+    {
+        $source = (string) file_get_contents(base_path('docker-compose.native-eval.yml'));
+        preg_match_all('/^\s{4}native-([a-z-]+)-worker:\s*$/m', $source, $matches);
+
+        return array_values(array_unique($matches[1]));
+    }
+
+    private function scriptSource(string $path): string
+    {
+        $fullPath = base_path($path);
+        $this->assertFileExists($fullPath);
+
+        return (string) file_get_contents($fullPath);
     }
 }

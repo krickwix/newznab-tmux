@@ -1,0 +1,51 @@
+{
+    "version": 1,
+    "generated_at": "2026-06-15T12:00:00.000000Z",
+    "mode": "shadow",
+    "job": {
+        "name": "metadata-refresh",
+        "description": "Refresh external release-name evidence and run strong fix-name passes",
+        "enabled": true,
+        "disabled_reason": null,
+        "sleep": 900
+    },
+    "lock": {
+        "name": "nntmux:distributed-worker:metadata-refresh",
+        "redis_key": "nntmux_database_nntmux-cache-nntmux:distributed-worker:metadata-refresh",
+        "seconds": 42
+    },
+    "commands": [
+        {
+            "command": "predb:refresh-external-metadata",
+            "arguments": {
+                "--source": [
+                    "all"
+                ],
+                "--limit": 25,
+                "--sleep-ms": 250
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "20",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--limit": 500,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "16",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--limit": 500,
+                "--show": true
+            }
+        }
+    ]
+}

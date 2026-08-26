@@ -1,7 +1,10 @@
 <?php
 
+use App\Console\Commands\ApplyNativeHashedFixNameRenames;
 use App\Console\Commands\CollectionSplitDiagnostics;
+use App\Console\Commands\ResolveNativeWriteContract;
 use App\Console\Commands\RequeueBodyPreambleFragments;
+use App\Console\Commands\SyncNativeSearchSideEffects;
 use App\Http\Middleware\BlockAbusiveServices;
 use App\Http\Middleware\ClearanceMiddleware;
 use App\Http\Middleware\ContentSecurityPolicy;
@@ -48,8 +51,11 @@ return Application::configure(basePath: dirname(__DIR__))
         },
     )
     ->withCommands([
+        ApplyNativeHashedFixNameRenames::class,
         CollectionSplitDiagnostics::class,
+        ResolveNativeWriteContract::class,
         RequeueBodyPreambleFragments::class,
+        SyncNativeSearchSideEffects::class,
     ])
     ->withMiddleware(function (Middleware $middleware) {
         $middleware->redirectTo(

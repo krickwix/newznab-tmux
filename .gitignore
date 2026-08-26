@@ -6,6 +6,7 @@ docker/php-overrides.local.ini
 docker-compose.yml
 docker-compose.override.yml
 .env
+.env.*
 install.lock
 error_log
 failed-login.log
@@ -37,6 +38,7 @@ test.php
 # Ignore symlinks in public/storage that point to storage/covers
 /public/storage/covers
 /storage/nzb/*
+/storage/native-eval/
 /resources/tmp/*
 !/resources/tmp/unrar/
 !/resources/tmp/unzip/

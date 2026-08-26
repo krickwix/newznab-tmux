@@ -1,0 +1,212 @@
+services:
+    php-test:
+        image: composer:2
+        entrypoint: [""]
+        user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
+        environment:
+            TZ: '${APP_TIMEZONE:-UTC}'
+            APP_ENV: testing
+            APP_KEY: base64:SomeTestKeyForTestingPurposesOnly123=
+            DB_CONNECTION: testing
+            DB_DATABASE: ':memory:'
+            CACHE_STORE: array
+            SESSION_DRIVER: array
+            QUEUE_CONNECTION: sync
+            MAIL_MAILER: array
+            COMPOSER_CACHE_DIR: /tmp/composer-cache
+            COMPOSER_HOME: /tmp/composer-home
+        working_dir: /var/www/html
+        volumes:
+            - '.:/var/www/html'
+        networks:
+            - native-test
+
+    php-search-test:
+        build:
+            context: .
+            dockerfile: native/docker/php-search-test.Dockerfile
+        entrypoint: [""]
+        user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
+        profiles:
+            - manticore-smoke
+        environment:
+            TZ: '${APP_TIMEZONE:-UTC}'
+            APP_ENV: testing
+            APP_KEY: base64:SomeTestKeyForTestingPurposesOnly123=
+            DB_CONNECTION: mysql
+            DB_HOST: mariadb
+            DB_PORT: 3306
+            DB_DATABASE: nntmux_native_test
+            DB_USERNAME: nntmux
+            DB_PASSWORD: nntmux
+            CACHE_STORE: array
+            SESSION_DRIVER: array
+            QUEUE_CONNECTION: sync
+            MAIL_MAILER: array
+            SEARCH_DRIVER: manticore
+            MANTICORESEARCH_HOST: manticore
+            MANTICORESEARCH_PORT: 9308
+            NNTMUX_NATIVE_MANTICORE_SMOKE: '1'
+            NNTMUX_NATIVE_ALLOW_DESTRUCTIVE_TEST_DB: '1'
+            COMPOSER_CACHE_DIR: /tmp/composer-cache
+            COMPOSER_HOME: /tmp/composer-home
+        working_dir: /var/www/html
+        volumes:
+            - '.:/var/www/html'
+        depends_on:
+            mariadb:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+            manticore:
+                condition: service_healthy
+        networks:
+            - native-test
+
+    php-native-test:
+        build:
+            context: .
+            dockerfile: native/docker/php-native-test.Dockerfile
+        entrypoint: [""]
+        user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
+        environment:
+            TZ: '${APP_TIMEZONE:-UTC}'
+            APP_ENV: testing
+            APP_NAME: nntmux
+            APP_KEY: base64:SomeTestKeyForTestingPurposesOnly123=
+            DB_CONNECTION: mysql
+            DB_HOST: mariadb
+            DB_PORT: 3306
+            DB_DATABASE: nntmux_native_test
+            DB_USERNAME: nntmux
+            DB_PASSWORD: nntmux
+            CACHE_STORE: redis
+            REDIS_CLIENT: phpredis
+            REDIS_HOST: redis
+            REDIS_PORT: 6379
+            REDIS_DB: 0
+            REDIS_CACHE_DB: 1
+            CACHE_PREFIX: nntmux-cache-
+            NNTMUX_DISTRIBUTED_LOCK_STORE: redis
+            SESSION_DRIVER: array
+            QUEUE_CONNECTION: sync
+            MAIL_MAILER: array
+            NNTMUX_NATIVE_PREPASS_SMOKE: '1'
+            NNTMUX_NATIVE_WORKER_COMMIT_TEST_ENABLED: '1'
+            NNTMUX_NATIVE_ALLOW_DESTRUCTIVE_TEST_DB: '1'
+            NNTMUX_NATIVE_ALLOW_COMMITTED_TEST_DB: '1'
+            NNTMUX_NATIVE_WORKER_HASHED_FIXNAMES_COMMIT_ENABLED: '1'
+            NNTMUX_NATIVE_WORKER_BINARY: /var/www/html/storage/native-php-worker-smoke/nntmux-worker
+            NNTMUX_NATIVE_WORKER_MYSQL_DSN: 'nntmux:nntmux@tcp(mariadb:3306)/nntmux_native_test?parseTime=true'
+            NNTMUX_NATIVE_WORKER_REDIS_ADDR: 'redis:6379'
+            NNTMUX_NATIVE_WORKER_SEARCH_OUTBOX_LIMIT: 10
+            NNTMUX_NATIVE_WORKER_SEARCH_OUTBOX_MAX_ATTEMPTS: 2
+            COMPOSER_CACHE_DIR: /tmp/composer-cache
+            COMPOSER_HOME: /tmp/composer-home
+        working_dir: /var/www/html
+        volumes:
+            - '.:/var/www/html'
+        depends_on:
+            mariadb:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        networks:
+            - native-test
+
+    go-test:
+        image: golang:1.23-bookworm
+        user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
+        working_dir: /workspace/native
+        environment:
+            GOMODCACHE: /tmp/go-mod-cache
+            GOCACHE: /tmp/go-build-cache
+        volumes:
+            - '.:/workspace'
+        networks:
+            - native-test
+
+    go-integration-test:
+        image: golang:1.23-bookworm
+        user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
+        working_dir: /workspace/native
+        environment:
+            GOMODCACHE: /tmp/go-mod-cache
+            GOCACHE: /tmp/go-build-cache
+            NNTMUX_NATIVE_MYSQL_DSN: 'nntmux:nntmux@tcp(mariadb:3306)/nntmux_native_test?parseTime=true'
+            NNTMUX_NATIVE_ALLOW_DESTRUCTIVE_TEST_DB: '1'
+            NNTMUX_NATIVE_REDIS_ADDR: 'redis:6379'
+        volumes:
+            - '.:/workspace'
+        depends_on:
+            mariadb:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        networks:
+            - native-test
+
+    native-worker:
+        build:
+            context: .
+            dockerfile: native/docker/nntmux-worker.Dockerfile
+        image: nntmux-native-worker:dev
+        profiles:
+            - native-worker-smoke
+        working_dir: /workspace/native
+        volumes:
+            - '.:/workspace:ro'
+        networks:
+            - native-test
+
+    mariadb:
+        image: mariadb:11.4
+        environment:
+            MARIADB_DATABASE: nntmux_native_test
+            MARIADB_USER: nntmux
+            MARIADB_PASSWORD: nntmux
+            MARIADB_ROOT_PASSWORD: nntmux-root
+        healthcheck:
+            test: ['CMD-SHELL', 'mariadb-admin ping -h 127.0.0.1 -unntmux -pnntmux --silent']
+            interval: 2s
+            timeout: 2s
+            retries: 30
+        networks:
+            - native-test
+
+    redis:
+        image: redis:7-alpine
+        command: ['redis-server', '--save', '', '--appendonly', 'no']
+        healthcheck:
+            test: ['CMD', 'redis-cli', 'ping']
+            interval: 2s
+            timeout: 2s
+            retries: 30
+        networks:
+            - native-test
+
+    manticore:
+        build:
+            context: .
+            dockerfile: native/docker/manticore-smoke.Dockerfile
+        profiles:
+            - manticore-smoke
+        environment:
+            TZ: '${APP_TIMEZONE:-UTC}'
+            EXTRA: 1
+        volumes:
+            - 'manticore-native-test:/var/lib/manticore/data'
+        healthcheck:
+            test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:9308/']
+            interval: 2s
+            timeout: 5s
+            retries: 30
+        networks:
+            - native-test
+
+networks:
+    native-test:
+        driver: bridge
+
+volumes:
+    manticore-native-test:

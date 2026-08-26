@@ -1,0 +1,173 @@
+{
+    "version": 1,
+    "generated_at": "2026-06-15T12:00:00.000000Z",
+    "mode": "shadow",
+    "job": {
+        "name": "fixnames",
+        "description": "Run release name fixing passes",
+        "enabled": true,
+        "disabled_reason": null,
+        "sleep": 300
+    },
+    "lock": {
+        "name": "nntmux:distributed-worker:fixnames",
+        "redis_key": "nntmux_database_nntmux-cache-nntmux:distributed-worker:fixnames",
+        "seconds": 42
+    },
+    "commands": [
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "3",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "4",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "5",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "6",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "6",
+                "--update": true,
+                "--category": "movies",
+                "--set-status": true,
+                "--limit": 500,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "21",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--limit": 500,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "21",
+                "--update": true,
+                "--category": "movies",
+                "--set-status": true,
+                "--limit": 500,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "8",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--limit": 50,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "7",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "9",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "11",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "13",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "15",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "17",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "19",
+                "--update": true,
+                "--category": "other",
+                "--set-status": true,
+                "--show": true
+            }
+        }
+    ]
+}

@@ -9,12 +9,14 @@ __pycache__/
 storage/logs/
 storage/nzb/
 storage/covers/
+storage/native-eval/
 
 public/build/
 
 .env
 .env.*
 !.env.dist
+docker-compose.native-eval.yml
 *.log
 phpstan*
 .phpunit*

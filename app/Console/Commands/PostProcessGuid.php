@@ -6,6 +6,7 @@ namespace App\Console\Commands;
 
 use App\Models\Settings;
 use App\Services\AdditionalProcessing\AdditionalProcessingOrchestrator;
+use App\Services\Distributed\NativeLeafStartupSmoke;
 use App\Services\NfoService;
 use App\Services\NNTP\NNTPService;
 use App\Services\PostProcessService;
@@ -21,7 +22,7 @@ class PostProcessGuid extends Command
      */
     protected $signature = 'postprocess:guid
                             {type : Type: additional, nfo, movie, tv, anime, books, music, console, or games}
-                            {guid : First character of release guid (a-f, 0-9)}
+                            {guid : First character of release leftguid}
                             {renamed? : For movie/tv: process renamed only (optional)}';
 
     /**
@@ -48,9 +49,17 @@ class PostProcessGuid extends Command
         $renamed = $this->argument('renamed') ?? '';
 
         if (! $this->isValidChar($guid)) {
-            $this->error('GUID character must be a-f or 0-9.');
+            $this->error('GUID character must be a single alphanumeric character.');
 
             return self::FAILURE;
+        }
+
+        $smokeArguments = [(string) $type, (string) $guid];
+        if ($renamed !== '') {
+            $smokeArguments[] = (string) $renamed;
+        }
+        if (NativeLeafStartupSmoke::recordIfEnabled('postprocess:guid', $smokeArguments)) {
+            return self::SUCCESS;
         }
 
         try {
@@ -106,15 +115,11 @@ class PostProcessGuid extends Command
     }
 
     /**
-     * Check if the character contains a-f or 0-9.
+     * Check if the bucket is a single leftguid character.
      */
     private function isValidChar(string $char): bool
     {
-        return \in_array(
-            $char,
-            ['a', 'b', 'c', 'd', 'e', 'f', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
-            true
-        );
+        return preg_match('/^[A-Za-z0-9]$/', $char) === 1;
     }
 
     /**

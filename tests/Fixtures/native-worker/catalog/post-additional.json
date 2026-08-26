@@ -1,0 +1,63 @@
+{
+    "version": 1,
+    "generated_at": "2026-06-15T12:00:00.000000Z",
+    "mode": "shadow",
+    "job": {
+        "name": "post-additional",
+        "description": "Run additional and/or NFO post-processing",
+        "enabled": true,
+        "disabled_reason": null,
+        "sleep": 300
+    },
+    "lock": {
+        "name": "nntmux:distributed-worker:post-additional",
+        "redis_key": "nntmux_database_nntmux-cache-nntmux:distributed-worker:post-additional",
+        "seconds": 42
+    },
+    "commands": [
+        {
+            "command": "multiprocessing:postprocess",
+            "arguments": {
+                "type": "add"
+            }
+        },
+        {
+            "command": "multiprocessing:postprocess",
+            "arguments": {
+                "type": "nfo"
+            }
+        },
+        {
+            "command": "predb:refresh-external-metadata",
+            "arguments": {
+                "--source": [
+                    "all"
+                ],
+                "--limit": 7,
+                "--sleep-ms": 250
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "20",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--limit": 500,
+                "--show": true
+            }
+        },
+        {
+            "command": "releases:fix-names",
+            "arguments": {
+                "method": "16",
+                "--update": true,
+                "--category": "hashed",
+                "--set-status": true,
+                "--limit": 500,
+                "--show": true
+            }
+        }
+    ]
+}

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Distributed\NativeLeafStartupSmoke;
 use App\Services\ReleaseProcessingService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -36,6 +37,10 @@ class ProcessReleasesCommand extends Command
     public function handle(): int
     {
         $groupId = $this->argument('groupId');
+
+        if (NativeLeafStartupSmoke::recordIfEnabled('releases:process', is_numeric($groupId) ? [(string) $groupId] : [])) {
+            return self::SUCCESS;
+        }
 
         try {
             if (is_numeric($groupId)) {

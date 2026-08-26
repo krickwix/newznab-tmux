@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Distributed\NativeLeafStartupSmoke;
 use App\Services\IRCScraper;
 use Illuminate\Console\Command;
 
@@ -29,15 +30,19 @@ class IrcScraperCommand extends Command
      */
     public function handle(): int
     {
+        // Use Laravel's built-in quiet mode for silent operation
+        $silent = $this->option('quiet');
+        $debug = $this->option('debug');
+
+        if (NativeLeafStartupSmoke::recordIfEnabled('irc:scrape', $debug ? ['--debug'] : [])) {
+            return self::SUCCESS;
+        }
+
         if (config('irc_settings.scrape_irc_username') === '') {
             $this->error('ERROR! You must put a username in config/irc_settings.php');
 
             return self::FAILURE;
         }
-
-        // Use Laravel's built-in quiet mode for silent operation
-        $silent = $this->option('quiet');
-        $debug = $this->option('debug');
 
         if (! $silent) {
             $this->info('Starting IRC Scraper...');

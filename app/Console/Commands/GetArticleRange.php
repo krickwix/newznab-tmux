@@ -7,6 +7,7 @@ namespace App\Console\Commands;
 use App\Models\Settings;
 use App\Models\UsenetGroup;
 use App\Services\Binaries\BinariesService;
+use App\Services\Distributed\NativeLeafStartupSmoke;
 use App\Services\NNTP\NNTPService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -46,6 +47,10 @@ class GetArticleRange extends Command
             $this->error('Mode must be either "binaries" or "backfill".');
 
             return self::FAILURE;
+        }
+
+        if (NativeLeafStartupSmoke::recordIfEnabled('articles:get-range', [(string) $mode, (string) $groupName, $firstArticle, $lastArticle])) {
+            return self::SUCCESS;
         }
 
         try {

@@ -1,0 +1,253 @@
+name: nntmux-native-eval
+
+x-app-build: &app-build
+    context: .
+    dockerfile: Dockerfile
+
+x-app-environment: &app-environment
+    TZ: ${APP_TIMEZONE:-UTC}
+    NNTMUX_NATIVE_WORKER_BINARY: ${NNTMUX_NATIVE_WORKER_BINARY:-/opt/nntmux-native/nntmux-worker}
+    NNTMUX_NATIVE_WORKER_MYSQL_DSN: ${NNTMUX_NATIVE_WORKER_MYSQL_DSN:-}
+    NNTMUX_NATIVE_WORKER_REDIS_ADDR: ${NNTMUX_NATIVE_WORKER_REDIS_ADDR:-redis:6379}
+
+x-native-worker-environment: &native-worker-environment
+    <<: *app-environment
+    NNTMUX_NATIVE_WORKER_LANE_EXECUTION_ENABLED: ${NNTMUX_NATIVE_WORKER_LANE_EXECUTION_ENABLED:-true}
+    NNTMUX_NATIVE_WORKER_POST_ADDITIONAL_DEFERRED_EXECUTION_ENABLED: ${NNTMUX_NATIVE_WORKER_POST_ADDITIONAL_DEFERRED_EXECUTION_ENABLED:-true}
+    NNTMUX_NATIVE_LEAF_STARTUP_SMOKE: ${NNTMUX_NATIVE_LEAF_STARTUP_SMOKE:-1}
+    NNTMUX_NATIVE_LEAF_STARTUP_SMOKE_LOG: ${NNTMUX_NATIVE_LEAF_STARTUP_SMOKE_LOG:-/tmp/nntmux-native-leaf-startup-smoke.log}
+
+x-app-volumes: &app-volumes
+    - 'native-eval-install:/app/_install'
+    - 'native-eval-storage:/app/storage'
+    - 'native-eval-public-covers:/app/public/covers'
+    - './storage/native-eval:/opt/nntmux-native:ro'
+
+x-native-worker-service: &native-worker-service
+    build: *app-build
+    image: nntmux-native-eval-app:latest
+    profiles:
+        - native-workers
+    extra_hosts:
+        - 'host.docker.internal:host-gateway'
+    env_file:
+        - .env.native-eval
+    environment: *native-worker-environment
+    restart: 'no'
+    volumes: *app-volumes
+    networks:
+        - nntmux-native-eval
+    depends_on:
+        webapp:
+            condition: service_healthy
+
+services:
+    webapp:
+        build: *app-build
+        image: nntmux-native-eval-app:latest
+        entrypoint: ['sh', '/app/docker/native-eval-entrypoint.sh']
+        command: ['--config', '/etc/caddy/Caddyfile', '--adapter', 'caddyfile']
+        extra_hosts:
+            - 'host.docker.internal:host-gateway'
+        ports:
+            - '${APP_PORT:-18080}:80'
+        env_file:
+            - .env.native-eval
+        environment: *app-environment
+        healthcheck:
+            test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1/ >/dev/null']
+            interval: 10s
+            timeout: 5s
+            retries: 30
+            start_period: 180s
+        volumes: *app-volumes
+        networks:
+            - nntmux-native-eval
+        depends_on:
+            mariadb:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+            manticore:
+                condition: service_healthy
+
+    worker:
+        build: *app-build
+        image: nntmux-native-eval-app:latest
+        profiles:
+            - workers
+        extra_hosts:
+            - 'host.docker.internal:host-gateway'
+        tty: true
+        env_file:
+            - .env.native-eval
+        environment: *app-environment
+        command: >
+            sh -c "php artisan tmux-ui:start & php artisan horizon"
+        volumes: *app-volumes
+        networks:
+            - nntmux-native-eval
+        depends_on:
+            webapp:
+                condition: service_healthy
+
+    scheduler:
+        build: *app-build
+        image: nntmux-native-eval-app:latest
+        profiles:
+            - workers
+        extra_hosts:
+            - 'host.docker.internal:host-gateway'
+        tty: true
+        env_file:
+            - .env.native-eval
+        environment: *app-environment
+        command: >
+            sh -c "while true; do php artisan schedule:run; sleep 60; done"
+        volumes: *app-volumes
+        networks:
+            - nntmux-native-eval
+        depends_on:
+            webapp:
+                condition: service_healthy
+
+    native-binaries-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'binaries', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-backfill-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'backfill', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-releases-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'releases', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-fixnames-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'fixnames', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-hashed-fixnames-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'hashed-fixnames', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-removecrap-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'removecrap', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-post-additional-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'post-additional', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-metadata-refresh-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'metadata-refresh', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-post-tv-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'post-tv', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-post-movies-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'post-movies', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-post-amazon-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'post-amazon', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-irc-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'irc', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    native-per-group-worker:
+        <<: *native-worker-service
+        command: ['php', 'artisan', 'nntmux:worker', 'per-group', '--once', '--stop-on-disabled', '--lock-seconds=${NNTMUX_NATIVE_EVAL_LOCK_SECONDS:-900}']
+
+    mariadb:
+        image: mariadb:11.4
+        ports:
+            - '${FORWARD_DB_PORT:-13306}:3306'
+        environment:
+            TZ: ${APP_TIMEZONE:-UTC}
+            MARIADB_DATABASE: ${DB_DATABASE:-nntmux_native_eval}
+            MARIADB_USER: ${DB_USERNAME:-nntmux}
+            MARIADB_PASSWORD: ${DB_PASSWORD:-nntmux}
+            MARIADB_ROOT_PASSWORD: ${DB_ROOTPASSWORD:-nntmux-root}
+        command:
+            - --max_allowed_packet=128M
+            - --group_concat_max_len=16384
+            - --max_connections=200
+        volumes:
+            - 'native-eval-mariadb:/var/lib/mysql'
+        healthcheck:
+            test: ['CMD-SHELL', 'mariadb-admin ping -h 127.0.0.1 -u"$${MARIADB_USER}" -p"$${MARIADB_PASSWORD}" --silent']
+            interval: 5s
+            timeout: 5s
+            retries: 30
+            start_period: 20s
+        networks:
+            - nntmux-native-eval
+
+    redis:
+        image: redis:7-alpine
+        command: ['redis-server', '--save', '', '--appendonly', 'no']
+        ports:
+            - '${FORWARD_REDIS_PORT:-16379}:6379'
+        healthcheck:
+            test: ['CMD', 'redis-cli', 'ping']
+            interval: 5s
+            timeout: 5s
+            retries: 30
+        networks:
+            - nntmux-native-eval
+
+    manticore:
+        build:
+            context: .
+            dockerfile: native/docker/manticore-smoke.Dockerfile
+        image: nntmux-native-eval-manticore:latest
+        entrypoint: ['searchd']
+        command: ['--config', '/etc/manticoresearch/manticore.conf', '--nodetach']
+        environment:
+            TZ: ${APP_TIMEZONE:-UTC}
+            EXTRA: 1
+        ports:
+            - '${FORWARD_MANTICORE_SQL_PORT:-19306}:9306'
+            - '${FORWARD_MANTICORE_HTTP_PORT:-19308}:9308'
+        ulimits:
+            nproc: 65535
+            nofile:
+                soft: 65535
+                hard: 65535
+            memlock:
+                soft: -1
+                hard: -1
+        volumes:
+            - 'native-eval-manticore:/var/lib/manticore/data'
+        healthcheck:
+            test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:9308/']
+            interval: 10s
+            timeout: 5s
+            retries: 30
+            start_period: 20s
+        networks:
+            - nntmux-native-eval
+
+    mailpit:
+        image: axllent/mailpit:latest
+        ports:
+            - '${FORWARD_MAILPIT_PORT:-11025}:1025'
+            - '${FORWARD_MAILPIT_DASHBOARD_PORT:-18025}:8025'
+        networks:
+            - nntmux-native-eval
+
+networks:
+    nntmux-native-eval:
+        driver: bridge
+
+volumes:
+    native-eval-install:
+    native-eval-storage:
+    native-eval-public-covers:
+    native-eval-mariadb:
+    native-eval-manticore:

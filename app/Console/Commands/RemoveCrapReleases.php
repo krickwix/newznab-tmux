@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Distributed\NativeLeafStartupSmoke;
 use App\Services\ReleaseRemoverService;
 use Illuminate\Console\Command;
 
@@ -28,6 +29,23 @@ class RemoveCrapReleases extends Command
         $time = $this->option('time') ?? 'full';
         $blacklistId = $this->option('blacklist-id') ?? '';
         $delete = $this->option('delete');
+
+        $smokeArguments = [];
+        if ($type !== '') {
+            $smokeArguments[] = '--type='.$type;
+        }
+        if ($time !== '') {
+            $smokeArguments[] = '--time='.$time;
+        }
+        if ($blacklistId !== '') {
+            $smokeArguments[] = '--blacklist-id='.$blacklistId;
+        }
+        if ($delete) {
+            $smokeArguments[] = '--delete';
+        }
+        if (NativeLeafStartupSmoke::recordIfEnabled('releases:remove-crap', $smokeArguments)) {
+            return self::SUCCESS;
+        }
 
         if (! $delete) {
             $this->warn('Running in DRY-RUN mode. Use --delete to actually remove releases.');

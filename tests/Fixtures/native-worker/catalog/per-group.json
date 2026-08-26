@@ -1,0 +1,23 @@
+{
+    "version": 1,
+    "generated_at": "2026-06-15T12:00:00.000000Z",
+    "mode": "shadow",
+    "job": {
+        "name": "per-group",
+        "description": "Run the per-group all-in-one processing worker",
+        "enabled": true,
+        "disabled_reason": null,
+        "sleep": 300
+    },
+    "lock": {
+        "name": "nntmux:distributed-worker:per-group",
+        "redis_key": "nntmux_database_nntmux-cache-nntmux:distributed-worker:per-group",
+        "seconds": 42
+    },
+    "commands": [
+        {
+            "command": "multiprocessing:update-per-group",
+            "arguments": []
+        }
+    ]
+}

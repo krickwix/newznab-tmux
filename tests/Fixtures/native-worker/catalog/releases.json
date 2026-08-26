@@ -1,0 +1,23 @@
+{
+    "version": 1,
+    "generated_at": "2026-06-15T12:00:00.000000Z",
+    "mode": "shadow",
+    "job": {
+        "name": "releases",
+        "description": "Create and categorize releases",
+        "enabled": true,
+        "disabled_reason": null,
+        "sleep": 60
+    },
+    "lock": {
+        "name": "nntmux:distributed-worker:releases",
+        "redis_key": "nntmux_database_nntmux-cache-nntmux:distributed-worker:releases",
+        "seconds": 42
+    },
+    "commands": [
+        {
+            "command": "multiprocessing:releases",
+            "arguments": []
+        }
+    ]
+}
