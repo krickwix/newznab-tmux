@@ -28,6 +28,7 @@ use App\Http\Controllers\Admin\AdminInvitationController;
 use App\Http\Controllers\Admin\AdminLogViewerController;
 use App\Http\Controllers\Admin\AdminMovieController;
 use App\Http\Controllers\Admin\AdminMusicController;
+use App\Http\Controllers\Admin\AdminOrchestratorController;
 use App\Http\Controllers\Admin\AdminPageController;
 use App\Http\Controllers\Admin\AdminPaymentController;
 use App\Http\Controllers\Admin\AdminPredbController;
@@ -265,6 +266,7 @@ Route::middleware(['role:Admin', '2fa'])->prefix('admin')->group(function () {
     Route::post('status/service/{service}/update', [AdminStatusController::class, 'updateService'])->name('admin.status.update-service')->whereNumber('service');
     Route::get('site-stats', [AdminSiteController::class, 'stats'])->name('admin.site-stats');
     Route::get('logs', [AdminLogViewerController::class, 'index'])->name('admin.logs.index');
+    Route::get('orchestrator', [AdminOrchestratorController::class, 'index'])->name('admin.orchestrator.index');
     Route::get('role-list', [AdminRoleController::class, 'index'])->name('admin.role-list');
     Route::match(['GET', 'POST'], 'role-add', [AdminRoleController::class, 'create'])->name('admin.role-add');
     Route::match(['GET', 'POST'], 'role-edit', [AdminRoleController::class, 'edit'])->name('admin.role-edit');

@@ -320,6 +320,9 @@
             <a href="{{ route('admin.logs.index') }}" class="block py-2 px-3 text-gray-400 dark:text-gray-500 hover:text-white dark:hover:text-white hover:bg-white/10 dark:hover:bg-white/5 rounded transition">
                 <i class="fas fa-file-lines mr-2 text-amber-400"></i>Logs
             </a>
+            <a href="{{ route('admin.orchestrator.index') }}" class="block py-2 px-3 text-gray-400 dark:text-gray-500 hover:text-white dark:hover:text-white hover:bg-white/10 dark:hover:bg-white/5 rounded transition">
+                <i class="fas fa-sliders-h mr-2 text-indigo-400"></i>Worker Orchestrator
+            </a>
             <a href="{{ url(config('horizon.path', 'horizon')) }}" class="block py-2 px-3 text-gray-400 dark:text-gray-500 hover:text-white dark:hover:text-white hover:bg-white/10 dark:hover:bg-white/5 rounded transition">
                 <i class="fas fa-stream mr-2 text-cyan-400"></i>Horizon
             </a>
