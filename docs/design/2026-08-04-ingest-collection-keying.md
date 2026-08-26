@@ -1,6 +1,8 @@
 # Ingest collection keying: stop one posting becoming N collections
 
-Status: **design, not implemented**. Written for review before any code ships.
+Status: **implemented behind a per-group flag, not yet enabled anywhere.**
+Written for review before any code ships; the design below is unchanged, and
+the implementation notes are at the bottom under "As built".
 
 ## Why this exists
 
@@ -235,3 +237,115 @@ sweep simply has more to do for a week.
 I would not implement this in one pass. Classification first, behind the flag,
 asserting today's behaviour is unchanged everywhere — then the allocator, with
 the contention test written before it.
+
+---
+
+## As built
+
+Written after the fact. The design above is what shipped; this records the two
+places the implementation had to differ, and where the code is.
+
+### Where it lives
+
+| Piece | File |
+|---|---|
+| Classification (already shipped, v229) | `app/Services/Binaries/HeaderStorageService::extractFileNumberAndTotal()` |
+| The switch | `app/Services/Binaries/IngestCollectionKeying.php` |
+| Demotion + wiring | `app/Services/Binaries/HeaderStorageService::processHeaderChunk()` |
+| Dense ordinals + contention check | `app/Services/Binaries/CollectionFileNumberAllocator.php` |
+| The collision | `app/Services/Binaries/CollectionFileNumberCollision.php` |
+| Legacy-key adoption | `app/Services/Binaries/CollectionHandler::adoptLegacyCollections()` |
+| Config | `config/nntmux.php` |
+
+### Difference 1 — the flag is not `ingest_partcount_key_groups`
+
+The design names that key, but between the design and this implementation the
+name was taken by the *reporting* flag from the v229/v230 measurement window,
+and that flag is deployed fleet-wide as `all`
+(`mediahome/manifests/media/nntmux/distributed-workers.yaml`). Reusing it would
+have turned the next image build into a fleet-wide behaviour change nobody asked
+for.
+
+So the write flag is a new key, `nntmux.ingest_collection_keying_groups`
+(`NNTMUX_INGEST_COLLECTION_KEYING_GROUPS`), empty by default, and it
+deliberately has **no `all` sentinel** — the Rollout section above is group by
+group.
+The reporting flag keeps its name, its meaning and its `all`.
+
+### Difference 2 — legacy adoption defaults off
+
+Section 4 calls adoption optional. It defaults **off**
+(`NNTMUX_INGEST_COLLECTION_KEYING_LEGACY_ADOPTION`) because of a hazard the
+design does not discuss: an adopted collection keeps its old, wrong
+`totalfiles`. Feed it the rest of a large posting and
+`COUNT(DISTINCT filenumber) >= CEIL(totalfiles * completion / 100)` is satisfied
+by a handful of files, so it promotes and releases short. Without adoption the
+in-flight fragment stalls exactly where it stalls today and the hourly sweep
+merges it, which is the safer half of the trade.
+
+The hazard is not created by adoption — two files of one posting that happen to
+declare the same part count already share a too-small `totalfiles` today — but
+adoption feeds it more.
+
+Note also what adoption can reach. Every demoted header of one posting collapses
+onto one new key, so the pending row carries the legacy keys of all of them and
+the lowest-id match wins, taking the whole posting with it. That only works
+because one of those legacy keys is already in the database: adoption catches a
+posting whose ingest had *started*, which is the in-flight case it exists for.
+
+### Retry: the machinery was already there
+
+The design's contract — catch the collision, re-read `MAX`, retry the batch, and
+on repeated failure fail to part repair — is served by the chunk retry loop in
+`HeaderStorageService::storeChunk()`. `TransientHeaderStorageFailure::is()`
+recognises `CollectionFileNumberCollision`, the transaction rolls back, the next
+attempt re-reads `MAX(filenumber)` from scratch, and after
+`MAX_CHUNK_ATTEMPTS` (3) the chunk's article numbers go to part repair. No new
+retry loop was written.
+
+The insert itself cannot raise for us: `BinaryHandler`'s bulk statement carries
+`ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`, so a stolen ordinal resolves
+*silently* to the other writer's binary. Detection is therefore
+`CollectionFileNumberAllocator::assertOrdinalsHeld()`, which runs after binary
+resolution and before any part is attributed, and asks only "is this binary the
+file we asked for?" — not "is the filenumber the one we picked", because a
+pre-existing file legitimately keeps a legacy ordinal.
+
+Locking was considered and rejected: header storage runs at READ COMMITTED
+specifically to avoid gap locks (`HeaderStorageTransaction::begin()`), so a
+locking read could not protect the gap above `MAX` anyway.
+
+### Tests
+
+- `tests/Unit/Binaries/CollectionFileNumberAllocatorTest.php` — density,
+  determinism, high-water continuation, legacy-zero handling, collision
+  detection.
+- `tests/Feature/IngestCollectionKeyingTest.php` — the integration case from the
+  test plan, stage 0 promotion, the completion-100 pin, the characterisation
+  (flag off still fragments), the differential regression for real counters, and
+  the `SplitCollectionReconciler` exclusion.
+- `tests/Feature/IngestCollectionKeyingContentionTest.php` — the contention path
+  actually exercised: one collision retried into a clean 1..N, persistent
+  contention failed to part repair with nothing half-written, and a
+  non-transient allocator bug still propagating.
+
+### Still to do before this is live
+
+1. Declare `NNTMUX_INGEST_COLLECTION_KEYING_GROUPS` on the three lanes that
+   reach `HeaderStorageService` (`binaries`, `current-forward`, `backfill`) in
+   `mediahome/manifests/media/nntmux/distributed-workers.yaml`, set to
+   `alt.binaries.cinemageddon`.
+2. The v225 lesson: the key must exist in the **image's** `config/nntmux.php`,
+   not just on the branch. An overlay that copies `HeaderStorageService.php`
+   without `config/nntmux.php` gives a pod where `config()` returns `[]` and the
+   manifest variable is silently inert.
+3. Then step 3 of the rollout above: watch one-binary collections created per
+   hour in that group fall toward zero, `filecheck=0` stop growing, and releases
+   from the group appear. The per-batch count is logged as
+   `ingest re-keyed collections off a leaked counter`.
+
+   That wording is load-bearing: the measurement CronJob in
+   `mediahome/manifests/media/nntmux/distributed-workers.yaml` sums every log
+   line containing the substring `part count` followed by a `{group, headers}`
+   object, so a message reusing that phrase would silently double-count the
+   reporting flag's window.

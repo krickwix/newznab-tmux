@@ -283,6 +283,34 @@ return [
         'trim',
         explode(',', (string) env('NNTMUX_INGEST_PARTCOUNT_KEY_GROUPS', '')),
     )))),
+    // Groups where ingest ACTS on that classification: a part counter that
+    // leaked in through extractFileNumberAndTotal()'s raw-subject fallback is
+    // kept out of the collection key and out of collections.totalfiles, and the
+    // binary ordinal is allocated densely per collection instead.
+    // See docs/design/2026-08-04-ingest-collection-keying.md.
+    //
+    // This is a separate key from ingest_partcount_key_groups on purpose. That
+    // one gates a log line and is already deployed fleet-wide as `all`; this one
+    // gates WRITES. Empty (= off) by default, and there is deliberately NO `all`
+    // sentinel -- the rollout is group by group, starting with
+    // alt.binaries.cinemageddon.
+    'ingest_collection_keying_groups' => array_values(array_unique(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('NNTMUX_INGEST_COLLECTION_KEYING_GROUPS', '')),
+    )))),
+
+    // Temporary companion to the above (design section 4): on a key miss, look
+    // up the LEGACY `name . partCount` key and adopt that collection, so a
+    // posting that was mid-flight when the flag flipped keeps landing where its
+    // siblings already are.
+    //
+    // OFF by default. An adopted collection keeps its old, wrong totalfiles, so
+    // feeding it the rest of a large posting can take it past the stage 1 gate
+    // and release it short. Without adoption the in-flight fragment stalls where
+    // it already stalls today and the hourly sweep merges it. See
+    // IngestCollectionKeying::legacyAdoptionEnabled().
+    'ingest_collection_keying_legacy_adoption' => (bool) env('NNTMUX_INGEST_COLLECTION_KEYING_LEGACY_ADOPTION', false),
+
     'obfuscated_hash_set_groups' => array_values(array_unique(array_filter(array_map(
         'trim',
         explode(',', (string) env('NNTMUX_OBFUSCATED_HASH_SET_GROUPS', '')),

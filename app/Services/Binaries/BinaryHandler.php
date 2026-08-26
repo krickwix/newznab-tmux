@@ -34,6 +34,20 @@ final class BinaryHandler
     public function __construct() {}
 
     /**
+     * The binary identity a header resolves to inside its collection.
+     *
+     * Extracted so CollectionFileNumberAllocator can ask "does this file already
+     * exist in this collection, and at which ordinal?" with exactly the identity
+     * the insert will use. If the two ever disagree, the allocator hands out an
+     * ordinal for a file the insert then matches to a different row -- which is
+     * the failure the allocator exists to prevent.
+     */
+    public static function binaryHash(string $name, string $fromName, int $groupId): string
+    {
+        return md5($name.$fromName.$groupId);
+    }
+
+    /**
      * Reset state for a new batch.
      */
     public function reset(): void
@@ -85,7 +99,11 @@ final class BinaryHandler
             return $binaryId;
         }
 
-        $hash = md5((string) ($header['matches'][1] ?? '').(string) ($header['From'] ?? '').(string) $groupId);
+        $hash = self::binaryHash(
+            (string) ($header['matches'][1] ?? ''),
+            (string) ($header['From'] ?? ''),
+            $groupId
+        );
         $driver = DB::getDriverName();
 
         try {
@@ -158,7 +176,11 @@ final class BinaryHandler
                 continue;
             }
 
-            $hash = md5((string) ($header['matches'][1] ?? '').(string) ($header['From'] ?? '').(string) $groupId);
+            $hash = self::binaryHash(
+                (string) ($header['matches'][1] ?? ''),
+                (string) ($header['From'] ?? ''),
+                $groupId
+            );
             $pending[$articleKey] = [
                 'hash' => $hash,
                 'name' => Utf8::clean($header['matches'][1]),

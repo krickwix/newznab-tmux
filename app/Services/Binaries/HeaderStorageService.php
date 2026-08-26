@@ -27,6 +27,10 @@ final class HeaderStorageService
 
     private CurrentForwardWindowLineage $lineage;
 
+    private IngestCollectionKeying $keying;
+
+    private CollectionFileNumberAllocator $fileNumbers;
+
     /** @var array<int> Article numbers that failed to insert */
     private array $failedInserts = [];
 
@@ -37,12 +41,28 @@ final class HeaderStorageService
      */
     private int $partCounterKeyedHeaders = 0;
 
+    /**
+     * Headers this batch that were actually re-keyed -- i.e. the group is on
+     * nntmux.ingest_collection_keying_groups, so the leaked count was kept out
+     * of the key and the ordinal was allocated. This is the number step 3 of the
+     * rollout watches.
+     *
+     * It is NOT a subset of partCounterKeyedHeaders. That counter deliberately
+     * only counts a count that LEAKED (totalFiles > 0); this one also covers the
+     * subject that declares nothing at all, which classifies as "not a real
+     * counter" for the same reason and today lands every such file of a posting
+     * on one binary at filenumber 0. Those get a dense ordinal too.
+     */
+    private int $rekeyedHeaders = 0;
+
     public function __construct(
         ?CollectionHandler $collectionHandler = null,
         ?BinaryHandler $binaryHandler = null,
         ?PartHandler $partHandler = null,
         ?BinariesConfig $config = null,
         ?CurrentForwardWindowLineage $lineage = null,
+        ?IngestCollectionKeying $keying = null,
+        ?CollectionFileNumberAllocator $fileNumbers = null,
     ) {
         $this->config = $config ?? BinariesConfig::fromSettings();
         $this->collectionHandler = $collectionHandler ?? new CollectionHandler;
@@ -52,6 +72,8 @@ final class HeaderStorageService
             true
         );
         $this->lineage = $lineage ?? new CurrentForwardWindowLineage;
+        $this->keying = $keying ?? new IngestCollectionKeying;
+        $this->fileNumbers = $fileNumbers ?? new CollectionFileNumberAllocator;
     }
 
     /**
@@ -74,6 +96,7 @@ final class HeaderStorageService
 
         $this->failedInserts = [];
         $this->partCounterKeyedHeaders = 0;
+        $this->rekeyedHeaders = 0;
 
         // Use the dedicated header chunk size, NOT partsChunkSize. The latter
         // controls single-row part flushes and is normally much larger; using
@@ -93,8 +116,35 @@ final class HeaderStorageService
         }
 
         $this->reportPartCounterKeying((string) ($groupMySQL['name'] ?? ''));
+        $this->reportRekeying((string) ($groupMySQL['name'] ?? ''));
 
         return array_values(array_unique($this->failedInserts));
+    }
+
+    /**
+     * Say how much of this batch the keying change actually touched.
+     *
+     * Unconditional for an enabled group -- no second allowlist. Enabling a
+     * group here is already an explicit, per-group, write-affecting decision,
+     * and step 3 of the rollout is "watch for 24h", which needs a number.
+     *
+     * The wording deliberately avoids the substring "part count". The
+     * measurement CronJob in
+     * mediahome/manifests/media/nntmux/distributed-workers.yaml sums every log
+     * line containing `part count` followed by a JSON object with `group` and
+     * `headers` -- which is exactly the shape below. Reusing the phrase would
+     * silently double-count the reporting flag's window.
+     */
+    private function reportRekeying(string $groupName): void
+    {
+        if ($this->rekeyedHeaders === 0 || $groupName === '') {
+            return;
+        }
+
+        Log::info('ingest re-keyed collections off a leaked counter', [
+            'group' => $groupName,
+            'headers' => $this->rekeyedHeaders,
+        ]);
     }
 
     /**
@@ -285,19 +335,42 @@ final class HeaderStorageService
         HeaderStorageTransaction $transaction,
         bool $addToPartRepair,
     ): array {
+        $groupId = (int) $groupMySQL['id'];
+        $groupName = (string) ($groupMySQL['name'] ?? '');
+        $rekey = $this->keying->appliesTo($groupName);
+
         $totalFilesByIndex = [];
         $fileNumbersByIndex = [];
+        $legacyTotalFilesByIndex = [];
+        $allocationRequests = [];
 
         foreach ($headers as $index => $header) {
             [$fileNumber, $totalFiles, $counterIsReal] = $this->extractFileNumberAndTotal($header);
-            $fileNumbersByIndex[$index] = $fileNumber;
-            $totalFilesByIndex[$index] = $totalFiles;
 
-            // Observation only -- $totalFiles is still passed through unchanged
-            // below, so the write path is byte-identical to before.
             if (! $counterIsReal && $totalFiles > 0) {
                 $this->partCounterKeyedHeaders++;
             }
+
+            if ($rekey && ! $counterIsReal) {
+                // The count is a part counter wearing a file counter's clothes,
+                // so it is kept out of BOTH the collection key and
+                // collections.totalfiles. `totalfiles = 0` is not a special
+                // case: it is the existing path for counter-less postings, and
+                // runCollectionFileCheckStage0() promotes such collections once
+                // the filenumbers are dense.
+                if ($totalFiles > 0) {
+                    $legacyTotalFilesByIndex[$index] = $totalFiles;
+                }
+                $totalFiles = 0;
+
+                // The ordinal is allocated below, once the collection is known.
+                $fileNumber = 0;
+                $allocationRequests[$index] = true;
+                $this->rekeyedHeaders++;
+            }
+
+            $fileNumbersByIndex[$index] = $fileNumber;
+            $totalFilesByIndex[$index] = $totalFiles;
         }
 
         $collectionIds = $this->collectionHandler->getOrCreateCollections(
@@ -305,8 +378,35 @@ final class HeaderStorageService
             $groupMySQL['id'],
             $groupMySQL['name'],
             $totalFilesByIndex,
-            $transaction->getBatchNoise()
+            $transaction->getBatchNoise(),
+            $this->keying->legacyAdoptionEnabled() ? $legacyTotalFilesByIndex : []
         );
+
+        $allocations = [];
+        if ($allocationRequests !== []) {
+            foreach (array_keys($allocationRequests) as $index) {
+                if (! isset($collectionIds[$index])) {
+                    // No collection means the header is about to be failed
+                    // anyway; there is nothing to number it inside of.
+                    continue;
+                }
+
+                $subject = (string) ($headers[$index]['matches'][1] ?? '');
+                $allocations[$index] = [
+                    'collection_id' => (int) $collectionIds[$index],
+                    'hash' => BinaryHandler::binaryHash(
+                        $subject,
+                        (string) ($headers[$index]['From'] ?? ''),
+                        $groupId
+                    ),
+                    'sort' => $subject,
+                ];
+            }
+
+            foreach ($this->fileNumbers->allocate($allocations) as $index => $allocatedFileNumber) {
+                $fileNumbersByIndex[$index] = $allocatedFileNumber;
+            }
+        }
 
         $binaryRecords = [];
         foreach ($headers as $index => $header) {
@@ -324,6 +424,16 @@ final class HeaderStorageService
         }
 
         $binaryIds = $this->binaryHandler->getOrCreateBinaries($binaryRecords, $groupMySQL['id']);
+
+        // Before a single part is attributed, prove every allocated ordinal is
+        // still ours. A concurrent lane allocating from the same stale
+        // MAX(filenumber) resolves silently to ITS binary -- the bulk insert
+        // carries ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id), so nothing
+        // raises -- and this file's parts would then hang off that file's name.
+        // Throwing here rolls the chunk back and re-reads MAX on the retry.
+        if ($allocations !== []) {
+            $this->fileNumbers->assertOrdinalsHeld($allocations, $binaryIds);
+        }
 
         // Acquire/update binary parents before parts take shared foreign-key
         // locks. This preserves collection -> binary -> parts lock order and
@@ -378,13 +488,19 @@ final class HeaderStorageService
      * never reaches, so the rows stall until retention purges articles that
      * were fully downloaded.
      *
-     * NOTHING ACTS ON THIS YET, deliberately. Keying on `name . 0` requires
-     * dense per-collection ordinals, because with `settings.completion` NULL
-     * (=100) stage 0 reduces to COUNT(DISTINCT filenumber) == MAX(filenumber).
-     * Without that allocator, two files of one posting would land in one
-     * collection both claiming filenumber 1 and collide on
-     * UNIQUE (collections_id, filenumber). The allocator is the next change;
-     * this one only has to be provably inert.
+     * WHAT ACTS ON IT. processHeaderChunk() demotes a false count to 0 -- out of
+     * the key, out of collections.totalfiles -- and allocates a dense ordinal
+     * via CollectionFileNumberAllocator, but ONLY for groups on
+     * nntmux.ingest_collection_keying_groups. The allocator is not optional:
+     * with `settings.completion` NULL (=100) stage 0 reduces to
+     * COUNT(DISTINCT filenumber) == MAX(filenumber), so without it two files of
+     * one posting would land in one collection both claiming filenumber 1 and
+     * collide on UNIQUE (collections_id, filenumber).
+     *
+     * For every group NOT on that list the two values below still reach the
+     * write path exactly as they did before this classification existed. That
+     * is what makes the flag a switch rather than a rewrite, and
+     * HeaderFileCounterClassificationTest pins it.
      *
      * @param  array<string, mixed>  $header
      * @return array{0: int, 1: int, 2: bool}
