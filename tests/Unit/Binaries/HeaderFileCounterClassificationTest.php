@@ -13,18 +13,25 @@ use Tests\TestCase;
 /**
  * Phase 1 of docs/design/2026-08-04-ingest-collection-keying.md.
  *
- * extractFileNumberAndTotal() now says whether the count it returns is a REAL
- * file counter or a PART counter that leaked in through the raw-subject
- * fallback. Nothing acts on it yet, so this file has two jobs: pin the
- * classification, and prove the values that DO reach the write path are
- * unchanged.
+ * extractFileNumberAndTotal() says whether the count it returns is a REAL file
+ * counter or a PART counter that leaked in through the raw-subject fallback.
+ * This file has two jobs: pin the classification, and prove the values that
+ * reach the write path are unchanged.
  *
- * The second job is the important one. Keying on `name . 0` cannot ship until
- * per-collection ordinals are allocated -- with `settings.completion` NULL
- * (=100), stage 0 reduces to COUNT(DISTINCT filenumber) == MAX(filenumber), so
- * two files of one posting would otherwise land in one collection both claiming
- * filenumber 1 and collide on UNIQUE (collections_id, filenumber). Until then a
- * behaviour change here is a bug, not progress.
+ * The second job is still the important one, and it did not lapse when the
+ * keying change shipped. Phase 2 acts on the classification only for groups on
+ * `nntmux.ingest_collection_keying_groups` -- empty by default -- so what this
+ * method returns must remain exactly what it always returned. A behaviour change
+ * HERE is a behaviour change for every group at once, which is precisely what
+ * the flag exists to prevent.
+ *
+ * What phase 2 does with the third value, and the ordinal allocator it needs
+ * (with `settings.completion` NULL (=100), stage 0 reduces to
+ * COUNT(DISTINCT filenumber) == MAX(filenumber), so without dense ordinals two
+ * files of one posting would land in one collection both claiming filenumber 1
+ * and collide on UNIQUE (collections_id, filenumber)) are covered by
+ * Tests\Feature\IngestCollectionKeyingTest and
+ * Tests\Unit\Binaries\CollectionFileNumberAllocatorTest.
  *
  * Subjects are transcribed from live headers, not invented.
  */
@@ -123,10 +130,12 @@ final class HeaderFileCounterClassificationTest extends TestCase
     /**
      * The inertness proof. Every fixture above must still yield exactly the
      * file number and count it did before the third value existed, because
-     * those two are what reach collectionIdentity() and binaries.filenumber.
+     * those two are what reach collectionIdentity() and binaries.filenumber for
+     * every group not on the keying allowlist -- which is every group, by
+     * default.
      *
-     * If this fails, the classification has started changing ingest and the
-     * ordinal allocator is not in place to absorb it.
+     * If this fails, the classification itself has started changing ingest,
+     * outside the flag that is supposed to gate it.
      */
     public function test_the_values_that_reach_the_write_path_are_unchanged(): void
     {

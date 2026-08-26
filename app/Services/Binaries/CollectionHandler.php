@@ -192,6 +192,13 @@ final class CollectionHandler
      *
      * @param  array<int, array<string, mixed>>  $headers
      * @param  array<int, int>  $totalFilesByIndex
+     * @param  array<int, int>  $legacyTotalFilesByIndex  Pre-demotion file counts for
+     *                                                    headers whose count was
+     *                                                    classified as a leaked part
+     *                                                    counter. Empty unless
+     *                                                    IngestCollectionKeying enables
+     *                                                    legacy adoption for the group;
+     *                                                    see adoptLegacyCollections().
      * @return array<int, int> Collection ids keyed by header index
      */
     public function getOrCreateCollections(
@@ -199,13 +206,15 @@ final class CollectionHandler
         int $groupId,
         string $groupName,
         array $totalFilesByIndex,
-        string $batchNoise
+        string $batchNoise,
+        array $legacyTotalFilesByIndex = []
     ): array {
         $resolved = [];
         $pending = [];
         $indexByCollectionKey = [];
         $xrefsToPrefetch = [];
         $cleanedBySubject = [];
+        $legacyHashesByCollectionKey = [];
 
         foreach ($headers as $index => $header) {
             $totalFiles = (int) ($totalFilesByIndex[$index] ?? 0);
@@ -237,6 +246,27 @@ final class CollectionHandler
             }
 
             $indexByCollectionKey[$collectionKey][] = $index;
+
+            // Collected per HEADER, not per pending row: the whole defect is
+            // that files of one posting disagree about the count, so one new
+            // key can face several legacy ones.
+            if (isset($legacyTotalFilesByIndex[$index])) {
+                $legacyTotalFiles = (int) $legacyTotalFilesByIndex[$index];
+                if ($legacyTotalFiles > 0) {
+                    $legacyKey = $this->collectionIdentity(
+                        $collMatch,
+                        $subject,
+                        $groupName,
+                        $groupId,
+                        $legacyTotalFiles,
+                        $unixtime
+                    );
+                    if ($legacyKey !== $collectionKey) {
+                        $legacyHashesByCollectionKey[$collectionKey][sha1($legacyKey)] = true;
+                    }
+                }
+            }
+
             if (isset($pending[$collectionKey])) {
                 continue;
             }
@@ -267,6 +297,7 @@ final class CollectionHandler
         }
 
         $this->prefetchExistingCollections($xrefsToPrefetch);
+        $this->adoptLegacyCollections($pending, $legacyHashesByCollectionKey);
 
         foreach ($pending as $collectionKey => &$row) {
             $row['xref_append'] = implode(' ', $this->xrefService->diffNewTokens(
@@ -306,6 +337,100 @@ final class CollectionHandler
         }
 
         return $resolved;
+    }
+
+    /**
+     * Section 4 of docs/design/2026-08-04-ingest-collection-keying.md.
+     *
+     * A posting that was mid-flight when the flag flipped already has
+     * collections under `name . partCount`. Its next articles compute
+     * `name . 0`, miss, and would mint yet another collection. So on a key miss
+     * we look up the LEGACY key and land in the collection the siblings are
+     * already in.
+     *
+     * Adoption is expressed as swapping the pending row's collectionhash for the
+     * legacy one, rather than as a separate resolution path. Everything
+     * downstream -- the existing-hash test, the xref append, the "insert only
+     * what is new" filter, the id resolution -- then works unchanged, because
+     * all of it is already keyed on $row['collectionhash'] and
+     * $this->existingIdsByHash.
+     *
+     * This is meant to be temporary: the design says it can be dropped once the
+     * backlog has aged out (~7 days), which is why it sits behind its own
+     * config toggle rather than being welded to the keying flag.
+     *
+     * @param  array<string, array<string, mixed>>  $pending  Mutated in place.
+     * @param  array<string, array<string, true>>  $legacyHashesByCollectionKey
+     */
+    private function adoptLegacyCollections(array &$pending, array $legacyHashesByCollectionKey): void
+    {
+        if ($legacyHashesByCollectionKey === []) {
+            return;
+        }
+
+        // Only a genuine MISS may adopt. A new-shape collection that already
+        // exists is where the posting belongs.
+        $candidateKeys = [];
+        $candidateHashes = [];
+        foreach ($legacyHashesByCollectionKey as $collectionKey => $hashes) {
+            if (! isset($pending[$collectionKey])) {
+                continue;
+            }
+            if (isset($this->existingIdsByHash[(string) $pending[$collectionKey]['collectionhash']])) {
+                continue;
+            }
+
+            $candidateKeys[$collectionKey] = array_map('strval', array_keys($hashes));
+            foreach ($candidateKeys[$collectionKey] as $hash) {
+                $candidateHashes[$hash] = true;
+            }
+        }
+
+        if ($candidateHashes === []) {
+            return;
+        }
+
+        $rows = [];
+        foreach (array_chunk(array_keys($candidateHashes), self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
+            foreach (Collection::query()
+                ->whereIn('collectionhash', array_map('strval', $chunk))
+                ->select(['id', 'collectionhash', 'xref'])
+                ->get() as $row) {
+                $rows[(string) $row->collectionhash] = [
+                    'id' => (int) $row->id,
+                    'xref' => (string) ($row->xref ?? ''),
+                ];
+            }
+        }
+
+        if ($rows === []) {
+            return;
+        }
+
+        $claimed = [];
+        foreach ($candidateKeys as $collectionKey => $hashes) {
+            // Lowest collection id among the matches, so a replay of the same
+            // chunk adopts the same row.
+            $adopted = null;
+            foreach ($hashes as $hash) {
+                if (! isset($rows[$hash]) || isset($claimed[$hash])) {
+                    continue;
+                }
+                if ($adopted === null || $rows[$hash]['id'] < $rows[$adopted]['id']) {
+                    $adopted = $hash;
+                }
+            }
+
+            if ($adopted === null) {
+                continue;
+            }
+
+            $claimed[$adopted] = true;
+            $pending[$collectionKey]['collectionhash'] = $adopted;
+            $this->existingIdsByHash[$adopted] = $rows[$adopted]['id'];
+            $this->existingXrefs[$collectionKey] = $rows[$adopted]['xref'];
+            $this->batchCollectionHashes[$adopted] = true;
+        }
     }
 
     /**
