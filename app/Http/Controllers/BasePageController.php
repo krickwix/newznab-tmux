@@ -62,7 +62,14 @@ class BasePageController extends Controller
 
         // Load settings as collection with caching (5 minutes)
         $this->settings = $this->rememberWithCacheFallback('site_settings', 300, function () {
-            return Settings::query()->pluck('value', 'name');
+            // toBase(): the model has a `value` accessor, so an Eloquent pluck() maps every row
+            // through a model instance and lands in Settings::__get(), which queries the table
+            // again per row -- 204 extra queries whenever this cache is cold. The explicit
+            // convertValue() keeps the converted values the accessor used to return.
+            return Settings::query()
+                ->toBase()
+                ->pluck('value', 'name')
+                ->map(fn ($value) => Settings::convertValue($value));
         });
 
         // Initialize view data FIRST with serverroot

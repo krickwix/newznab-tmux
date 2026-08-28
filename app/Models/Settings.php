@@ -126,8 +126,14 @@ class Settings extends Model
      * over 200 settingValue() call sites, so a single page ran 204 of them: cheap individually,
      * but each one pays a database round trip, which is what made the site slow.
      *
-     * pluck() mirrors toTree() and returns raw column values, so callers still get exactly what
-     * `->value('value')` and the `value` accessor gave them once convertValue() is applied.
+     * toBase() is load bearing. Eloquent's pluck() hydrates a model per row and reads its
+     * attributes, which lands back in the __get() override below -- so an Eloquent-level bulk
+     * read of this table costs one query per row, the very thing this method exists to avoid.
+     * The base query builder returns raw column values and never calls __get().
+     *
+     * Raw values are also what callers already expected: `->value('value')` and the `value`
+     * accessor both hand back the column, so they get exactly the same thing once
+     * convertValue() is applied.
      *
      * Returns null when the map is not usable, which means the caller must fall back to the
      * single key query it used before.
@@ -155,7 +161,7 @@ class Settings extends Model
         self::$loadingSettings = true;
 
         try {
-            self::$settingsCollection = self::query()->pluck('value', 'name');
+            self::$settingsCollection = self::query()->toBase()->pluck('value', 'name');
             self::$settingsLoadedAt = $now;
         } finally {
             self::$loadingSettings = false;
@@ -217,7 +223,15 @@ class Settings extends Model
      */
     public static function toTree(bool $excludeUnsectioned = true): array
     {
-        $results = self::query()->pluck('value', 'name')->toArray();
+        // toBase() for the same reason as settingsMap(): the model has a `value` accessor, so an
+        // Eloquent pluck() maps every row through a model instance, which lands in the __get()
+        // override and turns one bulk read into one query per row. The explicit convertValue()
+        // keeps the converted values the accessor used to return.
+        $results = self::query()
+            ->toBase()
+            ->pluck('value', 'name')
+            ->map(fn ($value) => self::convertValue($value))
+            ->toArray();
 
         if (empty($results)) {
             throw new \RuntimeException(
