@@ -525,13 +525,22 @@ class NntmuxPrometheusMetrics
         }
 
         if (Schema::hasTable('predb') && Schema::hasTable('predb_crcs')) {
-            $withoutCrc = (int) DB::table('predb')
-                ->where('source', 'srrdb')
-                ->whereNotExists(function ($query): void {
-                    $query->selectRaw('1')
-                        ->from('predb_crcs')
-                        ->whereColumn('predb_crcs.predb_id', 'predb.id');
-                })
+            // A LEFT JOIN ... IS NULL anti-join rather than the NOT EXISTS this used to be.
+            // Same answer -- both return 19,889 today -- but MariaDB planned the subquery form
+            // as MATERIALIZED, building a temp table from all 2.47M rows of
+            // predb_crcs_predb_id_index on every scrape:
+            //
+            //   1 PRIMARY      predb      ref   ix_predb_source            rows=161,606
+            //   2 MATERIALIZED predb_crcs index predb_crcs_predb_id_index  rows=2,470,209
+            //
+            // The join form uses that index directly with the optimiser's "Not exists" access,
+            // touching ~26 rows per predb row instead: 1,015ms down to 373ms measured on the
+            // live database. This is a query-shape problem, not a missing index -- the index it
+            // needs already existed.
+            $withoutCrc = (int) DB::table('predb as p')
+                ->leftJoin('predb_crcs as c', 'c.predb_id', '=', 'p.id')
+                ->where('p.source', 'srrdb')
+                ->whereNull('c.predb_id')
                 ->count();
 
             $lines[] = $this->metric('nntmux_external_metadata_total', $withoutCrc, [
