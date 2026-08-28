@@ -19,6 +19,31 @@ use Throwable;
 
 class NntmuxPrometheusMetrics
 {
+    /**
+     * Memoised Schema::hasTable / hasColumn answers, as key => [answer, checked at].
+     *
+     * render() asks information_schema 17 times per scrape -- 12 hasTable calls over 9 distinct
+     * tables, plus column checks -- and every one is a real query. Measured on the live
+     * database that is 355ms, 14% of the render's SQL time, spent re-establishing that tables
+     * which have existed for months still exist.
+     *
+     * The exporter is a long-running process serving a scrape every 30s on one instance, so
+     * this survives between scrapes and the first scrape after start pays for the rest.
+     *
+     * @var array<string, array{0: bool, 1: float}>
+     */
+    private array $schemaCache = [];
+
+    /**
+     * How long a memoised schema answer may be reused, in seconds.
+     *
+     * Not indefinite: a migration that adds or drops a table would otherwise never be noticed
+     * by a process that can run for weeks. Five minutes bounds that to ten scrapes, and a
+     * dropped table in the meantime raises inside render()'s existing try/catch, which reports
+     * nntmux_metric_scrape_success 0 rather than serving wrong numbers silently.
+     */
+    private const SCHEMA_CACHE_TTL = 300;
+
     private const TABLES = [
         'binaries',
         'collections',
@@ -52,6 +77,48 @@ class NntmuxPrometheusMetrics
         private readonly DistributedJobCatalog $jobCatalog = new DistributedJobCatalog,
         private readonly SplitCollectionTelemetry $splitCollectionTelemetry = new SplitCollectionTelemetry,
     ) {}
+
+    private function schemaCached(string $key, callable $probe): bool
+    {
+        $now = microtime(true);
+        $hit = $this->schemaCache[$key] ?? null;
+
+        if ($hit !== null && ($now - $hit[1]) < self::SCHEMA_CACHE_TTL) {
+            return $hit[0];
+        }
+
+        $answer = (bool) $probe();
+        $this->schemaCache[$key] = [$answer, $now];
+
+        return $answer;
+    }
+
+    private function tableExists(string $table): bool
+    {
+        return $this->schemaCached('t:'.$table, static fn (): bool => Schema::hasTable($table));
+    }
+
+    private function columnExists(string $table, string $column): bool
+    {
+        return $this->schemaCached(
+            'c:'.$table.'.'.$column,
+            static fn (): bool => Schema::hasColumn($table, $column),
+        );
+    }
+
+    /**
+     * @param  list<string>  $columns
+     */
+    private function columnsExist(string $table, array $columns): bool
+    {
+        $key = $columns;
+        sort($key);
+
+        return $this->schemaCached(
+            'cs:'.$table.'.'.implode(',', $key),
+            static fn (): bool => Schema::hasColumns($table, $columns),
+        );
+    }
 
     public function render(): string
     {
@@ -209,7 +276,7 @@ class NntmuxPrometheusMetrics
             '# HELP nntmux_body_recovery_rows BODY-preamble recovery rows by claim state and group.',
             '# TYPE nntmux_body_recovery_rows gauge',
         ];
-        if (! Schema::hasColumns('missed_parts', ['recovery_kind', 'claim_token', 'claim_expires_at'])) {
+        if (! $this->columnsExist('missed_parts', ['recovery_kind', 'claim_token', 'claim_expires_at'])) {
             $lines[] = $this->metric('nntmux_body_recovery_rows', 0, ['group' => 'unavailable', 'state' => 'unavailable']);
 
             return $lines;
@@ -298,7 +365,7 @@ class NntmuxPrometheusMetrics
             '# TYPE nntmux_collections_pending_multifile_total gauge',
         ];
 
-        if (! Schema::hasTable('collections') || ! Schema::hasTable('usenet_groups')) {
+        if (! $this->tableExists('collections') || ! $this->tableExists('usenet_groups')) {
             return $lines;
         }
 
@@ -353,7 +420,7 @@ class NntmuxPrometheusMetrics
             '# TYPE nntmux_collections_filecheck_lifecycle_count gauge',
         ];
 
-        if (! Schema::hasTable('collections')) {
+        if (! $this->tableExists('collections')) {
             return $lines;
         }
 
@@ -403,7 +470,7 @@ class NntmuxPrometheusMetrics
             '# TYPE nntmux_nzb_inserted_collections_count gauge',
         ];
 
-        if (! Schema::hasTable('releases') || ! Schema::hasColumn('releases', 'nzbstatus')) {
+        if (! $this->tableExists('releases') || ! $this->columnExists('releases', 'nzbstatus')) {
             return $lines;
         }
 
@@ -424,7 +491,7 @@ class NntmuxPrometheusMetrics
             ]);
         }
 
-        $insertedCollections = Schema::hasTable('collections')
+        $insertedCollections = $this->tableExists('collections')
             ? (int) DB::table('collections')->where('filecheck', CollectionFileCheckStatus::Inserted->value)->count()
             : 0;
         $lines[] = $this->metric('nntmux_nzb_inserted_collections_count', $insertedCollections);
@@ -439,7 +506,7 @@ class NntmuxPrometheusMetrics
     {
         $hour = (int) DB::table('releases')->where('adddate', '>=', now()->subHour())->count();
         $day = (int) DB::table('releases')->where('adddate', '>=', now()->subDay())->count();
-        $hasLegacyHashedColumn = Schema::hasColumn('releases', 'ishashed');
+        $hasLegacyHashedColumn = $this->columnExists('releases', 'ishashed');
         $stateCounts = DB::table('releases')->selectRaw(sprintf(
             '%s AS hashed, '
             .'SUM(CASE WHEN categories_id = %d THEN 1 ELSE 0 END) AS hashed_category, '
@@ -517,14 +584,14 @@ class NntmuxPrometheusMetrics
             '# TYPE nntmux_external_metadata_total gauge',
         ];
 
-        if (Schema::hasTable('predb_crcs')) {
+        if ($this->tableExists('predb_crcs')) {
             $lines[] = $this->metric('nntmux_external_metadata_total', (int) DB::table('predb_crcs')->count(), [
                 'source' => 'srrdb',
                 'state' => 'crc_rows',
             ]);
         }
 
-        if (Schema::hasTable('predb') && Schema::hasTable('predb_crcs')) {
+        if ($this->tableExists('predb') && $this->tableExists('predb_crcs')) {
             // A LEFT JOIN ... IS NULL anti-join rather than the NOT EXISTS this used to be.
             // Same answer -- both return 19,889 today -- but MariaDB planned the subquery form
             // as MATERIALIZED, building a temp table from all 2.47M rows of
@@ -826,8 +893,8 @@ class NntmuxPrometheusMetrics
     /** @return list<string> */
     private function currentForwardRefreshMetrics(): array
     {
-        $schemaReady = Schema::hasTable('current_forward_sources')
-            && Schema::hasTable('current_forward_windows');
+        $schemaReady = $this->tableExists('current_forward_sources')
+            && $this->tableExists('current_forward_windows');
         $lines = [
             '# HELP nntmux_orchestrator_current_forward_refresh_enabled Whether audited current-forward refresh discovery is enabled.',
             '# TYPE nntmux_orchestrator_current_forward_refresh_enabled gauge',
@@ -884,8 +951,8 @@ class NntmuxPrometheusMetrics
         }
 
         $quarantineTimestampColumn = match (true) {
-            Schema::hasColumn('current_forward_windows', 'settled_at') => 'settled_at',
-            Schema::hasColumn('current_forward_windows', 'updated_at') => 'updated_at',
+            $this->columnExists('current_forward_windows', 'settled_at') => 'settled_at',
+            $this->columnExists('current_forward_windows', 'updated_at') => 'updated_at',
             default => 'created_at',
         };
         $lastQuarantinedAt = DB::table('current_forward_windows')
@@ -938,12 +1005,12 @@ class NntmuxPrometheusMetrics
         $lines[] = '# TYPE nntmux_orchestrator_current_forward_refresh_verifications gauge';
         $lines[] = $this->metric(
             'nntmux_orchestrator_current_forward_refresh_verifications',
-            Schema::hasTable('current_forward_window_verifications')
+            $this->tableExists('current_forward_window_verifications')
                 ? DB::table('current_forward_window_verifications')->count()
                 : 0,
         );
 
-        $openRoot = Schema::hasColumn('current_forward_windows', 'chain_root_id')
+        $openRoot = $this->columnExists('current_forward_windows', 'chain_root_id')
             ? DB::table('current_forward_windows')->where('state', 'CONTINUATION_PENDING')->orderBy('id')->first()
             : null;
         $deadline = strtotime((string) ($openRoot->continuation_deadline_at ?? ''));
@@ -956,7 +1023,7 @@ class NntmuxPrometheusMetrics
         $lines[] = '# HELP nntmux_orchestrator_current_forward_continuation_objects Exact objects linked to the open continuation chain.';
         $lines[] = '# TYPE nntmux_orchestrator_current_forward_continuation_objects gauge';
         foreach (['COLLECTION' => 'collections', 'BINARY' => 'binaries', 'RELEASE' => 'releases'] as $type => $item) {
-            $count = $openRoot !== null && Schema::hasTable('current_forward_window_objects')
+            $count = $openRoot !== null && $this->tableExists('current_forward_window_objects')
                 ? DB::table('current_forward_window_objects')
                     ->where('chain_root_id', $openRoot->id)
                     ->where('object_type', $type)
