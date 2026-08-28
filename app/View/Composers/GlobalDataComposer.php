@@ -50,7 +50,11 @@ class GlobalDataComposer
     {
         // Cached site settings (shared across all requests)
         $siteArray = $this->rememberWithCacheFallback('site_settings_array', self::CACHE_TTL, function () {
+            // toBase(): an Eloquent pluck() hydrates a Settings model per row and reads its
+            // attributes through that model's __get() override, which queries the table again
+            // for every row. This one bulk read was issuing 204 extra queries on a cold cache.
             return Settings::query()
+                ->toBase()
                 ->pluck('value', 'name')
                 ->map(fn ($value) => Settings::convertValue($value))
                 ->all();

@@ -100,6 +100,77 @@ class Settings extends Model
     protected static ?\Illuminate\Support\Collection $settingsCollection = null; // @phpstan-ignore generics.notGeneric, property.phpDocType, missingType.generics
 
     /**
+     * When the memoised copy of the settings table was loaded, as a microtime float.
+     */
+    protected static ?float $settingsLoadedAt = null;
+
+    /**
+     * How long a memoised copy of the settings table may be reused, in seconds.
+     *
+     * A web request lives for milliseconds, so it always gets a single load. The TTL only
+     * bounds staleness in long-running CLI processes (Horizon workers, nntmux:worker), which
+     * would otherwise hold the first copy they ever read for the life of the process --
+     * forgetCachedSettings() only clears the memo inside the process that calls it.
+     */
+    protected const SETTINGS_MEMO_TTL = 30;
+
+    /**
+     * Guards against re-entering the bulk load while it is already running.
+     */
+    protected static bool $loadingSettings = false;
+
+    /**
+     * The whole settings table as a name => raw value map, loaded at most once per request.
+     *
+     * Every read of a setting used to issue its own `where name = ? limit 1` query. There are
+     * over 200 settingValue() call sites, so a single page ran 204 of them: cheap individually,
+     * but each one pays a database round trip, which is what made the site slow.
+     *
+     * toBase() is load bearing. Eloquent's pluck() hydrates a model per row and reads its
+     * attributes, which lands back in the __get() override below -- so an Eloquent-level bulk
+     * read of this table costs one query per row, the very thing this method exists to avoid.
+     * The base query builder returns raw column values and never calls __get().
+     *
+     * Raw values are also what callers already expected: `->value('value')` and the `value`
+     * accessor both hand back the column, so they get exactly the same thing once
+     * convertValue() is applied.
+     *
+     * Returns null when the map is not usable, which means the caller must fall back to the
+     * single key query it used before.
+     *
+     * @return \Illuminate\Support\Collection<string, string|null>|null
+     */
+    protected static function settingsMap(): ?\Illuminate\Support\Collection
+    {
+        $now = microtime(true);
+
+        if (self::$settingsCollection !== null
+            && self::$settingsLoadedAt !== null
+            && ($now - self::$settingsLoadedAt) < self::SETTINGS_MEMO_TTL) {
+            return self::$settingsCollection;
+        }
+
+        // Re-entered while the map is still loading, because a global scope, model event or
+        // observer read a setting during the pluck() below. Report "no map" so the caller falls
+        // back to a single key query -- exactly what it did before -- rather than recursing
+        // until the process dies.
+        if (self::$loadingSettings) {
+            return null;
+        }
+
+        self::$loadingSettings = true;
+
+        try {
+            self::$settingsCollection = self::query()->toBase()->pluck('value', 'name');
+            self::$settingsLoadedAt = $now;
+        } finally {
+            self::$loadingSettings = false;
+        }
+
+        return self::$settingsCollection;
+    }
+
+    /**
      * Get the value attribute and convert empty strings to null and numeric strings to numbers.
      *
      * @param  string  $value
@@ -116,12 +187,27 @@ class Settings extends Model
      */
     public function __get($key)
     {
-        $override = self::query()->where('name', $key)->first();
+        $settings = self::settingsMap();
 
+        if ($settings === null) {
+            $override = self::query()->where('name', $key)->first();
+
+            if ($override && ! $this->hasGetMutator($key)) {
+                return $override->value;
+            }
+
+            return parent::__get($key);
+        }
+
+        // has(), not a null check on the value: the old code tested whether a row existed, and
+        // a row whose value is NULL is still an override. Reading the value would drop those
+        // through to parent::__get() instead.
+        //
         // If there's an override and no mutator has been explicitly defined on
         // the model then use the override value
-        if ($override && ! $this->hasGetMutator($key)) {
-            return $override->value;
+        if ($settings->has($key) && ! $this->hasGetMutator($key)) {
+            // The old code returned $override->value, which ran the value accessor.
+            return self::convertValue($settings->get($key));
         }
 
         // If the attribute is not overridden the use the usual __get() magic method
@@ -137,7 +223,15 @@ class Settings extends Model
      */
     public static function toTree(bool $excludeUnsectioned = true): array
     {
-        $results = self::query()->pluck('value', 'name')->toArray();
+        // toBase() for the same reason as settingsMap(): the model has a `value` accessor, so an
+        // Eloquent pluck() maps every row through a model instance, which lands in the __get()
+        // override and turns one bulk read into one query per row. The explicit convertValue()
+        // keeps the converted values the accessor used to return.
+        $results = self::query()
+            ->toBase()
+            ->pluck('value', 'name')
+            ->map(fn ($value) => self::convertValue($value))
+            ->toArray();
 
         if (empty($results)) {
             throw new \RuntimeException(
@@ -151,7 +245,11 @@ class Settings extends Model
     public static function settingValue(mixed $setting): mixed
     {
         try {
-            $value = self::query()->where('name', $setting)->value('value');
+            $map = self::settingsMap();
+
+            $value = $map !== null
+                ? $map->get((string) $setting)
+                : self::query()->where('name', $setting)->value('value');
         } catch (QueryException $e) {
             if (self::isDatabaseOptionalCli()) {
                 return null;
@@ -231,5 +329,6 @@ class Settings extends Model
         Cache::forget('api_v2_capabilities');
 
         self::$settingsCollection = null;
+        self::$settingsLoadedAt = null;
     }
 }
