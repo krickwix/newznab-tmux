@@ -2880,7 +2880,7 @@ final class WorkerOrchestratorTest extends TestCase
             'nntmux.orchestrator.auto_backfill' => true,
             'nntmux.orchestrator.auto_current_forward' => false,
             'nntmux.orchestrator.free_run' => true,
-            'nntmux.orchestrator.backfill_fill_quantity' => 10_000,
+            'nntmux.orchestrator.backfill_fill_quantity' => 100_000,
             'database.default' => 'sqlite',
             'database.connections.sqlite.database' => ':memory:',
         ]);
@@ -2907,6 +2907,7 @@ final class WorkerOrchestratorTest extends TestCase
             eligibleBackfillSupply: true,
             backfillGroup: 'alt.test',
             backfillCursor: 30_000,
+            backfillRemainingArticles: 10_505,
             backfillSafeQuantity: 10_000,
         );
         $lock = Mockery::mock(Lock::class);
@@ -2940,6 +2941,7 @@ final class WorkerOrchestratorTest extends TestCase
         ))->runOnce(false);
 
         self::assertTrue($result['permit_granted']);
+        self::assertSame(10_000, $result['backfill_target']['quantity']);
     }
 
     public function test_an_expired_unconsumed_permit_is_revoked_without_consuming_a_strike(): void

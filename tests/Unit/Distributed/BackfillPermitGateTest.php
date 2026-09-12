@@ -23,6 +23,7 @@ class BackfillPermitGateTest extends TestCase
             'database.connections.sqlite.foreign_key_constraints' => true,
         ]);
         DB::purge('sqlite');
+        Settings::forgetMemoizedSettings();
         Schema::create('settings', function (Blueprint $table): void {
             $table->string('name')->primary();
             $table->string('value');

@@ -80,6 +80,7 @@ class PipelineSnapshotRepository
         $signals = $this->safety->signals();
         $eligibleNzbs = $this->nzbBacklog->eligibleCandidateCount((int) config('nntmux.distributed_nzb_scan_cap', 10000));
         $controlState = $this->state->loadState();
+        $profileOverride = (new ControlProfileOverride)->effective();
         $yieldHistory = $this->state->backfillYieldHistory();
 
         $totalCollections = (int) ($pipeline->collections_backlog ?? 0);
@@ -131,6 +132,7 @@ class PipelineSnapshotRepository
             $yieldHistory,
             $controlState,
             time(),
+            $profileOverride,
         );
         $backfillPermitHandoffSafe = $this->permitHandoffTargetSafe(
             $safeBackfillCandidates,
@@ -246,7 +248,7 @@ class PipelineSnapshotRepository
             databaseMemoryKnown: $signals['memory_known'],
             databaseCpuKnown: $signals['cpu_known'],
             storageKnown: $signals['storage_known'],
-            profileOverride: (new ControlProfileOverride)->effective(),
+            profileOverride: $profileOverride,
         );
     }
 
@@ -580,8 +582,13 @@ class PipelineSnapshotRepository
      * @param  array<string, array{attempts: int, ewma_nzbs_per_10k: float, last_attempt_at: int, last_effective_at: int, last_cursor_delta: int}>  $history
      * @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity: int}|null
      */
-    private function selectBackfillTarget(array $candidates, array $history, ControlState $state, int $now): ?array
-    {
+    private function selectBackfillTarget(
+        array $candidates,
+        array $history,
+        ControlState $state,
+        int $now,
+        ?ControlProfile $profileOverride = null,
+    ): ?array {
         $pendingGroups = $this->state->pendingBackfillDelayedAttributionGroups();
         $contextRepeat = $this->state->backfillContextRepeat($now);
         $continuationGroup = trim((string) ($contextRepeat['group'] ?? ''));
@@ -615,6 +622,7 @@ class PipelineSnapshotRepository
             $now,
             $state->ineffectiveBackfillPermitsByTarget,
             $contextRepeat,
+            $profileOverride === ControlProfile::FreeRun,
         );
     }
 

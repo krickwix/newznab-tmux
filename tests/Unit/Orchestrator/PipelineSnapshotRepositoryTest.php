@@ -536,6 +536,49 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame(10_000, $target['safe_quantity'] ?? null);
     }
 
+    public function test_repository_allows_only_free_run_to_consume_an_unproven_terminal_window(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.backfill_probe_groups' => [],
+        ]);
+        Cache::store('array')->flush();
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: new WorkerControlStateStore,
+        );
+        $method = new ReflectionMethod($repository, 'selectBackfillTarget');
+        $candidate = [[
+            'name' => 'alt.terminal',
+            'cursor' => 147_219_426,
+            'cursor_postdate' => '2008-10-24 01:12:31',
+            'remaining_articles' => 10_505,
+            'safe_quantity' => 40_000,
+        ]];
+
+        self::assertNull($method->invoke(
+            $repository,
+            $candidate,
+            [],
+            new ControlState(profile: ControlProfile::Balanced),
+            2_000_000_000,
+            ControlProfile::Balanced,
+        ));
+
+        $target = $method->invoke(
+            $repository,
+            $candidate,
+            [],
+            new ControlState(profile: ControlProfile::Balanced),
+            2_000_000_000,
+            ControlProfile::FreeRun,
+        );
+
+        self::assertSame('alt.terminal', $target['name'] ?? null);
+        self::assertSame(10_000, $target['safe_quantity'] ?? null);
+    }
+
     public function test_repository_rejects_all_supply_when_pending_context_candidate_cursor_drifted(): void
     {
         config([

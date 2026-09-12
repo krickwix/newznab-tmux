@@ -435,6 +435,16 @@ class WorkerOrchestrator
                 $snapshot->backfillTargetIneffectivePermits,
                 $snapshot->backfillTargetLockRetryDue,
             );
+            // Free-run is allowed to use a safe 10k probe when capacity or a
+            // terminal range is smaller than the configured fill quantity.
+            // WorkerProfileApplier already enforces that 10k floor; make the
+            // decision/result value match the permit it actually writes.
+            if ($freeRun
+                && $backfillQuantity === 0
+                && $snapshot->backfillSafeQuantity >= 10_000
+                && trim($snapshot->backfillGroup) !== '') {
+                $backfillQuantity = 10_000;
+            }
             $preserveUnclaimedPermit = ! $shadow
                 && $permitObservation !== null
                 && time() - (int) $permitObservation['issued_at'] < (int) config('nntmux.orchestrator.permit_claim_grace_seconds', 120)
