@@ -94,22 +94,26 @@ final readonly class BackfillTargetSelector
         int $now,
         array $ineffectivePermitsByTarget = [],
         ?array $contextRepeat = null,
+        bool $allowUnprovenTerminalWindow = false,
     ): ?array {
         $candidates = array_values(array_filter(
             $candidates,
-            function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget): bool {
+            function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget, $allowUnprovenTerminalWindow): bool {
                 $timestamp = strtotime($candidate['cursor_postdate']);
                 $entry = $history[$candidate['name']] ?? null;
+                $ineffectivePermits = (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0);
                 $lockRetryDue = is_array($entry)
                     && (int) ($entry['last_attempt_at'] ?? 0) > 0
                     && $now - (int) $entry['last_attempt_at'] >= $this->lockRetrySeconds;
                 $remainingArticles = (int) $candidate['remaining_articles'];
+                $terminalWindow = $remainingArticles > 10_000 && $remainingArticles < 20_000;
                 $rangeEligible = $remainingArticles >= 20_000
+                    || ($allowUnprovenTerminalWindow && $terminalWindow)
                     || $this->isTerminalPositiveCandidate(
                         $candidate,
                         $entry,
                         $now,
-                        (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0),
+                        $ineffectivePermits,
                     );
 
                 return $candidate['cursor'] > 0
@@ -119,7 +123,7 @@ final readonly class BackfillTargetSelector
                     && (int) substr($candidate['cursor_postdate'], 0, 4) >= 2000
                     && $timestamp <= $now
                     && ($lockRetryDue
-                        || (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) < WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT);
+                        || $ineffectivePermits < WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT);
             },
         ));
         if ($candidates === []) {

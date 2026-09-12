@@ -993,6 +993,52 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertArrayNotHasKey('terminal_positive', $target ?? []);
     }
 
+    public function test_free_run_can_select_an_unproven_terminal_range_without_weakening_its_floor(): void
+    {
+        $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
+        $candidate = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
+            'remaining_articles' => 10_505,
+            'safe_quantity' => 40_000,
+        ];
+
+        self::assertNull($selector->select([$candidate], history: [], now: 2_000_000_000));
+
+        $target = $selector->select(
+            [$candidate],
+            history: [],
+            now: 2_000_000_000,
+            allowUnprovenTerminalWindow: true,
+        );
+
+        self::assertSame('alt.terminal', $target['name'] ?? null);
+        self::assertSame(10_000, $target['safe_quantity'] ?? null);
+        self::assertTrue($target['terminal_positive'] ?? false);
+
+        self::assertNull($selector->select(
+            [[...$candidate, 'remaining_articles' => 10_000]],
+            history: [],
+            now: 2_000_000_000,
+            allowUnprovenTerminalWindow: true,
+        ));
+
+        self::assertNull($selector->select(
+            [[...$candidate, 'safe_quantity' => 9_999]],
+            history: [],
+            now: 2_000_000_000,
+            allowUnprovenTerminalWindow: true,
+        ));
+
+        self::assertNull($selector->select(
+            [$candidate],
+            history: [],
+            now: 2_000_000_000,
+            ineffectivePermitsByTarget: [
+                'alt.terminal' => WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT,
+            ],
+            allowUnprovenTerminalWindow: true,
+        ));
+    }
+
     public function test_context_repeat_cannot_bypass_terminal_productivity_guards(): void
     {
         $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
