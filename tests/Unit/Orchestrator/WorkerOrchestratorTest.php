@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Orchestrator;
 
+use App\Models\Settings;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Orchestrator\ControlDecision;
 use App\Services\Orchestrator\ControlProfile;
@@ -2871,6 +2872,74 @@ final class WorkerOrchestratorTest extends TestCase
         $this->expectExceptionMessage('redis unavailable');
 
         $orchestrator->runOnce(false);
+    }
+
+    public function test_free_run_observes_a_permit_consumed_by_another_process_on_the_next_cycle(): void
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => true,
+            'nntmux.orchestrator.auto_current_forward' => false,
+            'nntmux.orchestrator.free_run' => true,
+            'nntmux.orchestrator.backfill_fill_quantity' => 10_000,
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+        ]);
+        DB::purge('sqlite');
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->string('value');
+        });
+        DB::table('settings')->insert(['name' => 'orchestrator_bf_permit', 'value' => '7']);
+        Settings::forgetCachedSettings();
+
+        // Prime the long-running controller's process-local memo, then mimic the
+        // separate worker process atomically consuming the permit in the database.
+        self::assertSame(7, Settings::settingValue('orchestrator_bf_permit'));
+        DB::table('settings')->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
+        self::assertSame(7, Settings::settingValue('orchestrator_bf_permit'));
+
+        $snapshot = new PipelineSnapshot(
+            1,
+            2,
+            3,
+            4,
+            5,
+            eligibleBackfillSupply: true,
+            backfillGroup: 'alt.test',
+            backfillCursor: 30_000,
+            backfillSafeQuantity: 10_000,
+        );
+        $lock = Mockery::mock(Lock::class);
+        $lock->shouldReceive('get')->once()->andReturnTrue();
+        $lock->shouldReceive('release')->once();
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
+        $store->shouldReceive('leaderLock')->once()->andReturn($lock);
+        $store->shouldReceive('previousSnapshot')->once()->andReturnNull();
+        $store->shouldReceive('permitObservation')->once()->andReturnNull();
+        $store->shouldReceive('loadState')->once()->andReturn(new ControlState(profile: ControlProfile::FreeRun));
+        $store->shouldReceive('storeState')->once();
+        $store->shouldReceive('storeSnapshot')->once()->with($snapshot);
+        $store->shouldReceive('storeDecision')->once();
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->with(null)->andReturn($snapshot);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->once()->with(
+            Mockery::on(static fn (ControlDecision $decision): bool => $decision->backfillPermitted),
+            Mockery::type('int'),
+            true,
+            'alt.test',
+            false,
+            10_000,
+        )->andReturn(8);
+
+        $result = (new WorkerOrchestrator(
+            $snapshots,
+            new WorkerControlPolicy,
+            $store,
+            $applier,
+        ))->runOnce(false);
+
+        self::assertTrue($result['permit_granted']);
     }
 
     public function test_an_expired_unconsumed_permit_is_revoked_without_consuming_a_strike(): void

@@ -328,6 +328,18 @@ class Settings extends Model
         Cache::forget('api_v1_server_menu');
         Cache::forget('api_v2_capabilities');
 
+        self::forgetMemoizedSettings();
+    }
+
+    /**
+     * Clear only this process's bulk settings memo.
+     *
+     * Long-running workers use this when another process owns writes to the
+     * settings table. Unlike forgetCachedSettings(), it deliberately leaves
+     * shared application cache keys untouched.
+     */
+    public static function forgetMemoizedSettings(): void
+    {
         self::$settingsCollection = null;
         self::$settingsLoadedAt = null;
     }

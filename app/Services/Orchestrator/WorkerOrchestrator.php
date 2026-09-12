@@ -64,6 +64,12 @@ class WorkerOrchestrator
                 return ['leader' => false, 'applied' => false, 'reason' => 'leader_lock_contended'];
             }
             $acquired = true;
+            // This command is a long-running process, while permit claims and
+            // completions are written by a separate worker process. Refresh the
+            // process-local settings memo once per owned cycle so a consumed
+            // permit can be re-granted immediately instead of remaining stale
+            // until Settings' general 30-second CLI TTL expires.
+            Settings::forgetMemoizedSettings();
             $previous = $this->store->previousSnapshot();
             $snapshot = $this->snapshots->capture($previous);
             if (! $shadow) {
