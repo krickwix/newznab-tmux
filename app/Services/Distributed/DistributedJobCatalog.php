@@ -223,7 +223,9 @@ class DistributedJobCatalog
         }
 
         $freeRunPermit = $this->hasFreshActiveBackfillPermit($settings)
-            && (string) ($settings['orchestrator_profile'] ?? '') === 'free_run';
+            && (string) ($settings['orchestrator_profile'] ?? '') === 'free_run'
+            && trim((string) ($settings['orchestrator_bf_group'] ?? '')) !== ''
+            && (int) ($settings['orchestrator_bf_qty'] ?? 0) >= 10_000;
         if (($killswitch['pp'] ?? false) === true
             || (! $freeRunPermit && ($killswitch['coll'] ?? false) === true)
         ) {
