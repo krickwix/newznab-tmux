@@ -14,15 +14,16 @@ final class BackfillRunnerTest extends TestCase
     {
         $runner = new class extends BackfillRunner
         {
-            public function admission(string $group, ?ControlProfile $profile): string
+            public function admission(?int $generation, string $group, int $claimedGeneration, string $claimedProfile): string
             {
-                return $this->safeBackfillSourceAdmissionSql($group, $profile);
+                return $this->safeBackfillSourceAdmissionSql($generation, $group, $claimedGeneration, $claimedProfile);
             }
         };
 
-        self::assertSame('(g.backfill = 1 OR g.active = 1)', $runner->admission('alt.active', ControlProfile::FreeRun));
-        self::assertSame('g.backfill = 1', $runner->admission('', ControlProfile::FreeRun));
-        self::assertSame('g.backfill = 1', $runner->admission('alt.active', ControlProfile::Balanced));
+        self::assertSame('(g.backfill = 1 OR g.active = 1)', $runner->admission(9, 'alt.active', 9, ControlProfile::FreeRun->value));
+        self::assertSame('g.backfill = 1', $runner->admission(null, 'alt.active', 9, ControlProfile::FreeRun->value));
+        self::assertSame('g.backfill = 1', $runner->admission(9, 'alt.active', 8, ControlProfile::FreeRun->value));
+        self::assertSame('g.backfill = 1', $runner->admission(9, 'alt.active', 9, ControlProfile::Balanced->value));
     }
 
     public function test_orchestrated_quantity_uses_the_permit_pinned_value(): void

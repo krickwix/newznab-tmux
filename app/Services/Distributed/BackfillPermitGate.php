@@ -25,6 +25,7 @@ class BackfillPermitGate
             $rows = Settings::query()
                 ->whereIn('name', [
                     'orchestrator_mode',
+                    'orchestrator_profile',
                     'orchestrator_lease_until',
                     'orchestrator_bf_paused',
                     'orchestrator_bf_permit',
@@ -97,6 +98,10 @@ class BackfillPermitGate
             Settings::query()->updateOrCreate(
                 ['name' => 'orchestrator_bfc_group'],
                 ['value' => $group],
+            );
+            Settings::query()->updateOrCreate(
+                ['name' => 'orchestrator_bfc_profile'],
+                ['value' => (string) $rows->get('orchestrator_profile', '')],
             );
             Settings::query()->updateOrCreate(
                 ['name' => 'orchestrator_bfc_qty'],

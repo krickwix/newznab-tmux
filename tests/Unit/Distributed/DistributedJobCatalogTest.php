@@ -434,6 +434,8 @@ class DistributedJobCatalogTest extends TestCase
                 'orchestrator_lease_until' => time() + 300,
                 'orchestrator_bf_permit' => 9,
                 'orchestrator_bf_paused' => 0,
+                'orchestrator_bf_group' => 'alt.active',
+                'orchestrator_bf_qty' => 10_000,
             ], ['backfill_groups_days' => 0]),
             'killswitch' => ['pp' => false, 'coll' => true],
         ]);
@@ -451,8 +453,30 @@ class DistributedJobCatalogTest extends TestCase
                 'orchestrator_lease_until' => time() + 300,
                 'orchestrator_bf_permit' => 9,
                 'orchestrator_bf_paused' => 0,
+                'orchestrator_bf_group' => 'alt.active',
+                'orchestrator_bf_qty' => 10_000,
             ], ['backfill_groups_days' => 0]),
             'killswitch' => ['pp' => true, 'coll' => true],
+        ]);
+
+        self::assertFalse($plan['enabled']);
+        self::assertSame('kill limit exceeded', $plan['disabled_reason']);
+    }
+
+    public function test_malformed_free_run_permit_does_not_bypass_collection_kill_switch(): void
+    {
+        $plan = (new DistributedJobCatalog)->resolve('backfill', [
+            ...$this->runVar([
+                'backfill' => 4,
+                'orchestrator_mode' => 'active',
+                'orchestrator_profile' => 'free_run',
+                'orchestrator_lease_until' => time() + 300,
+                'orchestrator_bf_permit' => 9,
+                'orchestrator_bf_paused' => 0,
+                'orchestrator_bf_group' => '',
+                'orchestrator_bf_qty' => 0,
+            ], ['backfill_groups_days' => 0]),
+            'killswitch' => ['pp' => false, 'coll' => true],
         ]);
 
         self::assertFalse($plan['enabled']);
