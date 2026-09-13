@@ -459,6 +459,7 @@ class WorkerOrchestrator
                         $snapshot->backfillGroup,
                         $preserveUnclaimedPermit,
                         $backfillQuantity,
+                        $snapshot->backfillSafeQuantity,
                     )
                     : $this->applier->apply(
                         $decision,

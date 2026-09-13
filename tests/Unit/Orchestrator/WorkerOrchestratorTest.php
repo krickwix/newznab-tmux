@@ -1047,6 +1047,7 @@ final class WorkerOrchestratorTest extends TestCase
             'alt.next',
             false,
             10_000,
+            10_000,
         )->andReturn(9);
         $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
 
@@ -2760,6 +2761,7 @@ final class WorkerOrchestratorTest extends TestCase
             'alt.multipart',
             false,
             10_000,
+            80_000,
         )->andReturn(42);
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
@@ -2846,6 +2848,7 @@ final class WorkerOrchestratorTest extends TestCase
             'alt.cooldown-due',
             false,
             10_000,
+            40_000,
         )->andReturn(42);
 
         $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
@@ -2930,6 +2933,7 @@ final class WorkerOrchestratorTest extends TestCase
             true,
             'alt.test',
             false,
+            10_000,
             10_000,
         )->andReturn(8);
 

@@ -7,6 +7,7 @@ namespace App\Services\Orchestrator;
 use App\Models\Settings;
 use Illuminate\Support\Carbon;
 use InvalidArgumentException;
+use Throwable;
 
 final class BackfillDateEligibilityPolicy
 {
@@ -37,5 +38,31 @@ final class BackfillDateEligibilityPolicy
         $days = $this->mode === 1 ? "{$alias}.backfill_target" : (string) ($this->mode === 2 ? $this->globalDays : 0);
 
         return "(NOW() - INTERVAL {$days} DAY) < {$alias}.first_record_postdate";
+    }
+
+    public function isPending(?string $firstRecordPostdate, int $groupTargetDays, ?Carbon $at = null): bool
+    {
+        if ($firstRecordPostdate === null || trim($firstRecordPostdate) === '') {
+            return false;
+        }
+
+        try {
+            $cursorPostdate = Carbon::parse($firstRecordPostdate);
+        } catch (Throwable) {
+            return false;
+        }
+
+        $observedAt = ($at ?? now())->copy();
+        if ($cursorPostdate->lt(Carbon::parse('2000-01-01 00:00:00'))
+            || $cursorPostdate->gt($observedAt)
+        ) {
+            return false;
+        }
+
+        $days = $this->mode === 1
+            ? max(0, $groupTargetDays)
+            : ($this->mode === 2 ? $this->globalDays : 0);
+
+        return $observedAt->subDays($days)->lt($cursorPostdate);
     }
 }

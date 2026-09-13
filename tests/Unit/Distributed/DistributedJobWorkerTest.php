@@ -162,6 +162,7 @@ class DistributedJobWorkerTest extends TestCase
         $gate = Mockery::mock(BackfillPermitGate::class);
         $gate->shouldReceive('claimGeneration')->once()->andReturn(17);
         $gate->shouldReceive('complete')->once()->with(17)->andReturnTrue();
+        $gate->shouldReceive('queueFreeRunSuccessor')->once()->with(17)->andReturn(18);
 
         $worker = new DistributedJobWorker(
             new DistributedJobCatalog,
