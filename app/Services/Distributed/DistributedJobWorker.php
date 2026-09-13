@@ -194,16 +194,14 @@ class DistributedJobWorker
 
                 return $result(0);
             }
-            if ((bool) config('nntmux.orchestrator.require_backfill_permit', false)) {
-                foreach ($plan['commands'] as &$command) {
-                    if ($command['command'] === 'multiprocessing:safe'
-                        && ($command['arguments']['type'] ?? null) === 'backfill'
-                    ) {
-                        $command['arguments']['--backfill-generation'] = $claimedBackfillGeneration;
-                    }
+            foreach ($plan['commands'] as &$command) {
+                if ($command['command'] === 'multiprocessing:safe'
+                    && ($command['arguments']['type'] ?? null) === 'backfill'
+                ) {
+                    $command['arguments']['--backfill-generation'] = $claimedBackfillGeneration;
                 }
-                unset($command);
             }
+            unset($command);
         }
 
         $nzbBatchBefore = $this->nzbBatchCounts($plan['name']);
