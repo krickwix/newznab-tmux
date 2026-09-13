@@ -424,6 +424,41 @@ class DistributedJobCatalogTest extends TestCase
         self::assertFalse($allowed['lightweight_poll']);
     }
 
+    public function test_free_run_permit_bypasses_collection_kill_switch_and_legacy_group_count(): void
+    {
+        $plan = (new DistributedJobCatalog)->resolve('backfill', [
+            ...$this->runVar([
+                'backfill' => 4,
+                'orchestrator_mode' => 'active',
+                'orchestrator_profile' => 'free_run',
+                'orchestrator_lease_until' => time() + 300,
+                'orchestrator_bf_permit' => 9,
+                'orchestrator_bf_paused' => 0,
+            ], ['backfill_groups_days' => 0]),
+            'killswitch' => ['pp' => false, 'coll' => true],
+        ]);
+
+        self::assertTrue($plan['enabled']);
+    }
+
+    public function test_free_run_permit_still_obeys_postprocessing_kill_switch(): void
+    {
+        $plan = (new DistributedJobCatalog)->resolve('backfill', [
+            ...$this->runVar([
+                'backfill' => 4,
+                'orchestrator_mode' => 'active',
+                'orchestrator_profile' => 'free_run',
+                'orchestrator_lease_until' => time() + 300,
+                'orchestrator_bf_permit' => 9,
+                'orchestrator_bf_paused' => 0,
+            ], ['backfill_groups_days' => 0]),
+            'killswitch' => ['pp' => true, 'coll' => true],
+        ]);
+
+        self::assertFalse($plan['enabled']);
+        self::assertSame('kill limit exceeded', $plan['disabled_reason']);
+    }
+
     public function test_current_forward_emits_only_the_exact_generation_pinned_range(): void
     {
         $settings = [

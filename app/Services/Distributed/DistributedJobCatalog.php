@@ -222,12 +222,16 @@ class DistributedJobCatalog
             return $this->disabled('backfill', 'disabled in settings', $sleep);
         }
 
-        if (($killswitch['coll'] ?? false) === true || ($killswitch['pp'] ?? false) === true) {
+        $freeRunPermit = $this->hasFreshActiveBackfillPermit($settings)
+            && (string) ($settings['orchestrator_profile'] ?? '') === 'free_run';
+        if (($killswitch['pp'] ?? false) === true
+            || (! $freeRunPermit && ($killswitch['coll'] ?? false) === true)
+        ) {
             return $this->disabled('backfill', 'kill limit exceeded', $sleep);
         }
 
         $groupWork = $this->backfillGroupWorkCount($settings, $counts);
-        if ($groupWork !== null && $groupWork === 0) {
+        if (! $freeRunPermit && $groupWork !== null && $groupWork === 0) {
             return $this->disabled('backfill', 'no backfill groups to process', $sleep);
         }
 

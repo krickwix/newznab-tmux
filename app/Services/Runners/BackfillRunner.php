@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace App\Services\Runners;
 
 use App\Models\Settings;
+use App\Services\Orchestrator\BackfillDateEligibilityPolicy;
 use App\Services\Orchestrator\BackfillStopCursorPolicy;
-use Illuminate\Support\Carbon;
+use App\Services\Orchestrator\ControlProfile;
+use App\Services\Orchestrator\ControlProfileOverride;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -67,14 +69,7 @@ class BackfillRunner extends BaseRunner
         $this->executeCommand(PHP_BINARY.' app/Services/Tmux/Scripts/update_groups.php');
 
         $backfill_qty = (int) Settings::settingValue('backfill_qty');
-        // backfill_days is an enum: 0=disabled, 1=use each group's backfill_target,
-        // 2=use the global safebackfilldate. It can be overridden declaratively via
-        // the NNTMUX_ORCHESTRATOR_BACKFILL_DAYS env so deployments (k8s manifests)
-        // don't depend on a mutable DB setting that may be unset on a fresh cluster.
-        $backfillDaysOverride = env('NNTMUX_ORCHESTRATOR_BACKFILL_DAYS');
-        $backfill_days = $backfillDaysOverride !== null && $backfillDaysOverride !== ''
-            ? (int) $backfillDaysOverride
-            : (int) Settings::settingValue('backfill_days');
+        $eligibility = BackfillDateEligibilityPolicy::fromRuntime();
         $backfill_groups = max(1, (int) Settings::settingValue('backfill_groups'));
         $maxMessages = (int) Settings::settingValue('maxmssgs');
         $threads = (int) Settings::settingValue('backfillthreads');
@@ -87,12 +82,11 @@ class BackfillRunner extends BaseRunner
             ? ''
             : ' AND g.name = '.DB::getPdo()->quote($orchestratorGroup);
 
-        $backfilldays = '0';
-        if ($backfill_days === 1) {
-            $backfilldays = 'g.backfill_target';
-        } elseif ($backfill_days === 2) {
-            $backfilldays = (string) now()->diffInDays(Carbon::createFromFormat('Y-m-d', Settings::settingValue('safebackfilldate')), true);
-        }
+        $backfilldays = $eligibility->datePendingSql('g');
+        $sourceAdmissionSql = $this->safeBackfillSourceAdmissionSql(
+            $orchestratorGroup,
+            (new ControlProfileOverride)->effective(),
+        );
 
         $sql = 'SELECT g.name,
                 g.first_record AS our_first,
@@ -104,9 +98,9 @@ class BackfillRunner extends BaseRunner
             WHERE g.first_record IS NOT NULL
             AND CAST(g.first_record AS SIGNED) > 0
             AND g.first_record_postdate IS NOT NULL
-            AND g.backfill = 1
+            AND '.$sourceAdmissionSql.'
             '.$orchestratorGroupFilter.'
-            AND (NOW() - INTERVAL '.$backfilldays.' DAY ) < g.first_record_postdate
+            AND '.$backfilldays.'
             AND CAST(a.first_record AS SIGNED) > 0
             AND CAST(a.last_record AS SIGNED) >= CAST(a.first_record AS SIGNED)
             AND (CAST(g.first_record AS SIGNED) - CAST(a.first_record AS SIGNED)) >= '.$minimumSafeRange.'
@@ -284,7 +278,7 @@ class BackfillRunner extends BaseRunner
             : $legacyQuantity;
     }
 
-    private function reportSafeBackfillNoWork(string $backfilldays): void
+    private function reportSafeBackfillNoWork(string $datePendingSql): void
     {
         $context = [
             'enabled_backfill_groups' => $this->countScalar(
@@ -309,7 +303,7 @@ class BackfillRunner extends BaseRunner
                 'SELECT COUNT(*) FROM usenet_groups g INNER JOIN short_groups a ON a.name = g.name WHERE g.backfill = 1 AND CAST(g.first_record AS SIGNED) > CAST(a.first_record AS SIGNED) AND (CAST(g.first_record AS SIGNED) - CAST(a.first_record AS SIGNED)) < '.$this->minimumSafeBackfillRange()
             ),
             'enabled_target_reached' => $this->countScalar(
-                'SELECT COUNT(*) FROM usenet_groups g WHERE g.backfill = 1 AND g.first_record_postdate IS NOT NULL AND (NOW() - INTERVAL '.$backfilldays.' DAY) >= g.first_record_postdate'
+                'SELECT COUNT(*) FROM usenet_groups g WHERE g.backfill = 1 AND g.first_record_postdate IS NOT NULL AND NOT ('.$datePendingSql.')'
             ),
         ];
 
@@ -330,6 +324,13 @@ class BackfillRunner extends BaseRunner
     private function countScalar(string $sql): int
     {
         return (int) DB::scalar($sql);
+    }
+
+    protected function safeBackfillSourceAdmissionSql(string $orchestratorGroup, ?ControlProfile $profile): string
+    {
+        return $orchestratorGroup !== '' && $profile === ControlProfile::FreeRun
+            ? '(g.backfill = 1 OR g.active = 1)'
+            : 'g.backfill = 1';
     }
 
     private function minimumSafeBackfillRange(): int

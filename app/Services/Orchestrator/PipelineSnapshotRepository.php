@@ -26,16 +26,20 @@ class PipelineSnapshotRepository
 
     private readonly PipelinePressureClassifier $pressure;
 
+    private readonly ?BackfillDateEligibilityPolicy $eligibility;
+
     public function __construct(
         private readonly PrometheusSafetySignalProvider $safety,
         private readonly NzbBacklogCreationService $nzbBacklog,
         ?BackfillTargetSelector $targets = null,
         ?WorkerControlStateStore $state = null,
         ?PipelinePressureClassifier $pressure = null,
+        ?BackfillDateEligibilityPolicy $eligibility = null,
     ) {
         $this->targets = $targets ?? new BackfillTargetSelector;
         $this->state = $state ?? new WorkerControlStateStore;
         $this->pressure = $pressure ?? new PipelinePressureClassifier;
+        $this->eligibility = $eligibility;
     }
 
     /** @param array<string, int|float>|null $previous */
@@ -126,7 +130,12 @@ class PipelineSnapshotRepository
             'releases' => $backlogs['releases'],
             'nzbs' => $backlogs['nzbs'],
         ];
-        $safeBackfillCandidates = $this->safeBackfillCandidates($this->backfillCandidates(), $capacityBacklogs);
+        $freeRun = $profileOverride === ControlProfile::FreeRun;
+        $safeBackfillCandidates = $this->safeBackfillCandidates(
+            $this->backfillCandidates($profileOverride),
+            $capacityBacklogs,
+            $freeRun,
+        );
         $backfillTarget = $this->selectBackfillTarget(
             $safeBackfillCandidates,
             $yieldHistory,
@@ -510,13 +519,16 @@ class PipelineSnapshotRepository
     }
 
     /** @param array{parts: int, binaries: int, collections: int, releases: int, nzbs: int} $backlogs */
-    private function safeBackfillQuantity(array $backlogs, string $backfillGroup = ''): int
+    private function safeBackfillQuantity(array $backlogs, string $backfillGroup = '', bool $bypassCollectionCapacity = false): int
     {
         $fraction = (float) config('nntmux.orchestrator.backfill_headroom_fraction', 0.10);
         $high = (array) config('nntmux.orchestrator.high_watermarks', []);
         $growth = $this->state->backfillGrowthFor($backfillGroup);
         $quantities = [];
         foreach (['parts', 'binaries', 'collections', 'collections_total', 'releases', 'nzbs'] as $stage) {
+            if ($bypassCollectionCapacity && in_array($stage, ['collections', 'collections_total'], true)) {
+                continue;
+            }
             $current = $backlogs[$stage] ?? ($stage === 'collections_total' ? $backlogs['collections'] : 0);
             $limit = $high[$stage] ?? ($stage === 'collections_total' ? $high['collections'] ?? 0 : 0);
             if ((int) $limit <= 0) {
@@ -539,11 +551,11 @@ class PipelineSnapshotRepository
      * @param  array{parts: int, binaries: int, collections: int, collections_total: int, releases: int, nzbs: int}  $backlogs
      * @return list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity: int}>
      */
-    private function safeBackfillCandidates(array $candidates, array $backlogs): array
+    private function safeBackfillCandidates(array $candidates, array $backlogs, bool $bypassCollectionCapacity = false): array
     {
         $safe = [];
         foreach ($candidates as $candidate) {
-            $quantity = $this->safeBackfillQuantity($backlogs, $candidate['name']);
+            $quantity = $this->safeBackfillQuantity($backlogs, $candidate['name'], $bypassCollectionCapacity);
             if ($quantity >= 10_000) {
                 $safe[] = [...$candidate, 'safe_quantity' => $quantity];
             }
@@ -1343,7 +1355,7 @@ class PipelineSnapshotRepository
     /**
      * @return list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>
      */
-    public function backfillCandidates(): array
+    public function backfillCandidates(?ControlProfile $profile = null): array
     {
         $allowedGroups = array_values(array_unique(array_filter(array_map(
             static fn (mixed $group): string => trim((string) $group),
@@ -1387,6 +1399,11 @@ class PipelineSnapshotRepository
             $orderBySql = 'g.last_updated IS NOT NULL, g.last_updated ASC, g.name ASC';
         }
 
+        $sourceAdmissionSql = $profile === ControlProfile::FreeRun
+            ? '(g.backfill = 1 OR g.active = 1)'
+            : 'g.backfill = 1';
+        $datePendingSql = ($this->eligibility ?? BackfillDateEligibilityPolicy::fromRuntime())->datePendingSql('g');
+
         $rows = DB::select('SELECT
             g.name,
             CAST(g.first_record AS SIGNED) AS backfill_cursor,
@@ -1394,9 +1411,10 @@ class PipelineSnapshotRepository
             CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) AS remaining_articles
             FROM usenet_groups g
             INNER JOIN short_groups s ON s.name = g.name
-            WHERE g.backfill = 1'.$nameFilterSql.'
+            WHERE '.$sourceAdmissionSql.$nameFilterSql.'
             AND g.first_record IS NOT NULL
             AND g.first_record_postdate >= \'2000-01-01\'
+            AND '.$datePendingSql.'
             AND s.updated >= NOW() - INTERVAL 10 MINUTE
             AND CAST(s.first_record AS SIGNED) > 0
             AND CAST(s.last_record AS SIGNED) >= CAST(s.first_record AS SIGNED)
