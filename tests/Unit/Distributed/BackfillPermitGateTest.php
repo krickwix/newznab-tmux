@@ -194,7 +194,9 @@ class BackfillPermitGateTest extends TestCase
     {
         Carbon::setTestNow('2026-09-13 18:00:00');
         config()->set('nntmux.orchestrator.backfill_days_override', 1);
-        config()->set('nntmux.orchestrator.backfill_probe_groups', ['all']);
+        // Free-run automatically admits active date-pending groups even when
+        // they are outside the curated probe allowlist.
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['alt.other']);
         Schema::create('usenet_groups', function (Blueprint $table): void {
             $table->id();
             $table->string('name')->unique();
@@ -215,7 +217,7 @@ class BackfillPermitGateTest extends TestCase
         DB::table('usenet_groups')->insert([
             'name' => 'alt.test',
             'active' => 1,
-            'backfill' => 1,
+            'backfill' => 0,
             'backfill_target' => 30,
             'first_record' => 200_000,
             'first_record_postdate' => '2026-09-01 00:00:00',
@@ -270,9 +272,15 @@ class BackfillPermitGateTest extends TestCase
             'active' => 0,
             'backfill' => 1,
             'first_record' => 200_000,
-            'last_record' => 400_001,
+            'last_record' => 400_000,
         ]);
         self::assertNull((new BackfillPermitGate)->queueFreeRunSuccessor(17));
+
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['alt.test']);
+        self::assertSame(19, (new BackfillPermitGate)->queueFreeRunSuccessor(17));
+        self::assertSame(19, Settings::settingValue('orchestrator_bf_permit'));
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
+        Settings::query()->where('name', 'orchestrator_bf_budget')->update(['value' => '100000']);
 
         DB::table('usenet_groups')->where('name', 'alt.test')->update([
             'first_record' => 200_000,

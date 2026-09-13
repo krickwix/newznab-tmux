@@ -284,7 +284,6 @@ class BackfillPermitGate
             if ($group === ''
                 || (string) $rows->get('orchestrator_bfc_profile', '') !== 'free_run'
                 || $quantity < 10_000
-                || ! $this->groupIsAllowed($group)
                 || $claimedFirst <= 0
                 || $claimedLast < $claimedFirst
                 || ! $stopPolicy->isValid()
@@ -310,6 +309,7 @@ class BackfillPermitGate
                     's.updated as provider_updated',
                 ]);
             if ($candidate === null
+                || ((int) $candidate->active !== 1 && ! $this->groupIsAllowed($group))
                 || ! BackfillDateEligibilityPolicy::fromRuntime()->isPending(
                     (string) $candidate->first_record_postdate,
                     (int) $candidate->backfill_target,
