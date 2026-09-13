@@ -4,11 +4,27 @@ declare(strict_types=1);
 
 namespace Tests\Unit;
 
+use App\Services\Orchestrator\ControlProfile;
 use App\Services\Runners\BackfillRunner;
 use Tests\TestCase;
 
 final class BackfillRunnerTest extends TestCase
 {
+    public function test_free_run_exact_permit_can_execute_an_active_group_without_legacy_backfill_flag(): void
+    {
+        $runner = new class extends BackfillRunner
+        {
+            public function admission(string $group, ?ControlProfile $profile): string
+            {
+                return $this->safeBackfillSourceAdmissionSql($group, $profile);
+            }
+        };
+
+        self::assertSame('(g.backfill = 1 OR g.active = 1)', $runner->admission('alt.active', ControlProfile::FreeRun));
+        self::assertSame('g.backfill = 1', $runner->admission('', ControlProfile::FreeRun));
+        self::assertSame('g.backfill = 1', $runner->admission('alt.active', ControlProfile::Balanced));
+    }
+
     public function test_orchestrated_quantity_uses_the_permit_pinned_value(): void
     {
         $runner = new class extends BackfillRunner

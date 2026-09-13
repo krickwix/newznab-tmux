@@ -139,6 +139,7 @@ return [
         'backfill_fill_groups' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_FILL_GROUPS', 1)),
         'backfill_fill_threads' => max(1, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_FILL_THREADS', 1)),
         'backfill_fill_quantity' => max(10000, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_FILL_QUANTITY', 10000)),
+        'backfill_days_override' => env('NNTMUX_ORCHESTRATOR_BACKFILL_DAYS'),
         // Operator override: every worker timer at zero, backfill always
         // permitted, no admission or fail-safe gating. Defaults OFF and is not
         // reachable from the adaptive ladder -- see ControlProfile::FreeRun.

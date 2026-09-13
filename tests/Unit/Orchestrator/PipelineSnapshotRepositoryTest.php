@@ -6,6 +6,7 @@ namespace Tests\Unit\Orchestrator;
 
 use App\Models\Settings;
 use App\Services\Nzb\NzbBacklogCreationService;
+use App\Services\Orchestrator\BackfillDateEligibilityPolicy;
 use App\Services\Orchestrator\BodyRecoverySourceCriteria;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlState;
@@ -500,6 +501,86 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             'releases' => 12,
             'nzbs' => 6_794,
         ]));
+    }
+
+    public function test_free_run_candidates_bypass_only_soft_capacity_admission(): void
+    {
+        $original = config('nntmux.orchestrator');
+        config([
+            'nntmux.orchestrator.backfill_fill_quantity' => 100_000,
+            'nntmux.orchestrator.backfill_max_quantity' => 100_000,
+            'nntmux.orchestrator.high_watermarks' => [
+                'parts' => 300_000_000,
+                'binaries' => 1_000_000,
+                'collections' => 220_000,
+                'collections_total' => 220_000,
+                'releases' => 20_000,
+                'nzbs' => 12_000,
+            ],
+        ]);
+        /** @var WorkerControlStateStore&Mockery\MockInterface $state */
+        $state = Mockery::mock(WorkerControlStateStore::class);
+        $state->expects('backfillGrowthFor')->with('alt.active')->andReturn([]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'safeBackfillCandidates');
+        $candidate = [
+            'name' => 'alt.active',
+            'cursor' => 200_000,
+            'cursor_postdate' => '2026-01-03 00:00:00',
+            'remaining_articles' => 190_000,
+        ];
+        $overCapacity = [
+            'parts' => 100_000_000,
+            'binaries' => 100_000,
+            'collections' => 350_000,
+            'collections_total' => 350_000,
+            'releases' => 100,
+            'nzbs' => 1_100,
+        ];
+
+        self::assertSame([[
+            ...$candidate,
+            'safe_quantity' => 100_000,
+        ]], $method->invoke($repository, [$candidate], $overCapacity, true));
+        config()->set('nntmux.orchestrator', $original);
+    }
+
+    public function test_free_run_candidates_still_obey_non_collection_capacity_admission(): void
+    {
+        $original = config('nntmux.orchestrator');
+        config([
+            'nntmux.orchestrator.backfill_fill_quantity' => 100_000,
+            'nntmux.orchestrator.backfill_max_quantity' => 100_000,
+            'nntmux.orchestrator.high_watermarks' => ['parts' => 300_000_000],
+        ]);
+        /** @var WorkerControlStateStore&Mockery\MockInterface $state */
+        $state = Mockery::mock(WorkerControlStateStore::class);
+        $state->expects('backfillGrowthFor')->with('alt.active')->andReturn([]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'safeBackfillCandidates');
+
+        self::assertSame([], $method->invoke($repository, [[
+            'name' => 'alt.active',
+            'cursor' => 200_000,
+            'cursor_postdate' => '2026-01-03 00:00:00',
+            'remaining_articles' => 190_000,
+        ]], [
+            'parts' => 300_000_001,
+            'binaries' => 0,
+            'collections' => 0,
+            'collections_total' => 0,
+            'releases' => 0,
+            'nzbs' => 0,
+        ], true));
+        config()->set('nntmux.orchestrator', $original);
     }
 
     public function test_repository_wires_the_durable_context_repeat_into_target_selection(): void
@@ -1109,6 +1190,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
             app(NzbBacklogCreationService::class),
+            eligibility: new BackfillDateEligibilityPolicy(1),
         );
 
         self::assertSame([[
@@ -1117,6 +1199,35 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             'cursor_postdate' => '2020-01-01 00:00:00',
             'remaining_articles' => 90_000,
         ]], $repository->backfillCandidates());
+    }
+
+    public function test_free_run_backfill_candidates_include_active_date_pending_groups(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['all']);
+
+        DB::shouldReceive('select')
+            ->once()
+            ->withArgs(function (string $sql, array $bindings): bool {
+                self::assertStringContainsString('(g.backfill = 1 OR g.active = 1)', $sql);
+                self::assertStringContainsString('(NOW() - INTERVAL g.backfill_target DAY) < g.first_record_postdate', $sql);
+                self::assertSame([], $bindings);
+
+                return true;
+            })
+            ->andReturn([(object) [
+                'name' => 'alt.active',
+                'backfill_cursor' => 200_000,
+                'cursor_postdate' => '2026-01-03 00:00:00',
+                'remaining_articles' => 190_000,
+            ]]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            eligibility: new BackfillDateEligibilityPolicy(1),
+        );
+
+        self::assertSame('alt.active', $repository->backfillCandidates(ControlProfile::FreeRun)[0]['name'] ?? null);
     }
 
     public function test_backfill_candidate_remaining_articles_are_capped_at_the_configured_source_stop_cursor(): void
@@ -1133,6 +1244,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
             app(NzbBacklogCreationService::class),
+            eligibility: new BackfillDateEligibilityPolicy(1),
         );
 
         self::assertSame([[
@@ -1192,6 +1304,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
             app(NzbBacklogCreationService::class),
+            eligibility: new BackfillDateEligibilityPolicy(1),
         );
 
         self::assertSame([], $repository->backfillCandidates());
