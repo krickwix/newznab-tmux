@@ -63,6 +63,42 @@ class BackfillPermitGateTest extends TestCase
         self::assertSame(17, Settings::settingValue('orchestrator_bf_permit'));
     }
 
+    public function test_it_claims_a_queued_permit_only_after_the_previous_claim_settles(): void
+    {
+        $this->settings('active', time() + 60, 0, 18);
+        Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '17']);
+        Settings::query()->insert([
+            ['name' => 'orchestrator_bf_completed', 'value' => '16'],
+            ['name' => 'orchestrator_bf_failed', 'value' => '0'],
+        ]);
+
+        $gate = new BackfillPermitGate;
+        self::assertNull($gate->claimGeneration());
+        self::assertSame(18, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_claimed'));
+
+        Settings::query()->where('name', 'orchestrator_bf_completed')->update(['value' => '17']);
+
+        self::assertSame(18, $gate->claimGeneration());
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(18, Settings::settingValue('orchestrator_bf_claimed'));
+    }
+
+    public function test_it_claims_a_queued_permit_after_the_previous_claim_fails(): void
+    {
+        $this->settings('active', time() + 60, 0, 18);
+        Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '17']);
+        Settings::query()->insert([
+            ['name' => 'orchestrator_bf_completed', 'value' => '0'],
+            ['name' => 'orchestrator_bf_failed', 'value' => '17'],
+        ]);
+
+        $gate = new BackfillPermitGate;
+        self::assertSame(18, $gate->claimGeneration());
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(18, Settings::settingValue('orchestrator_bf_claimed'));
+    }
+
     public function test_it_atomically_copies_a_matching_audited_stop_cursor(): void
     {
         config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.test:60000');

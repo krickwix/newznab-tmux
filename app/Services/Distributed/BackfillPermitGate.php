@@ -29,6 +29,9 @@ class BackfillPermitGate
                     'orchestrator_lease_until',
                     'orchestrator_bf_paused',
                     'orchestrator_bf_permit',
+                    'orchestrator_bf_claimed',
+                    'orchestrator_bf_completed',
+                    'orchestrator_bf_failed',
                     'orchestrator_bf_group',
                     'orchestrator_bf_qty',
                     'orchestrator_bf_stop',
@@ -54,6 +57,14 @@ class BackfillPermitGate
             if ((int) $rows->get('orchestrator_cf_permit', 0) > 0
                 || ($currentForwardClaimed > 0
                     && $currentForwardClaimed !== (int) $rows->get('orchestrator_cf_completed', 0))
+            ) {
+                return null;
+            }
+
+            $backfillClaimed = (int) $rows->get('orchestrator_bf_claimed', 0);
+            if ($backfillClaimed > 0
+                && $backfillClaimed !== (int) $rows->get('orchestrator_bf_completed', 0)
+                && $backfillClaimed !== (int) $rows->get('orchestrator_bf_failed', 0)
             ) {
                 return null;
             }

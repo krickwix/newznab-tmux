@@ -48,6 +48,7 @@ final class WorkerProfileApplierTest extends TestCase
 
     public function test_it_atomically_advances_generation_and_applies_the_selected_profile(): void
     {
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
         $generation = (new WorkerProfileApplier)->apply(
             $this->decision(ControlProfile::Balanced, true),
             1_000,
@@ -241,6 +242,7 @@ final class WorkerProfileApplierTest extends TestCase
 
     public function test_it_pins_scaled_quantity_to_the_granted_permit_and_preserves_it_without_a_new_grant(): void
     {
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
         $applier = new WorkerProfileApplier;
         $applier->apply($this->decision(ControlProfile::Fill, true), 1_000, true, 'alt.proven', false, 200_000);
 
@@ -255,6 +257,7 @@ final class WorkerProfileApplierTest extends TestCase
 
     public function test_it_pins_the_audited_stop_cursor_with_the_permit(): void
     {
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
         config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.proven:60000');
         $applier = new WorkerProfileApplier;
 
@@ -363,7 +366,7 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame('alt.test', Settings::settingValue('orchestrator_bf_group'));
     }
 
-    public function test_it_does_not_replace_an_in_flight_claimed_permit(): void
+    public function test_free_run_queues_one_permit_without_replacing_an_in_flight_claim(): void
     {
         Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
         Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '4']);
@@ -373,9 +376,15 @@ final class WorkerProfileApplierTest extends TestCase
             ['name' => 'orchestrator_bf_group', 'value' => 'alt.in-flight'],
             ['name' => 'orchestrator_bf_qty', 'value' => '100000'],
             ['name' => 'orchestrator_bf_stop', 'value' => '0'],
+            ['name' => 'orchestrator_bfc_group', 'value' => 'alt.in-flight'],
+            ['name' => 'orchestrator_bfc_profile', 'value' => 'free_run'],
+            ['name' => 'orchestrator_bfc_qty', 'value' => '100000'],
+            ['name' => 'orchestrator_bfc_stop', 'value' => '7'],
+            ['name' => 'orchestrator_bfc_first', 'value' => '100001'],
+            ['name' => 'orchestrator_bfc_last', 'value' => '200000'],
         ]);
 
-        (new WorkerProfileApplier)->apply(
+        $generation = (new WorkerProfileApplier)->apply(
             $this->decision(ControlProfile::FreeRun, true),
             1_000,
             true,
@@ -384,11 +393,97 @@ final class WorkerProfileApplierTest extends TestCase
             100_000,
         );
 
-        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(5, $generation);
+        self::assertSame(5, Settings::settingValue('orchestrator_bf_permit'));
         self::assertSame(4, Settings::settingValue('orchestrator_bf_claimed'));
         self::assertSame(3, Settings::settingValue('orchestrator_bf_completed'));
-        self::assertSame('alt.in-flight', Settings::settingValue('orchestrator_bf_group'));
+        self::assertSame('alt.next', Settings::settingValue('orchestrator_bf_group'));
         self::assertSame(100_000, Settings::settingValue('orchestrator_bf_qty'));
+        self::assertSame('alt.in-flight', Settings::settingValue('orchestrator_bfc_group'));
+        self::assertSame('free_run', Settings::settingValue('orchestrator_bfc_profile'));
+        self::assertSame(100_000, Settings::settingValue('orchestrator_bfc_qty'));
+        self::assertSame(7, Settings::settingValue('orchestrator_bfc_stop'));
+        self::assertSame(100_001, Settings::settingValue('orchestrator_bfc_first'));
+        self::assertSame(200_000, Settings::settingValue('orchestrator_bfc_last'));
+    }
+
+    public function test_adaptive_profile_does_not_queue_behind_an_in_flight_claim(): void
+    {
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
+        Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '4']);
+        Settings::query()->where('name', 'orchestrator_bf_completed')->update(['value' => '3']);
+        Settings::query()->insert([
+            ['name' => 'orchestrator_bf_failed', 'value' => '0'],
+            ['name' => 'orchestrator_bf_group', 'value' => 'alt.in-flight'],
+        ]);
+
+        (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::Balanced, true),
+            1_000,
+            true,
+            'alt.next',
+        );
+
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(4, Settings::settingValue('orchestrator_bf_claimed'));
+        self::assertSame('alt.in-flight', Settings::settingValue('orchestrator_bf_group'));
+    }
+
+    public function test_free_run_never_replaces_an_already_queued_permit(): void
+    {
+        Settings::query()->where('name', 'orchestrator_generation')->update(['value' => '5']);
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '5']);
+        Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '4']);
+        Settings::query()->where('name', 'orchestrator_bf_completed')->update(['value' => '3']);
+        Settings::query()->insert([
+            ['name' => 'orchestrator_bf_failed', 'value' => '0'],
+            ['name' => 'orchestrator_bf_group', 'value' => 'alt.queued'],
+            ['name' => 'orchestrator_bf_qty', 'value' => '10000'],
+            ['name' => 'orchestrator_bf_stop', 'value' => '123'],
+        ]);
+
+        $generation = (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::FreeRun, true),
+            1_000,
+            true,
+            'alt.replacement',
+            false,
+            100_000,
+        );
+
+        self::assertSame(5, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame('alt.queued', Settings::settingValue('orchestrator_bf_group'));
+        self::assertSame(10_000, Settings::settingValue('orchestrator_bf_qty'));
+        self::assertSame(123, Settings::settingValue('orchestrator_bf_stop'));
+        self::assertSame(6, $generation);
+    }
+
+    public function test_free_run_never_replaces_a_queued_permit_after_the_previous_claim_settles(): void
+    {
+        Settings::query()->where('name', 'orchestrator_generation')->update(['value' => '5']);
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '5']);
+        Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '4']);
+        Settings::query()->where('name', 'orchestrator_bf_completed')->update(['value' => '4']);
+        Settings::query()->insert([
+            ['name' => 'orchestrator_bf_failed', 'value' => '0'],
+            ['name' => 'orchestrator_bf_group', 'value' => 'alt.queued'],
+            ['name' => 'orchestrator_bf_qty', 'value' => '10000'],
+            ['name' => 'orchestrator_bf_stop', 'value' => '123'],
+        ]);
+
+        (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::FreeRun, true),
+            1_000,
+            true,
+            'alt.replacement',
+            false,
+            100_000,
+        );
+
+        self::assertSame(5, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame('alt.queued', Settings::settingValue('orchestrator_bf_group'));
+        self::assertSame(10_000, Settings::settingValue('orchestrator_bf_qty'));
+        self::assertSame(123, Settings::settingValue('orchestrator_bf_stop'));
     }
 
     public function test_all_managed_setting_names_fit_the_live_varchar_25_schema(): void

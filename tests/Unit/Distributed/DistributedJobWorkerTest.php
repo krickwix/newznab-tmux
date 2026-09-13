@@ -219,6 +219,30 @@ class DistributedJobWorkerTest extends TestCase
         self::assertFalse($result['completed']);
     }
 
+    public function test_termination_fails_the_claimed_backfill_generation_before_exit(): void
+    {
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $gate = Mockery::mock(BackfillPermitGate::class);
+        $gate->shouldReceive('fail')
+            ->once()
+            ->with(17, 'Managed backfill worker terminated by signal 15.')
+            ->andReturnTrue();
+        $worker = new DistributedJobWorker(
+            new DistributedJobCatalog,
+            Mockery::mock(TmuxMonitorService::class),
+            $telemetry,
+            $gate,
+        );
+
+        (new ReflectionMethod($worker, 'failBackfillClaimOnTermination'))->invoke(
+            $worker,
+            $gate,
+            17,
+            15,
+            new BufferedOutput,
+        );
+    }
+
     public function test_successful_backfill_without_complete_receipts_fails_the_generation(): void
     {
         config(['nntmux.distributed_lock_store' => 'array']);

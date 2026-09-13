@@ -216,6 +216,8 @@ class DistributedJobWorker
             $plan['name'],
             $startedAt,
             $output,
+            $backfillPermitGate,
+            $claimedBackfillGeneration,
         );
         $alarmSeconds = $this->executionAlarmSeconds($plan['name']);
         if ($alarmSeconds > 0 && function_exists('pcntl_alarm')) {
@@ -358,6 +360,8 @@ class DistributedJobWorker
         string $job,
         float $startedAt,
         OutputInterface $output,
+        ?BackfillPermitGate $backfillPermitGate = null,
+        ?int $claimedBackfillGeneration = null,
     ): callable {
         if (! function_exists('pcntl_signal')) {
             return static fn (): null => null;
@@ -386,10 +390,16 @@ class DistributedJobWorker
                 ? pcntl_signal_get_handler($signal)
                 : SIG_DFL;
 
-            pcntl_signal($signal, function (int $receivedSignal) use ($lock, $lockName, $job, $startedAt, $output): void {
+            pcntl_signal($signal, function (int $receivedSignal) use ($lock, $lockName, $job, $startedAt, $output, $backfillPermitGate, $claimedBackfillGeneration): void {
                 $this->terminating = true;
                 $output->writeln($this->formatTerminationSignalMessage($receivedSignal, $job, $lockName));
                 $this->workerTelemetry->finishRun($job, 'terminated', $startedAt);
+                $this->failBackfillClaimOnTermination(
+                    $backfillPermitGate,
+                    $claimedBackfillGeneration,
+                    $receivedSignal,
+                    $output,
+                );
 
                 try {
                     $lock->release();
@@ -416,6 +426,32 @@ class DistributedJobWorker
                 pcntl_async_signals($previousAsyncSignals);
             }
         };
+    }
+
+    private function failBackfillClaimOnTermination(
+        ?BackfillPermitGate $backfillPermitGate,
+        ?int $claimedBackfillGeneration,
+        int $signal,
+        OutputInterface $output,
+    ): void {
+        if ($backfillPermitGate === null || $claimedBackfillGeneration === null) {
+            return;
+        }
+
+        try {
+            $backfillPermitGate->fail(
+                $claimedBackfillGeneration,
+                sprintf('Managed backfill worker terminated by signal %d.', $signal),
+            );
+        } catch (Throwable $error) {
+            $output->writeln(sprintf(
+                '[%s] could not fail backfill generation %d after signal %d: %s',
+                now()->toDateTimeString(),
+                $claimedBackfillGeneration,
+                $signal,
+                $error->getMessage(),
+            ));
+        }
     }
 
     private function formatTerminationSignalMessage(int $signal, string $job, string $lockName): string
