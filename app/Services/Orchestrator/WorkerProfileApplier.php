@@ -61,6 +61,13 @@ class WorkerProfileApplier
             $existingGroup = (string) $lockedSettings->get('orchestrator_bf_group', '');
             $existingPinnedQuantity = (int) $lockedSettings->get('orchestrator_bf_qty', 0);
             $existingPinnedStop = (int) $lockedSettings->get('orchestrator_bf_stop', 0);
+            $claimedPermitInFlight = $existingClaimed > 0
+                && $existingClaimed !== $existingCompleted
+                && $existingClaimed !== $existingFailed;
+            if ($grantPermit && $claimedPermitInFlight) {
+                $grantPermit = false;
+                $preserveUnclaimedPermit = false;
+            }
             $currentForwardUnsettled = Schema::hasTable('current_forward_windows')
                 && DB::table('current_forward_windows')
                     ->whereIn('state', ['OFFERED', 'CLAIMED', 'INGESTED', 'ATTRIBUTING', 'CONTINUATION_PENDING'])

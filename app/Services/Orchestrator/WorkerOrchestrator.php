@@ -407,6 +407,10 @@ class WorkerOrchestrator
             // orchestrator_bf_permit === 0 is still required, so a permit that
             // has been granted and not yet claimed is never overwritten.
             $freeRun = $decision->profile->profile === ControlProfile::FreeRun;
+            $claimedBackfillGeneration = (int) Settings::settingValue('orchestrator_bf_claimed');
+            $claimedBackfillInFlight = $claimedBackfillGeneration > 0
+                && $claimedBackfillGeneration !== (int) Settings::settingValue('orchestrator_bf_completed')
+                && $claimedBackfillGeneration !== (int) Settings::settingValue('orchestrator_bf_failed');
             $autoGrant = ! $shadow
                 && (bool) config('nntmux.orchestrator.auto_backfill', false)
                 && $decision->backfillPermitted
@@ -420,6 +424,7 @@ class WorkerOrchestrator
                 && trim((string) $snapshot->backfillGroup) !== ''
                 && ($freeRun || $permitObservation === null)
                 && ($freeRun || $delayedAttributionSettled === null)
+                && ! $claimedBackfillInFlight
                 && (int) Settings::settingValue('orchestrator_bf_permit') === 0;
             $issuePermit = ($grantPermit || $autoGrant)
                 && ($freeRun || $delayedAttributionSettled === null)

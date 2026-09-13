@@ -363,6 +363,34 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame('alt.test', Settings::settingValue('orchestrator_bf_group'));
     }
 
+    public function test_it_does_not_replace_an_in_flight_claimed_permit(): void
+    {
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
+        Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '4']);
+        Settings::query()->where('name', 'orchestrator_bf_completed')->update(['value' => '3']);
+        Settings::query()->insert([
+            ['name' => 'orchestrator_bf_failed', 'value' => '0'],
+            ['name' => 'orchestrator_bf_group', 'value' => 'alt.in-flight'],
+            ['name' => 'orchestrator_bf_qty', 'value' => '100000'],
+            ['name' => 'orchestrator_bf_stop', 'value' => '0'],
+        ]);
+
+        (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::FreeRun, true),
+            1_000,
+            true,
+            'alt.next',
+            false,
+            100_000,
+        );
+
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(4, Settings::settingValue('orchestrator_bf_claimed'));
+        self::assertSame(3, Settings::settingValue('orchestrator_bf_completed'));
+        self::assertSame('alt.in-flight', Settings::settingValue('orchestrator_bf_group'));
+        self::assertSame(100_000, Settings::settingValue('orchestrator_bf_qty'));
+    }
+
     public function test_all_managed_setting_names_fit_the_live_varchar_25_schema(): void
     {
         (new WorkerProfileApplier)->apply($this->decision(ControlProfile::Balanced, true), 1_000, true, 'alt.test');
