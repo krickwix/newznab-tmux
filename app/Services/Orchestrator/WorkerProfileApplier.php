@@ -21,8 +21,9 @@ class WorkerProfileApplier
         ?string $backfillGroup = null,
         bool $preserveUnclaimedPermit = false,
         ?int $backfillQuantity = null,
+        ?int $backfillSafeQuantity = null,
     ): int {
-        return DB::transaction(function () use ($decision, $now, $grantPermit, $backfillGroup, $preserveUnclaimedPermit, $backfillQuantity): int {
+        return DB::transaction(function () use ($decision, $now, $grantPermit, $backfillGroup, $preserveUnclaimedPermit, $backfillQuantity, $backfillSafeQuantity): int {
             $lockedSettings = Settings::query()
                 ->whereIn('name', [
                     'orchestrator_generation',
@@ -33,6 +34,7 @@ class WorkerProfileApplier
                     'orchestrator_bf_group',
                     'orchestrator_bf_qty',
                     'orchestrator_bf_stop',
+                    'orchestrator_bf_budget',
                 ])
                 ->orderBy('name')
                 ->lockForUpdate()
@@ -61,6 +63,7 @@ class WorkerProfileApplier
             $existingGroup = (string) $lockedSettings->get('orchestrator_bf_group', '');
             $existingPinnedQuantity = (int) $lockedSettings->get('orchestrator_bf_qty', 0);
             $existingPinnedStop = (int) $lockedSettings->get('orchestrator_bf_stop', 0);
+            $existingRefillBudget = (int) $lockedSettings->get('orchestrator_bf_budget', 0);
             $claimedPermitInFlight = $existingClaimed > 0
                 && $existingClaimed !== $existingCompleted
                 && $existingClaimed !== $existingFailed;
@@ -95,6 +98,23 @@ class WorkerProfileApplier
             $permit = ($backfillAdmissionOpen || $preserveUnclaimedPermit)
                 ? ($grantPermit ? $generation : $existingPermit)
                 : 0;
+            $issuedQuantity = $grantPermit
+                ? max(10000, $backfillQuantity ?? $profile->backfillQuantity)
+                : $existingPinnedQuantity;
+            $refillBudget = 0;
+            if ($backfillAdmissionOpen && $freeRun) {
+                if ($grantPermit) {
+                    // Only an idle-lane grant can authorize a completion-time
+                    // chain. A permit queued behind a running claim gets no
+                    // additional budget because that claim can still consume
+                    // capacity after this snapshot was captured.
+                    $refillBudget = $queueBehindClaim
+                        ? 0
+                        : max(0, ($backfillSafeQuantity ?? $issuedQuantity) - $issuedQuantity);
+                } elseif ($existingPermit > 0 || $claimedPermitInFlight) {
+                    $refillBudget = $existingRefillBudget;
+                }
+            }
             $values = [
                 'orchestrator_mode' => 'active',
                 'orchestrator_profile' => $profile->profile->value,
@@ -123,10 +143,9 @@ class WorkerProfileApplier
                 'orchestrator_bf_completed' => $grantPermit && ! $queueBehindClaim ? '0' : (string) $existingCompleted,
                 'orchestrator_bf_failed' => $grantPermit && ! $queueBehindClaim ? '0' : (string) $existingFailed,
                 'orchestrator_bf_group' => $grantPermit ? (string) $backfillGroup : $existingGroup,
-                'orchestrator_bf_qty' => (string) ($grantPermit
-                    ? max(10000, $backfillQuantity ?? $profile->backfillQuantity)
-                    : $existingPinnedQuantity),
+                'orchestrator_bf_qty' => (string) $issuedQuantity,
                 'orchestrator_bf_stop' => (string) $backfillStop,
+                'orchestrator_bf_budget' => (string) $refillBudget,
                 'backfill_groups' => (string) max(1, $profile->backfillGroups),
                 'backfillthreads' => (string) max(1, $profile->backfillThreads),
                 'backfill_qty' => (string) max(10000, $profile->backfillQuantity),
@@ -157,6 +176,7 @@ class WorkerProfileApplier
                 'orchestrator_bf_group' => '',
                 'orchestrator_bf_qty' => '0',
                 'orchestrator_bf_stop' => '0',
+                'orchestrator_bf_budget' => '0',
                 'orchestrator_cf_permit' => '0',
             ] as $name => $value) {
                 Settings::query()->updateOrCreate(['name' => $name], ['value' => $value]);
@@ -167,7 +187,15 @@ class WorkerProfileApplier
 
     public function revokePermit(): void
     {
-        Settings::query()->updateOrCreate(['name' => 'orchestrator_bf_permit'], ['value' => '0']);
+        DB::transaction(function (): void {
+            Settings::query()
+                ->whereIn('name', ['orchestrator_bf_budget', 'orchestrator_bf_permit'])
+                ->orderBy('name')
+                ->lockForUpdate()
+                ->get();
+            Settings::query()->updateOrCreate(['name' => 'orchestrator_bf_permit'], ['value' => '0']);
+            Settings::query()->updateOrCreate(['name' => 'orchestrator_bf_budget'], ['value' => '0']);
+        }, 3);
         Settings::forgetCachedSettings();
     }
 
@@ -196,6 +224,7 @@ class WorkerProfileApplier
                 'orchestrator_bf_paused' => '1',
                 'orchestrator_bf_group' => $group,
                 'orchestrator_bf_quality' => $reason,
+                'orchestrator_bf_budget' => '0',
             ] as $name => $value) {
                 Settings::query()->updateOrCreate(['name' => $name], ['value' => $value]);
             }

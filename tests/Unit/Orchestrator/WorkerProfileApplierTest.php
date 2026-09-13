@@ -391,6 +391,7 @@ final class WorkerProfileApplierTest extends TestCase
             'alt.next',
             false,
             100_000,
+            500_000,
         );
 
         self::assertSame(5, $generation);
@@ -405,6 +406,42 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame(7, Settings::settingValue('orchestrator_bfc_stop'));
         self::assertSame(100_001, Settings::settingValue('orchestrator_bfc_first'));
         self::assertSame(200_000, Settings::settingValue('orchestrator_bfc_last'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_budget'));
+    }
+
+    public function test_free_run_publishes_only_the_snapshot_safe_residual_refill_budget(): void
+    {
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
+
+        (new WorkerProfileApplier)->apply(
+            $this->decision(ControlProfile::FreeRun, true),
+            1_000,
+            true,
+            'alt.test',
+            false,
+            100_000,
+            250_000,
+        );
+
+        self::assertSame(100_000, Settings::settingValue('orchestrator_bf_qty'));
+        self::assertSame(150_000, Settings::settingValue('orchestrator_bf_budget'));
+    }
+
+    public function test_revocation_atomically_clears_the_permit_and_its_refill_budget(): void
+    {
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '5']);
+        Settings::query()->insert(['name' => 'orchestrator_bf_budget', 'value' => '150000']);
+
+        (new WorkerProfileApplier)->revokePermit();
+
+        self::assertSame([
+            'orchestrator_bf_budget' => 0,
+            'orchestrator_bf_permit' => 0,
+        ], Settings::query()
+            ->whereIn('name', ['orchestrator_bf_budget', 'orchestrator_bf_permit'])
+            ->orderBy('name')
+            ->pluck('value', 'name')
+            ->all());
     }
 
     public function test_adaptive_profile_does_not_queue_behind_an_in_flight_claim(): void
@@ -437,6 +474,7 @@ final class WorkerProfileApplierTest extends TestCase
         Settings::query()->where('name', 'orchestrator_bf_completed')->update(['value' => '3']);
         Settings::query()->insert([
             ['name' => 'orchestrator_bf_failed', 'value' => '0'],
+            ['name' => 'orchestrator_bf_budget', 'value' => '30000'],
             ['name' => 'orchestrator_bf_group', 'value' => 'alt.queued'],
             ['name' => 'orchestrator_bf_qty', 'value' => '10000'],
             ['name' => 'orchestrator_bf_stop', 'value' => '123'],
@@ -455,6 +493,7 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame('alt.queued', Settings::settingValue('orchestrator_bf_group'));
         self::assertSame(10_000, Settings::settingValue('orchestrator_bf_qty'));
         self::assertSame(123, Settings::settingValue('orchestrator_bf_stop'));
+        self::assertSame(30_000, Settings::settingValue('orchestrator_bf_budget'));
         self::assertSame(6, $generation);
     }
 

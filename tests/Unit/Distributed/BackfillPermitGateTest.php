@@ -7,6 +7,7 @@ namespace Tests\Unit\Distributed;
 use App\Models\Settings;
 use App\Services\Distributed\BackfillPermitGate;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -187,6 +188,168 @@ class BackfillPermitGateTest extends TestCase
 
         self::assertTrue($gate->fail(17, 'provider failed'));
         self::assertSame(17, Settings::settingValue('orchestrator_bf_failed'));
+    }
+
+    public function test_free_run_successor_is_queued_from_the_completed_claim_without_a_full_snapshot(): void
+    {
+        Carbon::setTestNow('2026-09-13 18:00:00');
+        config()->set('nntmux.orchestrator.backfill_days_override', 1);
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['all']);
+        Schema::create('usenet_groups', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name')->unique();
+            $table->boolean('active');
+            $table->boolean('backfill');
+            $table->unsignedInteger('backfill_target');
+            $table->unsignedBigInteger('first_record');
+            $table->dateTime('first_record_postdate');
+            $table->unsignedBigInteger('last_record');
+            $table->dateTime('last_record_postdate');
+        });
+        Schema::create('short_groups', function (Blueprint $table): void {
+            $table->string('name')->unique();
+            $table->unsignedBigInteger('first_record');
+            $table->unsignedBigInteger('last_record');
+            $table->dateTime('updated');
+        });
+        DB::table('usenet_groups')->insert([
+            'name' => 'alt.test',
+            'active' => 1,
+            'backfill' => 1,
+            'backfill_target' => 30,
+            'first_record' => 200_000,
+            'first_record_postdate' => '2026-09-01 00:00:00',
+            'last_record' => 400_000,
+            'last_record_postdate' => '2026-09-13 17:59:00',
+        ]);
+        DB::table('short_groups')->insert([
+            'name' => 'alt.test',
+            'first_record' => 50_000,
+            'last_record' => 400_000,
+            'updated' => now(),
+        ]);
+        $this->settings('active', time() + 600, 0, 0);
+        Settings::query()->insert([
+            ['name' => 'orchestrator_generation', 'value' => '17'],
+            ['name' => 'orchestrator_free_run', 'value' => '1'],
+            ['name' => 'orchestrator_bf_budget', 'value' => '200000'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '17'],
+            ['name' => 'orchestrator_bf_failed', 'value' => '0'],
+            ['name' => 'orchestrator_bfc_group', 'value' => 'alt.test'],
+            ['name' => 'orchestrator_bfc_profile', 'value' => 'free_run'],
+            ['name' => 'orchestrator_bfc_qty', 'value' => '100000'],
+            ['name' => 'orchestrator_bfc_stop', 'value' => '0'],
+            ['name' => 'orchestrator_bfc_first', 'value' => '200000'],
+            ['name' => 'orchestrator_bfc_last', 'value' => '299999'],
+        ]);
+        Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '17']);
+
+        self::assertSame(18, (new BackfillPermitGate)->queueFreeRunSuccessor(17));
+        self::assertSame(18, Settings::settingValue('orchestrator_generation'));
+        self::assertSame(18, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame('alt.test', Settings::settingValue('orchestrator_bf_group'));
+        self::assertSame(100_000, Settings::settingValue('orchestrator_bf_qty'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_stop'));
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_claimed'));
+        self::assertSame(17, Settings::settingValue('orchestrator_bf_completed'));
+        self::assertSame(100_000, Settings::settingValue('orchestrator_bf_budget'));
+
+        self::assertNull((new BackfillPermitGate)->queueFreeRunSuccessor(17));
+        self::assertSame(18, Settings::settingValue('orchestrator_bf_permit'));
+
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '0']);
+        Settings::query()->where('name', 'orchestrator_bf_budget')->update(['value' => '9999']);
+        self::assertNull((new BackfillPermitGate)->queueFreeRunSuccessor(17));
+        self::assertSame(
+            0,
+            Settings::query()->where('name', 'orchestrator_bf_permit')->value('value'),
+        );
+
+        Settings::query()->where('name', 'orchestrator_bf_budget')->update(['value' => '100000']);
+        DB::table('usenet_groups')->where('name', 'alt.test')->update([
+            'active' => 0,
+            'backfill' => 1,
+            'first_record' => 200_000,
+            'last_record' => 400_001,
+        ]);
+        self::assertNull((new BackfillPermitGate)->queueFreeRunSuccessor(17));
+
+        DB::table('usenet_groups')->where('name', 'alt.test')->update([
+            'first_record' => 200_000,
+            'last_record' => 199_999,
+        ]);
+        DB::table('short_groups')->where('name', 'alt.test')->update(['first_record' => 200_000]);
+        self::assertNull((new BackfillPermitGate)->queueFreeRunSuccessor(17));
+
+        DB::table('usenet_groups')->where('name', 'alt.test')->update([
+            'active' => 1,
+            'first_record' => 300_000,
+            'last_record' => 400_000,
+        ]);
+        DB::table('short_groups')->where('name', 'alt.test')->update(['first_record' => 50_000]);
+        self::assertNull((new BackfillPermitGate)->queueFreeRunSuccessor(17));
+        self::assertSame(
+            0,
+            Settings::query()->where('name', 'orchestrator_bf_permit')->value('value'),
+        );
+    }
+
+    public function test_free_run_successor_is_not_queued_after_the_target_date_is_reached(): void
+    {
+        Carbon::setTestNow('2026-09-13 18:00:00');
+        config()->set('nntmux.orchestrator.backfill_days_override', 1);
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['all']);
+        Schema::create('usenet_groups', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name')->unique();
+            $table->boolean('active');
+            $table->boolean('backfill');
+            $table->unsignedInteger('backfill_target');
+            $table->unsignedBigInteger('first_record');
+            $table->dateTime('first_record_postdate');
+            $table->unsignedBigInteger('last_record');
+            $table->dateTime('last_record_postdate');
+        });
+        Schema::create('short_groups', function (Blueprint $table): void {
+            $table->string('name')->unique();
+            $table->unsignedBigInteger('first_record');
+            $table->unsignedBigInteger('last_record');
+            $table->dateTime('updated');
+        });
+        DB::table('usenet_groups')->insert([
+            'name' => 'alt.test',
+            'active' => 1,
+            'backfill' => 1,
+            'backfill_target' => 7,
+            'first_record' => 200_000,
+            'first_record_postdate' => '2026-09-01 00:00:00',
+            'last_record' => 400_000,
+            'last_record_postdate' => '2026-09-13 17:59:00',
+        ]);
+        DB::table('short_groups')->insert([
+            'name' => 'alt.test',
+            'first_record' => 50_000,
+            'last_record' => 400_000,
+            'updated' => now(),
+        ]);
+        $this->settings('active', time() + 600, 0, 0);
+        Settings::query()->insert([
+            ['name' => 'orchestrator_generation', 'value' => '17'],
+            ['name' => 'orchestrator_free_run', 'value' => '1'],
+            ['name' => 'orchestrator_bf_budget', 'value' => '200000'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '17'],
+            ['name' => 'orchestrator_bf_failed', 'value' => '0'],
+            ['name' => 'orchestrator_bfc_group', 'value' => 'alt.test'],
+            ['name' => 'orchestrator_bfc_profile', 'value' => 'free_run'],
+            ['name' => 'orchestrator_bfc_qty', 'value' => '100000'],
+            ['name' => 'orchestrator_bfc_stop', 'value' => '0'],
+            ['name' => 'orchestrator_bfc_first', 'value' => '200000'],
+            ['name' => 'orchestrator_bfc_last', 'value' => '299999'],
+        ]);
+        Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '17']);
+
+        self::assertNull((new BackfillPermitGate)->queueFreeRunSuccessor(17));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
     }
 
     public function test_it_denies_a_permit_when_the_pinned_stop_does_not_match_runtime_policy(): void

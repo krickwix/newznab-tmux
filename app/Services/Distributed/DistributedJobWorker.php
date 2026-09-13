@@ -268,6 +268,16 @@ class DistributedJobWorker
 
                     return $result(1);
                 }
+                try {
+                    $backfillPermitGate->queueFreeRunSuccessor($claimedBackfillGeneration);
+                } catch (Throwable $error) {
+                    $output->writeln(sprintf(
+                        '[%s] completed backfill generation %d but could not queue its free-run successor: %s',
+                        now()->toDateTimeString(),
+                        $claimedBackfillGeneration,
+                        $error->getMessage(),
+                    ));
+                }
             }
 
             $output->writeln(sprintf('[%s] completed %s', now()->toDateTimeString(), $plan['name']));
