@@ -64,7 +64,14 @@ class WorkerProfileApplier
             $claimedPermitInFlight = $existingClaimed > 0
                 && $existingClaimed !== $existingCompleted
                 && $existingClaimed !== $existingFailed;
-            if ($grantPermit && $claimedPermitInFlight) {
+            if ($grantPermit && $existingPermit > 0) {
+                $grantPermit = false;
+                $preserveUnclaimedPermit = $decision->backfillPermitted;
+            }
+            $queueBehindClaim = $grantPermit
+                && $claimedPermitInFlight
+                && $profile->profile === ControlProfile::FreeRun;
+            if ($grantPermit && $claimedPermitInFlight && ! $queueBehindClaim) {
                 $grantPermit = false;
                 $preserveUnclaimedPermit = false;
             }
@@ -112,9 +119,9 @@ class WorkerProfileApplier
                 'orchestrator_nzb_limit' => (string) $profile->nzbBatchSize,
                 'orchestrator_bf_paused' => $backfillAdmissionOpen ? '0' : '1',
                 'orchestrator_bf_permit' => (string) $permit,
-                'orchestrator_bf_claimed' => $grantPermit ? '0' : (string) $existingClaimed,
-                'orchestrator_bf_completed' => $grantPermit ? '0' : (string) $existingCompleted,
-                'orchestrator_bf_failed' => $grantPermit ? '0' : (string) $existingFailed,
+                'orchestrator_bf_claimed' => $grantPermit && ! $queueBehindClaim ? '0' : (string) $existingClaimed,
+                'orchestrator_bf_completed' => $grantPermit && ! $queueBehindClaim ? '0' : (string) $existingCompleted,
+                'orchestrator_bf_failed' => $grantPermit && ! $queueBehindClaim ? '0' : (string) $existingFailed,
                 'orchestrator_bf_group' => $grantPermit ? (string) $backfillGroup : $existingGroup,
                 'orchestrator_bf_qty' => (string) ($grantPermit
                     ? max(10000, $backfillQuantity ?? $profile->backfillQuantity)
