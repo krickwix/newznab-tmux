@@ -256,11 +256,14 @@ class DistributedJobWorkerTest extends TestCase
 
     public function test_backfill_refreshes_control_settings_before_resolving_each_plan(): void
     {
-        config(['nntmux.distributed_lock_store' => 'array']);
+        config([
+            'nntmux.distributed_lock_store' => 'array',
+            'nntmux.orchestrator.require_backfill_permit' => false,
+        ]);
         Cache::store('array')->flush();
         Artisan::shouldReceive('call')->once()->with(
             'multiprocessing:safe',
-            ['type' => 'backfill'],
+            ['type' => 'backfill', '--backfill-generation' => 17],
             Mockery::type(BufferedOutput::class),
         )->andReturn(0);
 
@@ -370,7 +373,7 @@ class DistributedJobWorkerTest extends TestCase
         $gate->shouldReceive('complete')->once()->with(17)->andReturnTrue();
         Artisan::shouldReceive('call')->once()->with(
             'multiprocessing:safe',
-            ['type' => 'backfill'],
+            ['type' => 'backfill', '--backfill-generation' => 17],
             Mockery::type(BufferedOutput::class),
         )->andReturn(0);
 
