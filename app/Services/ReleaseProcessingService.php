@@ -29,6 +29,7 @@ use DateTimeInterface;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
@@ -57,6 +58,8 @@ final class ReleaseProcessingService
     private int $workBatchSize = self::BATCH_SIZE;
 
     private bool $cooperativeSlice = false;
+
+    private bool $cursorCacheWarned = false;
 
     private float $workDeadlineAt = PHP_FLOAT_MAX;
 
@@ -441,6 +444,7 @@ final class ReleaseProcessingService
 
         $this->workBatchSize = max(1, min(self::BATCH_SIZE, $batchSize));
         $this->cooperativeSlice = true;
+        $this->cursorCacheWarned = false;
         $this->workDeadlineAt = $deadlineAt;
 
         try {
@@ -1042,6 +1046,19 @@ final class ReleaseProcessingService
             && $processed === $this->workBatchSize;
     }
 
+    /**
+     * Stage 3 marks every binary of a promoted page, not one batch of it.
+     *
+     * A 200-collection page holds thousands of binaries, so one batch per
+     * slice left most collections short at stage 4 for stage 5 to revert. The
+     * 15/16 set is only ever the current page (stage 5 reverts leftovers every
+     * slice), so a cooperative slice may drain it, bounded by its deadline.
+     */
+    private function shouldContinueBinaryBatch(int $processed): bool
+    {
+        return ! $this->deadlineReached() && $processed === $this->workBatchSize;
+    }
+
     /** @phpstan-impure */
     private function deadlineReached(): bool
     {
@@ -1068,7 +1085,9 @@ final class ReleaseProcessingService
         try {
             return max(0, (int) Cache::store((string) config('nntmux.distributed_lock_store', 'redis'))
                 ->get("nntmux:release-pump:{$stage}:{$groupId}", 0));
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            $this->warnCursorCacheUnavailable($e);
+
             return 0;
         }
     }
@@ -1078,9 +1097,114 @@ final class ReleaseProcessingService
         try {
             Cache::store((string) config('nntmux.distributed_lock_store', 'redis'))
                 ->forever("nntmux:release-pump:{$stage}:{$groupId}", max(0, $cursor));
-        } catch (Throwable) {
+        } catch (Throwable $e) {
             // A cache outage keeps the slice safe and bounded; later cycles can
             // resume from the deterministic beginning once the store recovers.
+            $this->warnCursorCacheUnavailable($e);
+        }
+    }
+
+    private function warnCursorCacheUnavailable(Throwable $e): void
+    {
+        if ($this->cursorCacheWarned) {
+            return;
+        }
+        $this->cursorCacheWarned = true;
+        Log::warning('Release stage scan cursors unavailable; scanning from the first id', ['error' => $e->getMessage()]);
+    }
+
+    /**
+     * One id page of candidate collections for a cooperative slice, in id
+     * order after the stage's persisted cursor.
+     *
+     * The caller commits the cursor via commitScanCursor() after its work. It
+     * advances by rows scanned, not rows qualified, so a prefix of
+     * non-qualifying collections cannot be re-read every slice. A short page
+     * means the tail was reached and wraps the cursor to the beginning.
+     *
+     * @param  list<int>  $filechecks
+     * @return list<int>
+     */
+    private function scanPageIds(string $stage, int $groupId, array $filechecks, ?callable $scope = null): array
+    {
+        $window = max(1, (int) config('nntmux.release_stage_scan_window', 2000));
+        $ids = $this->retryTransientCollectionOperation(
+            fn (): array => Collection::query()
+                ->whereIn('filecheck', $filechecks)
+                ->where('id', '>', $this->cooperativeStageCursor($stage, $groupId))
+                ->when($groupId !== 0, static fn ($q) => $q->where('groups_id', $groupId))
+                ->when($scope !== null, static fn ($q) => $scope($q))
+                ->orderBy('id')
+                ->limit($window)
+                ->pluck('id')
+                ->map(static fn ($id): int => (int) $id)
+                ->all()
+        );
+
+        return $ids;
+    }
+
+    /**
+     * Persist the scan cursor once the page's work has succeeded, so a failed
+     * slice re-reads its page instead of skipping it.
+     *
+     * @param  list<int>  $page
+     */
+    private function commitScanCursor(string $stage, int $groupId, array $page): void
+    {
+        $window = max(1, (int) config('nntmux.release_stage_scan_window', 2000));
+        $this->storeCooperativeStageCursor($stage, $groupId, \count($page) < $window ? 0 : max($page));
+    }
+
+    /**
+     * Stage 4's acceptance test as a collections-level predicate, evaluated
+     * before stage 3 has run. Stage 4 treats filecheck 15 and 16 identically,
+     * so the same test gates the 1 to 15 and the 1 to 16 moves.
+     *
+     * @return array{0: string, 1: list<int>}
+     */
+    private function stageFourAcceptable(): array
+    {
+        $completion = $this->requiredCompletionPercent();
+
+        return [
+            '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id AND (b.partcheck = ? OR (b.partcheck = ? AND b.totalparts > 0 AND b.currentparts >= CEIL(b.totalparts * ? / 100)))) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
+            [FileCompletionStatus::Complete->value, FileCompletionStatus::Incomplete->value, $completion, $completion],
+        ];
+    }
+
+    /**
+     * Cooperative stage 2: promote only collections stage 4 will accept.
+     *
+     * The predicate mirrors stage 3 + stage 4 exactly: a binary counts when it
+     * is already complete or is incomplete but meets stage 3's part threshold,
+     * and the count must reach stage 4's GREATEST(1, CEIL(totalfiles * c / 100)).
+     * Anything else would only be reverted by stage 5, so it stays at 1.
+     *
+     * @param  list<int>  $page
+     *
+     * @throws Throwable
+     */
+    private function promoteCooperativeStage2(array $page, int $fromStatus, int $toStatus): void
+    {
+        $ids = $this->retryTransientCollectionOperation(
+            fn (): array => Collection::query()
+                ->whereIn('collections.id', $page)
+                ->where('collections.filecheck', $fromStatus)
+                ->whereRaw(...$this->stageFourAcceptable())
+                ->orderBy('collections.id')
+                ->pluck('collections.id')
+                ->all()
+        );
+
+        foreach (array_chunk($ids, $this->workBatchSize) as $chunk) {
+            $this->retryTransientCollectionOperation(static fn () => DB::transaction(
+                static fn (): int => Collection::query()
+                    ->whereIn('id', $chunk)
+                    ->where('filecheck', $fromStatus)
+                    ->update(['filecheck' => $toStatus]),
+                10,
+            ));
         }
     }
 
@@ -1144,6 +1268,14 @@ final class ReleaseProcessingService
     private function runCollectionFileCheckStage0(?int $groupID): void
     {
         $completion = $this->requiredCompletionPercent();
+        $page = $this->cooperativeSlice
+            ? $this->scanPageIds('stage0', $groupID ?? 0, [CollectionFileCheckStatus::Default->value], static fn ($q) => $q->where('totalfiles', 0))
+            : null;
+        if ($page === []) {
+            $this->commitScanCursor('stage0', $groupID ?? 0, []);
+
+            return;
+        }
 
         $lastCollectionId = 0;
 
@@ -1153,6 +1285,7 @@ final class ReleaseProcessingService
                     ->select(['collections.id'])
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
                     ->where('collections.id', '>', $lastCollectionId)
+                    ->when($page !== null, static fn ($q) => $q->whereIn('collections.id', $page))
                     ->where('collections.totalfiles', '=', 0)
                     ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
                     ->where('binaries.filenumber', '>', 0)
@@ -1163,7 +1296,7 @@ final class ReleaseProcessingService
                         [$completion]
                     )
                     ->orderBy('collections.id')
-                    ->limit($this->workBatchSize)
+                    ->when($page === null, fn ($q) => $q->limit($this->workBatchSize))
                     ->pluck('collections.id')
             );
 
@@ -1171,23 +1304,29 @@ final class ReleaseProcessingService
                 break;
             }
 
-            $this->retryTransientCollectionOperation(
-                static fn () => DB::transaction(static function () use ($collectionIds): void {
-                    Collection::query()
-                        ->whereIn('id', $collectionIds->all())
-                        ->update([
-                            'filecheck' => CollectionFileCheckStatus::CompleteCollection->value,
-                            'totalfiles' => DB::raw(
-                                '(SELECT MAX(NULLIF(b2.filenumber, 0)) FROM binaries b2 WHERE b2.collections_id = collections.id)'
-                            ),
-                        ]);
-                }, 10)
-            );
+            foreach ($collectionIds->chunk($this->workBatchSize) as $ids) {
+                $this->retryTransientCollectionOperation(
+                    static fn () => DB::transaction(static function () use ($ids): void {
+                        Collection::query()
+                            ->whereIn('id', $ids->all())
+                            ->update([
+                                'filecheck' => CollectionFileCheckStatus::CompleteCollection->value,
+                                'totalfiles' => DB::raw(
+                                    '(SELECT MAX(NULLIF(b2.filenumber, 0)) FROM binaries b2 WHERE b2.collections_id = collections.id)'
+                                ),
+                            ]);
+                    }, 10)
+                );
+            }
 
             $lastCollectionId = (int) $collectionIds->max();
 
             usleep(self::BATCH_PAUSE_US);
         } while ($this->shouldContinueStageBatch($collectionIds->count()));
+
+        if ($page !== null) {
+            $this->commitScanCursor('stage0', $groupID ?? 0, $page);
+        }
     }
 
     /**
@@ -1196,6 +1335,14 @@ final class ReleaseProcessingService
     private function runCollectionFileCheckStage1(int $groupID): void
     {
         $completion = $this->requiredCompletionPercent();
+        $page = $this->cooperativeSlice
+            ? $this->scanPageIds('stage1', $groupID, [CollectionFileCheckStatus::Default->value], static fn ($q) => $q->where('totalfiles', '>', 0))
+            : null;
+        if ($page === []) {
+            $this->commitScanCursor('stage1', $groupID, []);
+
+            return;
+        }
 
         $lastCollectionId = 0;
 
@@ -1205,6 +1352,7 @@ final class ReleaseProcessingService
                     ->select(['collections.id'])
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
                     ->where('collections.id', '>', $lastCollectionId)
+                    ->when($page !== null, static fn ($q) => $q->whereIn('collections.id', $page))
                     ->where('collections.totalfiles', '>', 0)
                     ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
                     ->when($groupID !== 0, static fn ($q) => $q->where('collections.groups_id', $groupID))
@@ -1214,7 +1362,7 @@ final class ReleaseProcessingService
                         [$completion]
                     )
                     ->orderBy('collections.id')
-                    ->limit($this->workBatchSize)
+                    ->when($page === null, fn ($q) => $q->limit($this->workBatchSize))
                     ->pluck('collections.id')
             );
 
@@ -1252,6 +1400,10 @@ final class ReleaseProcessingService
 
             usleep(self::BATCH_PAUSE_US);
         } while ($this->shouldContinueStageBatch($collectionIds->count()));
+
+        if ($page !== null) {
+            $this->commitScanCursor('stage1', $groupID, $page);
+        }
     }
 
     /**
@@ -1259,6 +1411,15 @@ final class ReleaseProcessingService
      */
     private function runCollectionFileCheckStage2(int $groupID): void
     {
+        $page = $this->cooperativeSlice
+            ? $this->scanPageIds('stage2', $groupID, [CollectionFileCheckStatus::CompleteCollection->value])
+            : null;
+        if ($page === []) {
+            $this->commitScanCursor('stage2', $groupID, []);
+
+            return;
+        }
+
         do {
             $zeroPartIds = Collection::query()
                 ->select(['collections.id'])
@@ -1267,9 +1428,10 @@ final class ReleaseProcessingService
                 ->where('collections.totalfiles', '>', 0)
                 ->where('collections.filecheck', '=', CollectionFileCheckStatus::CompleteCollection->value)
                 ->when($groupID !== 0, static fn ($q) => $q->where('collections.groups_id', $groupID))
+                ->when($page !== null, fn ($q) => $q->whereIn('collections.id', $page)->whereRaw(...$this->stageFourAcceptable()))
                 ->groupBy(['collections.id'])
                 ->orderBy('collections.id')
-                ->limit($this->workBatchSize)
+                ->when($page === null, fn ($q) => $q->limit($this->workBatchSize))
                 ->pluck('collections.id')
                 ->all();
 
@@ -1283,6 +1445,13 @@ final class ReleaseProcessingService
                 ));
             }
         } while ($this->shouldContinueStageBatch(\count($zeroPartIds)));
+
+        if ($page !== null) {
+            $this->promoteCooperativeStage2($page, CollectionFileCheckStatus::CompleteCollection->value, CollectionFileCheckStatus::TempComplete->value);
+            $this->commitScanCursor('stage2', $groupID, $page);
+
+            return;
+        }
 
         $this->updateCollectionsFilecheckInChunks(
             $groupID,
@@ -1323,9 +1492,12 @@ final class ReleaseProcessingService
                         break;
                     }
 
-                    DB::transaction(static function () use ($ids, $toStatus): void {
+                    DB::transaction(static function () use ($ids, $fromStatus, $toStatus): void {
+                        // Guarded: a row another writer moved since the id page
+                        // was read must not be dragged back to $toStatus.
                         Collection::query()
                             ->whereIn('id', $ids)
+                            ->where('filecheck', $fromStatus)
                             ->update(['filecheck' => $toStatus]);
                     }, 10);
 
@@ -1460,7 +1632,7 @@ final class ReleaseProcessingService
             $lastBinaryId = (int) $binaryIds->max();
 
             usleep(self::BATCH_PAUSE_US);
-        } while ($this->shouldContinueStageBatch($binaryIds->count()));
+        } while ($this->shouldContinueBinaryBatch($binaryIds->count()));
     }
 
     /**
@@ -1502,6 +1674,18 @@ final class ReleaseProcessingService
     {
         $normalizedGroupId = $this->extractGroupIdFromWhereSql($whereSql);
         $completion = $this->requiredCompletionPercent();
+        $page = $this->cooperativeSlice
+            ? $this->scanPageIds('stage6', $normalizedGroupId ?? 0, [
+                CollectionFileCheckStatus::Default->value,
+                CollectionFileCheckStatus::CompleteCollection->value,
+                10,
+            ])
+            : null;
+        if ($page === []) {
+            $this->commitScanCursor('stage6', $normalizedGroupId ?? 0, []);
+
+            return;
+        }
 
         $lastCollectionId = 0;
 
@@ -1510,37 +1694,46 @@ final class ReleaseProcessingService
                 $lastCollectionId,
                 $normalizedGroupId,
                 $completion,
+                $page,
             );
             if ($completeIds === []) {
                 break;
             }
 
-            $this->retryTransientCollectionOperation(
-                static fn () => DB::transaction(static function () use ($completeIds): void {
-                    Collection::query()
-                        ->whereIn('id', $completeIds)
-                        ->update([
-                            'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
-                            'totalfiles' => DB::raw(
-                                '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id)'
-                            ),
-                        ]);
-                }, 10)
-            );
+            foreach (array_chunk($completeIds, $this->workBatchSize) as $chunk) {
+                $this->retryTransientCollectionOperation(
+                    static fn () => DB::transaction(static function () use ($chunk): void {
+                        Collection::query()
+                            ->whereIn('id', $chunk)
+                            ->update([
+                                'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
+                                'totalfiles' => DB::raw(
+                                    '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id)'
+                                ),
+                            ]);
+                    }, 10)
+                );
+            }
 
             $lastCollectionId = max($completeIds);
 
             usleep(self::BATCH_PAUSE_US);
         } while ($this->shouldContinueStageBatch(\count($completeIds)));
+
+        if ($page !== null) {
+            $this->commitScanCursor('stage6', $normalizedGroupId ?? 0, $page);
+        }
     }
 
     /**
+     * @param  list<int>|null  $page  Scan page of a cooperative slice; null pages by limit.
      * @return list<int>
      */
     private function stage6CompleteCollectionIds(
         int $lastCollectionId,
         ?int $normalizedGroupId,
         int $completion,
+        ?array $page = null,
     ): array {
         return $this->retryTransientCollectionOperation(
             fn (): array => DB::table('collections')
@@ -1554,6 +1747,7 @@ final class ReleaseProcessingService
                         );
                 })
                 ->where('collections.id', '>', $lastCollectionId)
+                ->when($page !== null, static fn ($q) => $q->whereIn('collections.id', $page))
                 ->where('collections.dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
                 ->whereIn('collections.filecheck', [
                     CollectionFileCheckStatus::Default->value,
@@ -1568,7 +1762,7 @@ final class ReleaseProcessingService
                     [$completion],
                 )
                 ->orderBy('collections.id')
-                ->limit($this->workBatchSize)
+                ->when($page === null, fn ($q) => $q->limit($this->workBatchSize))
                 ->pluck('collections.id')
                 ->map(static fn ($id): int => (int) $id)
                 ->all()
