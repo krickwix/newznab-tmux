@@ -149,6 +149,41 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
         self::assertSame(CollectionFileCheckStatus::Sized->value, (int) DB::table('collections')->where('id', 2)->value('filecheck'));
     }
 
+    public function test_stage_three_marks_every_binary_of_a_large_collection_in_one_slice(): void
+    {
+        $this->insertCollection(1, 1, CollectionFileCheckStatus::TempComplete->value, 450);
+        $binaries = [];
+        for ($i = 1; $i <= 450; $i++) {
+            $binaries[] = $this->binary($i, 1, 1, 1);
+        }
+        foreach (array_chunk($binaries, 200) as $chunk) {
+            DB::table('binaries')->insert($chunk);
+        }
+
+        $service = $this->cooperativeService(200);
+        $this->runStage($service, 'runCollectionFileCheckStage3', 1);
+
+        self::assertSame(0, DB::table('binaries')->where('partcheck', FileCompletionStatus::Incomplete->value)->count());
+    }
+
+    /** @return array<string, int> */
+    private function binary(int $id, int $collectionId, int $current, int $total, int $partcheck = 0): array
+    {
+        return [
+            'id' => $id,
+            'collections_id' => $collectionId,
+            'filenumber' => $id,
+            'totalparts' => $total,
+            'currentparts' => $current,
+            'partcheck' => $partcheck,
+        ];
+    }
+
+    private function runStage(ReleaseProcessingService $service, string $method, mixed ...$args): void
+    {
+        (new ReflectionMethod($service, $method))->invoke($service, ...$args);
+    }
+
     private function insertCollection(int $id, int $groupId, int $filecheck, int $totalfiles = 1): void
     {
         DB::table('collections')->insert([
@@ -160,12 +195,12 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
         ]);
     }
 
-    private function cooperativeService(): ReleaseProcessingService
+    private function cooperativeService(int $batchSize = 500): ReleaseProcessingService
     {
         $reflection = new ReflectionClass(ReleaseProcessingService::class);
         $service = $reflection->newInstanceWithoutConstructor();
         $reflection->getProperty('cooperativeSlice')->setValue($service, true);
-        $reflection->getProperty('workBatchSize')->setValue($service, 500);
+        $reflection->getProperty('workBatchSize')->setValue($service, $batchSize);
         $reflection->getProperty('settings')->setValue(
             $service,
             new ProcessReleasesSettings(completion: 100),

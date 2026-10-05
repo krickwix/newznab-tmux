@@ -1042,6 +1042,19 @@ final class ReleaseProcessingService
             && $processed === $this->workBatchSize;
     }
 
+    /**
+     * Stage 3 marks every binary of a promoted page, not one batch of it.
+     *
+     * A 200-collection page holds thousands of binaries, so one batch per
+     * slice left most collections short at stage 4 for stage 5 to revert. The
+     * 15/16 set is only ever the current page (stage 5 reverts leftovers every
+     * slice), so a cooperative slice may drain it, bounded by its deadline.
+     */
+    private function shouldContinueBinaryBatch(int $processed): bool
+    {
+        return ! $this->deadlineReached() && $processed === $this->workBatchSize;
+    }
+
     /** @phpstan-impure */
     private function deadlineReached(): bool
     {
@@ -1463,7 +1476,7 @@ final class ReleaseProcessingService
             $lastBinaryId = (int) $binaryIds->max();
 
             usleep(self::BATCH_PAUSE_US);
-        } while ($this->shouldContinueStageBatch($binaryIds->count()));
+        } while ($this->shouldContinueBinaryBatch($binaryIds->count()));
     }
 
     /**
