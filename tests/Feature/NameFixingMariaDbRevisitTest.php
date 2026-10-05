@@ -40,6 +40,7 @@ final class NameFixingMariaDbRevisitTest extends TestCase
             ],
             'cache.default' => 'array',
             'nntmux.namefix_subject_revisit_limit' => 2,
+            'nntmux.namefix_revisit_min_sweep_seconds' => 0,
         ]);
         DB::purge('mariadb_t');
         Cache::store('array')->flush();
@@ -153,5 +154,24 @@ final class NameFixingMariaDbRevisitTest extends TestCase
         self::assertSame([3, 2], $ids());
         self::assertSame([1], $ids());
         self::assertSame([3, 2], $ids());
+    }
+
+    public function test_mediainfo_revisit_rests_after_a_wrap(): void
+    {
+        config(['nntmux.namefix_revisit_min_sweep_seconds' => 3600, 'nntmux.namefix_subject_revisit_limit' => 5]);
+        foreach ([1, 2] as $id) {
+            $this->release($id);
+            DB::table('releases')->where('id', $id)->update(['categories_id' => Category::OTHER_HASHED]);
+            DB::table('media_infos')->insert(['releases_id' => $id, 'movie_name' => 'Some Movie', 'file_name' => 'f']);
+        }
+        $service = app(NameFixingService::class);
+        $method = new ReflectionMethod($service, 'revisitPage');
+        $query = 'SELECT rel.id AS releases_id FROM releases rel INNER JOIN media_infos rf ON rf.releases_id = rel.id WHERE rel.isrenamed = 0';
+        $ids = fn (): array => collect($method->invoke($service, 'mediainfo', $query, 2, 5, 5, true))->pluck('releases_id')->map(fn ($id): int => (int) $id)->all();
+
+        self::assertSame([2, 1], $ids());
+        self::assertSame([], $ids());
+        Cache::forever('nntmux:namefix:mediainfo:cursor:2:5:wrapped_at', time() - 3601);
+        self::assertSame([2, 1], $ids());
     }
 }

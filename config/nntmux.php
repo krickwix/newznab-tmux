@@ -39,6 +39,9 @@ return [
     // Already-processed rows each name-fixing lane re-checks per run (methods 18
     // and 21), swept behind a cursor. 0 disables revisits.
     'namefix_subject_revisit_limit' => min(5000, max(0, (int) env('NNTMUX_NAMEFIX_SUBJECT_REVISIT_LIMIT', 50))),
+    // After a revisit sweep wraps, the lane rests this long before sweeping again,
+    // so a revisit set smaller than the budget is not re-read every cycle. 0 disables.
+    'namefix_revisit_min_sweep_seconds' => max(0, (int) env('NNTMUX_NAMEFIX_REVISIT_MIN_SWEEP_SECONDS', 3600)),
     'distributed_release_sweep_groups' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_RELEASE_SWEEP_GROUPS', 1))),
     'distributed_control_sleep_slice_seconds' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_CONTROL_SLEEP_SLICE_SECONDS', 5))),
     'split_collection_reconcile_groups' => array_values(array_unique(array_filter(array_map(

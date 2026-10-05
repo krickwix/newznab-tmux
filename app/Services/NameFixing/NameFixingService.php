@@ -961,13 +961,50 @@ class NameFixingService
     private function revisitPage(string $lane, string $query, int $time, int $cats, int $take, bool $echo): \Illuminate\Database\Eloquent\Collection|bool // @phpstan-ignore class.notFound, return.phpDocType
     {
         $key = $this->revisitCursorKey($lane, $time, $cats);
+        if ($this->revisitSweepResting($key)) {
+            return new \Illuminate\Database\Eloquent\Collection;
+        }
+
         $cursor = $this->subjectCursor($key);
         $page = $this->getReleases($time, $cats, $query.($cursor === null ? '' : sprintf(' AND rel.id < %d', $cursor)), $take, true);
         if ($page !== false && $echo) {
-            $this->storeSubjectCursor($key, $page->count() < $take ? null : (int) $page->min('releases_id'));
+            $wrapped = $page->count() < $take;
+            $this->storeSubjectCursor($key, $wrapped ? null : (int) $page->min('releases_id'));
+            if ($wrapped) {
+                $this->storeSubjectWrapTime($key);
+            }
         }
 
         return $page;
+    }
+
+    /**
+     * A revisit set smaller than the budget wraps on every run, which would
+     * re-sweep it each cycle. After a wrap, rest until the minimum interval.
+     */
+    private function revisitSweepResting(string $key): bool
+    {
+        $minimum = (int) config('nntmux.namefix_revisit_min_sweep_seconds', 3600);
+        if ($minimum <= 0) {
+            return false;
+        }
+
+        try {
+            $wrappedAt = Cache::store((string) config('cache.default', 'redis'))->get($key.':wrapped_at');
+        } catch (Throwable) {
+            return false;
+        }
+
+        return is_int($wrappedAt) && time() - $wrappedAt < $minimum;
+    }
+
+    private function storeSubjectWrapTime(string $key): void
+    {
+        try {
+            Cache::store((string) config('cache.default', 'redis'))->forever($key.':wrapped_at', time());
+        } catch (Throwable) {
+            // Without the marker the sweep simply repeats next cycle.
+        }
     }
 
     private function subjectRevisitArms(): string
