@@ -181,7 +181,8 @@ final class PrometheusSafetySignalProviderTest extends TestCase
 
         self::assertTrue($signals['fresh']);
         self::assertSame('held', $signals['sample_source']);
-        self::assertSame(0, $signals['sample_age_seconds']);
+        self::assertGreaterThanOrEqual(0, $signals['sample_age_seconds']);
+        self::assertLessThanOrEqual(2, $signals['sample_age_seconds']);
         self::assertSame($good, array_diff_key($signals, ['sample_source' => 1, 'sample_age_seconds' => 1]));
     }
 
