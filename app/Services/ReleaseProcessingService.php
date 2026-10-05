@@ -1323,9 +1323,12 @@ final class ReleaseProcessingService
                         break;
                     }
 
-                    DB::transaction(static function () use ($ids, $toStatus): void {
+                    DB::transaction(static function () use ($ids, $fromStatus, $toStatus): void {
+                        // Guarded: a row another writer moved since the id page
+                        // was read must not be dragged back to $toStatus.
                         Collection::query()
                             ->whereIn('id', $ids)
+                            ->where('filecheck', $fromStatus)
                             ->update(['filecheck' => $toStatus]);
                     }, 10);
 

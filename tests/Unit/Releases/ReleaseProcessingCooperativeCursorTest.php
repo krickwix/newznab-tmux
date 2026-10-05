@@ -127,6 +127,39 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
         );
     }
 
+    public function test_stage_two_update_does_not_clobber_a_concurrently_moved_row(): void
+    {
+        $this->insertCollection(1, 1, CollectionFileCheckStatus::CompleteCollection->value);
+        $this->insertCollection(2, 1, CollectionFileCheckStatus::CompleteCollection->value);
+        DB::listen(static function ($query): void {
+            if (str_starts_with($query->sql, 'select "id" from "collections"')) {
+                DB::table('collections')->where('id', 2)->update(['filecheck' => CollectionFileCheckStatus::Sized->value]);
+            }
+        });
+
+        $service = $this->cooperativeService();
+        (new ReflectionMethod($service, 'updateCollectionsFilecheckInChunks'))->invoke(
+            $service,
+            1,
+            CollectionFileCheckStatus::CompleteCollection->value,
+            CollectionFileCheckStatus::TempComplete->value,
+        );
+
+        self::assertSame(CollectionFileCheckStatus::TempComplete->value, (int) DB::table('collections')->where('id', 1)->value('filecheck'));
+        self::assertSame(CollectionFileCheckStatus::Sized->value, (int) DB::table('collections')->where('id', 2)->value('filecheck'));
+    }
+
+    private function insertCollection(int $id, int $groupId, int $filecheck, int $totalfiles = 1): void
+    {
+        DB::table('collections')->insert([
+            'id' => $id,
+            'groups_id' => $groupId,
+            'filecheck' => $filecheck,
+            'totalfiles' => $totalfiles,
+            'dateadded' => now()->subDay(),
+        ]);
+    }
+
     private function cooperativeService(): ReleaseProcessingService
     {
         $reflection = new ReflectionClass(ReleaseProcessingService::class);
