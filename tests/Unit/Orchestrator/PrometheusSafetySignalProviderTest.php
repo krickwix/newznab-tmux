@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace Tests\Unit\Orchestrator;
 
 use App\Services\Orchestrator\PrometheusSafetySignalProvider;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -28,6 +31,8 @@ final class PrometheusSafetySignalProviderTest extends TestCase
             'nntmux.orchestrator.database_cpu_limit_cores' => 3,
             'nntmux.orchestrator.prometheus_retry_attempts' => 3,
             'nntmux.orchestrator.prometheus_sample_max_age_seconds' => 120,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.safety_sample_hold_seconds' => 120,
         ]);
     }
 
@@ -142,6 +147,120 @@ final class PrometheusSafetySignalProviderTest extends TestCase
             self::assertFalse($signals['storage_safe']);
             self::assertSame(0, $signals['storage_available_bytes']);
         }
+    }
+
+    public function test_a_connection_failure_on_one_query_does_not_erase_the_other_signals(): void
+    {
+        config(['nntmux.orchestrator.safety_sample_hold_seconds' => 0]);
+        Http::fake(function (Request $request) {
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $parameters);
+            if (str_starts_with((string) $parameters['query'], 'storage')) {
+                throw new ConnectionException('timeout');
+            }
+
+            return Http::response(str_ends_with((string) $parameters['query'], 'freshness-query')
+                ? $this->prometheusFreshnessResult()
+                : $this->prometheusResult('1'));
+        });
+
+        $signals = (new PrometheusSafetySignalProvider)->signals();
+
+        self::assertFalse($signals['storage_known']);
+        self::assertTrue($signals['memory_known']);
+        self::assertTrue($signals['cpu_known']);
+    }
+
+    public function test_a_failed_fetch_within_the_hold_window_reuses_the_last_good_sample(): void
+    {
+        $this->fakeGoodSample('20000', '4000', '2.5');
+        $good = (new PrometheusSafetySignalProvider)->signals();
+        $this->resetHttpFake();
+        Http::fake(fn () => throw new ConnectionException('timeout'));
+
+        $signals = (new PrometheusSafetySignalProvider)->signals();
+
+        self::assertTrue($signals['fresh']);
+        self::assertSame('held', $signals['sample_source']);
+        self::assertSame(0, $signals['sample_age_seconds']);
+        self::assertSame($good, array_diff_key($signals, ['sample_source' => 1, 'sample_age_seconds' => 1]));
+    }
+
+    public function test_the_hold_expires_and_falls_back_to_fail_closed(): void
+    {
+        $this->fakeGoodSample('20000', '4000', '2.5');
+        (new PrometheusSafetySignalProvider)->signals();
+        $this->resetHttpFake();
+        Http::fake(fn () => throw new ConnectionException('timeout'));
+
+        $key = 'nntmux:orchestrator:last-good-safety-sample';
+        $last = Cache::store('array')->get($key);
+        $last['observed_at'] -= 121;
+        Cache::store('array')->put($key, $last, 300);
+        $signals = (new PrometheusSafetySignalProvider)->signals();
+
+        self::assertFalse($signals['fresh']);
+        self::assertArrayNotHasKey('sample_source', $signals);
+    }
+
+    public function test_a_held_sample_with_a_real_breach_still_reports_it(): void
+    {
+        $this->fakeGoodSample('20000', '9000', '2.5');
+        (new PrometheusSafetySignalProvider)->signals();
+        $this->resetHttpFake();
+        Http::fake(fn () => throw new ConnectionException('timeout'));
+
+        $signals = (new PrometheusSafetySignalProvider)->signals();
+
+        self::assertSame('held', $signals['sample_source']);
+        self::assertFalse($signals['memory_safe']);
+        self::assertTrue($signals['memory_known']);
+    }
+
+    public function test_a_live_breach_is_never_masked_by_the_hold(): void
+    {
+        $this->fakeGoodSample('20000', '4000', '2.5');
+        (new PrometheusSafetySignalProvider)->signals();
+        $this->resetHttpFake();
+        Http::fakeSequence()
+            ->push($this->prometheusResult('20000'))
+            ->push($this->prometheusFreshnessResult())
+            ->push($this->prometheusResult('9000'))
+            ->push($this->prometheusFreshnessResult())
+            ->pushStatus(503)->pushStatus(503)->pushStatus(503);
+
+        $signals = (new PrometheusSafetySignalProvider)->signals();
+
+        self::assertFalse($signals['fresh']);
+        self::assertFalse($signals['memory_safe']);
+        self::assertArrayNotHasKey('sample_source', $signals);
+    }
+
+    public function test_a_zero_hold_disables_reuse(): void
+    {
+        config(['nntmux.orchestrator.safety_sample_hold_seconds' => 0]);
+        $this->fakeGoodSample('20000', '4000', '2.5');
+        (new PrometheusSafetySignalProvider)->signals();
+        $this->resetHttpFake();
+        Http::fake(fn () => throw new ConnectionException('timeout'));
+
+        self::assertFalse((new PrometheusSafetySignalProvider)->signals()['fresh']);
+    }
+
+    private function resetHttpFake(): void
+    {
+        $this->app->forgetInstance(Factory::class);
+        Http::clearResolvedInstance(Factory::class);
+    }
+
+    private function fakeGoodSample(string $storage, string $memory, string $cpu): void
+    {
+        Http::fakeSequence()
+            ->push($this->prometheusResult($storage))
+            ->push($this->prometheusFreshnessResult())
+            ->push($this->prometheusResult($memory))
+            ->push($this->prometheusFreshnessResult())
+            ->push($this->prometheusResult($cpu))
+            ->push($this->prometheusFreshnessResult());
     }
 
     /** @return array{status: string, data: array{result: list<array{value: array{int, string}}>}} */

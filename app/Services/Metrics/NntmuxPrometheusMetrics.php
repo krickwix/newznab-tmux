@@ -721,6 +721,12 @@ class NntmuxPrometheusMetrics
             '# HELP nntmux_orchestrator_backfill_permit_quantity Articles pinned atomically to the current one-shot permit.',
             '# TYPE nntmux_orchestrator_backfill_permit_quantity gauge',
             $this->metric('nntmux_orchestrator_backfill_permit_quantity', (int) ($settings['orchestrator_bf_qty'] ?? 0)),
+            '# HELP nntmux_orchestrator_safety_sample_held Whether the last tick used a held last-known-good safety sample.',
+            '# TYPE nntmux_orchestrator_safety_sample_held gauge',
+            $this->metric(
+                'nntmux_orchestrator_safety_sample_held',
+                $decisionFresh && ($decision['safety_sample']['source'] ?? 'live') === 'held' ? 1 : 0,
+            ),
             '# HELP nntmux_orchestrator_nzb_batch_size Desired bounded NZB batch size.',
             '# TYPE nntmux_orchestrator_nzb_batch_size gauge',
             $this->metric('nntmux_orchestrator_nzb_batch_size', (int) ($settings['orchestrator_nzb_limit'] ?? 0)),

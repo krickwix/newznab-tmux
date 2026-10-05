@@ -91,6 +91,10 @@ final readonly class PipelineSnapshot
         // policy stays a pure function of its snapshot and needs no store of
         // its own. Null means "no pin" -- run the adaptive ladder.
         public ?ControlProfile $profileOverride = null,
+        // 'held' when the safety signals are a last-known-good sample standing
+        // in for a failed fetch; the age is how old that sample is.
+        public string $safetySampleSource = 'live',
+        public int $safetySampleAgeSeconds = 0,
     ) {}
 
     public function withPermitOutcome(
@@ -181,6 +185,8 @@ final readonly class PipelineSnapshot
             // dropping it here would silently un-pin the fleet the moment a
             // backfill permit completed.
             profileOverride: $this->profileOverride,
+            safetySampleSource: $this->safetySampleSource,
+            safetySampleAgeSeconds: $this->safetySampleAgeSeconds,
         );
     }
 

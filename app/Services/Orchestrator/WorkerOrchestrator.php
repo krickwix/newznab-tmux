@@ -589,6 +589,10 @@ class WorkerOrchestrator
                     'admission_safe' => $snapshot->databaseAdmissionSafe,
                 ],
                 'storage_available_bytes' => $snapshot->storageAvailableBytes,
+                'safety_sample' => [
+                    'source' => $snapshot->safetySampleSource,
+                    'age_seconds' => $snapshot->safetySampleAgeSeconds,
+                ],
                 'observed_at' => $snapshot->observedAt,
                 'eligible_nzbs' => $snapshot->eligibleNzbs,
                 'body_recovery_queue' => $snapshot->bodyRecoveryQueueBacklog,

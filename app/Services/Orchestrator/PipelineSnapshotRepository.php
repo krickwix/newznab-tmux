@@ -258,6 +258,8 @@ class PipelineSnapshotRepository
             databaseCpuKnown: $signals['cpu_known'],
             storageKnown: $signals['storage_known'],
             profileOverride: $profileOverride,
+            safetySampleSource: $signals['sample_source'] ?? 'live',
+            safetySampleAgeSeconds: $signals['sample_age_seconds'] ?? 0,
         );
     }
 
