@@ -926,50 +926,63 @@ class NameFixingService
     /**
      * Unprocessed rows (proc_files = 0) are always eligible first. Rows that
      * were already processed are revisited only through the year/software
-     * REGEXP arms, and those walk older ids behind a persisted cursor so one
-     * full sweep re-checks each of them once instead of the newest page every
-     * cycle. A short page wraps the cursor to the top. Without a limit there
-     * is no page to sweep, so everything is selected as before.
+     * REGEXP arms, at most namefix_subject_revisit_limit per run (0 disables),
+     * walking older ids behind a persisted cursor so one full sweep re-checks
+     * each of them once instead of the newest page every cycle.
      *
      * @return \Illuminate\Database\Eloquent\Collection<int, Release>|false
      */
     private function subjectReleases(string $base, int $time, int $cats, int $limit, bool $echo): \Illuminate\Database\Eloquent\Collection|bool // @phpstan-ignore class.notFound, return.phpDocType
     {
         $fresh = $this->getReleases($time, $cats, $base.sprintf(' AND rel.proc_files = %d', self::PROC_FILES_NONE), $limit);
-        $remaining = $limit - ($fresh ? $fresh->count() : 0);
-        if ($fresh === false || ($limit > 0 && $remaining <= 0)) {
+        $take = $this->revisitBudget($limit > 0 ? $limit - ($fresh ? $fresh->count() : 0) : null);
+        if ($fresh === false || $take <= 0) {
             return $fresh;
         }
 
-        $key = $this->subjectCursorKey($time, $cats);
-        $cursor = $limit > 0 ? $this->subjectCursor($key) : null;
-        $revisit = $limit > 0
-            ? $this->getReleases($time, $cats, $base.$this->subjectRevisitArms($cursor), $remaining, true)
-            : $this->getReleases($time, $cats, $base.$this->subjectRevisitArms(null));
-        if ($revisit === false) {
-            return $fresh;
-        }
-        if ($echo && $limit > 0) {
-            $this->storeSubjectCursor($key, $revisit->count() < $remaining ? null : (int) $revisit->min('releases_id'));
-        }
+        $revisit = $this->revisitPage('subjects', $base.$this->subjectRevisitArms(), $time, $cats, $take, $echo);
 
-        return new \Illuminate\Database\Eloquent\Collection([...$fresh->all(), ...$revisit->all()]);
+        return $revisit === false ? $fresh : new \Illuminate\Database\Eloquent\Collection([...$fresh->all(), ...$revisit->all()]);
     }
 
-    private function subjectRevisitArms(?int $cursor): string
+    private function revisitBudget(?int $remaining): int
+    {
+        $budget = max(0, (int) config('nntmux.namefix_subject_revisit_limit', 50));
+
+        return $remaining === null ? $budget : min($budget, $remaining);
+    }
+
+    /**
+     * One id-ordered page of already-processed rows after the lane's cursor.
+     * A short page wraps the cursor; dry runs never advance it.
+     *
+     * @return \Illuminate\Database\Eloquent\Collection<int, Release>|false
+     */
+    private function revisitPage(string $lane, string $query, int $time, int $cats, int $take, bool $echo): \Illuminate\Database\Eloquent\Collection|bool // @phpstan-ignore class.notFound, return.phpDocType
+    {
+        $key = $this->revisitCursorKey($lane, $time, $cats);
+        $cursor = $this->subjectCursor($key);
+        $page = $this->getReleases($time, $cats, $query.($cursor === null ? '' : sprintf(' AND rel.id < %d', $cursor)), $take, true);
+        if ($page !== false && $echo) {
+            $this->storeSubjectCursor($key, $page->count() < $take ? null : (int) $page->min('releases_id'));
+        }
+
+        return $page;
+    }
+
+    private function subjectRevisitArms(): string
     {
         return sprintf(
-            ' AND rel.proc_files <> %d AND (COALESCE(NULLIF(rel.name, \'\'), rel.searchname) REGEXP %s OR COALESCE(NULLIF(rel.name, \'\'), rel.searchname) REGEXP %s)%s',
+            ' AND rel.proc_files <> %d AND (COALESCE(NULLIF(rel.name, \'\'), rel.searchname) REGEXP %s OR COALESCE(NULLIF(rel.name, \'\'), rel.searchname) REGEXP %s)',
             self::PROC_FILES_NONE,
             escapeString('(^|[^[:alnum:]])(19|20)[0-9]{2}([^[:alnum:]]|$)'),
-            escapeString($this->readableSoftwareSubjectRegex()),
-            $cursor === null ? '' : sprintf(' AND rel.id < %d', $cursor)
+            escapeString($this->readableSoftwareSubjectRegex())
         );
     }
 
-    private function subjectCursorKey(int $time, int $cats): string
+    private function revisitCursorKey(string $lane, int $time, int $cats): string
     {
-        return sprintf('nntmux:namefix:subjects:cursor:%d:%d', $time, $cats);
+        return sprintf('nntmux:namefix:%s:cursor:%d:%d', $lane, $time, $cats);
     }
 
     private function subjectCursor(string $key): ?int
@@ -1954,7 +1967,11 @@ class NameFixingService
             }
         }
 
-        $releases = $this->getReleases($time, $cats, $query);
+        // A movie name that does not rename leaves no flag, so sweep these rows
+        // behind a cursor and a per-run budget rather than re-reading them all.
+        $releases = $this->revisitBudget(null) > 0
+            ? $this->revisitPage('mediainfo', $query, $time, $cats, $this->revisitBudget(null), $echo)
+            : false;
         $total = $releases ? $releases->count() : 0;
 
         if ($total > 0) {

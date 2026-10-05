@@ -2152,4 +2152,56 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
 
         $this->assertSame(0, (int) Release::query()->whereKey(21)->value('proc_uid'));
     }
+
+    public function test_subject_revisit_page_is_capped_by_the_revisit_budget(): void
+    {
+        Cache::flush();
+        config(['nntmux.namefix_subject_revisit_limit' => 2]);
+        foreach ([1, 2, 3, 4, 5] as $id) {
+            $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
+        }
+        $this->requeueRelease(9, 'Fresh Unprocessed Thing', ['proc_files' => 0]);
+
+        $this->assertSame([9, 5, 4], $this->selectedSubjectIds(500));
+        $this->assertSame([9, 3, 2], $this->selectedSubjectIds(500));
+
+        config(['nntmux.namefix_subject_revisit_limit' => 0]);
+        $this->assertSame([9], $this->selectedSubjectIds(500));
+    }
+
+    public function test_hashed_subject_revisits_without_a_limit_are_swept_not_repeated(): void
+    {
+        Cache::flush();
+        config(['nntmux.namefix_subject_revisit_limit' => 2]);
+        foreach ([1, 2, 3] as $id) {
+            $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
+        }
+
+        $this->assertSame([3, 2], $this->selectedSubjectIds(0));
+        $this->assertSame([1], $this->selectedSubjectIds(0));
+        $this->assertSame([3, 2], $this->selectedSubjectIds(0));
+    }
+
+    public function test_mediainfo_revisit_page_sweeps_rows_whose_movie_name_does_not_rename(): void
+    {
+        Cache::flush();
+        config(['nntmux.namefix_subject_revisit_limit' => 2]);
+        Schema::create('media_infos', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedInteger('releases_id');
+            $table->string('movie_name')->nullable();
+        });
+        foreach ([1, 2, 3] as $id) {
+            $this->requeueRelease($id, 'Release '.$id);
+            DB::table('media_infos')->insert(['releases_id' => $id, 'movie_name' => 'Some Movie']);
+        }
+        $service = app(NameFixingService::class);
+        $method = new \ReflectionMethod($service, 'revisitPage');
+        $query = 'SELECT rel.id AS releases_id FROM releases rel INNER JOIN media_infos rf ON rf.releases_id = rel.id WHERE rel.isrenamed = 0';
+        $ids = fn (): array => collect($method->invoke($service, 'mediainfo', $query, 2, 5, 2, true))->pluck('releases_id')->map(fn ($id): int => (int) $id)->all();
+
+        $this->assertSame([3, 2], $ids());
+        $this->assertSame([1], $ids());
+        $this->assertSame([3, 2], $ids());
+    }
 }
