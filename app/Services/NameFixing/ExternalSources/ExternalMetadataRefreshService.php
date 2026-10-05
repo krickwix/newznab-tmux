@@ -27,6 +27,9 @@ class ExternalMetadataRefreshService
         'nzbindex',
     ];
 
+    /** Candidates fetched per slot, so cached negatives can be skipped. */
+    private const int OVER_SELECT = 3;
+
     private readonly ExternalSourceGuard $guard;
 
     public function __construct(
@@ -130,10 +133,14 @@ class ExternalMetadataRefreshService
                     ->whereColumn('predb_crcs.predb_id', 'predb.id');
             })
             ->orderByDesc('id')
-            ->limit($limit)
+            ->limit($limit * self::OVER_SELECT)
             ->get();
 
+        // Over-selected so negatively cached rows do not consume the limit.
         foreach ($pres as $pre) {
+            if ($source->queried >= $limit) {
+                break;
+            }
             if ($this->guard->isOpen('srrdb')) {
                 $source->skipped++;
                 $source->message('circuit open; remaining lookups skipped');
@@ -277,7 +284,10 @@ class ExternalMetadataRefreshService
             return;
         }
 
-        foreach (array_slice($queries, 0, $limit) as $query) {
+        foreach ($queries as $query) {
+            if ($source->queried >= $limit) {
+                break;
+            }
             if ($this->guard->isOpen($sourceName)) {
                 $source->skipped++;
                 $source->message('circuit open; remaining lookups skipped');
@@ -427,7 +437,7 @@ class ExternalMetadataRefreshService
         $names = DB::table('release_files')
             ->where('name', '!=', '')
             ->orderByDesc('created_at')
-            ->limit(max($limit * 10, 50))
+            ->limit(max($limit * 10 * self::OVER_SELECT, 50))
             ->pluck('name');
 
         $queries = [];
@@ -437,7 +447,7 @@ class ExternalMetadataRefreshService
                 $queries[$query] = $query;
             }
 
-            if (count($queries) >= $limit) {
+            if (count($queries) >= $limit * self::OVER_SELECT) {
                 break;
             }
         }

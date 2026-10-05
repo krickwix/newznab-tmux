@@ -11,6 +11,7 @@ use App\Services\NameFixing\ExternalSources\ExternalMetadataSourceSummary;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use ReflectionMethod;
@@ -111,6 +112,55 @@ final class ExternalSourceGuardTest extends TestCase
 
         self::assertSame(1, $summary->queried);
         self::assertNull(Cache::get('nntmux:extmeta:breaker:predb-ovh'));
+    }
+
+    public function test_negatively_cached_queries_do_not_consume_the_limit(): void
+    {
+        Http::fake(['predb.ovh/*' => Http::response(['data' => ['rows' => []]])]);
+        $service = app(ExternalMetadataRefreshService::class);
+
+        $service->refresh(['predb-ovh'], limit: 2, sleepMs: 0, queries: ['a 2024', 'b 2024']);
+        Http::assertSentCount(2);
+
+        $summary = $service->refresh(['predb-ovh'], limit: 2, sleepMs: 0, queries: ['a 2024', 'b 2024', 'c 2024', 'd 2024', 'e 2024'])->source('predb-ovh');
+
+        Http::assertSentCount(4);
+        self::assertSame(2, $summary->queried);
+        self::assertSame(2, $summary->skipped);
+    }
+
+    public function test_negatively_cached_srrdb_rows_advance_the_window(): void
+    {
+        Schema::create('predb_crcs', function (Blueprint $table): void {
+            $table->increments('id');
+            $table->unsignedInteger('predb_id');
+            $table->string('crchash');
+            $table->bigInteger('filesize')->default(0);
+            $table->timestamps();
+        });
+        Schema::create('release_files', function (Blueprint $table): void {
+            $table->unsignedInteger('releases_id');
+            $table->string('name');
+            $table->bigInteger('size')->default(0);
+            $table->string('crc32')->default('');
+            $table->timestamps();
+        });
+        foreach (['Rel.A-GRP', 'Rel.B-GRP', 'Rel.C-GRP'] as $title) {
+            DB::table('predb')->insert(['title' => $title, 'source' => 'srrdb']);
+        }
+        Http::fake(['api.srrdb.com/*' => Http::response('', 404)]);
+        $service = app(ExternalMetadataRefreshService::class);
+
+        $service->refresh(['srrdb'], limit: 1, sleepMs: 0);
+        $service->refresh(['srrdb'], limit: 1, sleepMs: 0);
+
+        $titles = [];
+        Http::assertSent(function (Request $request) use (&$titles): bool {
+            $titles[] = $request->url();
+
+            return true;
+        });
+        self::assertCount(2, array_unique($titles));
     }
 
     public function test_requests_carry_the_query_so_negative_keys_are_per_query(): void
