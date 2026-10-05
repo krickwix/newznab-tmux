@@ -172,6 +172,65 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
         self::assertSame(0, DB::table('binaries')->where('partcheck', FileCompletionStatus::Incomplete->value)->count());
     }
 
+    public function test_stage_one_cursor_advances_by_scanned_rows_so_a_later_qualifier_is_promoted(): void
+    {
+        config(['nntmux.release_stage_scan_window' => 2]);
+        for ($id = 1; $id <= 5; $id++) {
+            $this->insertCollection($id, 1, CollectionFileCheckStatus::Default->value, 1);
+        }
+        DB::table('binaries')->insert($this->binary(5, 5, 1, 1));
+        $service = $this->cooperativeService();
+        $cache = Cache::store('array');
+
+        $this->runStage($service, 'runCollectionFileCheckStage1', 1);
+        self::assertSame(2, $cache->get('nntmux:release-pump:stage1:1'));
+        $this->runStage($service, 'runCollectionFileCheckStage1', 1);
+        self::assertSame(4, $cache->get('nntmux:release-pump:stage1:1'));
+        self::assertSame(0, (int) DB::table('collections')->where('id', 5)->value('filecheck'));
+
+        $this->runStage($service, 'runCollectionFileCheckStage1', 1);
+        self::assertSame(0, $cache->get('nntmux:release-pump:stage1:1'));
+        self::assertSame(CollectionFileCheckStatus::CompleteCollection->value, (int) DB::table('collections')->where('id', 5)->value('filecheck'));
+    }
+
+    public function test_stage_zero_and_six_cursors_are_independent_per_group(): void
+    {
+        config(['nntmux.release_stage_scan_window' => 2]);
+        foreach ([[1, 1], [2, 1], [3, 1], [4, 2]] as [$id, $group]) {
+            $this->insertCollection($id, $group, CollectionFileCheckStatus::Default->value, 0);
+        }
+        $service = $this->cooperativeService();
+        $cache = Cache::store('array');
+
+        $this->runStage($service, 'runCollectionFileCheckStage0', 1);
+        self::assertSame(2, $cache->get('nntmux:release-pump:stage0:1'));
+        self::assertNull($cache->get('nntmux:release-pump:stage0:2'));
+        $this->runStage($service, 'runCollectionFileCheckStage0', 2);
+        self::assertSame(0, $cache->get('nntmux:release-pump:stage0:2'));
+        self::assertSame(2, $cache->get('nntmux:release-pump:stage0:1'));
+
+        $this->insertCollection(10, 1, 10, 1);
+        $this->runStage($service, 'runCollectionFileCheckStage6', ' AND c.groups_id = 1 ');
+        self::assertSame(2, $cache->get('nntmux:release-pump:stage6:1'));
+        self::assertNull($cache->get('nntmux:release-pump:stage6:2'));
+    }
+
+    public function test_non_cooperative_mode_ignores_the_scan_cursors(): void
+    {
+        config(['nntmux.release_stage_scan_window' => 1]);
+        foreach ([1, 2, 3] as $id) {
+            $this->insertCollection($id, 1, CollectionFileCheckStatus::Default->value, 1);
+            DB::table('binaries')->insert($this->binary($id, $id, 1, 1));
+        }
+        $service = $this->cooperativeService();
+        (new ReflectionClass($service))->getProperty('cooperativeSlice')->setValue($service, false);
+
+        $this->runStage($service, 'runCollectionFileCheckStage1', 1);
+
+        self::assertSame(3, DB::table('collections')->where('filecheck', CollectionFileCheckStatus::CompleteCollection->value)->count());
+        self::assertNull(Cache::store('array')->get('nntmux:release-pump:stage1:1'));
+    }
+
     /** @return array<string, int> */
     private function binary(int $id, int $collectionId, int $current, int $total, int $partcheck = 0): array
     {

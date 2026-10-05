@@ -1230,6 +1230,12 @@ final class ReleaseProcessingService
     private function runCollectionFileCheckStage0(?int $groupID): void
     {
         $completion = $this->requiredCompletionPercent();
+        $page = $this->cooperativeSlice
+            ? $this->scanPageIds('stage0', $groupID ?? 0, [CollectionFileCheckStatus::Default->value], static fn ($q) => $q->where('totalfiles', 0))
+            : null;
+        if ($page === []) {
+            return;
+        }
 
         $lastCollectionId = 0;
 
@@ -1239,6 +1245,7 @@ final class ReleaseProcessingService
                     ->select(['collections.id'])
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
                     ->where('collections.id', '>', $lastCollectionId)
+                    ->when($page !== null, static fn ($q) => $q->whereIn('collections.id', $page))
                     ->where('collections.totalfiles', '=', 0)
                     ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
                     ->where('binaries.filenumber', '>', 0)
@@ -1249,7 +1256,7 @@ final class ReleaseProcessingService
                         [$completion]
                     )
                     ->orderBy('collections.id')
-                    ->limit($this->workBatchSize)
+                    ->when($page === null, fn ($q) => $q->limit($this->workBatchSize))
                     ->pluck('collections.id')
             );
 
@@ -1257,18 +1264,20 @@ final class ReleaseProcessingService
                 break;
             }
 
-            $this->retryTransientCollectionOperation(
-                static fn () => DB::transaction(static function () use ($collectionIds): void {
-                    Collection::query()
-                        ->whereIn('id', $collectionIds->all())
-                        ->update([
-                            'filecheck' => CollectionFileCheckStatus::CompleteCollection->value,
-                            'totalfiles' => DB::raw(
-                                '(SELECT MAX(NULLIF(b2.filenumber, 0)) FROM binaries b2 WHERE b2.collections_id = collections.id)'
-                            ),
-                        ]);
-                }, 10)
-            );
+            foreach ($collectionIds->chunk($this->workBatchSize) as $ids) {
+                $this->retryTransientCollectionOperation(
+                    static fn () => DB::transaction(static function () use ($ids): void {
+                        Collection::query()
+                            ->whereIn('id', $ids->all())
+                            ->update([
+                                'filecheck' => CollectionFileCheckStatus::CompleteCollection->value,
+                                'totalfiles' => DB::raw(
+                                    '(SELECT MAX(NULLIF(b2.filenumber, 0)) FROM binaries b2 WHERE b2.collections_id = collections.id)'
+                                ),
+                            ]);
+                    }, 10)
+                );
+            }
 
             $lastCollectionId = (int) $collectionIds->max();
 
@@ -1282,6 +1291,12 @@ final class ReleaseProcessingService
     private function runCollectionFileCheckStage1(int $groupID): void
     {
         $completion = $this->requiredCompletionPercent();
+        $page = $this->cooperativeSlice
+            ? $this->scanPageIds('stage1', $groupID, [CollectionFileCheckStatus::Default->value], static fn ($q) => $q->where('totalfiles', '>', 0))
+            : null;
+        if ($page === []) {
+            return;
+        }
 
         $lastCollectionId = 0;
 
@@ -1291,6 +1306,7 @@ final class ReleaseProcessingService
                     ->select(['collections.id'])
                     ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
                     ->where('collections.id', '>', $lastCollectionId)
+                    ->when($page !== null, static fn ($q) => $q->whereIn('collections.id', $page))
                     ->where('collections.totalfiles', '>', 0)
                     ->where('collections.filecheck', '=', CollectionFileCheckStatus::Default->value)
                     ->when($groupID !== 0, static fn ($q) => $q->where('collections.groups_id', $groupID))
@@ -1300,7 +1316,7 @@ final class ReleaseProcessingService
                         [$completion]
                     )
                     ->orderBy('collections.id')
-                    ->limit($this->workBatchSize)
+                    ->when($page === null, fn ($q) => $q->limit($this->workBatchSize))
                     ->pluck('collections.id')
             );
 
@@ -1597,6 +1613,16 @@ final class ReleaseProcessingService
     {
         $normalizedGroupId = $this->extractGroupIdFromWhereSql($whereSql);
         $completion = $this->requiredCompletionPercent();
+        $page = $this->cooperativeSlice
+            ? $this->scanPageIds('stage6', $normalizedGroupId ?? 0, [
+                CollectionFileCheckStatus::Default->value,
+                CollectionFileCheckStatus::CompleteCollection->value,
+                10,
+            ])
+            : null;
+        if ($page === []) {
+            return;
+        }
 
         $lastCollectionId = 0;
 
@@ -1605,23 +1631,26 @@ final class ReleaseProcessingService
                 $lastCollectionId,
                 $normalizedGroupId,
                 $completion,
+                $page,
             );
             if ($completeIds === []) {
                 break;
             }
 
-            $this->retryTransientCollectionOperation(
-                static fn () => DB::transaction(static function () use ($completeIds): void {
-                    Collection::query()
-                        ->whereIn('id', $completeIds)
-                        ->update([
-                            'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
-                            'totalfiles' => DB::raw(
-                                '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id)'
-                            ),
-                        ]);
-                }, 10)
-            );
+            foreach (array_chunk($completeIds, $this->workBatchSize) as $chunk) {
+                $this->retryTransientCollectionOperation(
+                    static fn () => DB::transaction(static function () use ($chunk): void {
+                        Collection::query()
+                            ->whereIn('id', $chunk)
+                            ->update([
+                                'filecheck' => CollectionFileCheckStatus::CompleteParts->value,
+                                'totalfiles' => DB::raw(
+                                    '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id)'
+                                ),
+                            ]);
+                    }, 10)
+                );
+            }
 
             $lastCollectionId = max($completeIds);
 
@@ -1630,12 +1659,14 @@ final class ReleaseProcessingService
     }
 
     /**
+     * @param  list<int>|null  $page  Scan page of a cooperative slice; null pages by limit.
      * @return list<int>
      */
     private function stage6CompleteCollectionIds(
         int $lastCollectionId,
         ?int $normalizedGroupId,
         int $completion,
+        ?array $page = null,
     ): array {
         return $this->retryTransientCollectionOperation(
             fn (): array => DB::table('collections')
@@ -1649,6 +1680,7 @@ final class ReleaseProcessingService
                         );
                 })
                 ->where('collections.id', '>', $lastCollectionId)
+                ->when($page !== null, static fn ($q) => $q->whereIn('collections.id', $page))
                 ->where('collections.dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
                 ->whereIn('collections.filecheck', [
                     CollectionFileCheckStatus::Default->value,
@@ -1663,7 +1695,7 @@ final class ReleaseProcessingService
                     [$completion],
                 )
                 ->orderBy('collections.id')
-                ->limit($this->workBatchSize)
+                ->when($page === null, fn ($q) => $q->limit($this->workBatchSize))
                 ->pluck('collections.id')
                 ->map(static fn ($id): int => (int) $id)
                 ->all()
