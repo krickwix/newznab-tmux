@@ -21,15 +21,39 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        config([
-            'database.default' => 'sqlite',
-            'database.connections.sqlite.database' => ':memory:',
-            'nntmux.distributed_lock_store' => 'array',
-        ]);
-        DB::purge('sqlite');
+        $dsn = (string) env('NNTMUX_TEST_MARIADB_DSN', '');
+        if ($dsn !== '') {
+            // Optional engine switch, e.g. mysql://root:t@127.0.0.1:33061/t
+            $parts = parse_url($dsn);
+            config([
+                'database.default' => 'mariadb_t',
+                'database.connections.mariadb_t' => [
+                    'driver' => 'mariadb',
+                    'host' => $parts['host'] ?? '127.0.0.1',
+                    'port' => $parts['port'] ?? 3306,
+                    'database' => ltrim($parts['path'] ?? '/t', '/'),
+                    'username' => $parts['user'] ?? 'root',
+                    'password' => $parts['pass'] ?? '',
+                    'charset' => 'utf8mb4',
+                    'collation' => 'utf8mb4_unicode_ci',
+                    'prefix' => '',
+                    'strict' => false,
+                ],
+            ]);
+            DB::purge('mariadb_t');
+            Schema::dropIfExists('binaries');
+            Schema::dropIfExists('collections');
+        } else {
+            config([
+                'database.default' => 'sqlite',
+                'database.connections.sqlite.database' => ':memory:',
+            ]);
+            DB::purge('sqlite');
+            DB::connection()->getPdo()->sqliteCreateFunction('GREATEST', max(...), -1);
+            DB::connection()->getPdo()->sqliteCreateFunction('CEIL', ceil(...), 1);
+        }
+        config(['nntmux.distributed_lock_store' => 'array']);
         Cache::store('array')->flush();
-        DB::connection()->getPdo()->sqliteCreateFunction('GREATEST', max(...), -1);
-        DB::connection()->getPdo()->sqliteCreateFunction('CEIL', ceil(...), 1);
 
         Schema::create('collections', function (Blueprint $table): void {
             $table->id();
@@ -138,7 +162,7 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
             $this->binary(2, 2, 1, 1, FileCompletionStatus::Complete->value),
         ]);
         DB::listen(static function ($query): void {
-            if (str_starts_with($query->sql, 'select "id" from "collections"')) {
+            if (str_starts_with(str_replace('`', '"', $query->sql), 'select "id" from "collections"')) {
                 DB::table('collections')->where('id', 2)->update(['filecheck' => CollectionFileCheckStatus::Sized->value]);
             }
         });
@@ -299,7 +323,7 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
         $this->insertCollection(1, 1, CollectionFileCheckStatus::Default->value, 0);
         DB::table('binaries')->insert($this->binary(1, 1, 1, 1));
         DB::listen(static function ($query): void {
-            if (str_starts_with($query->sql, 'update "collections"')) {
+            if (str_starts_with(str_replace('`', '"', $query->sql), 'update "collections"')) {
                 throw new \RuntimeException('boom');
             }
         });
@@ -339,7 +363,7 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
         }
         $updates = 0;
         DB::listen(static function ($query) use (&$updates): void {
-            if (str_starts_with($query->sql, 'update')) {
+            if (str_starts_with(strtolower($query->sql), 'update')) {
                 $updates++;
             }
         });
