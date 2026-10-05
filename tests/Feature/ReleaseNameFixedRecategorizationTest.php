@@ -13,6 +13,7 @@ use App\Services\Categorization\CategorizationService;
 use App\Services\NameFixing\FilePrioritizer;
 use App\Services\NameFixing\NameFixingService;
 use App\Services\NameFixing\ReleaseUpdateService;
+use App\Services\Nntp\NNTPService;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Carbon;
@@ -2048,5 +2049,107 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
                 $table->timestamps();
             });
         }
+    }
+
+    /** @param array<string, mixed> $attributes */
+    private function requeueRelease(int $id, string $name, array $attributes = []): Release
+    {
+        static $group = null;
+        $group ??= UsenetGroup::query()->create(['name' => 'alt.binaries.requeue', 'active' => 1, 'backfill' => 0]);
+
+        return Release::factory()->create(array_merge([
+            'id' => $id,
+            'name' => $name,
+            'searchname' => $name,
+            'fromname' => 'poster@example.com',
+            'groups_id' => $group->id,
+            'categories_id' => Category::OTHER_HASHED,
+            'iscategorized' => 1,
+            'isrenamed' => 0,
+            'proc_files' => 1,
+            'proc_par2' => 1,
+            'guid' => str_pad((string) $id, 40, '0'),
+            'leftguid' => '0',
+            'size' => 1,
+            'postdate' => now(),
+            'adddate' => now(),
+        ], $attributes));
+    }
+
+    /** @return list<int> ids printed as "to process" candidates, via the selection helper */
+    private function selectedSubjectIds(int $limit, bool $echo = true): array
+    {
+        $service = app(NameFixingService::class);
+        $method = new \ReflectionMethod($service, 'subjectReleases');
+        $base = 'SELECT rel.id AS releases_id, rel.name, rel.searchname FROM releases rel WHERE rel.predb_id = 0 AND rel.isrenamed = 0';
+
+        return collect($method->invoke($service, $base, 2, 5, $limit, $echo))->pluck('releases_id')->map(fn ($id): int => (int) $id)->all();
+    }
+
+    public function test_subject_revisit_rows_are_swept_behind_a_cursor_and_wrap(): void
+    {
+        Cache::flush();
+        foreach ([1, 2, 3, 4, 5] as $id) {
+            $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
+        }
+
+        $this->assertSame([5, 4], $this->selectedSubjectIds(2));
+        $this->assertSame([3, 2], $this->selectedSubjectIds(2));
+        $this->assertSame([1], $this->selectedSubjectIds(2));
+        $this->assertSame([5, 4], $this->selectedSubjectIds(2));
+    }
+
+    public function test_dry_run_does_not_advance_the_subject_cursor(): void
+    {
+        Cache::flush();
+        foreach ([1, 2, 3] as $id) {
+            $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
+        }
+
+        $this->assertSame([3, 2], $this->selectedSubjectIds(2, false));
+        $this->assertSame([3, 2], $this->selectedSubjectIds(2, false));
+    }
+
+    public function test_new_unprocessed_subject_rows_are_selected_even_mid_sweep(): void
+    {
+        Cache::flush();
+        foreach ([1, 2, 3, 4] as $id) {
+            $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
+        }
+        $this->assertSame([4, 3], $this->selectedSubjectIds(2));
+
+        $this->requeueRelease(9, 'Fresh Unprocessed Thing', ['proc_files' => 0]);
+
+        $this->assertSame([9, 2, 1], $this->selectedSubjectIds(3));
+    }
+
+    public function test_par2_subject_title_without_a_rename_is_marked_done_only_with_set_status(): void
+    {
+        Search::shouldReceive('updateRelease')->zeroOrMoreTimes();
+        $this->requeueRelease(11, '"abcdefgh.par2" yEnc', ['proc_par2' => 0, 'searchname' => 'abcdefgh']);
+        $service = app(NameFixingService::class);
+        $nntp = \Mockery::mock(NNTPService::class);
+
+        $service->fixNamesWithPar2(2, true, 5, false, false, $nntp);
+        $this->assertSame(0, (int) Release::query()->whereKey(11)->value('proc_par2'));
+
+        $service->fixNamesWithPar2(2, true, 5, true, false, $nntp);
+        $this->assertSame(1, (int) Release::query()->whereKey(11)->value('proc_par2'));
+    }
+
+    public function test_mediainfo_movie_name_pass_skips_rows_without_a_movie_name(): void
+    {
+        Schema::create('media_infos', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedInteger('releases_id');
+            $table->string('movie_name')->nullable();
+            $table->string('file_name')->nullable();
+        });
+        $this->requeueRelease(21, 'Empty Movie Name Release');
+        DB::table('media_infos')->insert(['releases_id' => 21, 'movie_name' => '', 'file_name' => 'x']);
+
+        app(NameFixingService::class)->fixNamesWithMediaMovieName(2, true, 5, true, false);
+
+        $this->assertSame(0, (int) Release::query()->whereKey(21)->value('proc_uid'));
     }
 }
