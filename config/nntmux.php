@@ -36,8 +36,9 @@ return [
     // Collections scanned per stage per cooperative release slice; the stage
     // cursor advances by rows scanned so non-qualifying rows are not re-read.
     'release_stage_scan_window' => min(20_000, max(100, (int) env('NNTMUX_RELEASE_STAGE_SCAN_WINDOW', 2000))),
-    // Single-file collections holding one part of a file of at least min_parts
-    // parts are deleted this many hours after they were first seen. 0 disables.
+    // Collections whose only binary holds one part of a file of at least
+    // min_parts parts are deleted this many hours after they were first seen.
+    // 0 disables.
     'release_hopeless_singleton_age_hours' => max(0, (int) env('NNTMUX_RELEASE_HOPELESS_SINGLETON_AGE_HOURS', 0)),
     'release_hopeless_singleton_min_parts' => max(2, (int) env('NNTMUX_RELEASE_HOPELESS_SINGLETON_MIN_PARTS', 50)),
     // Already-processed rows each name-fixing lane re-checks per run (methods 18

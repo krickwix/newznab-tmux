@@ -129,22 +129,28 @@ final class ReleaseProcessingHopelessSingletonTest extends TestCase
         $this->seedCollection(5, hoursOld: 7, totalFiles: 0);
         $this->seedBinary(50, 5, totalParts: 6655, parts: 1);
         $this->seedBinary(51, 5, totalParts: 60, parts: 5);
-        // Multi-file collection that has seen one file so far.
-        $this->seedCollection(6, hoursOld: 7, totalFiles: 30);
-        $this->seedBinary(60, 6, totalParts: 6655, parts: 1);
+        // Hopeless: the part total was also recorded as totalfiles.
+        $this->seedCollection(6, hoursOld: 7, totalFiles: 10898);
+        $this->seedBinary(60, 6, totalParts: 10898, parts: 1);
         // currentparts lags the parts table: never trust it alone.
         $this->seedCollection(7, hoursOld: 7);
         $this->seedBinary(70, 7, totalParts: 6655, parts: 3, currentParts: 1);
+        // Multi-file collection with two one-part binaries: files are joining.
+        $this->seedCollection(8, hoursOld: 7, totalFiles: 30);
+        $this->seedBinary(80, 8, totalParts: 70, parts: 1);
+        $this->seedBinary(81, 8, totalParts: 70, parts: 1);
     }
 
     private function assertScenarioOutcome(): void
     {
         $this->assertSame(
-            [2, 3, 4, 5, 6, 7],
+            [2, 3, 4, 5, 7, 8],
             DB::table('collections')->orderBy('id')->pluck('id')->map(static fn ($id): int => (int) $id)->all()
         );
-        $this->assertFalse(DB::table('binaries')->where('collections_id', 1)->exists());
-        $this->assertFalse(DB::table('parts')->where('binaries_id', 10)->exists());
+        foreach ([[1, 10], [6, 60]] as [$collectionId, $binaryId]) {
+            $this->assertFalse(DB::table('binaries')->where('collections_id', $collectionId)->exists());
+            $this->assertFalse(DB::table('parts')->where('binaries_id', $binaryId)->exists());
+        }
     }
 
     private function runStage(int $groupId): void
