@@ -42,7 +42,8 @@ class ExternalSourceGuard
 
     public function isNegative(string $source, string $key): bool
     {
-        return $this->get($this->negativeKey($source, $key)) === 1;
+        // Redis returns the stored 1 as the string "1".
+        return (int) $this->get($this->negativeKey($source, $key)) === 1;
     }
 
     public function rememberNegative(string $source, string $key): void
