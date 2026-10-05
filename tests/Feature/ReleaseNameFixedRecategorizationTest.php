@@ -2089,6 +2089,7 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
     public function test_subject_revisit_rows_are_swept_behind_a_cursor_and_wrap(): void
     {
         Cache::flush();
+        config(['nntmux.namefix_revisit_min_sweep_seconds' => 0]);
         foreach ([1, 2, 3, 4, 5] as $id) {
             $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
         }
@@ -2102,6 +2103,7 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
     public function test_dry_run_does_not_advance_the_subject_cursor(): void
     {
         Cache::flush();
+        config(['nntmux.namefix_revisit_min_sweep_seconds' => 0]);
         foreach ([1, 2, 3] as $id) {
             $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
         }
@@ -2113,6 +2115,7 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
     public function test_new_unprocessed_subject_rows_are_selected_even_mid_sweep(): void
     {
         Cache::flush();
+        config(['nntmux.namefix_revisit_min_sweep_seconds' => 0]);
         foreach ([1, 2, 3, 4] as $id) {
             $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
         }
@@ -2156,7 +2159,8 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
     public function test_subject_revisit_page_is_capped_by_the_revisit_budget(): void
     {
         Cache::flush();
-        config(['nntmux.namefix_subject_revisit_limit' => 2]);
+        config(['nntmux.namefix_revisit_min_sweep_seconds' => 0]);
+        config(['nntmux.namefix_subject_revisit_limit' => 2, 'nntmux.namefix_revisit_min_sweep_seconds' => 0]);
         foreach ([1, 2, 3, 4, 5] as $id) {
             $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
         }
@@ -2172,7 +2176,8 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
     public function test_hashed_subject_revisits_without_a_limit_are_swept_not_repeated(): void
     {
         Cache::flush();
-        config(['nntmux.namefix_subject_revisit_limit' => 2]);
+        config(['nntmux.namefix_revisit_min_sweep_seconds' => 0]);
+        config(['nntmux.namefix_subject_revisit_limit' => 2, 'nntmux.namefix_revisit_min_sweep_seconds' => 0]);
         foreach ([1, 2, 3] as $id) {
             $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
         }
@@ -2185,7 +2190,8 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
     public function test_mediainfo_revisit_page_sweeps_rows_whose_movie_name_does_not_rename(): void
     {
         Cache::flush();
-        config(['nntmux.namefix_subject_revisit_limit' => 2]);
+        config(['nntmux.namefix_revisit_min_sweep_seconds' => 0]);
+        config(['nntmux.namefix_subject_revisit_limit' => 2, 'nntmux.namefix_revisit_min_sweep_seconds' => 0]);
         Schema::create('media_infos', function (Blueprint $table): void {
             $table->id();
             $table->unsignedInteger('releases_id');
@@ -2203,5 +2209,34 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame([3, 2], $ids());
         $this->assertSame([1], $ids());
         $this->assertSame([3, 2], $ids());
+    }
+
+    public function test_a_wrapped_revisit_sweep_rests_for_the_minimum_interval(): void
+    {
+        Cache::flush();
+        config(['nntmux.namefix_revisit_min_sweep_seconds' => 3600]);
+        foreach ([1, 2, 3] as $id) {
+            $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
+        }
+        $this->requeueRelease(9, 'Fresh Unprocessed Thing', ['proc_files' => 0]);
+
+        // The revisit set (3) is smaller than the budget (50): the first run wraps.
+        $this->assertSame([9, 3, 2, 1], $this->selectedSubjectIds(0));
+        // During the rest the revisit tier selects nothing; fresh rows still do.
+        $this->assertSame([9], $this->selectedSubjectIds(0));
+        $this->assertSame([9], $this->selectedSubjectIds(500));
+
+        Cache::forever('nntmux:namefix:subjects:cursor:2:5:wrapped_at', time() - 3601);
+        $this->assertSame([9, 3, 2, 1], $this->selectedSubjectIds(0));
+    }
+
+    public function test_dry_run_does_not_start_the_revisit_rest(): void
+    {
+        Cache::flush();
+        config(['nntmux.namefix_revisit_min_sweep_seconds' => 3600]);
+        $this->requeueRelease(1, 'Some Software Title 2024 yEnc 1');
+
+        $this->assertSame([1], $this->selectedSubjectIds(0, false));
+        $this->assertSame([1], $this->selectedSubjectIds(0, false));
     }
 }
