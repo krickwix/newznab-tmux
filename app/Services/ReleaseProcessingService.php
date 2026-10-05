@@ -1807,15 +1807,16 @@ final class ReleaseProcessingService
     }
 
     /**
-     * Delete single-file collections that hold one part of a many-part file
-     * long after it was first seen.
+     * Delete collections whose only binary holds one part of a many-part file
+     * long after the collection was first seen.
      *
      * Per-article obfuscated posts give every article its own random subject
      * and poster, so each article becomes a collection of one binary with one
-     * part that no later article can join. A real file of that size is posted
-     * within minutes, so after the age cutoff such a collection cannot reach
-     * completion and would otherwise sit in the backlog until
-     * collection_timeout. Disabled when the age is 0.
+     * part that no later article can join. Depending on the subject shape the
+     * part total also lands in totalfiles, so totalfiles is not a filter. A
+     * real post of that size arrives within minutes, so after the age cutoff
+     * such a collection cannot reach completion and would otherwise sit in the
+     * backlog until collection_timeout. Disabled when the age is 0.
      *
      * @throws Throwable
      */
@@ -1854,7 +1855,6 @@ final class ReleaseProcessingService
                 static fn (): array => DB::table('collections as c')
                     ->join('binaries as b', 'b.collections_id', '=', 'c.id')
                     ->whereIn('c.id', $page)
-                    ->where('c.totalfiles', '<=', 1)
                     ->whereNull('c.releases_id')
                     ->where('c.dateadded', '<', $cutoff)
                     ->groupBy('c.id')
