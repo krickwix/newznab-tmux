@@ -29,6 +29,7 @@ use DateTimeInterface;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Throwable;
 
 /**
@@ -57,6 +58,8 @@ final class ReleaseProcessingService
     private int $workBatchSize = self::BATCH_SIZE;
 
     private bool $cooperativeSlice = false;
+
+    private bool $cursorCacheWarned = false;
 
     private float $workDeadlineAt = PHP_FLOAT_MAX;
 
@@ -441,6 +444,7 @@ final class ReleaseProcessingService
 
         $this->workBatchSize = max(1, min(self::BATCH_SIZE, $batchSize));
         $this->cooperativeSlice = true;
+        $this->cursorCacheWarned = false;
         $this->workDeadlineAt = $deadlineAt;
 
         try {
@@ -1081,7 +1085,9 @@ final class ReleaseProcessingService
         try {
             return max(0, (int) Cache::store((string) config('nntmux.distributed_lock_store', 'redis'))
                 ->get("nntmux:release-pump:{$stage}:{$groupId}", 0));
-        } catch (Throwable) {
+        } catch (Throwable $e) {
+            $this->warnCursorCacheUnavailable($e);
+
             return 0;
         }
     }
@@ -1091,17 +1097,28 @@ final class ReleaseProcessingService
         try {
             Cache::store((string) config('nntmux.distributed_lock_store', 'redis'))
                 ->forever("nntmux:release-pump:{$stage}:{$groupId}", max(0, $cursor));
-        } catch (Throwable) {
+        } catch (Throwable $e) {
             // A cache outage keeps the slice safe and bounded; later cycles can
             // resume from the deterministic beginning once the store recovers.
+            $this->warnCursorCacheUnavailable($e);
         }
+    }
+
+    private function warnCursorCacheUnavailable(Throwable $e): void
+    {
+        if ($this->cursorCacheWarned) {
+            return;
+        }
+        $this->cursorCacheWarned = true;
+        Log::warning('Release stage scan cursors unavailable; scanning from the first id', ['error' => $e->getMessage()]);
     }
 
     /**
      * One id page of candidate collections for a cooperative slice, in id
      * order after the stage's persisted cursor.
      *
-     * The cursor advances by rows scanned, not rows qualified, so a prefix of
+     * The caller commits the cursor via commitScanCursor() after its work. It
+     * advances by rows scanned, not rows qualified, so a prefix of
      * non-qualifying collections cannot be re-read every slice. A short page
      * means the tail was reached and wraps the cursor to the beginning.
      *
@@ -1123,9 +1140,37 @@ final class ReleaseProcessingService
                 ->map(static fn ($id): int => (int) $id)
                 ->all()
         );
-        $this->storeCooperativeStageCursor($stage, $groupId, \count($ids) < $window ? 0 : max($ids));
 
         return $ids;
+    }
+
+    /**
+     * Persist the scan cursor once the page's work has succeeded, so a failed
+     * slice re-reads its page instead of skipping it.
+     *
+     * @param  list<int>  $page
+     */
+    private function commitScanCursor(string $stage, int $groupId, array $page): void
+    {
+        $window = max(1, (int) config('nntmux.release_stage_scan_window', 2000));
+        $this->storeCooperativeStageCursor($stage, $groupId, \count($page) < $window ? 0 : max($page));
+    }
+
+    /**
+     * Stage 4's acceptance test as a collections-level predicate, evaluated
+     * before stage 3 has run. Stage 4 treats filecheck 15 and 16 identically,
+     * so the same test gates the 1 to 15 and the 1 to 16 moves.
+     *
+     * @return array{0: string, 1: list<int>}
+     */
+    private function stageFourAcceptable(): array
+    {
+        $completion = $this->requiredCompletionPercent();
+
+        return [
+            '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id AND (b.partcheck = ? OR (b.partcheck = ? AND b.totalparts > 0 AND b.currentparts >= CEIL(b.totalparts * ? / 100)))) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
+            [FileCompletionStatus::Complete->value, FileCompletionStatus::Incomplete->value, $completion, $completion],
+        ];
     }
 
     /**
@@ -1136,24 +1181,17 @@ final class ReleaseProcessingService
      * and the count must reach stage 4's GREATEST(1, CEIL(totalfiles * c / 100)).
      * Anything else would only be reverted by stage 5, so it stays at 1.
      *
+     * @param  list<int>  $page
+     *
      * @throws Throwable
      */
-    private function promoteCooperativeStage2(int $groupID, int $fromStatus, int $toStatus): void
+    private function promoteCooperativeStage2(array $page, int $fromStatus, int $toStatus): void
     {
-        $page = $this->scanPageIds('stage2', $groupID, [$fromStatus]);
-        if ($page === []) {
-            return;
-        }
-
-        $completion = $this->requiredCompletionPercent();
         $ids = $this->retryTransientCollectionOperation(
             fn (): array => Collection::query()
                 ->whereIn('collections.id', $page)
                 ->where('collections.filecheck', $fromStatus)
-                ->whereRaw(
-                    '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id AND (b.partcheck = ? OR (b.partcheck = ? AND b.totalparts > 0 AND b.currentparts >= CEIL(b.totalparts * ? / 100)))) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
-                    [FileCompletionStatus::Complete->value, FileCompletionStatus::Incomplete->value, $completion, $completion],
-                )
+                ->whereRaw(...$this->stageFourAcceptable())
                 ->orderBy('collections.id')
                 ->pluck('collections.id')
                 ->all()
@@ -1234,6 +1272,8 @@ final class ReleaseProcessingService
             ? $this->scanPageIds('stage0', $groupID ?? 0, [CollectionFileCheckStatus::Default->value], static fn ($q) => $q->where('totalfiles', 0))
             : null;
         if ($page === []) {
+            $this->commitScanCursor('stage0', $groupID ?? 0, []);
+
             return;
         }
 
@@ -1283,6 +1323,10 @@ final class ReleaseProcessingService
 
             usleep(self::BATCH_PAUSE_US);
         } while ($this->shouldContinueStageBatch($collectionIds->count()));
+
+        if ($page !== null) {
+            $this->commitScanCursor('stage0', $groupID ?? 0, $page);
+        }
     }
 
     /**
@@ -1295,6 +1339,8 @@ final class ReleaseProcessingService
             ? $this->scanPageIds('stage1', $groupID, [CollectionFileCheckStatus::Default->value], static fn ($q) => $q->where('totalfiles', '>', 0))
             : null;
         if ($page === []) {
+            $this->commitScanCursor('stage1', $groupID, []);
+
             return;
         }
 
@@ -1354,6 +1400,10 @@ final class ReleaseProcessingService
 
             usleep(self::BATCH_PAUSE_US);
         } while ($this->shouldContinueStageBatch($collectionIds->count()));
+
+        if ($page !== null) {
+            $this->commitScanCursor('stage1', $groupID, $page);
+        }
     }
 
     /**
@@ -1361,6 +1411,15 @@ final class ReleaseProcessingService
      */
     private function runCollectionFileCheckStage2(int $groupID): void
     {
+        $page = $this->cooperativeSlice
+            ? $this->scanPageIds('stage2', $groupID, [CollectionFileCheckStatus::CompleteCollection->value])
+            : null;
+        if ($page === []) {
+            $this->commitScanCursor('stage2', $groupID, []);
+
+            return;
+        }
+
         do {
             $zeroPartIds = Collection::query()
                 ->select(['collections.id'])
@@ -1369,9 +1428,10 @@ final class ReleaseProcessingService
                 ->where('collections.totalfiles', '>', 0)
                 ->where('collections.filecheck', '=', CollectionFileCheckStatus::CompleteCollection->value)
                 ->when($groupID !== 0, static fn ($q) => $q->where('collections.groups_id', $groupID))
+                ->when($page !== null, fn ($q) => $q->whereIn('collections.id', $page)->whereRaw(...$this->stageFourAcceptable()))
                 ->groupBy(['collections.id'])
                 ->orderBy('collections.id')
-                ->limit($this->workBatchSize)
+                ->when($page === null, fn ($q) => $q->limit($this->workBatchSize))
                 ->pluck('collections.id')
                 ->all();
 
@@ -1385,6 +1445,13 @@ final class ReleaseProcessingService
                 ));
             }
         } while ($this->shouldContinueStageBatch(\count($zeroPartIds)));
+
+        if ($page !== null) {
+            $this->promoteCooperativeStage2($page, CollectionFileCheckStatus::CompleteCollection->value, CollectionFileCheckStatus::TempComplete->value);
+            $this->commitScanCursor('stage2', $groupID, $page);
+
+            return;
+        }
 
         $this->updateCollectionsFilecheckInChunks(
             $groupID,
@@ -1401,12 +1468,6 @@ final class ReleaseProcessingService
      */
     private function updateCollectionsFilecheckInChunks(int $groupID, int $fromStatus, int $toStatus): void
     {
-        if ($this->cooperativeSlice && $fromStatus === CollectionFileCheckStatus::CompleteCollection->value) {
-            $this->promoteCooperativeStage2($groupID, $fromStatus, $toStatus);
-
-            return;
-        }
-
         $attempt = 0;
         $maxAttempts = self::MAX_RETRIES + 1;
         $lastCollectionId = $this->cooperativeStageCursor('stage2', $groupID);
@@ -1621,6 +1682,8 @@ final class ReleaseProcessingService
             ])
             : null;
         if ($page === []) {
+            $this->commitScanCursor('stage6', $normalizedGroupId ?? 0, []);
+
             return;
         }
 
@@ -1656,6 +1719,10 @@ final class ReleaseProcessingService
 
             usleep(self::BATCH_PAUSE_US);
         } while ($this->shouldContinueStageBatch(\count($completeIds)));
+
+        if ($page !== null) {
+            $this->commitScanCursor('stage6', $normalizedGroupId ?? 0, $page);
+        }
     }
 
     /**
