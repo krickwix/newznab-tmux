@@ -173,6 +173,9 @@ return [
         'prometheus_url' => env('NNTMUX_ORCHESTRATOR_PROMETHEUS_URL', 'http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090'),
         'prometheus_retry_attempts' => min(5, max(1, (int) env('NNTMUX_ORCHESTRATOR_PROMETHEUS_RETRY_ATTEMPTS', 3))),
         'prometheus_sample_max_age_seconds' => min(600, max(30, (int) env('NNTMUX_ORCHESTRATOR_PROMETHEUS_SAMPLE_MAX_AGE_SECONDS', 120))),
+        // A failed Prometheus fetch reuses the last fresh safety sample for this
+        // long before falling to fail_safe. 0 disables the hold.
+        'safety_sample_hold_seconds' => min(600, max(0, (int) env('NNTMUX_ORCHESTRATOR_SAFETY_SAMPLE_HOLD_SECONDS', 120))),
         'snapshot_max_age_seconds' => min(600, max(60, (int) env('NNTMUX_ORCHESTRATOR_SNAPSHOT_MAX_AGE_SECONDS', 180))),
         'qualified_supply_starvation_enabled' => filter_var(env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_STARVATION_ENABLED', false), FILTER_VALIDATE_BOOL),
         'qualified_supply_starvation_dwell_seconds' => min(7200, max(300, (int) env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_STARVATION_DWELL_SECONDS', 900))),
