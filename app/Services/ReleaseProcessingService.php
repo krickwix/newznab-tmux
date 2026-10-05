@@ -385,6 +385,10 @@ final class ReleaseProcessingService
         if ($this->deadlineReached()) {
             return;
         }
+        $this->processHopelessSingletonCollections($normalizedGroupId ?? 0);
+        if ($this->deadlineReached()) {
+            return;
+        }
         // Pass the slice deadline down: reconcile() is the one stage here whose
         // own budgets are counted rather than timed, so without it a saturated
         // pass overruns the slice and starves every stage below.
@@ -1799,6 +1803,86 @@ final class ReleaseProcessingService
 
         if ($this->echoCLI && $totalDeleted > 0) {
             cli()->primary("Deleted {$totalDeleted} broken/stuck collections.", true);
+        }
+    }
+
+    /**
+     * Delete single-file collections that hold one part of a many-part file
+     * long after it was first seen.
+     *
+     * Per-article obfuscated posts give every article its own random subject
+     * and poster, so each article becomes a collection of one binary with one
+     * part that no later article can join. A real file of that size is posted
+     * within minutes, so after the age cutoff such a collection cannot reach
+     * completion and would otherwise sit in the backlog until
+     * collection_timeout. Disabled when the age is 0.
+     *
+     * @throws Throwable
+     */
+    private function processHopelessSingletonCollections(int $groupId): void
+    {
+        $ageHours = (int) config('nntmux.release_hopeless_singleton_age_hours', 0);
+        if ($ageHours <= 0) {
+            return;
+        }
+        $minParts = max(2, (int) config('nntmux.release_hopeless_singleton_min_parts', 50));
+        $window = max(1, (int) config('nntmux.release_stage_scan_window', 2000));
+        $cutoff = now()->subHours($ageHours);
+        $after = $this->cooperativeStageCursor('hopeless', $groupId);
+        $totalDeleted = 0;
+
+        do {
+            $page = $this->retryTransientCollectionOperation(
+                fn (): array => Collection::query()
+                    ->whereIn('filecheck', [
+                        CollectionFileCheckStatus::Default->value,
+                        CollectionFileCheckStatus::CompleteCollection->value,
+                    ])
+                    ->where('id', '>', $after)
+                    ->when($groupId !== 0, static fn ($q) => $q->where('groups_id', $groupId))
+                    ->orderBy('id')
+                    ->limit($window)
+                    ->pluck('id')
+                    ->map(static fn ($id): int => (int) $id)
+                    ->all()
+            );
+            if ($page === []) {
+                break;
+            }
+
+            $ids = $this->retryTransientCollectionOperation(
+                static fn (): array => DB::table('collections as c')
+                    ->join('binaries as b', 'b.collections_id', '=', 'c.id')
+                    ->whereIn('c.id', $page)
+                    ->where('c.totalfiles', '<=', 1)
+                    ->whereNull('c.releases_id')
+                    ->where('c.dateadded', '<', $cutoff)
+                    ->groupBy('c.id')
+                    ->havingRaw('COUNT(b.id) = 1')
+                    ->havingRaw('MAX(b.currentparts) <= 1')
+                    ->havingRaw('MIN(b.totalparts) >= ?', [$minParts])
+                    ->havingRaw('MAX((SELECT COUNT(*) FROM parts p WHERE p.binaries_id = b.id)) <= 1')
+                    ->pluck('c.id')
+                    ->map(static fn ($id): int => (int) $id)
+                    ->all()
+            );
+            if ($ids !== []) {
+                $totalDeleted += $this->collectionCleanupService->deleteCollectionsAndDescendants(
+                    $ids,
+                    'Hopeless single-part collections cleanup',
+                    $this->echoCLI
+                );
+            }
+
+            $after = \count($page) < $window ? 0 : max($page);
+            if ($this->cooperativeSlice) {
+                $this->storeCooperativeStageCursor('hopeless', $groupId, $after);
+                break;
+            }
+        } while ($after !== 0 && ! $this->deadlineReached());
+
+        if ($this->echoCLI && $totalDeleted > 0) {
+            cli()->primary("Deleted {$totalDeleted} hopeless single-part collections.", true);
         }
     }
 
