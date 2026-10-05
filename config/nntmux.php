@@ -36,6 +36,9 @@ return [
     // Collections scanned per stage per cooperative release slice; the stage
     // cursor advances by rows scanned so non-qualifying rows are not re-read.
     'release_stage_scan_window' => min(20_000, max(100, (int) env('NNTMUX_RELEASE_STAGE_SCAN_WINDOW', 2000))),
+    // Already-processed rows each name-fixing lane re-checks per run (methods 18
+    // and 21), swept behind a cursor. 0 disables revisits.
+    'namefix_subject_revisit_limit' => min(5000, max(0, (int) env('NNTMUX_NAMEFIX_SUBJECT_REVISIT_LIMIT', 50))),
     'distributed_release_sweep_groups' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_RELEASE_SWEEP_GROUPS', 1))),
     'distributed_control_sleep_slice_seconds' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_CONTROL_SLEEP_SLICE_SECONDS', 5))),
     'split_collection_reconcile_groups' => array_values(array_unique(array_filter(array_map(

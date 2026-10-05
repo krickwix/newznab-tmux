@@ -852,7 +852,7 @@ class NameFixingService
         $type = 'Filenames, ';
         $allowedCategories = $cats === 4 ? $this->movieCategoryIds : [];
 
-        $query = sprintf(
+        $base = sprintf(
             'SELECT rel.id AS releases_id, rel.categories_id, rel.name, rel.searchname, rel.fromname, rel.groups_id,
                 COALESCE(NULLIF(rel.name, \'\'), rel.searchname) AS textstring
             FROM releases rel
@@ -860,21 +860,13 @@ class NameFixingService
                 rel.isrenamed = %d
                 OR (rel.categories_id = %d AND rel.name REGEXP %s)
             )
-            AND rel.predb_id = 0
-            AND (
-                rel.proc_files = %d
-                OR COALESCE(NULLIF(rel.name, \'\'), rel.searchname) REGEXP %s
-                OR COALESCE(NULLIF(rel.name, \'\'), rel.searchname) REGEXP %s
-            )',
+            AND rel.predb_id = 0',
             self::IS_RENAMED_NONE,
             Category::OTHER_HASHED,
-            escapeString($this->readableSoftwareSubjectRegex()),
-            self::PROC_FILES_NONE,
-            escapeString('(^|[^[:alnum:]])(19|20)[0-9]{2}([^[:alnum:]]|$)'),
             escapeString($this->readableSoftwareSubjectRegex())
         );
 
-        $releases = $this->getReleases($time, $cats, $query, $limit);
+        $releases = $this->subjectReleases($base, $time, $cats, $limit, $echo);
         $total = $releases ? $releases->count() : 0;
 
         if ($total > 0) {
@@ -928,6 +920,89 @@ class NameFixingService
             $this->echoFoundCount($echo, ' subjects');
         } else {
             cli()->info('Nothing to fix.');
+        }
+    }
+
+    /**
+     * Unprocessed rows (proc_files = 0) are always eligible first. Rows that
+     * were already processed are revisited only through the year/software
+     * REGEXP arms, at most namefix_subject_revisit_limit per run (0 disables),
+     * walking older ids behind a persisted cursor so one full sweep re-checks
+     * each of them once instead of the newest page every cycle.
+     *
+     * @return \Illuminate\Database\Eloquent\Collection<int, Release>|false
+     */
+    private function subjectReleases(string $base, int $time, int $cats, int $limit, bool $echo): \Illuminate\Database\Eloquent\Collection|bool // @phpstan-ignore class.notFound, return.phpDocType
+    {
+        $fresh = $this->getReleases($time, $cats, $base.sprintf(' AND rel.proc_files = %d', self::PROC_FILES_NONE), $limit);
+        $take = $this->revisitBudget($limit > 0 ? $limit - ($fresh ? $fresh->count() : 0) : null);
+        if ($fresh === false || $take <= 0) {
+            return $fresh;
+        }
+
+        $revisit = $this->revisitPage('subjects', $base.$this->subjectRevisitArms(), $time, $cats, $take, $echo);
+
+        return $revisit === false ? $fresh : new \Illuminate\Database\Eloquent\Collection([...$fresh->all(), ...$revisit->all()]);
+    }
+
+    private function revisitBudget(?int $remaining): int
+    {
+        $budget = max(0, (int) config('nntmux.namefix_subject_revisit_limit', 50));
+
+        return $remaining === null ? $budget : min($budget, $remaining);
+    }
+
+    /**
+     * One id-ordered page of already-processed rows after the lane's cursor.
+     * A short page wraps the cursor; dry runs never advance it.
+     *
+     * @return \Illuminate\Database\Eloquent\Collection<int, Release>|false
+     */
+    private function revisitPage(string $lane, string $query, int $time, int $cats, int $take, bool $echo): \Illuminate\Database\Eloquent\Collection|bool // @phpstan-ignore class.notFound, return.phpDocType
+    {
+        $key = $this->revisitCursorKey($lane, $time, $cats);
+        $cursor = $this->subjectCursor($key);
+        $page = $this->getReleases($time, $cats, $query.($cursor === null ? '' : sprintf(' AND rel.id < %d', $cursor)), $take, true);
+        if ($page !== false && $echo) {
+            $this->storeSubjectCursor($key, $page->count() < $take ? null : (int) $page->min('releases_id'));
+        }
+
+        return $page;
+    }
+
+    private function subjectRevisitArms(): string
+    {
+        return sprintf(
+            ' AND rel.proc_files <> %d AND (COALESCE(NULLIF(rel.name, \'\'), rel.searchname) REGEXP %s OR COALESCE(NULLIF(rel.name, \'\'), rel.searchname) REGEXP %s)',
+            self::PROC_FILES_NONE,
+            escapeString('(^|[^[:alnum:]])(19|20)[0-9]{2}([^[:alnum:]]|$)'),
+            escapeString($this->readableSoftwareSubjectRegex())
+        );
+    }
+
+    private function revisitCursorKey(string $lane, int $time, int $cats): string
+    {
+        return sprintf('nntmux:namefix:%s:cursor:%d:%d', $lane, $time, $cats);
+    }
+
+    private function subjectCursor(string $key): ?int
+    {
+        try {
+            $cursor = Cache::store((string) config('cache.default', 'redis'))->get($key);
+        } catch (Throwable) {
+            return null;
+        }
+
+        return is_int($cursor) && $cursor > 0 ? $cursor : null;
+    }
+
+    private function storeSubjectCursor(string $key, ?int $cursor): void
+    {
+        try {
+            $store = Cache::store((string) config('cache.default', 'redis'));
+            $cursor === null ? $store->forget($key) : $store->forever($key, $cursor);
+        } catch (Throwable) {
+            // Losing the cursor only restarts the sweep from the newest rows.
         }
     }
 
@@ -1569,10 +1644,15 @@ class NameFixingService
      *
      * @return Collection<int, mixed>
      */
-    protected function getReleases(int $time, int $cats, string $query, int $limit = 0): \Illuminate\Database\Eloquent\Collection|bool // @phpstan-ignore class.notFound, return.phpDocType
+    protected function getReleases(int $time, int $cats, string $query, int $limit = 0, bool $orderById = false): \Illuminate\Database\Eloquent\Collection|bool // @phpstan-ignore class.notFound, return.phpDocType
     {
-        $releases = false;
         $queryLimit = ($limit === 0) ? '' : ' LIMIT '.$limit;
+        if ($orderById) {
+            $scope = $this->releaseScopeSuffix($time, $cats);
+
+            return $scope === null ? false : Release::fromQuery($query.preg_replace('/ ORDER BY .*$/', '', $scope).' ORDER BY rel.id DESC'.$queryLimit);
+        }
+        $releases = false;
 
         if ($time === 1 && $cats === 1) {
             $releases = Release::fromQuery($query.$this->timeother.$queryLimit);
@@ -1600,6 +1680,21 @@ class NameFixingService
         }
 
         return $releases;
+    }
+
+    private function releaseScopeSuffix(int $time, int $cats): ?string
+    {
+        return match ([$time, $cats]) {
+            [1, 1] => $this->timeother,
+            [1, 2] => $this->timeall,
+            [2, 1] => $this->fullother,
+            [2, 2] => $this->fullall,
+            [1, 4] => $this->timemovies,
+            [2, 4] => $this->fullmovies,
+            [1, 5] => $this->timehashed,
+            [2, 5] => $this->fullhashed,
+            default => null,
+        };
     }
 
     /**
@@ -1739,6 +1834,12 @@ class NameFixingService
                     if ($this->updateService->matched) {
                         $this->updateService->fixed++;
                     }
+                    // An unmatched subject title is final for this pass: mirror
+                    // checkPar2() and mark the release done, or it is re-selected
+                    // every cycle. Dry runs (no set-status) write nothing.
+                    if ($nameStatus === true && ! $this->updateService->matched) {
+                        $this->updateProcessingFlags('PAR2, ', (int) $release->releases_id);
+                    }
                     $this->updateService->incrementChecked();
                     $this->echoRenamed($show);
 
@@ -1847,7 +1948,8 @@ class NameFixingService
                 'SELECT rel.id AS releases_id, rel.name, rel.name AS textstring, rel.predb_id, rel.searchname, rel.fromname, rel.groups_id, rel.categories_id, rel.id AS releases_id, rf.movie_name as movie_name
                 FROM releases rel
                 INNER JOIN media_infos rf ON rf.releases_id = rel.id
-                WHERE rel.predb_id = 0'
+                WHERE rel.predb_id = 0
+                AND rf.movie_name IS NOT NULL AND rf.movie_name <> \'\''
             );
             $cats = 2;
         } else {
@@ -1856,7 +1958,8 @@ class NameFixingService
                 FROM releases rel
                 INNER JOIN media_infos rf ON rf.releases_id = rel.id
                 WHERE rel.isrenamed = %d
-                AND rel.predb_id = 0',
+                AND rel.predb_id = 0
+                AND rf.movie_name IS NOT NULL AND rf.movie_name <> \'\'',
                 self::IS_RENAMED_NONE
             );
             if ($cats === 2) {
@@ -1864,7 +1967,11 @@ class NameFixingService
             }
         }
 
-        $releases = $this->getReleases($time, $cats, $query);
+        // A movie name that does not rename leaves no flag, so sweep these rows
+        // behind a cursor and a per-run budget rather than re-reading them all.
+        $releases = $this->revisitBudget(null) > 0
+            ? $this->revisitPage('mediainfo', $query, $time, $cats, $this->revisitBudget(null), $echo)
+            : false;
         $total = $releases ? $releases->count() : 0;
 
         if ($total > 0) {
