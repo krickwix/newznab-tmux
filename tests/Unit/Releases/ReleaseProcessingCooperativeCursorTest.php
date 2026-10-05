@@ -29,6 +29,7 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
         DB::purge('sqlite');
         Cache::store('array')->flush();
         DB::connection()->getPdo()->sqliteCreateFunction('GREATEST', max(...), -1);
+        DB::connection()->getPdo()->sqliteCreateFunction('CEIL', ceil(...), 1);
 
         Schema::create('collections', function (Blueprint $table): void {
             $table->id();
@@ -49,6 +50,7 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
 
     public function test_incomplete_five_hundred_row_prefix_cannot_starve_a_later_complete_collection(): void
     {
+        config(['nntmux.release_stage_scan_window' => 500]);
         $collections = [];
         $binaries = [];
         for ($id = 1; $id <= 501; $id++) {
@@ -131,8 +133,12 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
     {
         $this->insertCollection(1, 1, CollectionFileCheckStatus::CompleteCollection->value);
         $this->insertCollection(2, 1, CollectionFileCheckStatus::CompleteCollection->value);
+        DB::table('binaries')->insert([
+            $this->binary(1, 1, 1, 1, FileCompletionStatus::Complete->value),
+            $this->binary(2, 2, 1, 1, FileCompletionStatus::Complete->value),
+        ]);
         DB::listen(static function ($query): void {
-            if (str_starts_with($query->sql, 'select "id" from "collections"')) {
+            if (str_starts_with($query->sql, 'select "collections"."id" from "collections"')) {
                 DB::table('collections')->where('id', 2)->update(['filecheck' => CollectionFileCheckStatus::Sized->value]);
             }
         });
@@ -184,6 +190,71 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
         (new ReflectionMethod($service, $method))->invoke($service, ...$args);
     }
 
+    public function test_stage_two_prefilter_leaves_incomplete_collections_at_one_with_no_updates(): void
+    {
+        for ($id = 1; $id <= 3; $id++) {
+            $this->insertCollection($id, 1, CollectionFileCheckStatus::CompleteCollection->value, 2);
+            DB::table('binaries')->insert($this->binary($id, $id, 0, 1));
+        }
+        $updates = 0;
+        DB::listen(static function ($query) use (&$updates): void {
+            if (str_starts_with($query->sql, 'update')) {
+                $updates++;
+            }
+        });
+
+        $this->runStage($this->cooperativeService(), 'runCollectionFileCheckStage2', 1);
+
+        self::assertSame(0, $updates);
+        self::assertSame(3, DB::table('collections')->where('filecheck', CollectionFileCheckStatus::CompleteCollection->value)->count());
+    }
+
+    public function test_stage_two_mirrors_stage_four_at_a_partial_completion_threshold(): void
+    {
+        // completion=75, totalfiles=4: stage 4 needs CEIL(3) = 3 complete
+        // binaries, and stage 3 completes a binary at CEIL(100 * 75 / 100) = 75.
+        // Figures divide exactly because SQLite integer division would
+        // truncate where MariaDB does not.
+        $this->insertCollection(1, 1, CollectionFileCheckStatus::CompleteCollection->value, 4);
+        $this->insertCollection(2, 1, CollectionFileCheckStatus::CompleteCollection->value, 4);
+        DB::table('binaries')->insert([
+            $this->binary(1, 1, 100, 100, FileCompletionStatus::Complete->value),
+            $this->binary(2, 1, 75, 100),
+            $this->binary(3, 1, 80, 100),
+            $this->binary(4, 2, 100, 100, FileCompletionStatus::Complete->value),
+            $this->binary(5, 2, 75, 100),
+            $this->binary(6, 2, 74, 100),
+        ]);
+        $service = $this->cooperativeService(500, 75);
+
+        foreach (['runCollectionFileCheckStage2', 'runCollectionFileCheckStage3', 'runCollectionFileCheckStage4'] as $stage) {
+            $this->runStage($service, $stage, 1);
+        }
+
+        self::assertSame(CollectionFileCheckStatus::CompleteParts->value, (int) DB::table('collections')->where('id', 1)->value('filecheck'));
+        self::assertSame(CollectionFileCheckStatus::CompleteCollection->value, (int) DB::table('collections')->where('id', 2)->value('filecheck'));
+    }
+
+    public function test_stage_two_cursor_advances_by_scanned_rows_and_wraps_per_group(): void
+    {
+        config(['nntmux.release_stage_scan_window' => 2]);
+        foreach ([1 => 1, 2 => 1, 3 => 1, 4 => 2] as $id => $group) {
+            $this->insertCollection($id, $group, CollectionFileCheckStatus::CompleteCollection->value, 1);
+        }
+        DB::table('binaries')->insert($this->binary(3, 3, 1, 1, FileCompletionStatus::Complete->value));
+        $service = $this->cooperativeService();
+        $cache = Cache::store('array');
+
+        $this->runStage($service, 'runCollectionFileCheckStage2', 1);
+        self::assertSame(2, $cache->get('nntmux:release-pump:stage2:1'));
+        self::assertSame(1, (int) DB::table('collections')->where('id', 3)->value('filecheck'));
+
+        $this->runStage($service, 'runCollectionFileCheckStage2', 1);
+        self::assertSame(0, $cache->get('nntmux:release-pump:stage2:1'));
+        self::assertSame(CollectionFileCheckStatus::TempComplete->value, (int) DB::table('collections')->where('id', 3)->value('filecheck'));
+        self::assertNull($cache->get('nntmux:release-pump:stage2:2'));
+    }
+
     private function insertCollection(int $id, int $groupId, int $filecheck, int $totalfiles = 1): void
     {
         DB::table('collections')->insert([
@@ -195,7 +266,7 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
         ]);
     }
 
-    private function cooperativeService(int $batchSize = 500): ReleaseProcessingService
+    private function cooperativeService(int $batchSize = 500, int $completion = 100): ReleaseProcessingService
     {
         $reflection = new ReflectionClass(ReleaseProcessingService::class);
         $service = $reflection->newInstanceWithoutConstructor();
@@ -203,7 +274,7 @@ final class ReleaseProcessingCooperativeCursorTest extends TestCase
         $reflection->getProperty('workBatchSize')->setValue($service, $batchSize);
         $reflection->getProperty('settings')->setValue(
             $service,
-            new ProcessReleasesSettings(completion: 100),
+            new ProcessReleasesSettings(completion: $completion),
         );
 
         return $service;

@@ -1097,6 +1097,79 @@ final class ReleaseProcessingService
         }
     }
 
+    /**
+     * One id page of candidate collections for a cooperative slice, in id
+     * order after the stage's persisted cursor.
+     *
+     * The cursor advances by rows scanned, not rows qualified, so a prefix of
+     * non-qualifying collections cannot be re-read every slice. A short page
+     * means the tail was reached and wraps the cursor to the beginning.
+     *
+     * @param  list<int>  $filechecks
+     * @return list<int>
+     */
+    private function scanPageIds(string $stage, int $groupId, array $filechecks, ?callable $scope = null): array
+    {
+        $window = max(1, (int) config('nntmux.release_stage_scan_window', 2000));
+        $ids = $this->retryTransientCollectionOperation(
+            fn (): array => Collection::query()
+                ->whereIn('filecheck', $filechecks)
+                ->where('id', '>', $this->cooperativeStageCursor($stage, $groupId))
+                ->when($groupId !== 0, static fn ($q) => $q->where('groups_id', $groupId))
+                ->when($scope !== null, static fn ($q) => $scope($q))
+                ->orderBy('id')
+                ->limit($window)
+                ->pluck('id')
+                ->map(static fn ($id): int => (int) $id)
+                ->all()
+        );
+        $this->storeCooperativeStageCursor($stage, $groupId, \count($ids) < $window ? 0 : max($ids));
+
+        return $ids;
+    }
+
+    /**
+     * Cooperative stage 2: promote only collections stage 4 will accept.
+     *
+     * The predicate mirrors stage 3 + stage 4 exactly: a binary counts when it
+     * is already complete or is incomplete but meets stage 3's part threshold,
+     * and the count must reach stage 4's GREATEST(1, CEIL(totalfiles * c / 100)).
+     * Anything else would only be reverted by stage 5, so it stays at 1.
+     *
+     * @throws Throwable
+     */
+    private function promoteCooperativeStage2(int $groupID, int $fromStatus, int $toStatus): void
+    {
+        $page = $this->scanPageIds('stage2', $groupID, [$fromStatus]);
+        if ($page === []) {
+            return;
+        }
+
+        $completion = $this->requiredCompletionPercent();
+        $ids = $this->retryTransientCollectionOperation(
+            fn (): array => Collection::query()
+                ->whereIn('collections.id', $page)
+                ->where('collections.filecheck', $fromStatus)
+                ->whereRaw(
+                    '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id AND (b.partcheck = ? OR (b.partcheck = ? AND b.totalparts > 0 AND b.currentparts >= CEIL(b.totalparts * ? / 100)))) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))',
+                    [FileCompletionStatus::Complete->value, FileCompletionStatus::Incomplete->value, $completion, $completion],
+                )
+                ->orderBy('collections.id')
+                ->pluck('collections.id')
+                ->all()
+        );
+
+        foreach (array_chunk($ids, $this->workBatchSize) as $chunk) {
+            $this->retryTransientCollectionOperation(static fn () => DB::transaction(
+                static fn (): int => Collection::query()
+                    ->whereIn('id', $chunk)
+                    ->where('filecheck', $fromStatus)
+                    ->update(['filecheck' => $toStatus]),
+                10,
+            ));
+        }
+    }
+
     // ========================================================================
     // Collection Processing Stages
     // ========================================================================
@@ -1312,6 +1385,12 @@ final class ReleaseProcessingService
      */
     private function updateCollectionsFilecheckInChunks(int $groupID, int $fromStatus, int $toStatus): void
     {
+        if ($this->cooperativeSlice && $fromStatus === CollectionFileCheckStatus::CompleteCollection->value) {
+            $this->promoteCooperativeStage2($groupID, $fromStatus, $toStatus);
+
+            return;
+        }
+
         $attempt = 0;
         $maxAttempts = self::MAX_RETRIES + 1;
         $lastCollectionId = $this->cooperativeStageCursor('stage2', $groupID);

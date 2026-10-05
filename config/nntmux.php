@@ -33,6 +33,9 @@ return [
     'distributed_nzb_terminal_stale_enabled' => filter_var(env('NNTMUX_DISTRIBUTED_NZB_TERMINAL_STALE_ENABLED', false), FILTER_VALIDATE_BOOL),
     'distributed_release_pump_deadline_seconds' => min(30, max(5, (int) env('NNTMUX_DISTRIBUTED_RELEASE_PUMP_DEADLINE_SECONDS', 25))),
     'distributed_release_pump_batch_size' => min(500, max(25, (int) env('NNTMUX_DISTRIBUTED_RELEASE_PUMP_BATCH_SIZE', 200))),
+    // Collections scanned per stage per cooperative release slice; the stage
+    // cursor advances by rows scanned so non-qualifying rows are not re-read.
+    'release_stage_scan_window' => min(20_000, max(100, (int) env('NNTMUX_RELEASE_STAGE_SCAN_WINDOW', 2000))),
     'distributed_release_sweep_groups' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_RELEASE_SWEEP_GROUPS', 1))),
     'distributed_control_sleep_slice_seconds' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_CONTROL_SLEEP_SLICE_SECONDS', 5))),
     'split_collection_reconcile_groups' => array_values(array_unique(array_filter(array_map(
