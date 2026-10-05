@@ -10,6 +10,13 @@ return [
     'sleep_ms' => (int) env('NNTMUX_METADATA_REFRESH_SLEEP_MS', 2500),
     'timer' => (int) env('NNTMUX_METADATA_REFRESH_TIMER', 900),
     'timeout' => (int) env('NNTMUX_METADATA_REFRESH_TIMEOUT', 20),
+    'connect_timeout' => max(1, (int) env('NNTMUX_METADATA_CONNECT_TIMEOUT', 3)),
+    // A lookup that got a healthy empty answer is not repeated for this long.
+    'negative_ttl' => max(0, (int) env('NNTMUX_METADATA_NEGATIVE_TTL', 86400)),
+    // Consecutive failures (timeouts, 5xx, 401/403/429) that open a source's breaker, and
+    // how long it stays open. A threshold of 0 disables the breaker.
+    'breaker_threshold' => max(0, (int) env('NNTMUX_METADATA_BREAKER_THRESHOLD', 3)),
+    'breaker_cooldown' => max(1, (int) env('NNTMUX_METADATA_BREAKER_COOLDOWN', 900)),
     'sources' => [
         'srrdb' => [
             'enabled' => (bool) env('NNTMUX_METADATA_SOURCE_SRRDB', true),

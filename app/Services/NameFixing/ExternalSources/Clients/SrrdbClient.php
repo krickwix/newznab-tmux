@@ -6,20 +6,22 @@ namespace App\Services\NameFixing\ExternalSources\Clients;
 
 use App\Services\NameFixing\ExternalSources\ExternalReleaseHit;
 use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Support\Facades\Http;
 
 class SrrdbClient
 {
+    use RecordsHttpStatus;
+
     /**
      * @return array{title: string, files: list<array{name: string, size: int, crc: string}>}|null
      */
     public function details(string $releaseTitle): ?array
     {
         try {
-            $response = Http::timeout((int) config('external_metadata.timeout', 20))
+            $response = $this->request()
                 ->withUserAgent('nntmux-external-metadata/1.0')
                 ->acceptJson()
                 ->get(rtrim((string) config('external_metadata.sources.srrdb.base_url'), '/').'/details/'.rawurlencode($releaseTitle));
+            $this->recordStatus($response->status());
         } catch (ConnectionException) {
             return null;
         }
@@ -76,10 +78,11 @@ class SrrdbClient
         }
 
         try {
-            $response = Http::timeout((int) config('external_metadata.timeout', 20))
+            $response = $this->request()
                 ->withUserAgent('nntmux-external-metadata/1.0')
                 ->acceptJson()
                 ->get(rtrim((string) config('external_metadata.sources.srrdb.base_url'), '/').$path);
+            $this->recordStatus($response->status());
         } catch (ConnectionException) {
             return [];
         }

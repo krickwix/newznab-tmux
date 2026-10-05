@@ -5,10 +5,11 @@ declare(strict_types=1);
 namespace App\Services\NameFixing\ExternalSources\Clients;
 
 use App\Services\NameFixing\ExternalSources\ExternalReleaseHit;
-use Illuminate\Support\Facades\Http;
 
 class NzbIndexClient
 {
+    use RecordsHttpStatus;
+
     /**
      * @return list<ExternalReleaseHit>
      */
@@ -19,13 +20,14 @@ class NzbIndexClient
             return [];
         }
 
-        $response = Http::timeout((int) config('external_metadata.timeout', 20))
+        $response = $this->request()
             ->acceptJson()
             ->get(rtrim((string) config('external_metadata.sources.nzbindex.base_url'), '/').'/search', [
                 'q' => $query,
                 'max' => $limit,
                 'key' => $apiKey,
             ]);
+        $this->recordStatus($response->status());
 
         if (! $response->successful() || $response->json('error') === true) {
             return [];
