@@ -2239,4 +2239,19 @@ class ReleaseNameFixedRecategorizationTest extends TestCase
         $this->assertSame([1], $this->selectedSubjectIds(0, false));
         $this->assertSame([1], $this->selectedSubjectIds(0, false));
     }
+
+    public function test_revisit_cursor_and_rest_accept_the_numeric_strings_redis_returns(): void
+    {
+        Cache::flush();
+        config(['nntmux.namefix_revisit_min_sweep_seconds' => 3600, 'nntmux.namefix_subject_revisit_limit' => 2]);
+        foreach ([1, 2, 3, 4] as $id) {
+            $this->requeueRelease($id, 'Some Software Title 2024 yEnc '.$id);
+        }
+
+        Cache::forever('nntmux:namefix:subjects:cursor:2:5', '3');
+        $this->assertSame([2, 1], $this->selectedSubjectIds(500));
+
+        Cache::forever('nntmux:namefix:subjects:cursor:2:5:wrapped_at', (string) time());
+        $this->assertSame([], $this->selectedSubjectIds(500));
+    }
 }

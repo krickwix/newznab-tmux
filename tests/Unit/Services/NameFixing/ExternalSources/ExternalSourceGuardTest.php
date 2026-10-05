@@ -8,6 +8,7 @@ use App\Facades\Search;
 use App\Services\NameFixing\ExternalSources\Clients\PredbOvhClient;
 use App\Services\NameFixing\ExternalSources\ExternalMetadataRefreshService;
 use App\Services\NameFixing\ExternalSources\ExternalMetadataSourceSummary;
+use App\Services\NameFixing\ExternalSources\ExternalSourceGuard;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Cache;
@@ -161,6 +162,16 @@ final class ExternalSourceGuardTest extends TestCase
             return true;
         });
         self::assertCount(2, array_unique($titles));
+    }
+
+    public function test_negative_cache_hit_is_recognised_when_the_store_returns_a_string(): void
+    {
+        $guard = new ExternalSourceGuard;
+        $guard->rememberNegative('predb-ovh', 'q');
+        $key = 'nntmux:extmeta:neg:predb-ovh:'.sha1('q');
+        Cache::put($key, '1', 60);
+
+        self::assertTrue($guard->isNegative('predb-ovh', 'q'));
     }
 
     public function test_requests_carry_the_query_so_negative_keys_are_per_query(): void

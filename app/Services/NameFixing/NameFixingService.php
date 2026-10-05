@@ -995,7 +995,8 @@ class NameFixingService
             return false;
         }
 
-        return is_int($wrappedAt) && time() - $wrappedAt < $minimum;
+        // Redis hands numeric values back as strings, so accept those too.
+        return is_numeric($wrappedAt) && time() - (int) $wrappedAt < $minimum;
     }
 
     private function storeSubjectWrapTime(string $key): void
@@ -1030,7 +1031,8 @@ class NameFixingService
             return null;
         }
 
-        return is_int($cursor) && $cursor > 0 ? $cursor : null;
+        // Redis returns numeric values as strings, not ints.
+        return is_numeric($cursor) && (int) $cursor > 0 ? (int) $cursor : null;
     }
 
     private function storeSubjectCursor(string $key, ?int $cursor): void
