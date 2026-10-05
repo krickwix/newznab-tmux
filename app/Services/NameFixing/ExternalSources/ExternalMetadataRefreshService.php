@@ -27,13 +27,37 @@ class ExternalMetadataRefreshService
         'nzbindex',
     ];
 
+    private readonly ExternalSourceGuard $guard;
+
     public function __construct(
         private readonly SrrdbClient $srrdbClient,
         private readonly PredbNetClient $predbNetClient,
         private readonly PredbOvhClient $predbOvhClient,
         private readonly XrelClient $xrelClient,
         private readonly NzbIndexClient $nzbIndexClient,
-    ) {}
+        ?ExternalSourceGuard $guard = null,
+    ) {
+        $this->guard = $guard ?? new ExternalSourceGuard;
+    }
+
+    /**
+     * Record one lookup outcome for the breaker and, for a healthy empty
+     * answer, the negative cache. Returns false once the source is unhealthy.
+     */
+    private function settleLookup(string $sourceName, string $cacheKey, ?int $status, bool $empty): bool
+    {
+        if (ExternalSourceGuard::isFailureStatus($status)) {
+            $this->guard->recordFailure($sourceName);
+
+            return false;
+        }
+        $this->guard->recordSuccess($sourceName);
+        if ($empty) {
+            $this->guard->rememberNegative($sourceName, $cacheKey);
+        }
+
+        return true;
+    }
 
     /**
      * @param  list<string>  $sources
@@ -110,14 +134,28 @@ class ExternalMetadataRefreshService
             ->get();
 
         foreach ($pres as $pre) {
+            if ($this->guard->isOpen('srrdb')) {
+                $source->skipped++;
+                $source->message('circuit open; remaining lookups skipped');
+
+                return;
+            }
+            $cacheKey = 'details:'.$pre->title;
+            if ($this->guard->isNegative('srrdb', $cacheKey)) {
+                $source->skipped++;
+
+                continue;
+            }
             $source->queried++;
             $details = $this->srrdbClient->details((string) $pre->title);
             if ($details === null) {
                 $source->failed++;
+                $this->settleLookup('srrdb', $cacheKey, $this->srrdbClient->lastStatus(), true);
                 $this->sleep($sleepMs);
 
                 continue;
             }
+            $this->settleLookup('srrdb', $cacheKey, $this->srrdbClient->lastStatus(), false);
 
             $rows = [];
             foreach ($details['files'] as $file) {
@@ -174,9 +212,21 @@ class ExternalMetadataRefreshService
                 continue;
             }
 
+            if ($this->guard->isOpen('srrdb')) {
+                $source->skipped++;
+                $source->message('circuit open; remaining lookups skipped');
+
+                return;
+            }
+            if ($this->guard->isNegative('srrdb', 'crc:'.$key)) {
+                $source->skipped++;
+
+                continue;
+            }
             $queried++;
             $source->queried++;
             $hits = $this->srrdbClient->searchByArchiveCrc($crc, $size);
+            $this->settleLookup('srrdb', 'crc:'.$key, $this->srrdbClient->lastStatus(), $hits === []);
             if ($hits === []) {
                 $source->failed++;
                 $this->sleep($sleepMs);
@@ -228,16 +278,29 @@ class ExternalMetadataRefreshService
         }
 
         foreach (array_slice($queries, 0, $limit) as $query) {
+            if ($this->guard->isOpen($sourceName)) {
+                $source->skipped++;
+                $source->message('circuit open; remaining lookups skipped');
+
+                break;
+            }
+            if ($this->guard->isNegative($sourceName, $query)) {
+                $source->skipped++;
+
+                continue;
+            }
             $source->queried++;
             try {
                 $hits = $search($query, min(10, $limit));
             } catch (ConnectionException $e) {
                 $source->failed++;
                 $source->message($e->getMessage());
+                $this->guard->recordFailure($sourceName);
                 $this->sleep($sleepMs);
 
                 continue;
             }
+            $this->settleLookup($sourceName, $query, $this->statusFor($sourceName), $hits === []);
 
             foreach ($hits as $hit) {
                 if ($this->importPredbHit($hit, $dryRun)) {
@@ -402,6 +465,15 @@ class ExternalMetadataRefreshService
         }
 
         return $base;
+    }
+
+    private function statusFor(string $sourceName): ?int
+    {
+        return match ($sourceName) {
+            'predb-net' => $this->predbNetClient->lastStatus(),
+            'predb-ovh' => $this->predbOvhClient->lastStatus(),
+            default => $this->xrelClient->lastStatus(),
+        };
     }
 
     private function sleep(int $sleepMs): void

@@ -5,16 +5,17 @@ declare(strict_types=1);
 namespace App\Services\NameFixing\ExternalSources\Clients;
 
 use App\Services\NameFixing\ExternalSources\ExternalReleaseHit;
-use Illuminate\Support\Facades\Http;
 
 class XrelClient
 {
+    use RecordsHttpStatus;
+
     /**
      * @return list<ExternalReleaseHit>
      */
     public function search(string $query, bool $p2p = false, int $limit = 10): array
     {
-        $response = Http::timeout((int) config('external_metadata.timeout', 20))
+        $response = $this->request()
             ->acceptJson()
             ->get(rtrim((string) config('external_metadata.sources.xrel.base_url'), '/').'/search/releases.json', [
                 'q' => $query,
@@ -22,6 +23,7 @@ class XrelClient
                 'p2p' => $p2p ? 1 : 0,
                 'limit' => $limit,
             ]);
+        $this->recordStatus($response->status());
 
         if (! $response->successful()) {
             return [];
