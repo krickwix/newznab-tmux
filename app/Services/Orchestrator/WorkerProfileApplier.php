@@ -208,11 +208,14 @@ class WorkerProfileApplier
             // short_groups and permanently stalls the backfill candidate query,
             // so we skip the group-disable for probe groups and only pause the
             // current permit so the orchestrator advances past the bad cohort.
-            $isProbeGroup = in_array(
-                $group,
+            // The "all" sentinel makes every DB-flagged group a probe group;
+            // clearing the flag would drop it from that pool for good.
+            $probeGroups = array_map(
+                static fn (mixed $probe): string => trim((string) $probe),
                 (array) config('nntmux.orchestrator.backfill_probe_groups', []),
-                true,
             );
+            $isProbeGroup = in_array($group, $probeGroups, true)
+                || in_array('all', array_map('strtolower', $probeGroups), true);
             if (! $isProbeGroup) {
                 DB::table('usenet_groups')
                     ->where('name', $group)
