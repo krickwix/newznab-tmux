@@ -79,4 +79,30 @@ class CategorizeSportTest extends TestCase
         $this->assertSame(Category::TV_SPORT, $result->categoryId);
         $this->assertNotSame(Category::MOVIE_HD, $result->categoryId);
     }
+
+    /**
+     * @return array<string, array{0: string, 1: int}>
+     */
+    public static function resolutionIsNotEventContextProvider(): array
+    {
+        return [
+            'sitcom episode titled Boxing' => ['Bad.Education.S05E01.Boxing.1080p.WEBRip.10bit.EAC3.2.0.X265-IVy', Category::TV_WEBDL],
+            'dated boxing card stays sport' => ['Boxing.2026.10.04.Usyk.vs.Fury.1080p.WEB.h264', Category::TV_SPORT],
+            'boxing with a year only stays sport' => ['Boxing.2026.Heavyweight.Title.720p.HDTV.x264', Category::TV_SPORT],
+        ];
+    }
+
+    #[DataProvider('resolutionIsNotEventContextProvider')]
+    public function test_a_resolution_is_not_sport_event_context(string $name, int $expected): void
+    {
+        $result = (new TvCategorizer)->categorize(new ReleaseContext(
+            releaseName: $name,
+            groupId: 0,
+            groupName: '',
+            poster: '',
+            catWebDL: true,
+        ));
+
+        $this->assertSame($expected, $result->categoryId, $name);
+    }
 }
