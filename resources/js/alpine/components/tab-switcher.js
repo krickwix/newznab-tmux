@@ -27,12 +27,13 @@ Alpine.data('seasonSwitcher', () => ({
     activeSeason: '',
 
     init() {
-        const first = this.$el.querySelector('[data-season]');
+        const root = this.$el;
+        const first = root.querySelector('[data-season]');
         if (first) this.activeSeason = first.getAttribute('data-season');
         // Season tabs have no inline handler; delegate clicks from the component root
-        this.$el.addEventListener('click', (e) => {
+        root.addEventListener('click', (e) => {
             const tab = e.target.closest('.season-tab');
-            if (!tab || !this.$el.contains(tab)) return;
+            if (!tab || !root.contains(tab)) return;
             e.preventDefault();
             this.switchSeason(tab.getAttribute('data-season'));
         });
