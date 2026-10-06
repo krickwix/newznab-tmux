@@ -102,9 +102,7 @@ final readonly class BackfillTargetSelector
                 $timestamp = strtotime($candidate['cursor_postdate']);
                 $entry = $history[$candidate['name']] ?? null;
                 $ineffectivePermits = (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0);
-                $lockRetryDue = is_array($entry)
-                    && (int) ($entry['last_attempt_at'] ?? 0) > 0
-                    && $now - (int) $entry['last_attempt_at'] >= $this->lockRetrySeconds;
+                $lockRetryDue = $this->lockRetryDue($entry, $history, $now);
                 $remainingArticles = (int) $candidate['remaining_articles'];
                 $terminalWindow = $remainingArticles > 10_000 && $remainingArticles < 20_000;
                 $rangeEligible = $remainingArticles >= 20_000
@@ -132,9 +130,7 @@ final readonly class BackfillTargetSelector
 
         $candidates = array_map(function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget): array {
             $entry = $history[$candidate['name']] ?? null;
-            $candidate['lock_retry_due'] = is_array($entry)
-                && (int) ($entry['last_attempt_at'] ?? 0) > 0
-                && $now - (int) $entry['last_attempt_at'] >= $this->lockRetrySeconds
+            $candidate['lock_retry_due'] = $this->lockRetryDue($entry, $history, $now)
                 && (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) >= WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT;
             if ((int) $candidate['remaining_articles'] < 20_000) {
                 $candidate['safe_quantity'] = 10_000;
@@ -304,6 +300,32 @@ final readonly class BackfillTargetSelector
      * @param  array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity?: int}  $candidate
      * @param  array{attempts?: int, ewma_nzbs_per_10k?: float, last_attempt_at?: int, last_effective_at?: int, last_cursor_delta?: int}|null  $entry
      */
+    /**
+     * A locked target is retried once its last attempt is old enough. History
+     * keeps only the most recent groups, so a locked target can lose its
+     * entry, and it would then never be retried. An evicted group was last
+     * attempted no later than the oldest entry still kept, so it is due once
+     * that entry is. With no history at all the age is unknown: stay locked.
+     *
+     * @param  array{last_attempt_at?: int}|null  $entry
+     * @param  array<string, array{last_attempt_at?: int}>  $history
+     */
+    private function lockRetryDue(?array $entry, array $history, int $now): bool
+    {
+        if (is_array($entry)) {
+            $lastAttemptAt = (int) ($entry['last_attempt_at'] ?? 0);
+
+            return $lastAttemptAt > 0 && $now - $lastAttemptAt >= $this->lockRetrySeconds;
+        }
+
+        $kept = array_filter(array_map(
+            static fn (mixed $row): int => is_array($row) ? (int) ($row['last_attempt_at'] ?? 0) : 0,
+            $history,
+        ), static fn (int $at): bool => $at > 0);
+
+        return $kept !== [] && $now - min($kept) >= $this->lockRetrySeconds;
+    }
+
     private function isTerminalPositiveCandidate(
         array $candidate,
         ?array $entry,
