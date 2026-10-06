@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Models\Category;
+use App\Models\Settings;
 use App\Services\Categorization\CategorizationService;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
@@ -33,6 +34,9 @@ final class CategorizationPipelineObfuscatedSubjectTest extends TestCase
             ['id' => 4, 'name' => 'alt.binaries.sounds.lossless'],
             ['id' => 5, 'name' => 'alt.binaries.documentaries'],
         ]);
+        // The settings memo is process-wide: drop any copy an earlier test
+        // loaded, or catwebdl reads stale in a full-suite run.
+        Settings::forgetCachedSettings();
     }
 
     public function test_readable_vintage_subject_is_not_replaced_by_archive_stem_before_categorization(): void
