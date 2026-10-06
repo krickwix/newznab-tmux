@@ -7,6 +7,7 @@ namespace App\Services\Distributed;
 use App\Models\Settings;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Tmux\TmuxMonitorService;
+use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Cache;
@@ -20,6 +21,16 @@ class DistributedJobWorker
      * acquire a fresh lock this process will never live long enough to release.
      */
     private bool $terminating = false;
+
+    /**
+     * Locks whose acquire threw. Redis may have applied the SET NX and lost
+     * only the reply, which leaves the lane held under our own owner token
+     * for the full TTL. Each is released, owner-scoped, before the lane
+     * tries again.
+     *
+     * @var array<string, Lock>
+     */
+    private array $unconfirmedLocks = [];
 
     public function __construct(
         private readonly DistributedJobCatalog $catalog,
@@ -157,11 +168,31 @@ class DistributedJobWorker
             return $result(0);
         }
 
+        if (isset($this->unconfirmedLocks[$lockName])) {
+            try {
+                $this->unconfirmedLocks[$lockName]->release();
+                unset($this->unconfirmedLocks[$lockName]);
+            } catch (Throwable $e) {
+                $this->workerTelemetry->recordRunOutcome($plan['name'], 'lock_error');
+                $output->writeln(sprintf(
+                    '[%s] skipped %s: failed to release unconfirmed %s lock [%s]: %s',
+                    now()->toDateTimeString(),
+                    $plan['name'],
+                    $lockStore,
+                    $lockName,
+                    $e->getMessage()
+                ));
+
+                return $result(1);
+            }
+        }
+
         $lock = $cacheStore->lock($lockName, $lockSeconds);
 
         try {
             $acquired = $lock->get();
         } catch (Throwable $e) {
+            $this->unconfirmedLocks[$lockName] = $lock;
             $this->workerTelemetry->recordRunOutcome($plan['name'], 'lock_error');
             $output->writeln(sprintf(
                 '[%s] skipped %s: failed to acquire %s lock [%s]: %s',
