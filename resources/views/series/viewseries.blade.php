@@ -314,7 +314,7 @@
                                                     </div>
                                                 </div>
 
-{{-- Season switcher functionality moved to csp-safe.js --}}
+{{-- Season switcher functionality lives in the seasonSwitcher component (resources/js/alpine/components/tab-switcher.js) --}}
                                             @endforeach
                                         </div>
                                     </div>

@@ -643,15 +643,6 @@ Alpine.data('myMovies', () => ({
             return;
         }
 
-        // Season tab
-        var seasonTab = e.target.closest('.season-tab');
-        if (seasonTab) {
-            e.preventDefault();
-            var num = seasonTab.getAttribute('data-season');
-            if (num && typeof switchSeason === 'function') switchSeason(num);
-            return;
-        }
-
         // My Movies confirm
         var confirmAction = e.target.closest('.confirm_action');
         if (confirmAction) {
