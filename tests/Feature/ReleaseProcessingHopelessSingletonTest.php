@@ -7,9 +7,11 @@ namespace Tests\Feature;
 use App\Enums\CollectionFileCheckStatus;
 use App\Services\ReleaseProcessingService;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use ReflectionMethod;
+use ReflectionProperty;
 use Tests\TestCase;
 
 /**
@@ -82,6 +84,26 @@ final class ReleaseProcessingHopelessSingletonTest extends TestCase
         $this->runStage(5);
 
         $this->assertSame([2], DB::table('collections')->pluck('id')->map(static fn ($id): int => (int) $id)->all());
+    }
+
+    public function test_a_cursor_past_every_collection_wraps(): void
+    {
+        // Ids restart after a truncate; the stored cursor still points past them.
+        Cache::store('array')->forever('nntmux:release-pump:hopeless:5', 7_765_673);
+        $this->seedCollection(1, hoursOld: 7);
+        $this->seedBinary(10, 1, totalParts: 6655, parts: 1);
+
+        $service = new ReleaseProcessingService;
+        $service->setEchoCLI(false);
+        (new ReflectionProperty($service, 'cooperativeSlice'))->setValue($service, true);
+        $stage = new ReflectionMethod($service, 'processHopelessSingletonCollections');
+
+        $stage->invoke($service, 5);
+        $this->assertSame(0, (int) Cache::store('array')->get('nntmux:release-pump:hopeless:5'));
+        $this->assertTrue(DB::table('collections')->where('id', 1)->exists());
+
+        $stage->invoke($service, 5);
+        $this->assertFalse(DB::table('collections')->where('id', 1)->exists());
     }
 
     public function test_mariadb_sql(): void
