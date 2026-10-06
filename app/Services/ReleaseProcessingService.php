@@ -55,6 +55,12 @@ final class ReleaseProcessingService
 
     private const int CATEGORIZE_CHUNK_SIZE = 1000;
 
+    /**
+     * Smallest advertised file count at which stage 6 forgives one missing
+     * file. Below it a single missing file is too large a share of the post.
+     */
+    private const int ONE_MISSING_FILE_MIN_FILES = 5;
+
     private int $workBatchSize = self::BATCH_SIZE;
 
     private bool $cooperativeSlice = false;
@@ -1739,6 +1745,19 @@ final class ReleaseProcessingService
         int $completion,
         ?array $page = null,
     ): array {
+        // Expected files: the largest of the advertised, highest observed and
+        // binary counts. With fewer than ~17 files CEIL(expected * pct / 100)
+        // rounds up to every file, so a post that never sends its last file
+        // ([12/12] .nfo/.sfv) would sit until collection_timeout and be
+        // deleted. Once every present binary has all its parts, forgive one
+        // missing file for posts of ONE_MISSING_FILE_MIN_FILES or more.
+        $expected = 'GREATEST(GREATEST(COALESCE(NULLIF(collections.totalfiles, 0), 0), COALESCE(MAX(NULLIF(existing.filenumber, 0)), 0)), COUNT(DISTINCT existing.id))';
+        $required = 'CEIL('.$expected.' * ? / 100)';
+        $forgiveOne = 'CASE WHEN '.$required.' >= '.$expected
+            .' AND '.$expected.' >= '.self::ONE_MISSING_FILE_MIN_FILES
+            .' AND SUM(CASE WHEN existing.currentparts < existing.totalparts THEN 1 ELSE 0 END) = 0'
+            .' THEN 1 ELSE 0 END';
+
         return $this->retryTransientCollectionOperation(
             fn (): array => DB::table('collections')
                 ->select('collections.id')
@@ -1762,8 +1781,8 @@ final class ReleaseProcessingService
                 ->whereNull('incomplete.id')
                 ->groupBy(['collections.id', 'collections.totalfiles'])
                 ->havingRaw(
-                    'COUNT(DISTINCT CASE WHEN existing.filenumber > 0 THEN existing.filenumber ELSE existing.id END) >= GREATEST(1, CEIL(GREATEST(GREATEST(COALESCE(NULLIF(collections.totalfiles, 0), 0), COALESCE(MAX(NULLIF(existing.filenumber, 0)), 0)), COUNT(DISTINCT existing.id)) * ? / 100))',
-                    [$completion],
+                    'COUNT(DISTINCT CASE WHEN existing.filenumber > 0 THEN existing.filenumber ELSE existing.id END) >= GREATEST(1, '.$required.' - '.$forgiveOne.')',
+                    [$completion, $completion],
                 )
                 ->orderBy('collections.id')
                 ->when($page === null, fn ($q) => $q->limit($this->workBatchSize))
