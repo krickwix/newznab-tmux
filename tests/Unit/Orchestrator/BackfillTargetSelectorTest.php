@@ -705,6 +705,40 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertNull($target);
     }
 
+    public function test_a_locked_target_evicted_from_history_is_retried_once_the_oldest_kept_entry_is_due(): void
+    {
+        // History keeps only the most recent groups. moovee fell out of it while
+        // locked; it was attempted no later than the oldest entry still kept.
+        $selector = new BackfillTargetSelector(
+            probeGroups: ['alt.binaries.moovee'],
+            historyTtlSeconds: 86_400,
+            lockRetrySeconds: 300,
+        );
+        $kept = static fn (int $at): array => [
+            'attempts' => 3,
+            'ewma_nzbs_per_10k' => 0.0,
+            'last_attempt_at' => $at,
+            'last_effective_at' => 0,
+            'last_cursor_delta' => 100_000,
+        ];
+        $candidates = [$this->candidate('alt.binaries.moovee', '2026-10-06 09:24:50')];
+        $strikes = ['alt.binaries.moovee' => WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT];
+
+        $due = $selector->select($candidates, history: [
+            'alt.binaries.hdtv' => $kept(1_999_999_900),
+            'alt.binaries.movies' => $kept(1_999_990_000),
+        ], now: 2_000_000_000, ineffectivePermitsByTarget: $strikes);
+
+        self::assertSame('alt.binaries.moovee', $due['name'] ?? null);
+        self::assertTrue($due['lock_retry_due'] ?? false);
+
+        // The oldest kept attempt is inside the cooldown, so the evicted one may be too.
+        self::assertNull($selector->select($candidates, history: [
+            'alt.binaries.hdtv' => $kept(1_999_999_900),
+            'alt.binaries.movies' => $kept(1_999_999_800),
+        ], now: 2_000_000_000, ineffectivePermitsByTarget: $strikes));
+    }
+
     public function test_it_retries_a_locked_target_after_the_bounded_cooldown(): void
     {
         $selector = new BackfillTargetSelector(
