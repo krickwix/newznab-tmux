@@ -16,7 +16,9 @@ class TvCategorizer extends AbstractCategorizer
 {
     private const string SPORTS_MARKER_REGEX = '/\b(NFL|NBA|NHL|MLB|MLS|EPL|UFC|WWE|Boxing|F1|Formula[._ -]?1|NASCAR|PGA|Tennis|Golf|Soccer|Football|Cricket|Rugby|Olympics?|Olympic[._ -]?Games?|Paralympics?)\b/i';
 
-    private const string SPORTS_EVENT_CONTEXT_REGEX = '/\d{4}|\b(Season|Week|Round|Match|Game|vs|Playoffs?|Finals?|Qualifying|Opening|Closing|Ceremony|Championship)\b/i';
+    // A year (also inside a date like 20260419), not any four digits: the
+    // "1080" of 1080p would otherwise make "Bad.Education.S05E01.Boxing" sport.
+    private const string SPORTS_EVENT_CONTEXT_REGEX = '/(?<!\d)(?:19|20)\d{2}|\b(Season|Week|Round|Match|Game|vs|Playoffs?|Finals?|Qualifying|Opening|Closing|Ceremony|Championship)\b/i';
 
     /**
      * Known anime release/fansub group tags. Matches when the tag appears
