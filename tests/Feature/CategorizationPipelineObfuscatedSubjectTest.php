@@ -156,4 +156,18 @@ final class CategorizationPipelineObfuscatedSubjectTest extends TestCase
         $this->assertFalse($result['debug']['locked_to_misc']);
         $this->assertSame('tv_compact_scene_episode_web', $result['debug']['matched_by']);
     }
+
+    public function test_apostrophes_in_a_multi_episode_name_do_not_hide_the_tv_identity(): void
+    {
+        DB::table('usenet_groups')->insert(['id' => 6, 'name' => 'alt.binaries.moovee']);
+
+        $result = app(CategorizationService::class)->determineCategory(
+            6,
+            "Max.&.Ruby.S01E07-E09.Max.Misses.The.Bus.&.Max's.Wormcake.&.Max's.Rainy.Day.480p.WEBRip.10bit.EAC3.2.0.X265-IVy",
+            '',
+            true,
+        );
+
+        $this->assertSame(Category::TV_WEBDL, $result['categories_id']);
+    }
 }
