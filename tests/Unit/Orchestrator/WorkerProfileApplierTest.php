@@ -346,6 +346,28 @@ final class WorkerProfileApplierTest extends TestCase
         self::assertSame(0, DB::table('usenet_groups')->where('name', 'alt.console')->value('backfill'));
     }
 
+    public function test_quality_lock_does_not_disable_groups_under_the_all_sentinel(): void
+    {
+        Schema::create('usenet_groups', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name')->unique();
+            $table->boolean('backfill');
+            $table->unsignedBigInteger('first_record');
+        });
+        DB::table('usenet_groups')->insert([
+            ['name' => 'alt.binaries.moovee', 'backfill' => 1, 'first_record' => 3_712_713_429],
+        ]);
+        // "all": the DB backfill flags are the only record of which groups to backfill.
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['All']);
+
+        (new WorkerProfileApplier)->qualityLockBackfillTarget('alt.binaries.moovee', 'backfill_permit_uncategorized_after_grace');
+
+        self::assertSame(1, DB::table('usenet_groups')->where('name', 'alt.binaries.moovee')->value('backfill'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(1, Settings::settingValue('orchestrator_bf_paused'));
+        self::assertSame('backfill_permit_uncategorized_after_grace', Settings::settingValue('orchestrator_bf_quality'));
+    }
+
     public function test_it_preserves_an_unclaimed_permit_during_the_claim_grace_period(): void
     {
         Settings::query()->insert([
