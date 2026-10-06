@@ -1848,6 +1848,12 @@ final class ReleaseProcessingService
                     ->all()
             );
             if ($page === []) {
+                // Nothing past the cursor: wrap, as the other stages do. Ids
+                // restart after a truncate, so a stale cursor would otherwise
+                // skip every new collection.
+                if ($this->cooperativeSlice && $after > 0) {
+                    $this->storeCooperativeStageCursor('hopeless', $groupId, 0);
+                }
                 break;
             }
 
