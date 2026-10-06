@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Models\Category;
+use App\Models\Settings;
 use App\Services\Categorization\CategorizationService;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
@@ -33,6 +34,9 @@ final class CategorizationPipelineObfuscatedSubjectTest extends TestCase
             ['id' => 4, 'name' => 'alt.binaries.sounds.lossless'],
             ['id' => 5, 'name' => 'alt.binaries.documentaries'],
         ]);
+        // The settings memo is process-wide: drop any copy an earlier test
+        // loaded, or catwebdl reads stale in a full-suite run.
+        Settings::forgetCachedSettings();
     }
 
     public function test_readable_vintage_subject_is_not_replaced_by_archive_stem_before_categorization(): void
@@ -155,5 +159,19 @@ final class CategorizationPipelineObfuscatedSubjectTest extends TestCase
         $this->assertSame(Category::TV_WEBDL, $result['categories_id']);
         $this->assertFalse($result['debug']['locked_to_misc']);
         $this->assertSame('tv_compact_scene_episode_web', $result['debug']['matched_by']);
+    }
+
+    public function test_apostrophes_in_a_multi_episode_name_do_not_hide_the_tv_identity(): void
+    {
+        DB::table('usenet_groups')->insert(['id' => 6, 'name' => 'alt.binaries.moovee']);
+
+        $result = app(CategorizationService::class)->determineCategory(
+            6,
+            "Max.&.Ruby.S01E07-E09.Max.Misses.The.Bus.&.Max's.Wormcake.&.Max's.Rainy.Day.480p.WEBRip.10bit.EAC3.2.0.X265-IVy",
+            '',
+            true,
+        );
+
+        $this->assertSame(Category::TV_WEBDL, $result['categories_id']);
     }
 }

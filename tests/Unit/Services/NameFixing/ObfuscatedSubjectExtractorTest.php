@@ -31,6 +31,27 @@ class ObfuscatedSubjectExtractorTest extends TestCase
     }
 
     #[Test]
+    public function it_does_not_treat_apostrophes_in_a_clean_name_as_quotes(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        $result = $extractor->extract("Max.&.Ruby.S01E07-E09.Max.Misses.The.Bus.&.Max's.Wormcake.&.Max's.Rainy.Day.480p.WEBRip.10bit.EAC3.2.0.X265-IVy");
+
+        $this->assertStringContainsString('S01E07-E09', (string) $result);
+        $this->assertStringStartsWith('Max', (string) $result);
+    }
+
+    #[Test]
+    public function it_still_extracts_a_single_quoted_filename(): void
+    {
+        $extractor = new ObfuscatedSubjectExtractor;
+
+        $result = $extractor->extract("[2/8] - 'Harry Styles Songbook - 1st Edition 2026.part1.rar' yEnc");
+
+        $this->assertSame('Harry Styles Songbook - 1st Edition 2026', $result);
+    }
+
+    #[Test]
     public function it_extracts_classic_movie_title_and_removes_nfo_suffix(): void
     {
         $extractor = new ObfuscatedSubjectExtractor;

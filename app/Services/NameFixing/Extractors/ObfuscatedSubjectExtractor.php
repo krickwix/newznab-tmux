@@ -70,7 +70,9 @@ final class ObfuscatedSubjectExtractor
 
             $normalized = $quoted[1];
             $looksObfuscated = true;
-        } elseif (preg_match("/'([^']{3,240})'/", $normalized, $quoted) === 1) {
+        } elseif (preg_match("/(?<![\\p{L}\\p{N}])'([^']{3,240})'(?![\\p{L}\\p{N}])/u", $normalized, $quoted) === 1) {
+            // Quotes, not apostrophes: in "Max's.Wormcake.&.Max's" both
+            // marks touch letters and must not frame a "filename".
             if ($this->hasReadableContextAroundShortPar2Sidecar($normalized, $quoted[1])) {
                 return null;
             }
