@@ -89,6 +89,9 @@ class CategorizeSportTest extends TestCase
             'sitcom episode titled Boxing' => ['Bad.Education.S05E01.Boxing.1080p.WEBRip.10bit.EAC3.2.0.X265-IVy', Category::TV_WEBDL],
             'dated boxing card stays sport' => ['Boxing.2026.10.04.Usyk.vs.Fury.1080p.WEB.h264', Category::TV_SPORT],
             'boxing with a year only stays sport' => ['Boxing.2026.Heavyweight.Title.720p.HDTV.x264', Category::TV_SPORT],
+            'chained episodes titled Soccer' => ['Max.And.Ruby.S07E10E11.Rubys.Knot.Soccer.Star.Max.1080p.PMTP.WEB-DL.AAC2.0.X264-AndreMor', Category::TV_WEBDL],
+            'chained episodes' => ['Max.And.Ruby.S07E10E11.Rubys.Knot.1080p.PMTP.WEB-DL.AAC2.0.X264-AndreMor', Category::TV_WEBDL],
+            'hyphenated chained episodes' => ['Show.Name.S02E03-E04.1080p.WEB-DL.AAC2.0.H.264-GRP', Category::TV_WEBDL],
         ];
     }
 
