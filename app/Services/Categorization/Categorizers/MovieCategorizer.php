@@ -115,7 +115,9 @@ class MovieCategorizer extends AbstractCategorizer
      */
     protected function looksLikeMovie(string $name, ReleaseContext $context): bool
     {
-        return (bool) preg_match('/[._ -]AVC|[BH][DR]RIP|(Bluray|Blu-Ray)|BD[._ -]?(25|50)?|\bBR\b|Camrip|[._ -]\d{4}[._ -].+(720p|1080p|Cam|HDTS|2160p)|DIVX|[._ -]DVD[._ -]|DVD-?(5|9|R|Rip)|Untouched|VHSRip|XVID|[._ -](DTS|TVrip|webrip|WEBDL|WEB-DL)[._ -]|\b(2160)p\b.*\b(Netflix|Amazon|NF|AMZN|Disney)\b/i', $name)
+        // The year may sit in parentheses and may be followed directly by the
+        // resolution: "Troy.(2004).2160p" and "Ryan.1998.1080p" are movies.
+        return (bool) preg_match('/[._ -]AVC|[BH][DR]RIP|(Bluray|Blu-Ray)|BD[._ -]?(25|50)?|\bBR\b|Camrip|[._ (-]\d{4}\)?[._ -].*(720p|1080p|Cam|HDTS|2160p)|DIVX|[._ -]DVD[._ -]|DVD-?(5|9|R|Rip)|Untouched|VHSRip|XVID|[._ -](DTS|TVrip|webrip|WEBDL|WEB-DL)[._ -]|\b(2160)p\b.*\b(Netflix|Amazon|NF|AMZN|Disney)\b/i', $name)
             || $this->looksLikeClassicMovieTitle($name, $context)
             || $this->looksLikeReadableVintageFilmArchiveSubject($name, $context)
             || $this->looksLikeVintageFilmPost($name, $context)
