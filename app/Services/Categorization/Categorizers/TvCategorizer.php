@@ -20,8 +20,9 @@ class TvCategorizer extends AbstractCategorizer
     // "1080" of 1080p would otherwise make "Bad.Education.S05E01.Boxing" sport.
     private const string SPORTS_EVENT_CONTEXT_REGEX = '/(?<!\d)(?:19|20)\d{2}|\b(Season|Week|Round|Match|Game|vs|Playoffs?|Finals?|Qualifying|Opening|Closing|Ceremony|Championship)\b/i';
 
-    // S01E01, S01.E01, S1D1, and chained episodes like S07E10E11.
-    private const string SEASON_EPISODE_REGEX = '/[._ -]s\d{1,3}[._ -]?(e|d(isc)?)\d{1,3}(?:-?e\d{1,3})*([._ -]|$)/i';
+    // S01E01, S01.E01, S1D1, chained episodes like S07E10E11, and year
+    // seasons like S1950E43.
+    private const string SEASON_EPISODE_REGEX = '/[._ -]s\d{1,4}[._ -]?(e|d(isc)?)\d{1,3}(?:-?e\d{1,3})*([._ -]|$)/i';
 
     /**
      * Known anime release/fansub group tags. Matches when the tag appears

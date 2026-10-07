@@ -28,7 +28,8 @@ class MovieCategorizer extends AbstractCategorizer
         }
 
         // Skip if it looks like a TV episode (S01E01) or season pack (S01.1080p)
-        if (preg_match('/[._ -]S\d{1,3}[._ -]?(E\d|D\d|Complete|Full|1080|720|480|2160|WEB|HDTV|BluRay|NF|AMZN)/i', $context->releaseName)) {
+        if ($context->looksLikeEpisode()
+            || preg_match('/[._ -]S\d{1,3}[._ -]?(E\d|D\d|Complete|Full|1080|720|480|2160|WEB|HDTV|BluRay|NF|AMZN)/i', $context->releaseName)) {
             return true;
         }
 
@@ -117,13 +118,23 @@ class MovieCategorizer extends AbstractCategorizer
     {
         // The year may sit in parentheses and may be followed directly by the
         // resolution: "Troy.(2004).2160p" and "Ryan.1998.1080p" are movies.
-        return (bool) preg_match('/[._ -]AVC|[BH][DR]RIP|(Bluray|Blu-Ray)|BD[._ -]?(25|50)?|\bBR\b|Camrip|[._ (-]\d{4}\)?[._ -].*(720p|1080p|Cam|HDTS|2160p)|DIVX|[._ -]DVD[._ -]|DVD-?(5|9|R|Rip)|Untouched|VHSRip|XVID|[._ -](DTS|TVrip|webrip|WEBDL|WEB-DL)[._ -]|\b(2160)p\b.*\b(Netflix|Amazon|NF|AMZN|Disney)\b/i', $name)
+        return (bool) preg_match('/[._ -]AVC|[BH][DR]RIP|(Bluray|Blu-Ray)|BD[._ -]?(25|50)?|\bBR\b|Camrip|[._ (-]\d{4}\)?[._ -].*(480p|576p|720p|1080p|Cam|HDTS|2160p)|DIVX|[._ -]DVD[._ -]|DVD-?(5|9|R|Rip)|Untouched|VHSRip|XVID|[._ -](DTS|TVrip|webrip|WEBDL|WEB-DL)[._ -]|\b(2160)p\b.*\b(Netflix|Amazon|NF|AMZN|Disney)\b/i', $name)
             || $this->looksLikeClassicMovieTitle($name, $context)
             || $this->looksLikeReadableVintageFilmArchiveSubject($name, $context)
             || $this->looksLikeVintageFilmPost($name, $context)
             || $this->looksLikeVideoPar2Sidecar($name)
             || $this->looksLikeCleanedVideoSidecar($name)
-            || $this->looksLikeDocumentaryVideoPost($name, $context);
+            || $this->looksLikeDocumentaryVideoPost($name, $context)
+            || $this->looksLikeTaggedFilm($name);
+    }
+
+    /**
+     * "8.Mile.(2002).VFF.AC3.5.1-Serpico": a year in parentheses followed by
+     * a language or audio tag, with no resolution in the name.
+     */
+    protected function looksLikeTaggedFilm(string $name): bool
+    {
+        return preg_match('/\((?:19|20)\d{2}\)[._ -]+(?:VFF|VFQ|VFI|VF2|VOF|VOSTFR|TRUEFRENCH|FRENCH|MULTI)\b/i', $name) === 1;
     }
 
     protected function looksLikeClassicMovieTitle(string $name, ReleaseContext $context): bool
@@ -269,6 +280,11 @@ class MovieCategorizer extends AbstractCategorizer
 
     protected function checkHD(string $name, bool $catWebDL): ?CategorizationResult
     {
+        // An explicit SD resolution wins over an x264/AVC codec tag.
+        if (preg_match('/\b(?:480p|576p)\b/i', $name)) {
+            return null;
+        }
+
         if (preg_match('/720p|1080p|AVC|VC1|VC-1|web-dl|wmvhd|x264|XvidHD|bdrip/i', $name)) {
             return $this->matched(Category::MOVIE_HD, 0.85, 'hd');
         }
@@ -381,6 +397,10 @@ class MovieCategorizer extends AbstractCategorizer
 
         if (preg_match('/[._ -]cam[._ -]/i', $name)) {
             return $this->matched(Category::MOVIE_OTHER, 0.6, 'cam');
+        }
+
+        if ($this->looksLikeTaggedFilm($name) || preg_match('/\((?:19|20)\d{2}\)[._ -].*\bBlu-?Ray\b/i', $name)) {
+            return $this->matched(Category::MOVIE_OTHER, 0.7, 'tagged_film');
         }
 
         return null;

@@ -151,7 +151,8 @@ class MusicCategorizer extends AbstractCategorizer
     protected function checkMusicVideo(string $name, bool $categorizeForeign): ?CategorizationResult
     {
         // Music video indicators
-        if (preg_match('/(?:^|[^a-zA-Z0-9])(?:Music\s*Video|Concert|Live\s*Show|Tour|Festival|MV|MTV)|\b(?:MVID|MVid)\b/i', $name)) {
+        // Whole words only: "The.Tourist.(2010)" is not a tour.
+        if (preg_match('/(?:^|[^a-zA-Z0-9])(?:Music\s*Videos?|Concerts?|Live\s*Show|Tours?|Festivals?|MV|MTV)(?![a-zA-Z])|\b(?:MVID|MVid)\b/i', $name)) {
             if (preg_match('/\b(?:720p|1080[pi]|2160p|BDRip|BluRay|DVDRip|HDTV|WebRip|WEB-DL|x264|x265)\b/i', $name) ||
                 preg_match('/\b(?:Live|Unplugged|Acoustic|World\s*Tour|in\s*Concert|Official\s*Video|Bootleg|Remastered)\b/i', $name) ||
                 preg_match('/\.(mkv|mp4|avi|ts|m2ts|mpg|mpeg|mov|wmv|vob|m4v)$/i', $name)) {

@@ -43,6 +43,11 @@ class XxxCategorizer extends AbstractCategorizer
             return $this->noMatch();
         }
 
+        // "Max.And.Ruby.S05E34E35E36.Toy.Train" is an episode, not a clip.
+        if ($context->looksLikeEpisode() && ! $context->hasExplicitAdultMarkers()) {
+            return $this->noMatch();
+        }
+
         // Check if it looks like adult content
         if (! $this->looksLikeXxx($name)) {
             return $this->noMatch();
@@ -152,6 +157,9 @@ class XxxCategorizer extends AbstractCategorizer
                 if (preg_match('/^'.preg_quote($matchedStudio, '/').'[.\-_ ](19|20)?\d{2}[.\-_ ]\d{2}[.\-_ ]\d{2}[.\-_ ]/i', $name)) {
                     return true;
                 }
+            } elseif ($this->looksLikeTitledMovie($name)) {
+                // A studio word inside a film title: "The.Score.(2001).2160p".
+                return false;
             }
 
             return true;
@@ -202,6 +210,16 @@ class XxxCategorizer extends AbstractCategorizer
         }
 
         return false;
+    }
+
+    /**
+     * Title.(Year).Resolution with no explicit adult marker or keyword.
+     */
+    protected function looksLikeTitledMovie(string $name): bool
+    {
+        return preg_match('/[._ (-](19|20)\d{2}\)?[._ -].*\b(480p|576p|720p|1080p|2160p)\b/i', $name) === 1
+            && ! preg_match('/\bXXX\b/i', $name)
+            && ! preg_match('/\b('.self::ADULT_KEYWORDS.')\b/i', $name);
     }
 
     protected function checkOnlyFans(string $name): ?CategorizationResult
