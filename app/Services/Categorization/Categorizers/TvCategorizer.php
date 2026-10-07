@@ -20,6 +20,9 @@ class TvCategorizer extends AbstractCategorizer
     // "1080" of 1080p would otherwise make "Bad.Education.S05E01.Boxing" sport.
     private const string SPORTS_EVENT_CONTEXT_REGEX = '/(?<!\d)(?:19|20)\d{2}|\b(Season|Week|Round|Match|Game|vs|Playoffs?|Finals?|Qualifying|Opening|Closing|Ceremony|Championship)\b/i';
 
+    // S01E01, S01.E01, S1D1, and chained episodes like S07E10E11.
+    private const string SEASON_EPISODE_REGEX = '/[._ -]s\d{1,3}[._ -]?(e|d(isc)?)\d{1,3}(?:-?e\d{1,3})*([._ -]|$)/i';
+
     /**
      * Known anime release/fansub group tags. Matches when the tag appears
      * as a standalone token in the release name (bracketed, dotted, etc.).
@@ -157,7 +160,7 @@ class TvCategorizer extends AbstractCategorizer
             return false;
         }
 
-        if (preg_match('/[._ -]s\d{1,3}[._ -]?(e|d(isc)?)\d{1,3}([._ -]|$)/i', $name)
+        if (preg_match(self::SEASON_EPISODE_REGEX, $name)
             || preg_match('/\b(Episode|Ep)[._ -]?\d{1,4}\b/i', $name)) {
             return false;
         }
@@ -168,8 +171,7 @@ class TvCategorizer extends AbstractCategorizer
 
     protected function looksLikeTV(string $name): bool
     {
-        // Season + Episode pattern: S01E01, S01.E01, S1D1, etc.
-        if (preg_match('/[._ -]s\d{1,3}[._ -]?(e|d(isc)?)\d{1,3}([._ -]|$)/i', $name)) {
+        if (preg_match(self::SEASON_EPISODE_REGEX, $name)) {
             return true;
         }
         // Episode-only pattern: .E01., .E02., E01.1080p (common in anime)
