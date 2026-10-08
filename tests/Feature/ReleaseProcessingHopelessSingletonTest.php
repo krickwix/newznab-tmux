@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Console\Commands\PurgeHopelessCollections;
 use App\Enums\CollectionFileCheckStatus;
 use App\Services\ReleaseProcessingService;
 use Illuminate\Database\Schema\Blueprint;
@@ -104,6 +105,53 @@ final class ReleaseProcessingHopelessSingletonTest extends TestCase
 
         $stage->invoke($service, 5);
         $this->assertFalse(DB::table('collections')->where('id', 1)->exists());
+    }
+
+    public function test_purge_command_applies_the_same_test(): void
+    {
+        $this->seedScenario();
+
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120])->assertSuccessful();
+
+        $this->assertScenarioOutcome();
+    }
+
+    public function test_purge_command_uses_its_own_shorter_age(): void
+    {
+        $this->seedScenario();
+
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 30])->assertSuccessful();
+
+        // Collection 2 is one hour old: past the lane's 30 minutes, still
+        // short of the release stage's 6 hours.
+        $this->assertSame(
+            [3, 4, 5, 7, 8],
+            DB::table('collections')->orderBy('id')->pluck('id')->map(static fn ($id): int => (int) $id)->all()
+        );
+    }
+
+    public function test_purge_command_resumes_from_its_cursor_and_wraps_once(): void
+    {
+        $this->seedScenario();
+        $key = PurgeHopelessCollections::CURSOR_KEY.':0';
+        Cache::store('array')->forever($key, 5);
+
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120, '--window' => 100])
+            ->assertSuccessful();
+
+        // Ids 6-8 first, then the wrap covers 1-5.
+        $this->assertScenarioOutcome();
+        $this->assertSame(0, (int) Cache::store('array')->get($key));
+    }
+
+    public function test_purge_command_is_off_at_age_zero(): void
+    {
+        config(['nntmux.hopeless_purge_age_minutes' => 0]);
+        $this->seedScenario();
+
+        $this->artisan('nntmux:purge-hopeless-collections')->assertSuccessful();
+
+        $this->assertSame(8, DB::table('collections')->count());
     }
 
     public function test_mariadb_sql(): void

@@ -44,6 +44,20 @@ class DistributedJobCatalogTest extends TestCase
         }
     }
 
+    public function test_hopeless_purge_lane_follows_its_age_setting(): void
+    {
+        $catalog = new DistributedJobCatalog;
+
+        config(['nntmux.hopeless_purge_age_minutes' => 0]);
+        $this->assertFalse($catalog->resolve('hopeless-purge', $this->runVar([]))['enabled']);
+
+        config(['nntmux.hopeless_purge_age_minutes' => 60, 'nntmux.hopeless_purge_sleep_seconds' => 45]);
+        $plan = $catalog->resolve('hopeless-purge', $this->runVar([]));
+        $this->assertTrue($plan['enabled']);
+        $this->assertSame('nntmux:purge-hopeless-collections', $plan['commands'][0]['command']);
+        $this->assertSame(45, $plan['sleep']);
+    }
+
     public function test_backfill_is_disabled_when_no_group_level_safe_backfill_work_exists(): void
     {
         $catalog = new DistributedJobCatalog;
