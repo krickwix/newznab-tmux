@@ -8,6 +8,7 @@ use App\Enums\BlacklistConstants;
 use App\Facades\Search;
 use App\Models\Category;
 use App\Models\Settings;
+use App\Services\AdditionalProcessing\AdditionalCandidateQuery;
 use App\Services\Nzb\NzbParserService;
 use App\Services\Nzb\NzbService;
 use App\Services\Releases\ReleaseBrowseService;
@@ -23,6 +24,8 @@ class ReleaseRemoverService
 {
     private const int HASHED_REMOVAL_GRACE_MINUTES = 30;
 
+    private const int UNRESOLVED_HASHED_GRACE_HOURS = 24;
+
     // Crap removal types
     private const string TYPE_BLACKLIST = 'blacklist';
 
@@ -33,6 +36,8 @@ class ReleaseRemoverService
     private const string TYPE_GIBBERISH = 'gibberish';
 
     private const string TYPE_HASHED = 'hashed';
+
+    private const string TYPE_HASHED_UNRESOLVED = 'hashed_unresolved';
 
     private const string TYPE_INSTALLBIN = 'installbin';
 
@@ -120,6 +125,7 @@ class ReleaseRemoverService
             self::TYPE_EXECUTABLE => fn () => $this->removeExecutable(),
             self::TYPE_GIBBERISH => fn () => $this->removeGibberish(),
             self::TYPE_HASHED => fn () => $this->removeHashed(),
+            self::TYPE_HASHED_UNRESOLVED => fn () => $this->removeUnresolvedHashed(),
             self::TYPE_INSTALLBIN => fn () => $this->removeInstallBin(),
             self::TYPE_PASSWORDED => fn () => $this->removePassworded(),
             self::TYPE_PASSWORDURL => fn () => $this->removePasswordURL(),
@@ -375,6 +381,41 @@ class ReleaseRemoverService
             Category::OTHER_HASHED,
             escapeString(Carbon::now()->subMinutes(self::HASHED_REMOVAL_GRACE_MINUTES)->format('Y-m-d H:i:s')),
             $this->crapTime
+        ));
+    }
+
+    /**
+     * Remove Other > Hashed releases that no rename pass resolved.
+     *
+     * A release qualifies once additional processing has run on it, or never
+     * will (no NZB, or a size outside the postprocess bounds), and it is still
+     * hashed a day after it was added. --time is ignored: the removecrap
+     * worker passes a 4-hour window, which never holds a release that old.
+     * Opt-in only, so it is not part of the "all" set.
+     *
+     * @throws Exception
+     */
+    protected function removeUnresolvedHashed(): bool|string
+    {
+        $notCandidate = ['r.passwordstatus <> -1', 'r.nzbstatus <> 1'];
+        $minSizeMB = AdditionalCandidateQuery::minSizeMB();
+        if ($minSizeMB > 0) {
+            $notCandidate[] = 'r.size <= '.($minSizeMB * 1048576);
+        }
+        $maxSizeGB = AdditionalCandidateQuery::maxSizeGB();
+        if ($maxSizeGB > 0) {
+            $notCandidate[] = 'r.size >= '.($maxSizeGB * 1073741824);
+        }
+
+        return $this->executeSimpleRemoval('HashedUnresolved', sprintf(
+            'SELECT r.guid, r.searchname, r.id
+            FROM releases r
+            WHERE r.categories_id = %d
+            AND r.adddate < %s
+            AND (%s)',
+            Category::OTHER_HASHED,
+            escapeString(Carbon::now()->subHours(self::UNRESOLVED_HASHED_GRACE_HOURS)->format('Y-m-d H:i:s')),
+            implode(' OR ', $notCandidate)
         ));
     }
 
