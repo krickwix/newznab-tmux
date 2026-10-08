@@ -31,6 +31,7 @@ class DistributedWorkerTelemetry
     public const ITEMS_BY_WORKER = [
         'nzb-backlog' => ['nzb'],
         'releases' => ['release'],
+        'hopeless-purge' => ['collection'],
     ];
 
     /** @var list<string> */
@@ -42,6 +43,7 @@ class DistributedWorkerTelemetry
         'failed',
         'marked_failed',
         'scan_exhausted',
+        'deleted',
     ];
 
     /**

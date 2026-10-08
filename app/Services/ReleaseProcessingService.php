@@ -89,6 +89,8 @@ final class ReleaseProcessingService
 
     private readonly SplitCollectionReconciler $splitCollectionReconciler;
 
+    private readonly HopelessCollectionPurger $hopelessPurger;
+
     public function __construct(
         ?NzbService $nzb = null,
         ?ReleaseCleaningService $releaseCleaning = null,
@@ -116,6 +118,7 @@ final class ReleaseProcessingService
             );
         $this->postProcessService = $postProcessService;
         $this->splitCollectionReconciler = $splitCollectionReconciler ?? new SplitCollectionReconciler;
+        $this->hopelessPurger = new HopelessCollectionPurger($this->collectionCleanupService);
 
         $this->settings = $this->loadSettings();
         $this->validateSettings();
@@ -1826,16 +1829,8 @@ final class ReleaseProcessingService
     }
 
     /**
-     * Delete collections whose only binary holds one part of a many-part file
-     * long after the collection was first seen.
-     *
-     * Per-article obfuscated posts give every article its own random subject
-     * and poster, so each article becomes a collection of one binary with one
-     * part that no later article can join. Depending on the subject shape the
-     * part total also lands in totalfiles, so totalfiles is not a filter. A
-     * real post of that size arrives within minutes, so after the age cutoff
-     * such a collection cannot reach completion and would otherwise sit in the
-     * backlog until collection_timeout. Disabled when the age is 0.
+     * Delete collections holding one part of a many-part file once they pass
+     * the age cutoff; see HopelessCollectionPurger. Disabled when the age is 0.
      *
      * @throws Throwable
      */
@@ -1845,28 +1840,15 @@ final class ReleaseProcessingService
         if ($ageHours <= 0) {
             return;
         }
-        $minParts = max(2, (int) config('nntmux.release_hopeless_singleton_min_parts', 50));
+        $minParts = (int) config('nntmux.release_hopeless_singleton_min_parts', 50);
         $window = max(1, (int) config('nntmux.release_stage_scan_window', 2000));
         $cutoff = now()->subHours($ageHours);
         $after = $this->cooperativeStageCursor('hopeless', $groupId);
         $totalDeleted = 0;
 
         do {
-            $page = $this->retryTransientCollectionOperation(
-                fn (): array => Collection::query()
-                    ->whereIn('filecheck', [
-                        CollectionFileCheckStatus::Default->value,
-                        CollectionFileCheckStatus::CompleteCollection->value,
-                    ])
-                    ->where('id', '>', $after)
-                    ->when($groupId !== 0, static fn ($q) => $q->where('groups_id', $groupId))
-                    ->orderBy('id')
-                    ->limit($window)
-                    ->pluck('id')
-                    ->map(static fn ($id): int => (int) $id)
-                    ->all()
-            );
-            if ($page === []) {
+            $page = $this->hopelessPurger->purgePage($groupId, $after, $cutoff, $minParts, $window, $this->echoCLI);
+            if ($page['scanned'] === 0) {
                 // Nothing past the cursor: wrap, as the other stages do. Ids
                 // restart after a truncate, so a stale cursor would otherwise
                 // skip every new collection.
@@ -1875,31 +1857,9 @@ final class ReleaseProcessingService
                 }
                 break;
             }
+            $totalDeleted += $page['deleted'];
 
-            $ids = $this->retryTransientCollectionOperation(
-                static fn (): array => DB::table('collections as c')
-                    ->join('binaries as b', 'b.collections_id', '=', 'c.id')
-                    ->whereIn('c.id', $page)
-                    ->whereNull('c.releases_id')
-                    ->where('c.dateadded', '<', $cutoff)
-                    ->groupBy('c.id')
-                    ->havingRaw('COUNT(b.id) = 1')
-                    ->havingRaw('MAX(b.currentparts) <= 1')
-                    ->havingRaw('MIN(b.totalparts) >= ?', [$minParts])
-                    ->havingRaw('MAX((SELECT COUNT(*) FROM parts p WHERE p.binaries_id = b.id)) <= 1')
-                    ->pluck('c.id')
-                    ->map(static fn ($id): int => (int) $id)
-                    ->all()
-            );
-            if ($ids !== []) {
-                $totalDeleted += $this->collectionCleanupService->deleteCollectionsAndDescendants(
-                    $ids,
-                    'Hopeless single-part collections cleanup',
-                    $this->echoCLI
-                );
-            }
-
-            $after = \count($page) < $window ? 0 : max($page);
+            $after = $page['next'];
             if ($this->cooperativeSlice) {
                 $this->storeCooperativeStageCursor('hopeless', $groupId, $after);
                 break;

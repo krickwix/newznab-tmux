@@ -41,6 +41,14 @@ return [
     // 0 disables.
     'release_hopeless_singleton_age_hours' => max(0, (int) env('NNTMUX_RELEASE_HOPELESS_SINGLETON_AGE_HOURS', 0)),
     'release_hopeless_singleton_min_parts' => max(2, (int) env('NNTMUX_RELEASE_HOPELESS_SINGLETON_MIN_PARTS', 50)),
+    // The dedicated hopeless-purge lane applies the same test with its own,
+    // shorter age, in pages of `window` collections until its deadline. Busy
+    // obfuscated groups (boneless) outrun the release stage by two orders of
+    // magnitude. 0 disables the lane.
+    'hopeless_purge_age_minutes' => max(0, (int) env('NNTMUX_HOPELESS_PURGE_AGE_MINUTES', 0)),
+    'hopeless_purge_window' => min(50_000, max(100, (int) env('NNTMUX_HOPELESS_PURGE_WINDOW', 20_000))),
+    'hopeless_purge_deadline_seconds' => min(3000, max(10, (int) env('NNTMUX_HOPELESS_PURGE_DEADLINE_SECONDS', 240))),
+    'hopeless_purge_sleep_seconds' => max(1, (int) env('NNTMUX_HOPELESS_PURGE_SLEEP_SECONDS', 30)),
     // Already-processed rows each name-fixing lane re-checks per run (methods 18
     // and 21), swept behind a cursor. 0 disables revisits.
     'namefix_subject_revisit_limit' => min(5000, max(0, (int) env('NNTMUX_NAMEFIX_SUBJECT_REVISIT_LIMIT', 50))),
