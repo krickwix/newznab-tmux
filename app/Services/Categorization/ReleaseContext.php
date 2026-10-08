@@ -51,24 +51,34 @@ class ReleaseContext
     }
 
     /**
-     * Check if this release has adult/XXX markers.
+     * S01E01, S1950E43, chained S05E34E35: an episode of a series.
      */
+    public function looksLikeEpisode(): bool
+    {
+        return (bool) preg_match('/[._ -]s\d{1,4}[._ -]?e\d{1,3}/i', $this->releaseName);
+    }
+
     /**
      * Check if this release has adult/XXX markers.
      */
     public function hasAdultMarkers(): bool
     {
-        // Check for explicit XXX markers and common adult keywords/studios
-        if (preg_match('/\b(XXX|Porn|Anal|Brazzers|BangBros|Bangbros|NaughtyAmerica|RealityKings|Tushy|Vixen|Blacked|OnlyFans|MetArt|JoyMii|Creampie|MP4-XXX|PureTaboo|Lady[._ -]?Lyne|TeamSkeet|GirlsWay|EvilAngel|Kink|FakeHub|FakeTaxi|SexArt|Nubiles|Defloration|Deeper|Bellesa|Twistys|Mofos|MissaX|LegalPorno|AnalVids|JAV|Hentai|RoccoSiffredi|DivineBitches|Device[._ -]?Bondage|Hogtied|Wired[._ -]?Pussy|Fucking[._ -]?Machines|Ultimate[._ -]?Surrender|Public[._ -]?Disgrace|Sex[._ -]?And[._ -]?Submission|Bound[._ -]?Gang[._ -]?Bangs|Electro[._ -]?Sluts|Whipped[._ -]?Ass|TS[._ -]?Seduction|Infernal[._ -]?Restraints|Sexually[._ -]?Broken)\b/i', $this->releaseName)) {
+        if ($this->hasExplicitAdultMarkers()) {
             return true;
         }
 
-        // Check for adult keywords combined with resolution (likely adult clip)
-        if (preg_match('/\b(Fuck|Fucked|Fucking|Cock|Dick|Pussy|Cum|Cumshot|Blowjob|Handjob|MILF|Teen|Lesbian|Threesome|Gangbang|Hardcore|Interracial)\b/i', $this->releaseName) &&
-            preg_match('/\b(720p|1080p|2160p|4k|mp4)\b/i', $this->releaseName)) {
-            return true;
-        }
+        // Adult keywords with a resolution suggest a clip, but episode titles
+        // like "Smells.Like.Teen.Spirit" or "Touch.Pussy.Cat" are not one.
+        return ! $this->looksLikeEpisode()
+            && preg_match('/\b(Fuck|Fucked|Fucking|Cock|Dick|Pussy|Cum|Cumshot|Blowjob|Handjob|MILF|Teen|Lesbian|Threesome|Gangbang|Hardcore|Interracial)\b/i', $this->releaseName)
+            && preg_match('/\b(720p|1080p|2160p|4k|mp4)\b/i', $this->releaseName);
+    }
 
-        return false;
+    /**
+     * Explicit XXX markers and adult studios: adult even on an episode name.
+     */
+    public function hasExplicitAdultMarkers(): bool
+    {
+        return (bool) preg_match('/\b(XXX|Porn|Anal|Brazzers|BangBros|Bangbros|NaughtyAmerica|RealityKings|Tushy|Vixen|Blacked|OnlyFans|MetArt|JoyMii|Creampie|MP4-XXX|PureTaboo|Lady[._ -]?Lyne|TeamSkeet|GirlsWay|EvilAngel|Kink|FakeHub|FakeTaxi|SexArt|Nubiles|Defloration|Deeper|Bellesa|Twistys|Mofos|MissaX|LegalPorno|AnalVids|JAV|Hentai|RoccoSiffredi|DivineBitches|Device[._ -]?Bondage|Hogtied|Wired[._ -]?Pussy|Fucking[._ -]?Machines|Ultimate[._ -]?Surrender|Public[._ -]?Disgrace|Sex[._ -]?And[._ -]?Submission|Bound[._ -]?Gang[._ -]?Bangs|Electro[._ -]?Sluts|Whipped[._ -]?Ass|TS[._ -]?Seduction|Infernal[._ -]?Restraints|Sexually[._ -]?Broken)\b/i', $this->releaseName);
     }
 }

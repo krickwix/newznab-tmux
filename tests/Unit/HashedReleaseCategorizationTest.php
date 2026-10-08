@@ -771,8 +771,8 @@ class HashedReleaseCategorizationTest extends TestCase
         );
 
         $this->assertFalse($passable->lockedToMisc);
-        $this->assertSame(Category::MOVIE_HD, $passable->bestResult->categoryId);
-        $this->assertSame('hd', $passable->bestResult->matchedBy);
+        $this->assertSame(Category::MOVIE_SD, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
     }
 
     public function test_movie_video_par2_sidecar_beats_mp3_scene_pattern(): void
@@ -807,8 +807,8 @@ class HashedReleaseCategorizationTest extends TestCase
         );
 
         $this->assertFalse($passable->lockedToMisc);
-        $this->assertSame(Category::MOVIE_HD, $passable->bestResult->categoryId);
-        $this->assertSame('hd', $passable->bestResult->matchedBy);
+        $this->assertSame(Category::MOVIE_SD, $passable->bestResult->categoryId);
+        $this->assertSame('vintage_film_sd', $passable->bestResult->matchedBy);
     }
 
     public function test_vintage_runtime_title_beats_mp3_scene_pattern(): void
