@@ -129,9 +129,10 @@ class WorkerControlStateStore
         }
 
         $counts = [];
+        $limit = WorkerControlPolicy::configuredIneffectiveBackfillLimit();
         foreach ($value as $group => $count) {
             if (is_string($group) && $group !== '') {
-                $counts[$group] = min(WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT, max(0, (int) $count));
+                $counts[$group] = min($limit, max(0, (int) $count));
             }
         }
 

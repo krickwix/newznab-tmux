@@ -50,8 +50,24 @@ final class WorkerControlPolicy
      */
     private function ineffectiveBackfillLimit(): int
     {
-        return max(1, $this->ineffectiveBackfillLimitOverride
-            ?? (int) $this->orchestratorConfig('ineffective_backfill_limit', self::INEFFECTIVE_BACKFILL_LIMIT));
+        return $this->ineffectiveBackfillLimitOverride !== null
+            ? max(1, $this->ineffectiveBackfillLimitOverride)
+            : self::configuredIneffectiveBackfillLimit();
+    }
+
+    /**
+     * The configured limit, shared by the target selector, the state store and
+     * the exporter so they cannot disagree with the policy. Each used the bare
+     * constant, so a group was skipped and its strikes capped at 2 whatever the
+     * env said.
+     */
+    public static function configuredIneffectiveBackfillLimit(): int
+    {
+        $container = Container::getInstance();
+
+        return max(1, $container->bound('config')
+            ? (int) config('nntmux.orchestrator.ineffective_backfill_limit', self::INEFFECTIVE_BACKFILL_LIMIT)
+            : self::INEFFECTIVE_BACKFILL_LIMIT);
     }
 
     /**
