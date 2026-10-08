@@ -303,11 +303,15 @@ abstract class BaseRunner
                         echo $err;
                     }
                     if (! $proc->isSuccessful()) {
+                        // Artisan children report through $this->error(), which
+                        // goes to stdout, so stderr is often empty. Fall back to
+                        // the end of stdout or the cause is lost.
+                        $detail = trim($err) !== '' ? trim($err) : self::outputTail($results[$key]);
                         $failures[] = sprintf(
                             '%s (exit %s)%s',
                             (string) $key,
                             (string) ($proc->getExitCode() ?? 'unknown'),
-                            $err === '' ? '' : ': '.trim($err),
+                            $detail === '' ? '' : ': '.$detail,
                         );
                     }
                     unset($running[$key]);
@@ -325,6 +329,22 @@ abstract class BaseRunner
         }
 
         return $results;
+    }
+
+    /**
+     * The last non-empty lines of a child's stdout, without ANSI colours or
+     * progress bars, capped so a failure message stays one readable line.
+     */
+    private static function outputTail(string $output, int $lines = 3, int $maxChars = 400): string
+    {
+        $clean = (string) preg_replace('/\e\[[0-9;]*[A-Za-z]/', '', $output);
+        $kept = array_values(array_filter(
+            array_map('trim', preg_split('/[\r\n]+/', $clean) ?: []),
+            static fn (string $line): bool => $line !== '' && preg_match('/^\d+\/\d+\s*\[/', $line) !== 1,
+        ));
+        $tail = implode(' | ', array_slice($kept, -$lines));
+
+        return mb_strlen($tail) > $maxChars ? '…'.mb_substr($tail, -$maxChars) : $tail;
     }
 
     /**
