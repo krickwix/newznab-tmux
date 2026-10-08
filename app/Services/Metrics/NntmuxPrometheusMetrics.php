@@ -862,7 +862,7 @@ class NntmuxPrometheusMetrics
             $lines[] = $this->metric('nntmux_orchestrator_backfill_target_ineffective_permits', $count, ['group' => $group]);
             $lines[] = $this->metric(
                 'nntmux_orchestrator_backfill_target_locked',
-                $count >= WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT ? 1 : 0,
+                $count >= WorkerControlPolicy::configuredIneffectiveBackfillLimit() ? 1 : 0,
                 ['group' => $group],
             );
         }

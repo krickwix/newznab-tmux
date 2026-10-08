@@ -1222,6 +1222,41 @@ final class BackfillTargetSelectorTest extends TestCase
     }
 
     /** @return array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int} */
+    public function test_it_honours_the_configured_ineffective_limit(): void
+    {
+        $history = [
+            'alt.binaries.dvdrip' => [
+                'attempts' => 2,
+                'ewma_nzbs_per_10k' => 0.0,
+                'last_attempt_at' => 1_999_999_900,
+                'last_effective_at' => 0,
+                'last_cursor_delta' => 350_000,
+            ],
+        ];
+        $candidates = [$this->candidate('alt.binaries.dvdrip', '2022-11-29 12:38:28')];
+        $strikes = ['alt.binaries.dvdrip' => 2];
+
+        // Two strikes on a cold group are below a configured limit of 10.
+        $tolerant = new BackfillTargetSelector(
+            probeGroups: [],
+            historyTtlSeconds: 86_400,
+            lockRetrySeconds: 300,
+            ineffectiveBackfillLimit: 10,
+        );
+        $target = $tolerant->select($candidates, $history, now: 2_000_000_000, ineffectivePermitsByTarget: $strikes);
+        self::assertSame('alt.binaries.dvdrip', $target['name'] ?? null);
+        self::assertFalse($target['lock_retry_due'] ?? false);
+
+        // At a limit of 2 the same group waits for its lock retry.
+        $strict = new BackfillTargetSelector(
+            probeGroups: [],
+            historyTtlSeconds: 86_400,
+            lockRetrySeconds: 300,
+            ineffectiveBackfillLimit: 2,
+        );
+        self::assertNull($strict->select($candidates, $history, now: 2_000_000_000, ineffectivePermitsByTarget: $strikes));
+    }
+
     private function candidate(string $name, string $postdate): array
     {
         return [

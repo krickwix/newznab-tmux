@@ -25,6 +25,8 @@ final readonly class BackfillTargetSelector
 
     private bool $fairShareNewestCursor;
 
+    private int $ineffectiveBackfillLimit;
+
     /** @param list<string> $probeGroups */
     public function __construct(
         ?array $probeGroups = null,
@@ -35,6 +37,7 @@ final readonly class BackfillTargetSelector
         ?int $terminalMinAttempts = null,
         ?float $terminalMinYield = null,
         ?bool $fairShareNewestCursor = null,
+        ?int $ineffectiveBackfillLimit = null,
     ) {
         $configuredGroups = $probeGroups ?? config('nntmux.orchestrator.backfill_probe_groups', []);
         $this->probeGroups = array_values(array_filter(array_map(
@@ -79,6 +82,9 @@ final readonly class BackfillTargetSelector
         $this->fairShareNewestCursor = $fairShareNewestCursor ?? ($container->bound('config')
             ? (bool) config('nntmux.orchestrator.backfill_fair_share_newest_cursor', false)
             : false);
+        $this->ineffectiveBackfillLimit = $ineffectiveBackfillLimit !== null
+            ? max(1, $ineffectiveBackfillLimit)
+            : WorkerControlPolicy::configuredIneffectiveBackfillLimit();
     }
 
     /**
@@ -121,7 +127,7 @@ final readonly class BackfillTargetSelector
                     && (int) substr($candidate['cursor_postdate'], 0, 4) >= 2000
                     && $timestamp <= $now
                     && ($lockRetryDue
-                        || $ineffectivePermits < WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT);
+                        || $ineffectivePermits < $this->ineffectiveBackfillLimit);
             },
         ));
         if ($candidates === []) {
@@ -131,7 +137,7 @@ final readonly class BackfillTargetSelector
         $candidates = array_map(function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget): array {
             $entry = $history[$candidate['name']] ?? null;
             $candidate['lock_retry_due'] = $this->lockRetryDue($entry, $history, $now)
-                && (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) >= WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT;
+                && (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) >= $this->ineffectiveBackfillLimit;
             if ((int) $candidate['remaining_articles'] < 20_000) {
                 $candidate['safe_quantity'] = 10_000;
                 $candidate['terminal_positive'] = true;
