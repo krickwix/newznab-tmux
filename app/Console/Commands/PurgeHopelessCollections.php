@@ -29,7 +29,8 @@ final class PurgeHopelessCollections extends Command
         {--age-minutes= : Minimum collection age; defaults to nntmux.hopeless_purge_age_minutes}
         {--window= : Collections scanned per page}
         {--deadline= : Seconds before the run stops and keeps its cursor}
-        {--group=0 : Restrict to one group id (0 = all groups)}';
+        {--group=0 : Restrict to one group id (0 = all groups)}
+        {--generic-min-parts= : Part threshold for generic-regex-only collections; 0 = same as min_parts}';
 
     protected $description = 'Delete one-part collections of per-article obfuscated posts, all groups';
 
@@ -52,6 +53,8 @@ final class PurgeHopelessCollections extends Command
         $deadline = microtime(true) + max(1, (int) ($this->option('deadline') ?? config('nntmux.hopeless_purge_deadline_seconds', 240)));
         $groupId = max(0, (int) $this->option('group'));
         $minParts = (int) config('nntmux.release_hopeless_singleton_min_parts', 50);
+        $genericMinParts = (int) ($this->option('generic-min-parts') ?? config('nntmux.hopeless_purge_generic_min_parts', 0));
+        $genericMinParts = $genericMinParts > 0 ? min($genericMinParts, $minParts) : null;
         $cutoff = now()->subMinutes($ageMinutes);
         $cursorKey = self::CURSOR_KEY.':'.$groupId;
 
@@ -60,7 +63,7 @@ final class PurgeHopelessCollections extends Command
         $wrapped = false;
 
         while (true) {
-            $page = $this->purger->purgePage($groupId, $after, $cutoff, $minParts, $window);
+            $page = $this->purger->purgePage($groupId, $after, $cutoff, $minParts, $window, false, $genericMinParts);
             $scanned += $page['scanned'];
             $deleted += $page['deleted'];
             $after = $page['next'];

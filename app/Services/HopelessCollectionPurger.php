@@ -25,6 +25,11 @@ use Throwable;
  *
  * Shared by the release worker's cleanup stage and the dedicated
  * hopeless-purge lane, so both apply exactly the same test.
+ *
+ * The lane can also pass a lower part threshold for collections that only
+ * matched the generic regex: obfuscated groups such as boneless post
+ * smaller files the same way, and with no group regex behind them those
+ * one-part collections are just as dead.
  */
 final class HopelessCollectionPurger
 {
@@ -40,7 +45,8 @@ final class HopelessCollectionPurger
      * Scan one page of collection ids after $after and delete the hopeless ones.
      *
      * `next` is the cursor for the following page, or 0 once the page
-     * reached the last collection.
+     * reached the last collection. $genericMinParts, when set, replaces
+     * $minParts for collections that only matched the generic regex.
      *
      * @return array{next: int, scanned: int, deleted: int}
      *
@@ -53,8 +59,10 @@ final class HopelessCollectionPurger
         int $minParts,
         int $window,
         bool $echoCLI = false,
+        ?int $genericMinParts = null,
     ): array {
         $minParts = max(2, $minParts);
+        $genericMinParts = $genericMinParts === null ? $minParts : max(2, $genericMinParts);
         $window = max(1, $window);
 
         $page = $this->retryTransient(
@@ -84,7 +92,10 @@ final class HopelessCollectionPurger
                 ->groupBy('c.id')
                 ->havingRaw('COUNT(b.id) = 1')
                 ->havingRaw('MAX(b.currentparts) <= 1')
-                ->havingRaw('MIN(b.totalparts) >= ?', [$minParts])
+                ->havingRaw(
+                    'MIN(b.totalparts) >= CASE WHEN MAX(c.collection_regexes_id) = ? THEN ? ELSE ? END',
+                    [CollectionsCleaningService::REGEX_GENERIC_MATCH, $genericMinParts, $minParts]
+                )
                 ->havingRaw('MAX((SELECT COUNT(*) FROM parts p WHERE p.binaries_id = b.id)) <= 1')
                 ->pluck('c.id')
                 ->map(static fn ($id): int => (int) $id)
