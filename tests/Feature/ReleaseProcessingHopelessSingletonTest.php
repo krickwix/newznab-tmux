@@ -6,6 +6,7 @@ namespace Tests\Feature;
 
 use App\Console\Commands\PurgeHopelessCollections;
 use App\Enums\CollectionFileCheckStatus;
+use App\Services\CollectionsCleaningService;
 use App\Services\ReleaseProcessingService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Cache;
@@ -154,6 +155,38 @@ final class ReleaseProcessingHopelessSingletonTest extends TestCase
         $this->assertSame(8, DB::table('collections')->count());
     }
 
+    public function test_purge_command_lowers_the_part_threshold_for_generic_matches_only(): void
+    {
+        $this->seedScenario();
+        $this->seedGenericSmallFiles();
+
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120, '--generic-min-parts' => 2])
+            ->assertSuccessful();
+
+        // 9 is one part of a 10-part file that only matched the generic
+        // regex; 3 is the same shape behind a group regex and stays, as do
+        // 10 (two parts arrived) and 11 (a single-part file is complete).
+        $this->assertSame(
+            [2, 3, 4, 5, 7, 8, 10, 11],
+            DB::table('collections')->orderBy('id')->pluck('id')->map(static fn ($id): int => (int) $id)->all()
+        );
+        $this->assertFalse(DB::table('parts')->where('binaries_id', 90)->exists());
+    }
+
+    public function test_generic_threshold_is_off_by_default_and_never_used_by_the_release_stage(): void
+    {
+        config(['nntmux.hopeless_purge_generic_min_parts' => 2]);
+        $this->seedScenario();
+        $this->seedGenericSmallFiles();
+
+        $this->runStage(0);
+        $this->assertTrue(DB::table('collections')->where('id', 9)->exists());
+
+        config(['nntmux.hopeless_purge_generic_min_parts' => 0]);
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120])->assertSuccessful();
+        $this->assertTrue(DB::table('collections')->where('id', 9)->exists());
+    }
+
     public function test_mariadb_sql(): void
     {
         $dsn = (string) env('NNTMUX_TEST_MARIADB_DSN', '');
@@ -211,6 +244,17 @@ final class ReleaseProcessingHopelessSingletonTest extends TestCase
         $this->seedBinary(81, 8, totalParts: 70, parts: 1);
     }
 
+    private function seedGenericSmallFiles(): void
+    {
+        $generic = CollectionsCleaningService::REGEX_GENERIC_MATCH;
+        $this->seedCollection(9, hoursOld: 7, regexId: $generic);
+        $this->seedBinary(90, 9, totalParts: 10, parts: 1);
+        $this->seedCollection(10, hoursOld: 7, regexId: $generic);
+        $this->seedBinary(100, 10, totalParts: 10, parts: 2);
+        $this->seedCollection(11, hoursOld: 7, regexId: $generic);
+        $this->seedBinary(110, 11, totalParts: 1, parts: 1);
+    }
+
     private function assertScenarioOutcome(): void
     {
         $this->assertSame(
@@ -230,7 +274,7 @@ final class ReleaseProcessingHopelessSingletonTest extends TestCase
         (new ReflectionMethod($service, 'processHopelessSingletonCollections'))->invoke($service, $groupId);
     }
 
-    private function seedCollection(int $id, int $hoursOld, int $totalFiles = 1, int $groupId = 5): void
+    private function seedCollection(int $id, int $hoursOld, int $totalFiles = 1, int $groupId = 5, int $regexId = 0): void
     {
         $at = now()->subHours($hoursOld)->format('Y-m-d H:i:s');
         DB::table('collections')->insert([
@@ -246,7 +290,7 @@ final class ReleaseProcessingHopelessSingletonTest extends TestCase
             'filesize' => 0,
             'filecheck' => CollectionFileCheckStatus::Default->value,
             'collectionhash' => 'collection-'.$id,
-            'collection_regexes_id' => 0,
+            'collection_regexes_id' => $regexId,
             'releases_id' => null,
             'noise' => '',
         ]);

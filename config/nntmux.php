@@ -49,6 +49,9 @@ return [
     'hopeless_purge_window' => min(50_000, max(100, (int) env('NNTMUX_HOPELESS_PURGE_WINDOW', 20_000))),
     'hopeless_purge_deadline_seconds' => min(3000, max(10, (int) env('NNTMUX_HOPELESS_PURGE_DEADLINE_SECONDS', 240))),
     'hopeless_purge_sleep_seconds' => max(1, (int) env('NNTMUX_HOPELESS_PURGE_SLEEP_SECONDS', 30)),
+    // Lower part threshold the lane uses for collections that only matched
+    // the generic regex (no group regex). 0 keeps min_parts for them too.
+    'hopeless_purge_generic_min_parts' => max(0, (int) env('NNTMUX_HOPELESS_PURGE_GENERIC_MIN_PARTS', 0)),
     // Already-processed rows each name-fixing lane re-checks per run (methods 18
     // and 21), swept behind a cursor. 0 disables revisits.
     'namefix_subject_revisit_limit' => min(5000, max(0, (int) env('NNTMUX_NAMEFIX_SUBJECT_REVISIT_LIMIT', 50))),
