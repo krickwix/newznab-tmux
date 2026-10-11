@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Runners;
 
 use App\Models\Settings;
+use App\Services\Orchestrator\BackfillWindow;
 use Illuminate\Support\Facades\DB;
 
 class BinariesRunner extends BaseRunner
@@ -17,6 +18,7 @@ class BinariesRunner extends BaseRunner
                 $maxPerGroup
             )
         );
+        $work = $this->withoutWindowPausedGroups($work, 'name');
 
         $maxProcesses = (int) Settings::settingValue('binarythreads');
 
@@ -80,6 +82,7 @@ class BinariesRunner extends BaseRunner
             INNER JOIN short_groups a ON g.active = 1 AND g.name = a.name
             ORDER BY a.last_record DESC'
         );
+        $groups = $this->withoutWindowPausedGroups($groups, 'groupname');
 
         if (empty($groups)) {
             $this->headerNone();
@@ -181,5 +184,32 @@ class BinariesRunner extends BaseRunner
         }
 
         return $queues;
+    }
+
+    /**
+     * Drop the groups an open backfill window pauses, so their forward fetch
+     * stops for the window and backfill gets the provider and database.
+     *
+     * @param  array<int, object>  $groups
+     * @return list<object>
+     */
+    private function withoutWindowPausedGroups(array $groups, string $nameField): array
+    {
+        $window = new BackfillWindow;
+        $kept = [];
+        $paused = [];
+        foreach ($groups as $group) {
+            $name = (string) ($group->{$nameField} ?? '');
+            if ($window->pauses($name)) {
+                $paused[] = $name;
+            } else {
+                $kept[] = $group;
+            }
+        }
+        if ($paused !== []) {
+            cli()->primary('Backfill window open: forward fetch paused for '.implode(', ', $paused));
+        }
+
+        return $kept;
     }
 }

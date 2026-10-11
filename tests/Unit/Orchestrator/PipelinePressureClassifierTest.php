@@ -176,6 +176,21 @@ final class PipelinePressureClassifierTest extends TestCase
         ));
     }
 
+    public function test_with_low_watermarks_replaces_only_the_given_low_marks(): void
+    {
+        $backlogs = $this->backlogs(collections: 15_000);
+
+        // Default collections low mark is 60% of the 20k high mark.
+        self::assertFalse($this->classifier->isLow($backlogs, $this->rates()));
+
+        $window = $this->classifier->withLowWatermarks(['collections' => 18_000]);
+        self::assertTrue($window->isLow($backlogs, $this->rates()));
+        self::assertFalse($window->isLow($this->backlogs(collections: 18_000), $this->rates()));
+        // High marks and age SLOs are kept.
+        self::assertTrue($window->isHigh($this->backlogs(collections: 20_000), $this->ages(), $this->rates()));
+        self::assertTrue($window->isHigh($this->backlogs(collections: 19_000), $this->ages(collections: 172_800), $this->rates()));
+    }
+
     /** @return array<string, int> */
     private function backlogs(int $parts = 186_000_000, int $binaries = 40_000, int $collections = 4_000): array
     {

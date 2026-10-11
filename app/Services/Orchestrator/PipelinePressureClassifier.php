@@ -21,6 +21,21 @@ final readonly class PipelinePressureClassifier
     ) {}
 
     /**
+     * The same classifier with some low watermarks replaced.
+     *
+     * @param  array<string, int>  $lowWatermarks
+     */
+    public function withLowWatermarks(array $lowWatermarks): self
+    {
+        return new self(
+            $this->highWatermarks,
+            $this->ageSloSeconds,
+            $this->projectionHorizonMinutes,
+            [...($this->lowWatermarks ?? []), ...$lowWatermarks],
+        );
+    }
+
+    /**
      * @param  array<string, int>  $backlogs
      * @param  array<string, int>  $ages
      * @param  array<string, float>  $ewma
