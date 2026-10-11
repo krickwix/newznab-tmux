@@ -187,6 +187,66 @@ final class ReleaseProcessingHopelessSingletonTest extends TestCase
         $this->assertTrue(DB::table('collections')->where('id', 9)->exists());
     }
 
+    public function test_shards_partition_the_candidates_without_overlap(): void
+    {
+        foreach (range(1, 9) as $id) {
+            $this->seedCollection($id, hoursOld: 7);
+            $this->seedBinary($id * 10, $id, totalParts: 6655, parts: 1);
+        }
+
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120, '--shard' => '0/3'])
+            ->assertSuccessful();
+        $this->assertSame([1, 2, 4, 5, 7, 8], $this->collectionIds());
+
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120, '--shard' => '1/3'])
+            ->assertSuccessful();
+        $this->assertSame([2, 5, 8], $this->collectionIds());
+
+        config(['nntmux.hopeless_purge_shard' => '2/3']);
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120])->assertSuccessful();
+        $this->assertSame([], $this->collectionIds());
+    }
+
+    public function test_shards_keep_independent_cursors(): void
+    {
+        foreach (range(1, 6) as $id) {
+            $this->seedCollection($id, hoursOld: 7);
+            $this->seedBinary($id * 10, $id, totalParts: 6655, parts: 1);
+        }
+        $store = Cache::store('array');
+        $unsharded = PurgeHopelessCollections::CURSOR_KEY.':0';
+        $shardZero = $unsharded.':shard-0-of-2';
+        $shardOne = $unsharded.':shard-1-of-2';
+        $store->forever($unsharded, 99);
+        $store->forever($shardOne, 3);
+
+        // Shard 0 starts from its own (empty) cursor, not the unsharded one.
+        $this->artisan('nntmux:purge-hopeless-collections', [
+            '--age-minutes' => 120,
+            '--window' => 100,
+            '--shard' => '0/2',
+        ])->assertSuccessful();
+
+        $this->assertSame([1, 3, 5], $this->collectionIds());
+        $this->assertSame(0, (int) $store->get($shardZero));
+        $this->assertSame(3, (int) $store->get($shardOne));
+        $this->assertSame(99, (int) $store->get($unsharded));
+    }
+
+    public function test_invalid_shards_are_rejected_before_any_delete(): void
+    {
+        $this->seedScenario();
+
+        foreach (['3/3', '1/0', '0/17', 'one/2', '-1/2', '1/2/3'] as $shard) {
+            $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120, '--shard' => $shard])
+                ->assertFailed();
+        }
+        config(['nntmux.hopeless_purge_shard' => '2/2']);
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120])->assertFailed();
+
+        $this->assertSame(8, DB::table('collections')->count());
+    }
+
     public function test_mariadb_sql(): void
     {
         $dsn = (string) env('NNTMUX_TEST_MARIADB_DSN', '');
@@ -265,6 +325,12 @@ final class ReleaseProcessingHopelessSingletonTest extends TestCase
             $this->assertFalse(DB::table('binaries')->where('collections_id', $collectionId)->exists());
             $this->assertFalse(DB::table('parts')->where('binaries_id', $binaryId)->exists());
         }
+    }
+
+    /** @return list<int> */
+    private function collectionIds(): array
+    {
+        return DB::table('collections')->orderBy('id')->pluck('id')->map(static fn ($id): int => (int) $id)->all();
     }
 
     private function runStage(int $groupId): void

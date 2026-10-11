@@ -6,8 +6,10 @@ namespace App\Console\Commands;
 
 use App\Services\HopelessCollectionPurger;
 use App\Services\Metrics\DistributedWorkerTelemetry;
+use App\Support\HopelessPurgeShard;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
+use InvalidArgumentException;
 use Throwable;
 
 /**
@@ -20,6 +22,10 @@ use Throwable;
  * this lane runs it on its own with a shorter age and larger pages. The
  * cursor is kept in the cache, so a run cut short by its deadline resumes
  * where it stopped instead of rescanning the oldest ids.
+ *
+ * With --shard=i/N (or NNTMUX_HOPELESS_PURGE_SHARD) the run only scans ids
+ * with id % N = i and keeps a cursor of its own, so N replicas can sweep
+ * the table in parallel.
  */
 final class PurgeHopelessCollections extends Command
 {
@@ -30,7 +36,8 @@ final class PurgeHopelessCollections extends Command
         {--window= : Collections scanned per page}
         {--deadline= : Seconds before the run stops and keeps its cursor}
         {--group=0 : Restrict to one group id (0 = all groups)}
-        {--generic-min-parts= : Part threshold for generic-regex-only collections; 0 = same as min_parts}';
+        {--generic-min-parts= : Part threshold for generic-regex-only collections; 0 = same as min_parts}
+        {--shard= : Scan only ids with id % N = i, written i/N; defaults to nntmux.hopeless_purge_shard}';
 
     protected $description = 'Delete one-part collections of per-article obfuscated posts, all groups';
 
@@ -43,6 +50,15 @@ final class PurgeHopelessCollections extends Command
 
     public function handle(): int
     {
+        try {
+            $shard = $this->option('shard') !== null
+                ? HopelessPurgeShard::parse((string) $this->option('shard'))
+                : HopelessPurgeShard::fromConfig();
+        } catch (InvalidArgumentException $e) {
+            $this->error($e->getMessage());
+
+            return self::FAILURE;
+        }
         $ageMinutes = (int) ($this->option('age-minutes') ?? config('nntmux.hopeless_purge_age_minutes', 0));
         if ($ageMinutes <= 0) {
             $this->info('Hopeless purge disabled (age is 0).');
@@ -56,14 +72,14 @@ final class PurgeHopelessCollections extends Command
         $genericMinParts = (int) ($this->option('generic-min-parts') ?? config('nntmux.hopeless_purge_generic_min_parts', 0));
         $genericMinParts = $genericMinParts > 0 ? min($genericMinParts, $minParts) : null;
         $cutoff = now()->subMinutes($ageMinutes);
-        $cursorKey = self::CURSOR_KEY.':'.$groupId;
+        $cursorKey = self::CURSOR_KEY.':'.$groupId.($shard === null ? '' : ':'.$shard->suffix());
 
         $start = $after = $this->cursor($cursorKey);
         $scanned = $deleted = 0;
         $wrapped = false;
 
         while (true) {
-            $page = $this->purger->purgePage($groupId, $after, $cutoff, $minParts, $window, false, $genericMinParts);
+            $page = $this->purger->purgePage($groupId, $after, $cutoff, $minParts, $window, false, $genericMinParts, $shard);
             $scanned += $page['scanned'];
             $deleted += $page['deleted'];
             $after = $page['next'];
@@ -92,10 +108,11 @@ final class PurgeHopelessCollections extends Command
             $this->workerTelemetry->recordItem('hopeless-purge', 'collection', 'deleted', $deleted);
         }
         $this->info(sprintf(
-            'Scanned %d collections, deleted %d hopeless (age >= %d min); cursor %d.',
+            'Scanned %d collections, deleted %d hopeless (age >= %d min)%s; cursor %d.',
             $scanned,
             $deleted,
             $ageMinutes,
+            $shard === null ? '' : ' in '.$shard->suffix(),
             $after,
         ));
 

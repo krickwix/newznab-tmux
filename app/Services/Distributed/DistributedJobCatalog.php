@@ -4,9 +4,30 @@ declare(strict_types=1);
 
 namespace App\Services\Distributed;
 
+use App\Support\HopelessPurgeShard;
+
 class DistributedJobCatalog
 {
     private const int HASHED_FIXNAMES_THRESHOLD = 100;
+
+    /**
+     * Cache lock that keeps one copy of $job running at a time.
+     *
+     * A sharded hopeless-purge replica locks only its own shard, so N
+     * replicas run side by side instead of queueing on one lock.
+     */
+    public static function lockName(string $job): string
+    {
+        $name = 'nntmux:distributed-worker:'.$job;
+        if ($job === 'hopeless-purge') {
+            $shard = HopelessPurgeShard::fromConfig();
+            if ($shard !== null) {
+                $name .= ':'.$shard->suffix();
+            }
+        }
+
+        return $name;
+    }
 
     /**
      * @return array<string, string>
