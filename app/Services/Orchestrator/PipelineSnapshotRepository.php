@@ -91,7 +91,7 @@ class PipelineSnapshotRepository
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS oldest_release_age,
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(adddate), NOW()), 0) FROM releases WHERE nzbstatus = 0) AS oldest_nzb_age,
             NOT EXISTS(SELECT 1 FROM usenet_groups g LEFT JOIN short_groups s ON s.name = g.name
-                WHERE g.active = 1'.$pausedClause.' AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > 10000)) AS current_groups', $pausedGroups);
+                WHERE g.active = 1'.$pausedClause.' AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > '.$this->currentGroupMaxLag().')) AS current_groups', $pausedGroups);
         $statusRows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Innodb_deadlocks', 'Innodb_row_lock_current_waits', 'Innodb_row_lock_waits')");
         $status = [];
         foreach ($statusRows as $row) {
@@ -424,6 +424,16 @@ class PipelineSnapshotRepository
             'database_current_wait_started_at' => $currentWaitStartedAt,
             'database_admission_safe' => $admissionSafe,
         ];
+    }
+
+    /**
+     * Articles an active group may trail the server's newest and still count
+     * as current. Applies to current_groups and to backfill candidacy. Busy
+     * groups fetch at most one task per header pass, so a 10k lag flickers.
+     */
+    public function currentGroupMaxLag(): int
+    {
+        return $this->boundedIntConfig('current_group_max_lag', 10_000, 1_000, 1_000_000);
     }
 
     private function boundedIntConfig(string $key, int $default, int $minimum, int $maximum): int
@@ -1476,7 +1486,7 @@ class PipelineSnapshotRepository
             AND CAST(s.last_record AS SIGNED) >= CAST(s.first_record AS SIGNED)
             AND CAST(g.last_record AS SIGNED) BETWEEN CAST(s.first_record AS SIGNED) AND CAST(s.last_record AS SIGNED)
             AND (
-                (g.active = 1 AND CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000)
+                (g.active = 1 AND CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= '.$this->currentGroupMaxLag().')
                 OR (
                     g.active = 0
                     AND g.last_record_postdate >= \'2000-01-01\'

@@ -164,6 +164,9 @@ return [
         ))),
         // Admit backfill at neutral pressure when the target's safe quantity
         // (sized from its own learned growth) is at least one 10k task.
+        // How far (articles) an active group may trail the server and still
+        // count as current, for current_groups and backfill candidacy.
+        'current_group_max_lag' => (int) env('NNTMUX_ORCHESTRATOR_CURRENT_GROUP_MAX_LAG', 10_000),
         'backfill_neutral_pressure_admission' => (bool) env('NNTMUX_ORCHESTRATOR_BACKFILL_NEUTRAL_PRESSURE_ADMISSION', false),
         'backfill_stop_cursors' => (string) env('NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS', ''),
         'current_forward_windows' => (string) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS', ''),
