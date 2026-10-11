@@ -39,7 +39,25 @@ final class WorkerControlPolicy
         private readonly ?float $qualifiedSupplyGrowthMinPerMinute = null,
         private readonly ?int $qualifiedSupplyColdStartCooldownSeconds = null,
         private readonly ?int $ineffectiveBackfillLimitOverride = null,
+        private readonly ?bool $neutralPressureAdmission = null,
     ) {}
+
+    /**
+     * Opt-in: admit backfill at neutral pressure (neither high nor low).
+     *
+     * Low pressure needs every stage under its low mark, which a noisy
+     * forward-only group can hold off for the whole day. The per-target
+     * safe quantity already sizes a permit from that target's learned
+     * collection growth, and backfillGatesPassed() refuses one below 10k,
+     * so a permit is only granted when the target's own growth fits the
+     * remaining headroom. High pressure, the database guard, locks and
+     * current groups still gate every permit.
+     */
+    private function neutralPressureAdmission(): bool
+    {
+        return $this->neutralPressureAdmission
+            ?? (bool) $this->orchestratorConfig('backfill_neutral_pressure_admission', false);
+    }
 
     /**
      * Consecutive input-bearing permits without attributed output before a
@@ -289,7 +307,7 @@ final class WorkerControlPolicy
         $backfillHealthyCommon = $workerProfile->backfillEnabled
             && ! $transitioned
             && ! $snapshot->highPressure
-            && $snapshot->lowPressure
+            && ($snapshot->lowPressure || $this->neutralPressureAdmission())
             && ! $backfillLocked
             && ! $targetLocked;
         $backfillHealthy = $backfillHealthyCommon && $snapshot->backfillGatesPassed();
@@ -853,7 +871,7 @@ final class WorkerControlPolicy
         if (! $snapshot->eligibleBackfillSupply) {
             return 'backfill_no_eligible_supply';
         }
-        if (! $snapshot->lowPressure) {
+        if (! $snapshot->lowPressure && ! $this->neutralPressureAdmission()) {
             return 'backfill_pipeline_not_drained';
         }
 
