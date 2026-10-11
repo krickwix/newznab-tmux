@@ -151,6 +151,17 @@ return [
             ))),
             'collections_low' => max(0, (int) env('NNTMUX_BACKFILL_WINDOW_COLLECTIONS_LOW', 0)),
         ],
+        // Forward-only groups (comma separated, any case). They are never
+        // counted as unfetched and never the backfill target, at any hour,
+        // but their forward fetch is NOT paused. A group far behind the
+        // server would otherwise hold current_groups false all day.
+        'backfill_ignore_forward_groups' => array_values(array_filter(array_map(
+            static fn (string $group): string => strtolower(trim($group)),
+            explode(',', (string) env('NNTMUX_BACKFILL_IGNORE_FORWARD_GROUPS', ''))
+        ))),
+        // Admit backfill at neutral pressure when the target's safe quantity
+        // (sized from its own learned growth) is at least one 10k task.
+        'backfill_neutral_pressure_admission' => (bool) env('NNTMUX_ORCHESTRATOR_BACKFILL_NEUTRAL_PRESSURE_ADMISSION', false),
         'backfill_stop_cursors' => (string) env('NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS', ''),
         'current_forward_windows' => (string) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS', ''),
         'current_forward_claim_timeout_seconds' => min(3600, max(300, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CLAIM_TIMEOUT_SECONDS', 900))),

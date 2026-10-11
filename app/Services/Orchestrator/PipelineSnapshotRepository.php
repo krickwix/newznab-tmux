@@ -62,7 +62,13 @@ class PipelineSnapshotRepository
         // counter, not a wider tolerance.
         // Groups paused by an open backfill window are not forward-fetched, so
         // their growing gap must not count as unfetched current content.
-        $pausedGroups = $this->window->pausedGroups();
+        // Configured forward-only groups are left out at every hour: they keep
+        // their forward fetch but must not hold current_groups false or become
+        // the backfill target.
+        $pausedGroups = self::backfillExcludedGroups(
+            $this->window->pausedGroups(),
+            (array) config('nntmux.orchestrator.backfill_ignore_forward_groups', []),
+        );
         $pausedClause = $pausedGroups === []
             ? ''
             : ' AND LOWER(g.name) NOT IN ('.implode(', ', array_fill(0, count($pausedGroups), '?')).')';
@@ -560,6 +566,21 @@ class PipelineSnapshotRepository
         }
 
         return $quantities === [] ? 0 : min($quantities);
+    }
+
+    /**
+     * Window-paused and forward-only groups, lower-cased and de-duplicated.
+     *
+     * @param  list<string>  $pausedGroups
+     * @param  list<mixed>  $forwardOnlyGroups
+     * @return list<string>
+     */
+    public static function backfillExcludedGroups(array $pausedGroups, array $forwardOnlyGroups): array
+    {
+        return array_values(array_unique(array_filter(array_map(
+            static fn (mixed $group): string => strtolower(trim((string) $group)),
+            [...$pausedGroups, ...$forwardOnlyGroups],
+        ), static fn (string $group): bool => $group !== '')));
     }
 
     /**
