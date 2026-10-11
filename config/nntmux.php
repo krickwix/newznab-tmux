@@ -138,6 +138,19 @@ return [
                 'alt.binaries.tv,alt.binaries.appletv.movies,alt.binaries.movies.dvd,alt.binaries.movies.xvid,alt.binaries.sounds.lossless.metal,alt.binaries.sounds.lossless,alt.binaries.dvd.classics,alt.binaries.dvd.criterion,alt.binaries.dvd-freak,alt.binaries.dvd-r,alt.binaries.dvd'
             ))
         ))),
+        // Scheduled backfill windows (UTC "HH:MM-HH:MM", comma separated).
+        // Inside a window the paused groups get no forward fetch, are not
+        // counted as unfetched and are never the backfill target, and
+        // collections_low (when > 0) replaces the collections low marks.
+        // Must be set on the orchestrator and on the binaries worker alike.
+        'backfill_window' => [
+            'schedule' => (string) env('NNTMUX_BACKFILL_WINDOW_SCHEDULE', ''),
+            'paused_groups' => array_values(array_filter(array_map(
+                'trim',
+                explode(',', (string) env('NNTMUX_BACKFILL_WINDOW_PAUSED_GROUPS', ''))
+            ))),
+            'collections_low' => max(0, (int) env('NNTMUX_BACKFILL_WINDOW_COLLECTIONS_LOW', 0)),
+        ],
         'backfill_stop_cursors' => (string) env('NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS', ''),
         'current_forward_windows' => (string) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS', ''),
         'current_forward_claim_timeout_seconds' => min(3600, max(300, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CLAIM_TIMEOUT_SECONDS', 900))),

@@ -28,6 +28,8 @@ class PipelineSnapshotRepository
 
     private readonly ?BackfillDateEligibilityPolicy $eligibility;
 
+    private readonly BackfillWindow $window;
+
     public function __construct(
         private readonly PrometheusSafetySignalProvider $safety,
         private readonly NzbBacklogCreationService $nzbBacklog,
@@ -35,7 +37,9 @@ class PipelineSnapshotRepository
         ?WorkerControlStateStore $state = null,
         ?PipelinePressureClassifier $pressure = null,
         ?BackfillDateEligibilityPolicy $eligibility = null,
+        ?BackfillWindow $window = null,
     ) {
+        $this->window = $window ?? new BackfillWindow;
         $this->targets = $targets ?? new BackfillTargetSelector;
         $this->state = $state ?? new WorkerControlStateStore;
         $this->pressure = $pressure ?? new PipelinePressureClassifier;
@@ -56,6 +60,12 @@ class PipelineSnapshotRepository
         // margin ever closes, this reintroduces exactly the failure documented
         // on $binariesBacklog below, and the answer then is a cheaper exact
         // counter, not a wider tolerance.
+        // Groups paused by an open backfill window are not forward-fetched, so
+        // their growing gap must not count as unfetched current content.
+        $pausedGroups = $this->window->pausedGroups();
+        $pausedClause = $pausedGroups === []
+            ? ''
+            : ' AND LOWER(g.name) NOT IN ('.implode(', ', array_fill(0, count($pausedGroups), '?')).')';
         $tables = DB::selectOne("SELECT
             COALESCE(MAX(CASE WHEN TABLE_NAME = 'parts' THEN TABLE_ROWS END), 0) AS parts_count
             FROM information_schema.TABLES
@@ -75,7 +85,7 @@ class PipelineSnapshotRepository
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS oldest_release_age,
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(adddate), NOW()), 0) FROM releases WHERE nzbstatus = 0) AS oldest_nzb_age,
             NOT EXISTS(SELECT 1 FROM usenet_groups g LEFT JOIN short_groups s ON s.name = g.name
-                WHERE g.active = 1 AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > 10000)) AS current_groups');
+                WHERE g.active = 1'.$pausedClause.' AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > 10000)) AS current_groups', $pausedGroups);
         $statusRows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Innodb_deadlocks', 'Innodb_row_lock_current_waits', 'Innodb_row_lock_waits')");
         $status = [];
         foreach ($statusRows as $row) {
@@ -132,7 +142,7 @@ class PipelineSnapshotRepository
         ];
         $freeRun = $profileOverride === ControlProfile::FreeRun;
         $safeBackfillCandidates = $this->safeBackfillCandidates(
-            $this->backfillCandidates($profileOverride),
+            self::withoutGroups($this->backfillCandidates($profileOverride), $pausedGroups),
             $capacityBacklogs,
             $freeRun,
         );
@@ -172,7 +182,11 @@ class PipelineSnapshotRepository
             $recoverySourceCollections,
         );
         $high = $physicalCapacityHigh || $this->pressure->isHigh($backlogs, $ages, $ewma);
-        $low = ! $physicalCapacityHigh && $this->pressure->isLow($backlogs, $ewma);
+        $windowLow = $this->window->collectionsLow();
+        $lowClassifier = $windowLow === null
+            ? $this->pressure
+            : $this->pressure->withLowWatermarks(['collections' => $windowLow, 'collections_total' => $windowLow]);
+        $low = ! $physicalCapacityHigh && $lowClassifier->isLow($backlogs, $ewma);
         $workerTelemetry = (new DistributedWorkerTelemetry)->snapshot(['releases'], (float) $now);
         // Unavailable telemetry is not a zero counter. Reading it as one reports
         // a false zero yield, and persisting that zero would make the next
@@ -546,6 +560,25 @@ class PipelineSnapshotRepository
         }
 
         return $quantities === [] ? 0 : min($quantities);
+    }
+
+    /**
+     * @template T of array{name: string}
+     *
+     * @param  list<T>  $candidates
+     * @param  list<string>  $groups  lower-cased names
+     * @return list<T>
+     */
+    public static function withoutGroups(array $candidates, array $groups): array
+    {
+        if ($groups === []) {
+            return $candidates;
+        }
+
+        return array_values(array_filter(
+            $candidates,
+            static fn (array $candidate): bool => ! in_array(strtolower((string) $candidate['name']), $groups, true),
+        ));
     }
 
     /**

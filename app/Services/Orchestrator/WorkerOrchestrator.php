@@ -597,6 +597,7 @@ class WorkerOrchestrator
                 'eligible_nzbs' => $snapshot->eligibleNzbs,
                 'body_recovery_queue' => $snapshot->bodyRecoveryQueueBacklog,
                 'pressure' => $snapshot->highPressure ? 'high' : ($snapshot->lowPressure ? 'low' : 'neutral'),
+                'backfill_window' => (new BackfillWindow)->pausedGroups(),
                 'rates_per_minute' => $snapshot->backlogRatesPerMinute,
                 'ewma_per_minute' => $snapshot->backlogEwmaPerMinute,
                 'oldest_age_seconds' => [
