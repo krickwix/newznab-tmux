@@ -52,6 +52,9 @@ return [
     // Lower part threshold the lane uses for collections that only matched
     // the generic regex (no group regex). 0 keeps min_parts for them too.
     'hopeless_purge_generic_min_parts' => max(0, (int) env('NNTMUX_HOPELESS_PURGE_GENERIC_MIN_PARTS', 0)),
+    // "i/N" runs this replica as shard i of N (ids with id % N = i), with its
+    // own cursor and worker lock. Empty runs one unsharded lane.
+    'hopeless_purge_shard' => trim((string) env('NNTMUX_HOPELESS_PURGE_SHARD', '')),
     // Already-processed rows each name-fixing lane re-checks per run (methods 18
     // and 21), swept behind a cursor. 0 disables revisits.
     'namefix_subject_revisit_limit' => min(5000, max(0, (int) env('NNTMUX_NAMEFIX_SUBJECT_REVISIT_LIMIT', 50))),

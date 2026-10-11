@@ -32,7 +32,7 @@ class ReleaseDistributedWorkerLock extends Command
         $store = is_string($storeOption) && $storeOption !== ''
             ? $storeOption
             : (string) config('nntmux.distributed_lock_store', 'redis');
-        $lockName = 'nntmux:distributed-worker:'.$job;
+        $lockName = DistributedJobCatalog::lockName($job);
 
         try {
             Cache::store($store)->lock($lockName)->forceRelease();
