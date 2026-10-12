@@ -1270,6 +1270,45 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame(0, $method->invoke($repository, 'alt.test', 100_000, 90_000));
     }
 
+    public function test_backfill_candidates_use_the_configured_current_group_lag(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['all']);
+        config()->set('nntmux.orchestrator.current_group_max_lag', 50_000);
+        DB::shouldReceive('select')
+            ->once()
+            ->withArgs(function (string $sql): bool {
+                self::assertStringContainsString('CAST(g.last_record AS SIGNED) <= 50000)', $sql);
+                self::assertStringNotContainsString('CAST(g.last_record AS SIGNED) <= 10000)', $sql);
+
+                return true;
+            })
+            ->andReturn([]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            eligibility: new BackfillDateEligibilityPolicy(1),
+        );
+
+        self::assertSame([], $repository->backfillCandidates());
+    }
+
+    public function test_current_group_lag_defaults_to_ten_thousand_and_is_bounded(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame(10_000, $repository->currentGroupMaxLag());
+        config()->set('nntmux.orchestrator.current_group_max_lag', 50_000);
+        self::assertSame(50_000, $repository->currentGroupMaxLag());
+        config()->set('nntmux.orchestrator.current_group_max_lag', 0);
+        self::assertSame(1_000, $repository->currentGroupMaxLag());
+        config()->set('nntmux.orchestrator.current_group_max_lag', 999_999_999);
+        self::assertSame(1_000_000, $repository->currentGroupMaxLag());
+    }
+
     public function test_backfill_candidates_fail_closed_without_an_explicit_allowlist(): void
     {
         config()->set('nntmux.orchestrator.backfill_probe_groups', []);
