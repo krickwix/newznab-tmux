@@ -26,6 +26,9 @@ use Throwable;
  * With --shard=i/N (or NNTMUX_HOPELESS_PURGE_SHARD) the run only scans ids
  * with id % N = i and keeps a cursor of its own, so N replicas can sweep
  * the table in parallel.
+ *
+ * Each run sweeps only up to the newest collection already past the age
+ * cutoff: the ids above it were all first seen too recently to delete.
  */
 final class PurgeHopelessCollections extends Command
 {
@@ -77,9 +80,15 @@ final class PurgeHopelessCollections extends Command
         $start = $after = $this->cursor($cursorKey);
         $scanned = $deleted = 0;
         $wrapped = false;
+        $ceiling = $this->purger->newestIdBefore($cutoff);
+        if ($ceiling === 0) {
+            $this->info(sprintf('No collection is older than %d min yet.', $ageMinutes));
+
+            return self::SUCCESS;
+        }
 
         while (true) {
-            $page = $this->purger->purgePage($groupId, $after, $cutoff, $minParts, $window, false, $genericMinParts, $shard);
+            $page = $this->purger->purgePage($groupId, $after, $cutoff, $minParts, $window, false, $genericMinParts, $shard, $ceiling);
             $scanned += $page['scanned'];
             $deleted += $page['deleted'];
             $after = $page['next'];
@@ -108,12 +117,13 @@ final class PurgeHopelessCollections extends Command
             $this->workerTelemetry->recordItem('hopeless-purge', 'collection', 'deleted', $deleted);
         }
         $this->info(sprintf(
-            'Scanned %d collections, deleted %d hopeless (age >= %d min)%s; cursor %d.',
+            'Scanned %d collections, deleted %d hopeless (age >= %d min)%s; cursor %d of %d.',
             $scanned,
             $deleted,
             $ageMinutes,
             $shard === null ? '' : ' in '.$shard->suffix(),
             $after,
+            $ceiling,
         ));
 
         return self::SUCCESS;

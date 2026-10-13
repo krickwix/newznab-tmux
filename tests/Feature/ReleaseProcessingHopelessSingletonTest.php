@@ -145,6 +145,52 @@ final class ReleaseProcessingHopelessSingletonTest extends TestCase
         $this->assertSame(0, (int) Cache::store('array')->get($key));
     }
 
+    public function test_purge_sweep_stops_at_the_newest_collection_past_the_age(): void
+    {
+        $this->seedScenario();
+        // Recent hopeless-shaped collections above the ceiling (id 8).
+        foreach (range(9, 12) as $id) {
+            $this->seedCollection($id, hoursOld: 0);
+            $this->seedBinary($id * 10, $id, totalParts: 6655, parts: 1);
+        }
+        $key = PurgeHopelessCollections::CURSOR_KEY.':0';
+
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120, '--window' => 4])
+            ->expectsOutputToContain('Scanned 8 collections, deleted 2 hopeless (age >= 120 min); cursor 0 of 8.')
+            ->assertSuccessful();
+
+        $this->assertSame([2, 3, 4, 5, 7, 8, 9, 10, 11, 12], $this->collectionIds());
+        $this->assertSame(0, (int) Cache::store('array')->get($key));
+    }
+
+    public function test_purge_command_wraps_a_cursor_left_above_the_ceiling(): void
+    {
+        $this->seedScenario();
+        $key = PurgeHopelessCollections::CURSOR_KEY.':0';
+        Cache::store('array')->forever($key, 50);
+
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120, '--window' => 100])
+            ->assertSuccessful();
+
+        $this->assertScenarioOutcome();
+        $this->assertSame(0, (int) Cache::store('array')->get($key));
+    }
+
+    public function test_purge_command_skips_the_sweep_when_nothing_is_old_enough(): void
+    {
+        $this->seedCollection(1, hoursOld: 0);
+        $this->seedBinary(10, 1, totalParts: 6655, parts: 1);
+        $key = PurgeHopelessCollections::CURSOR_KEY.':0';
+        Cache::store('array')->forever($key, 7);
+
+        $this->artisan('nntmux:purge-hopeless-collections', ['--age-minutes' => 120])
+            ->expectsOutputToContain('No collection is older than 120 min yet.')
+            ->assertSuccessful();
+
+        $this->assertSame([1], $this->collectionIds());
+        $this->assertSame(7, (int) Cache::store('array')->get($key));
+    }
+
     public function test_purge_command_is_off_at_age_zero(): void
     {
         config(['nntmux.hopeless_purge_age_minutes' => 0]);
