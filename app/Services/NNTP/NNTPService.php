@@ -1344,7 +1344,10 @@ class NNTPService extends NntpClient
             ? stream_context_create(streamSslContextOptions())
             : null;
 
-        $socket = stream_socket_client(
+        // Silenced: a failed DNS lookup raises a warning, which Laravel turns
+        // into an exception before the false return below can be handled, so
+        // the retry loop in doConnect() never ran and the worker died.
+        $socket = @stream_socket_client(
             $transport.'://'.$host.':'.$port,
             $errorNumber,
             $errorString,
