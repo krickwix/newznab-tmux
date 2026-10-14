@@ -248,6 +248,17 @@ return [
         // hard limit of 2 locked every group prematurely. Default raised to 6.
         'ineffective_backfill_limit' => min(50, max(1, (int) env('NNTMUX_ORCHESTRATOR_INEFFECTIVE_BACKFILL_LIMIT', 6))),
         'qualified_supply_binaries_sleep_seconds' => min(1800, max(60, (int) env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_BINARIES_SLEEP_SECONDS', 300))),
+        // Header-ingestion sleep per input-pressure tier in the adaptive
+        // profiles: guard at >= 0.85 of a high watermark, throttle at >= 0.70,
+        // steady at >= 0.30. Lower tiers are clamped to the tier above.
+        'adaptive_binaries_sleep_seconds' => [
+            'guard' => min(1800, max(5, (int) env('NNTMUX_ORCHESTRATOR_ADAPTIVE_BINARIES_GUARD_SLEEP_SECONDS', 160))),
+            'throttle' => min(1800, max(5, (int) env('NNTMUX_ORCHESTRATOR_ADAPTIVE_BINARIES_THROTTLE_SLEEP_SECONDS', 60))),
+            'steady' => min(1800, max(5, (int) env('NNTMUX_ORCHESTRATOR_ADAPTIVE_BINARIES_STEADY_SLEEP_SECONDS', 40))),
+        ],
+        // NZB poll interval when no NZB is eligible; with eligible NZBs the
+        // adaptive profiles always poll every 20s.
+        'adaptive_nzb_idle_sleep_seconds' => min(600, max(5, (int) env('NNTMUX_ORCHESTRATOR_ADAPTIVE_NZB_IDLE_SLEEP_SECONDS', 60))),
         'database_memory_limit_bytes' => (int) env('NNTMUX_ORCHESTRATOR_DB_MEMORY_LIMIT_BYTES', 4456448000),
         'database_cpu_limit_cores' => (float) env('NNTMUX_ORCHESTRATOR_DB_CPU_LIMIT_CORES', 3),
         'database_row_lock_window_seconds' => min(600, max(60, (int) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_WINDOW_SECONDS', 120))),
