@@ -545,6 +545,7 @@ class WorkerOrchestrator
                     ...($abandonedPermit ? ['backfill_permit_abandoned_after_worker_exit'] : []),
                     ...($delayedAttributionQueued ? ['backfill_delayed_attribution_queued'] : []),
                     ...($delayedAttributionSettled === null ? [] : ['backfill_delayed_attribution_settled']),
+                    ...(($delayedAttributionSettled['max_hold'] ?? false) ? ['backfill_delayed_attribution_max_hold'] : []),
                     ...($delayedAttributionEarlyQualityLock ? ['backfill_delayed_attribution_early_quality_lock'] : []),
                     ...($shadowQualityFailure === null ? [] : [$shadowQualityFailure, 'backfill_quality_shadow_observation']),
                 ],
@@ -780,18 +781,26 @@ class WorkerOrchestrator
         return [$snapshot, null];
     }
 
-    /** @return array{PipelineSnapshot, array{generation: int, group: string, result: string}|null} */
+    /** @return array{PipelineSnapshot, array{generation: int, group: string, result: string, max_hold?: bool}|null} */
     private function settleMatureDelayedAttribution(PipelineSnapshot $snapshot, int $now): array
     {
-        $entry = $this->store->matureBackfillDelayedAttribution($now);
-        if ($entry === null
-            || ! $snapshot->telemetryIsValid()
-            || ! $snapshot->hardSafetyPassed()
-            || $snapshot->highPressure
+        $maxHoldSeconds = (int) config('nntmux.orchestrator.backfill_delayed_attribution_max_hold_seconds', 0);
+        $entry = $this->store->matureBackfillDelayedAttribution($now, $maxHoldSeconds);
+        if ($entry === null || ! $snapshot->telemetryIsValid() || ! $snapshot->hardSafetyPassed()) {
+            return [$snapshot, null];
+        }
+        // Past the max hold the entry settles on what it has produced so far:
+        // waiting for a quiet moment is what let one permit block backfill for
+        // over two hours (2026-10-15 window, alt.binaries.teevee).
+        $maxHoldReached = $maxHoldSeconds > 0
+            && (int) ($entry['queued_at'] ?? 0) > 0
+            && $now - (int) $entry['queued_at'] >= $maxHoldSeconds;
+        if (! $maxHoldReached && (
+            $snapshot->highPressure
             || $snapshot->databaseCurrentWaits > 0
             || ! $snapshot->databaseAdmissionSafe
             || $snapshot->eligibleNzbs > 0
-        ) {
+        )) {
             return [$snapshot, null];
         }
 
@@ -808,7 +817,7 @@ class WorkerOrchestrator
             (string) ($entry['cursor_end_postdate'] ?? ''),
         );
         $counts = $quality['counts'];
-        if ($this->snapshots->backfillPendingCollectionsForCohort(
+        if (! $maxHoldReached && $this->snapshots->backfillPendingCollectionsForCohort(
             $group,
             (string) ($entry['cursor_start_postdate'] ?? ''),
             (string) ($entry['cursor_end_postdate'] ?? ''),
@@ -851,6 +860,7 @@ class WorkerOrchestrator
                 'generation' => $generation,
                 'group' => $group,
                 'result' => $qualityFailure !== '' ? $qualityFailure : ($productive > 0 ? 'productive' : 'zero_output'),
+                'max_hold' => $maxHoldReached,
             ],
         ];
     }

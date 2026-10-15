@@ -683,14 +683,20 @@ class PipelineSnapshotRepository
         } elseif ($contextRepeat !== null) {
             $contextRepeat['expected_cursor_postdate'] = $expectedCursorPostdate;
         }
-        if ($pendingGroups !== []) {
-            if ($continuationGroup === '') {
-                return null;
-            }
-
+        if ($pendingGroups !== [] && $continuationGroup !== '') {
             $candidates = array_values(array_filter(
                 $candidates,
                 static fn (array $candidate): bool => $candidate['name'] === $continuationGroup,
+            ));
+        } elseif ($pendingGroups !== []) {
+            if (! config('nntmux.orchestrator.backfill_parallel_attribution', false)) {
+                return null;
+            }
+            // A pending group waits for its own attribution; every other
+            // group may take the next permit.
+            $candidates = array_values(array_filter(
+                $candidates,
+                static fn (array $candidate): bool => ! in_array($candidate['name'], $pendingGroups, true),
             ));
         }
 

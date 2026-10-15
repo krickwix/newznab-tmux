@@ -209,6 +209,17 @@ return [
         'backfill_incomplete_release_grace_seconds' => min(1200, max(600, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_INCOMPLETE_RELEASE_GRACE_SECONDS', 600))),
         'backfill_productive_settlement_grace_seconds' => min(300, max(30, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_PRODUCTIVE_SETTLEMENT_GRACE_SECONDS', 120))),
         'backfill_delayed_attribution_seconds' => min(21_600, max(300, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_DELAYED_ATTRIBUTION_SECONDS', 9_000))),
+        // Let another group take a backfill permit while earlier permits are
+        // still waiting for their delayed attribution. Each attribution is
+        // scoped to its own group and cursor range, so they do not mix. Off,
+        // any pending attribution blocks every other group.
+        'backfill_parallel_attribution' => (bool) env('NNTMUX_ORCHESTRATOR_BACKFILL_PARALLEL_ATTRIBUTION', false),
+        // Longest a delayed attribution may stay pending, counted from its
+        // first queueing and including chain extensions. Once reached it is
+        // settled on the output so far, without waiting for its cohort to
+        // drain or for pressure, database waits and eligible NZBs to clear.
+        // 0 disables the cap.
+        'backfill_delayed_attribution_max_hold_seconds' => min(86_400, max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_DELAYED_ATTRIBUTION_MAX_HOLD_SECONDS', 0))),
         'backfill_max_quantity' => max(10000, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_QUANTITY', 200000)),
         'backfill_headroom_fraction' => min(0.5, max(0.01, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_HEADROOM_FRACTION', 0.10))),
         'backfill_growth_per_10k' => [
