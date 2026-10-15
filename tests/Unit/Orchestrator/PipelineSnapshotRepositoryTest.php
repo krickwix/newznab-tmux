@@ -724,6 +724,39 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertNull($target);
     }
 
+    public function test_parallel_attribution_selects_another_group_while_one_is_pending(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.backfill_probe_groups' => ['alt.pending', 'alt.safe'],
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_parallel_attribution' => true,
+        ]);
+        Cache::store('array')->flush();
+        $state = new WorkerControlStateStore;
+        self::assertTrue($state->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.pending',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, 1_000));
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'selectBackfillTarget');
+        $pending = ['name' => 'alt.pending', 'cursor' => 40_000, 'cursor_postdate' => '2026-01-03 00:00:00', 'remaining_articles' => 40_000, 'safe_quantity' => 40_000];
+        $safe = ['name' => 'alt.safe', 'cursor' => 30_000, 'cursor_postdate' => '2026-01-02 00:00:00', 'remaining_articles' => 30_000, 'safe_quantity' => 30_000];
+
+        $target = $method->invoke($repository, [$pending, $safe], [], ControlState::initial(), 2_000_000_000);
+
+        self::assertSame('alt.safe', $target['name'] ?? null);
+        // The pending group itself still waits for its attribution.
+        self::assertNull($method->invoke($repository, [$pending], [], ControlState::initial(), 2_000_000_000));
+    }
+
     public function test_repository_allows_only_one_exact_fenced_continuation_when_multiple_groups_are_pending(): void
     {
         config([

@@ -783,7 +783,7 @@ class WorkerControlStateStore
     }
 
     /** @return array<string, int|string>|null */
-    public function matureBackfillDelayedAttribution(int $now): ?array
+    public function matureBackfillDelayedAttribution(int $now, int $maxHoldSeconds = 0): ?array
     {
         $ledger = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
             ->get(self::BACKFILL_DELAYED_ATTRIBUTION_KEY);
@@ -791,13 +791,23 @@ class WorkerControlStateStore
             return null;
         }
 
+        // An entry is due at settle_after, or once it has been pending for
+        // the max hold since it was first queued, whichever comes first.
+        $dueAt = static function (array $entry) use ($maxHoldSeconds): int {
+            $settleAfter = (int) ($entry['settle_after'] ?? 0);
+            $queuedAt = (int) ($entry['queued_at'] ?? 0);
+
+            return $maxHoldSeconds > 0 && $queuedAt > 0
+                ? min($settleAfter, $queuedAt + $maxHoldSeconds)
+                : $settleAfter;
+        };
         $mature = array_values(array_filter($ledger, fn (mixed $entry): bool => is_array($entry)
             && in_array((int) ($entry['schema_version'] ?? 0), [1, 2], true)
             && (int) ($entry['generation'] ?? 0) > 0
             && (int) ($entry['settle_after'] ?? 0) > 0
-            && (int) $entry['settle_after'] <= $now
+            && $dueAt($entry) <= $now
             && $this->backfillDelayedAttributionGenerations($entry) !== []));
-        usort($mature, static fn (array $left, array $right): int => (int) $left['settle_after'] <=> (int) $right['settle_after']);
+        usort($mature, static fn (array $left, array $right): int => $dueAt($left) <=> $dueAt($right));
 
         return $mature[0] ?? null;
     }
