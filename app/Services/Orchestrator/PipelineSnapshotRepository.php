@@ -308,11 +308,12 @@ class PipelineSnapshotRepository
         $windowSeconds = $this->boundedIntConfig('database_row_lock_window_seconds', 120, 60, 600);
         $blockRate = $this->boundedFloatConfig('database_row_lock_admission_block_rate', 4.0, 0.1, 1_000.0);
         $reopenRate = $this->boundedFloatConfig('database_row_lock_admission_reopen_rate', 3.0, 0.0, $blockRate);
-        $hardRate = $this->boundedFloatConfig('database_row_lock_hard_rate', 6.0, $blockRate, 1_000.0);
+        $hardRate = $this->boundedFloatConfig('database_row_lock_hard_rate', 6.0, $blockRate, 2_000.0);
         $burstWaits = $this->boundedIntConfig('database_row_lock_burst_waits', 12, 1, 10_000);
         $burstSeconds = $this->boundedIntConfig('database_row_lock_burst_seconds', 60, 1, $windowSeconds);
         $instantHardRate = $this->boundedFloatConfig('database_row_lock_instant_hard_rate', 30.0, $hardRate, 10_000.0);
         $hardCooldownSeconds = $this->boundedIntConfig('database_row_lock_hard_cooldown_seconds', 600, 60, 86_400);
+        $deadlockHardCount = $this->boundedIntConfig('database_deadlock_hard_count', 1, 1, 1_000);
         $currentWaitHardSeconds = $this->boundedIntConfig('database_current_wait_hard_seconds', 30, 5, 300);
         $profileStableSeconds = $this->boundedIntConfig('database_profile_stable_seconds', 120, 60, $windowSeconds);
         $snapshotMaxAgeSeconds = $this->boundedIntConfig('snapshot_max_age_seconds', 180, 60, 600);
@@ -379,7 +380,7 @@ class PipelineSnapshotRepository
                     : $now;
         }
 
-        $deadlockDelta = $deadlocks > (int) ($previous['database_deadlocks'] ?? $deadlocks);
+        $deadlockDelta = $deadlocks - (int) ($previous['database_deadlocks'] ?? $deadlocks) >= $deadlockHardCount;
         $persistentCurrentWait = $currentWaitStartedAt > 0
             && $now - $currentWaitStartedAt >= $currentWaitHardSeconds;
         $burst = $delta >= $burstWaits && $elapsed <= $burstSeconds;
