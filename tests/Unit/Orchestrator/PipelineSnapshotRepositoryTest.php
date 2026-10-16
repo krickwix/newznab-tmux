@@ -191,6 +191,111 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertFalse($method->invoke($repository, 24, 0, null, $previous, 1_120)['database_waits_safe']);
     }
 
+    public function test_deadlock_hard_count_sets_how_many_new_deadlocks_breach(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'databaseContentionTelemetry');
+        $previous = [
+            'schema_version' => 3,
+            'database_deadlocks' => 24,
+            'database_current_waits' => 0,
+            'database_row_lock_waits' => 100,
+            'database_row_lock_window_started_at' => 1_000,
+            'database_row_lock_window_start_count' => 100,
+            'database_row_lock_admission_blocked' => false,
+            'database_row_lock_hard_breach_at' => 0,
+            'database_current_wait_started_at' => 0,
+            'database_admission_safe' => true,
+            'observed_at' => 1_100,
+        ];
+
+        self::assertFalse($method->invoke($repository, 25, 0, 100, $previous, 1_120)['database_waits_safe']);
+
+        config(['nntmux.orchestrator.database_deadlock_hard_count' => 3]);
+        self::assertTrue($method->invoke($repository, 24, 0, 100, $previous, 1_120)['database_waits_safe']);
+        self::assertTrue($method->invoke($repository, 25, 0, 100, $previous, 1_120)['database_waits_safe']);
+        self::assertTrue($method->invoke($repository, 26, 0, 100, $previous, 1_120)['database_waits_safe']);
+        self::assertFalse($method->invoke($repository, 27, 0, 100, $previous, 1_120)['database_waits_safe']);
+    }
+
+    public function test_row_lock_rates_above_the_former_config_clamps_take_effect(): void
+    {
+        config([
+            'nntmux.orchestrator.database_row_lock_admission_block_rate' => 300.0,
+            'nntmux.orchestrator.database_row_lock_admission_reopen_rate' => 200.0,
+            'nntmux.orchestrator.database_row_lock_hard_rate' => 400.0,
+            'nntmux.orchestrator.database_row_lock_burst_waits' => 10_000,
+        ]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'databaseContentionTelemetry');
+        $previous = [
+            'schema_version' => 3,
+            'database_deadlocks' => 24,
+            'database_current_waits' => 0,
+            'database_row_lock_waits' => 100,
+            'database_row_lock_window_started_at' => 1_000,
+            'database_row_lock_window_start_count' => 100,
+            'database_row_lock_admission_blocked' => true,
+            'database_row_lock_hard_breach_at' => 0,
+            'database_current_wait_started_at' => 0,
+            'database_admission_safe' => false,
+            'observed_at' => 1_000,
+        ];
+
+        // 150 waits/minute over a complete window: hard under the old 120
+        // cap, below the configured reopen rate now.
+        $moderate = $method->invoke($repository, 24, 0, 400, $previous, 1_120);
+        self::assertSame(150.0, $moderate['database_row_lock_window_rate']);
+        self::assertTrue($moderate['database_waits_safe']);
+        self::assertFalse($moderate['database_row_lock_admission_blocked']);
+
+        // 450 waits/minute is still a hard breach.
+        $heavy = $method->invoke($repository, 24, 0, 1_000, $previous, 1_120);
+        self::assertFalse($heavy['database_waits_safe']);
+        self::assertTrue($heavy['database_row_lock_admission_blocked']);
+    }
+
+    public function test_config_file_accepts_row_lock_rates_up_to_the_widened_clamps(): void
+    {
+        $keys = [
+            'NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_BLOCK_RATE' => '300',
+            'NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_REOPEN_RATE' => '200',
+            'NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_RATE' => '400',
+            'NNTMUX_ORCHESTRATOR_DB_DEADLOCK_HARD_COUNT' => '3',
+        ];
+        $saved = [];
+        foreach ($keys as $key => $value) {
+            $saved[$key] = getenv($key);
+            $this->setEnvironmentValue($key, $value);
+        }
+
+        try {
+            $orchestrator = (require base_path('config/nntmux.php'))['orchestrator'];
+            self::assertSame(300.0, $orchestrator['database_row_lock_admission_block_rate']);
+            self::assertSame(200.0, $orchestrator['database_row_lock_admission_reopen_rate']);
+            self::assertSame(400.0, $orchestrator['database_row_lock_hard_rate']);
+            self::assertSame(3, $orchestrator['database_deadlock_hard_count']);
+
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_BLOCK_RATE', '5000');
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_RATE', '5000');
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_DB_DEADLOCK_HARD_COUNT', '0');
+            $orchestrator = (require base_path('config/nntmux.php'))['orchestrator'];
+            self::assertSame(1000.0, $orchestrator['database_row_lock_admission_block_rate']);
+            self::assertSame(2000.0, $orchestrator['database_row_lock_hard_rate']);
+            self::assertSame(1, $orchestrator['database_deadlock_hard_count']);
+        } finally {
+            foreach ($saved as $key => $value) {
+                $this->setEnvironmentValue($key, $value === false ? null : $value);
+            }
+        }
+    }
+
     public function test_hard_breach_cooldown_requires_a_post_cooldown_clean_window_before_admission(): void
     {
         $repository = new PipelineSnapshotRepository(
@@ -2107,5 +2212,19 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         $method = new ReflectionMethod($repository, 'bodyRecoveryQueueBacklog');
 
         self::assertSame(1, $method->invoke($repository));
+    }
+
+    private function setEnvironmentValue(string $key, ?string $value): void
+    {
+        if ($value === null) {
+            putenv($key);
+            unset($_ENV[$key], $_SERVER[$key]);
+
+            return;
+        }
+
+        putenv($key.'='.$value);
+        $_ENV[$key] = $value;
+        $_SERVER[$key] = $value;
     }
 }
