@@ -69,8 +69,17 @@ final readonly class WorkerControlProfile
         int $targetIneffectivePermits = 0,
         bool $targetLockRetryDue = false,
     ): int {
-        if ($safeQuantity < $this->backfillQuantity) {
-            return 0;
+        // The fill quantity is a floor, but a floor above the live headroom
+        // used to zero the permit, which the applier then issued as a 10k
+        // probe: a 20k swing in collections cut night permits from 350k to
+        // 10k. Shrink the floor to the largest 10k-aligned quantity the
+        // headroom still fits instead, and give up only below one quantum.
+        $floor = $this->backfillQuantity;
+        if ($safeQuantity < $floor) {
+            $floor = intdiv(max(0, $safeQuantity), 10000) * 10000;
+            if ($floor < 10000) {
+                return 0;
+            }
         }
 
         $minimumYield = (float) config('nntmux.orchestrator.backfill_scale_min_yield', 1.0);
@@ -79,23 +88,23 @@ final readonly class WorkerControlProfile
         // a target has an ineffective strike, probe it at the minimum quantity
         // until a productive cohort clears the strike or the target locks.
         if ($targetIneffectivePermits > 0) {
-            return $this->backfillQuantity;
+            return $floor;
         }
-        $rampLimit = $historyRecent && $lastCursorDelta >= $this->backfillQuantity
+        $rampLimit = $historyRecent && $lastCursorDelta >= $floor
             ? min($maxQuantity, $lastCursorDelta * 2)
             : $maxQuantity;
         if ($this->profile !== ControlProfile::Fill || ! is_finite($nzbsPer10k) || $nzbsPer10k < $minimumYield) {
-            return $this->backfillQuantity;
+            return $floor;
         }
 
         $targetNzbs = (int) config('nntmux.orchestrator.backfill_target_nzbs_per_permit', 60);
         $quantity = (int) ceil($targetNzbs / $nzbsPer10k) * 10000;
 
         $availableQuantity = max(
-            $this->backfillQuantity,
+            $floor,
             intdiv(max(0, $remainingArticles - 10000), 10000) * 10000,
         );
 
-        return max($this->backfillQuantity, min($rampLimit, $availableQuantity, $safeQuantity, $quantity));
+        return max($floor, min($rampLimit, $availableQuantity, $safeQuantity, $quantity));
     }
 }
