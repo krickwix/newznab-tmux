@@ -2981,6 +2981,10 @@ final class WorkerOrchestratorTest extends TestCase
         $store->shouldReceive('storeState')->once();
         $store->shouldReceive('storeSnapshot')->once()->with($snapshot);
         $store->shouldReceive('storeDecision')->once();
+        // Free-run opens no observation, but must still stamp the grant so
+        // fair-share rotates instead of re-picking the same target forever.
+        $store->shouldReceive('beginPermitObservation')->never();
+        $store->shouldReceive('markBackfillTargetAttempted')->once()->with('alt.test', Mockery::type('int'));
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->once()->with(null)->andReturn($snapshot);
         $applier = Mockery::mock(WorkerProfileApplier::class);
