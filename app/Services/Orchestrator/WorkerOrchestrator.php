@@ -503,6 +503,13 @@ class WorkerOrchestrator
                         $this->store->markBackfillTargetAttempted($snapshot->backfillGroup, time());
                     }
                 }
+                // Fair-share ranks targets by last_attempt_at, which only the
+                // observation and attribution paths write. Skipping them froze
+                // every timestamp, so one group took every free-run permit
+                // (teevee, 173 in 3h, on 2026-10-19). Stamp the grant itself.
+                if ($backfillPermitGranted && $freeRun) {
+                    $this->store->markBackfillTargetAttempted($snapshot->backfillGroup, time());
+                }
                 if ($requestCurrentForward) {
                     if ($currentForwardSettlementTransitioned) {
                         $currentForward['reason'] = 'current_forward_settlement_transition_hold';
