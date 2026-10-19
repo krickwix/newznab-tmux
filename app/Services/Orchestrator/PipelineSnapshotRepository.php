@@ -148,7 +148,7 @@ class PipelineSnapshotRepository
         ];
         $freeRun = $profileOverride === ControlProfile::FreeRun;
         $safeBackfillCandidates = $this->safeBackfillCandidates(
-            self::withoutGroups($this->backfillCandidates($profileOverride), $pausedGroups),
+            self::withoutGroups($this->backfillCandidates(), $pausedGroups),
             $capacityBacklogs,
             $freeRun,
         );
@@ -1428,7 +1428,7 @@ class PipelineSnapshotRepository
     /**
      * @return list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>
      */
-    public function backfillCandidates(?ControlProfile $profile = null): array
+    public function backfillCandidates(): array
     {
         $allowedGroups = array_values(array_unique(array_filter(array_map(
             static fn (mixed $group): string => trim((string) $group),
@@ -1472,9 +1472,8 @@ class PipelineSnapshotRepository
             $orderBySql = 'g.last_updated IS NOT NULL, g.last_updated ASC, g.name ASC';
         }
 
-        $sourceAdmissionSql = $profile === ControlProfile::FreeRun
-            ? '(g.backfill = 1 OR g.active = 1)'
-            : 'g.backfill = 1';
+        // The backfill flag is the operator's opt-in in every profile; free_run
+        // must not widen it to active groups an operator disabled.
         $datePendingSql = ($this->eligibility ?? BackfillDateEligibilityPolicy::fromRuntime())->datePendingSql('g');
 
         $rows = DB::select('SELECT
@@ -1484,7 +1483,7 @@ class PipelineSnapshotRepository
             CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) AS remaining_articles
             FROM usenet_groups g
             INNER JOIN short_groups s ON s.name = g.name
-            WHERE '.$sourceAdmissionSql.$nameFilterSql.'
+            WHERE g.backfill = 1'.$nameFilterSql.'
             AND g.first_record IS NOT NULL
             AND g.first_record_postdate >= \'2000-01-01\'
             AND '.$datePendingSql.'

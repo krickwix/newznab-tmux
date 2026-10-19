@@ -1339,25 +1339,21 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         ]], $repository->backfillCandidates());
     }
 
-    public function test_free_run_backfill_candidates_include_active_date_pending_groups(): void
+    public function test_backfill_candidates_admit_only_groups_with_the_backfill_flag(): void
     {
         config()->set('nntmux.orchestrator.backfill_probe_groups', ['all']);
 
         DB::shouldReceive('select')
             ->once()
             ->withArgs(function (string $sql, array $bindings): bool {
-                self::assertStringContainsString('(g.backfill = 1 OR g.active = 1)', $sql);
+                self::assertStringContainsString('WHERE g.backfill = 1', $sql);
+                self::assertStringNotContainsString('OR g.active = 1', $sql);
                 self::assertStringContainsString('(NOW() - INTERVAL g.backfill_target DAY) < g.first_record_postdate', $sql);
                 self::assertSame([], $bindings);
 
                 return true;
             })
-            ->andReturn([(object) [
-                'name' => 'alt.active',
-                'backfill_cursor' => 200_000,
-                'cursor_postdate' => '2026-01-03 00:00:00',
-                'remaining_articles' => 190_000,
-            ]]);
+            ->andReturn([]);
 
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
@@ -1365,7 +1361,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             eligibility: new BackfillDateEligibilityPolicy(1),
         );
 
-        self::assertSame('alt.active', $repository->backfillCandidates(ControlProfile::FreeRun)[0]['name'] ?? null);
+        self::assertSame([], $repository->backfillCandidates());
     }
 
     public function test_backfill_candidate_remaining_articles_are_capped_at_the_configured_source_stop_cursor(): void
