@@ -11,6 +11,7 @@
 |
 */
 
+use App\Http\Controllers\Api\Admin\OrchestratorApiController;
 use App\Http\Controllers\Api\ApiController;
 use App\Http\Controllers\Api\ApiInformController;
 use App\Http\Controllers\Api\ApiV2Controller;
@@ -33,6 +34,21 @@ Route::prefix('v2')->middleware('apiRateLimit')->group(function () {
     Route::get('tv', [ApiV2Controller::class, 'tv']);
     Route::get('getnzb', [ApiV2Controller::class, 'getNzb']);
     Route::get('details', [ApiV2Controller::class, 'details']);
+});
+
+// nntmux-control webui surface. Read endpoint is identity-checked only
+// (admin.apiUser); the control endpoint additionally requires the
+// separate, more privileged orchestrator.controlToken secret. See
+// docs/plans/2026-10-20-nntmux-control-webui.md for the one-writer
+// invariant this must preserve: `mode()` may only call the
+// nntmux:orchestrator-mode Artisan command, never write orchestrator
+// state directly.
+Route::prefix('v2/admin/orchestrator')->middleware(['apiRateLimit', 'admin.apiUser'])->group(function () {
+    Route::get('status', [OrchestratorApiController::class, 'status'])->name('api.v2.admin.orchestrator.status');
+
+    Route::post('mode', [OrchestratorApiController::class, 'mode'])
+        ->middleware('orchestrator.controlToken')
+        ->name('api.v2.admin.orchestrator.mode');
 });
 
 Route::prefix('inform')->group(function () {

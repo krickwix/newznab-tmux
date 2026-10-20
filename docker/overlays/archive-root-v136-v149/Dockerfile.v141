@@ -1,0 +1,16 @@
+FROM docker.io/krickwix/nntmux:microservices-pods-20260714-adaptive-timers-v140@sha256:b17b21359c54e597c5a5d7d7ff350d39cb7eb0084dffab2e287620530cf4560e
+
+ARG SOURCE_REVISION=unknown
+
+COPY app/Console/Commands/NzbCreateBacklog.php /app/app/Console/Commands/NzbCreateBacklog.php
+COPY app/Services/Distributed/BackfillPermitGate.php /app/app/Services/Distributed/BackfillPermitGate.php
+COPY app/Services/Distributed/DistributedJobCatalog.php /app/app/Services/Distributed/DistributedJobCatalog.php
+COPY app/Services/Nzb/NzbBacklogCreationService.php /app/app/Services/Nzb/NzbBacklogCreationService.php
+COPY app/Services/Orchestrator/BackfillStopCursorPolicy.php /app/app/Services/Orchestrator/BackfillStopCursorPolicy.php
+COPY app/Services/Orchestrator/PipelineSnapshotRepository.php /app/app/Services/Orchestrator/PipelineSnapshotRepository.php
+COPY app/Services/Orchestrator/WorkerProfileApplier.php /app/app/Services/Orchestrator/WorkerProfileApplier.php
+COPY app/Services/Orchestrator/WorkerControlStateStore.php /app/app/Services/Orchestrator/WorkerControlStateStore.php
+COPY app/Services/Runners/BackfillRunner.php /app/app/Services/Runners/BackfillRunner.php
+COPY config/nntmux.php /app/config/nntmux.php
+
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"

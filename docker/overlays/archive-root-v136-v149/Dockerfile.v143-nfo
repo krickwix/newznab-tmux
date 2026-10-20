@@ -1,0 +1,9 @@
+FROM docker.io/krickwix/nntmux:microservices-pods-20260710-nzb-query-v8@sha256:099d1023241be21a9c39ac20a30d4ec72a92a091cac0fbc97c951446b02aadc3
+
+ARG SOURCE_REVISION=unknown
+
+COPY app/Services/NfoService.php /app/app/Services/NfoService.php
+COPY app/Services/Nzb/NzbContentsService.php /app/app/Services/Nzb/NzbContentsService.php
+COPY app/Services/Nzb/NzbService.php /app/app/Services/Nzb/NzbService.php
+
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"

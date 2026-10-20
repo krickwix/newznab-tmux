@@ -7,7 +7,9 @@ use App\Http\Middleware\ClearanceMiddleware;
 use App\Http\Middleware\ContentSecurityPolicy;
 use App\Http\Middleware\DegradeWhenRedisUnreachable;
 use App\Http\Middleware\EnforceSessionToken;
+use App\Http\Middleware\EnsureAdminApiUser;
 use App\Http\Middleware\EnsureAuthenticatedUsersAreVerified;
+use App\Http\Middleware\EnsureOrchestratorControlToken;
 use App\Http\Middleware\ForceJsonOnAPI;
 use App\Http\Middleware\Google2FAMiddleware;
 use App\Http\Middleware\NoCacheForAuthenticatedUsers;
@@ -99,6 +101,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'bindings' => SubstituteBindings::class,
             'clearance' => ClearanceMiddleware::class,
             'apiRateLimit' => ThrottleApiRequestsByToken::class,
+            'admin.apiUser' => EnsureAdminApiUser::class,
+            'orchestrator.controlToken' => EnsureOrchestratorControlToken::class,
             'isVerified' => EnsureAuthenticatedUsersAreVerified::class,
             'permission' => PermissionMiddleware::class,
             'role' => RoleMiddleware::class,

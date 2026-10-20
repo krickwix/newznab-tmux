@@ -1,0 +1,7 @@
+FROM docker.io/krickwix/nntmux:microservices-pods-20260714-attribution-poll-v135@sha256:54089c09e2aab30f2a7386505c3153142bb00231bacfbaf333b77b934f0e47f0
+
+COPY config/nntmux.php /app/config/nntmux.php
+COPY app/Services/Orchestrator/PipelineSnapshotRepository.php /app/app/Services/Orchestrator/PipelineSnapshotRepository.php
+COPY app/Services/Orchestrator/WorkerOrchestrator.php /app/app/Services/Orchestrator/WorkerOrchestrator.php
+
+LABEL org.opencontainers.image.revision="ee6d57ac422d7c87b68f6941a4919bb7bfcac5f2"

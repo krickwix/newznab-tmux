@@ -155,6 +155,16 @@ return [
             'locking' => false,
         ],
 
+        'orchestrator' => [
+            'driver' => 'daily',
+            'path' => storage_path('logs/orchestrator.log'),
+            'level' => 'debug',
+            'days' => 30,
+            'bubble' => true,
+            'permission' => 0775,
+            'locking' => false,
+        ],
+
         'flare' => [
             'driver' => 'flare',
         ],

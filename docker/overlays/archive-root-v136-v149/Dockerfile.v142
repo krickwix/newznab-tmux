@@ -1,0 +1,9 @@
+FROM docker.io/krickwix/nntmux:microservices-pods-20260714-adaptive-orchestrator-v141@sha256:c3dcb423bdab0eb549d3550eed145f53df91261a7b954afadf491c385711858f
+
+ARG SOURCE_REVISION=unknown
+
+COPY app/Services/ReleaseProcessingService.php /app/app/Services/ReleaseProcessingService.php
+COPY app/Services/Releases/SplitCollectionReconciler.php /app/app/Services/Releases/SplitCollectionReconciler.php
+COPY config/nntmux.php /app/config/nntmux.php
+
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
