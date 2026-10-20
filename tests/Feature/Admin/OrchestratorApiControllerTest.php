@@ -1,0 +1,305 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Feature\Admin;
+
+use App\Enums\UserRole;
+use App\Models\Settings;
+use App\Services\Orchestrator\ControlProfile;
+use App\Services\Orchestrator\ControlProfileOverride;
+use App\Services\OrchestratorStatusService;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Tests\TestCase;
+
+/**
+ * The nntmux-control webui's only server-side surface: a read-only status
+ * endpoint and a control endpoint that must never become a second way to
+ * write orchestrator state.
+ *
+ * The core invariant under test: OrchestratorApiController::mode() may only
+ * ever reach orchestrator state through the `nntmux:orchestrator-mode`
+ * Artisan command. See docs/plans/2026-10-20-nntmux-control-webui.md.
+ */
+final class OrchestratorApiControllerTest extends TestCase
+{
+    private const CONTROL_TOKEN = 'test-orchestrator-control-token';
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        config([
+            'database.default' => 'sqlite',
+            'database.connections.sqlite.database' => ':memory:',
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.free_run' => false,
+            'nntmux_orchestrator.control_token' => self::CONTROL_TOKEN,
+            'app.key' => 'base64:'.base64_encode(random_bytes(32)),
+        ]);
+
+        DB::purge('sqlite');
+        DB::reconnect('sqlite');
+
+        Schema::create('users', function (Blueprint $table): void {
+            $table->increments('id');
+            $table->string('username')->unique();
+            $table->string('email')->unique();
+            $table->string('password');
+            $table->unsignedInteger('roles_id')->default(1);
+            $table->string('api_token')->nullable()->index();
+            $table->boolean('verified')->default(true);
+            $table->timestamp('email_verified_at')->nullable();
+            $table->integer('rate_limit')->default(60);
+            $table->timestamps();
+            $table->softDeletes();
+        });
+
+        Schema::create('settings', function (Blueprint $table): void {
+            $table->string('name')->primary();
+            $table->text('value')->nullable();
+        });
+
+        Settings::forgetCachedSettings();
+    }
+
+    private function createUser(UserRole $role, string $token): void
+    {
+        DB::table('users')->insert([
+            'username' => 'user-'.$token,
+            'email' => $token.'@example.test',
+            'password' => bcrypt('secret'),
+            'roles_id' => $role->value,
+            'api_token' => $token,
+            'verified' => 1,
+            'email_verified_at' => now(),
+            'rate_limit' => 60,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    private function override(): ControlProfileOverride
+    {
+        Settings::forgetCachedSettings();
+
+        return new ControlProfileOverride;
+    }
+
+    // ---- status() ----------------------------------------------------
+
+    public function test_status_rejects_an_unauthenticated_caller(): void
+    {
+        $this->getJson('/api/v2/admin/orchestrator/status')
+            ->assertUnauthorized()
+            ->assertJsonPath('error', 'Unauthorized');
+    }
+
+    public function test_status_rejects_a_non_admin_user(): void
+    {
+        $this->createUser(UserRole::USER, 'plain-user-token');
+
+        $this->getJson('/api/v2/admin/orchestrator/status', [
+            'Authorization' => 'Bearer plain-user-token',
+        ])->assertUnauthorized();
+    }
+
+    public function test_status_returns_the_orchestrator_status_service_report_shape(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        $expected = app(OrchestratorStatusService::class)->report();
+
+        $response = $this->getJson('/api/v2/admin/orchestrator/status', [
+            'Authorization' => 'Bearer admin-token',
+        ])->assertOk();
+
+        // Same top-level keys OrchestratorStatusService::report() produces --
+        // this is the contract the nntmux-control dashboard's DTOs decode.
+        self::assertSame(array_keys($expected), array_keys($response->json()));
+        foreach (['sources', 'freshness', 'profile', 'lease', 'fail_safe', 'pressure', 'backfill', 'denial', 'current_forward', 'yield', 'safety', 'lanes'] as $section) {
+            self::assertArrayHasKey($section, $response->json());
+        }
+    }
+
+    // ---- mode() auth/validation ---------------------------------------
+
+    public function test_mode_rejects_an_unauthenticated_caller(): void
+    {
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'drain'], [
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertUnauthorized();
+    }
+
+    public function test_mode_rejects_a_non_admin_user_even_with_a_valid_control_token(): void
+    {
+        $this->createUser(UserRole::USER, 'plain-user-token');
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'drain'], [
+            'Authorization' => 'Bearer plain-user-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertUnauthorized();
+    }
+
+    public function test_mode_rejects_an_admin_without_the_control_token(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'drain'], [
+            'Authorization' => 'Bearer admin-token',
+        ])->assertForbidden();
+
+        self::assertNull($this->override()->stored(), 'an admin-only request must never reach the write path');
+    }
+
+    public function test_mode_rejects_an_admin_with_the_wrong_control_token(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'drain'], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => 'wrong-token',
+        ])->assertForbidden();
+
+        self::assertNull($this->override()->stored());
+    }
+
+    public function test_mode_rejects_an_invalid_mode_name(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'turbo'], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertStatus(422);
+
+        self::assertNull($this->override()->stored(), 'an invalid mode must not have pinned anything');
+    }
+
+    public function test_mode_requires_explicit_confirmation_for_free_run(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'free_run'], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertStatus(422);
+
+        self::assertNull($this->override()->stored(), 'free_run without confirm must never be pinned');
+    }
+
+    public function test_mode_rejects_free_run_with_confirm_false(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', [
+            'mode' => 'free_run',
+            'confirm' => false,
+        ], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertStatus(422);
+
+        self::assertNull($this->override()->stored());
+    }
+
+    // ---- mode() end-to-end through the real Artisan command -----------
+
+    public function test_mode_set_reaches_the_pin_only_via_the_artisan_command(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        $response = $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'drain'], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertOk();
+
+        self::assertSame('drain', $response->json('pinned'));
+        self::assertSame(ControlProfile::Drain, $this->override()->stored());
+    }
+
+    public function test_mode_free_run_with_confirm_true_is_accepted(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        $response = $this->postJson('/api/v2/admin/orchestrator/mode', [
+            'mode' => 'free_run',
+            'confirm' => true,
+        ], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertOk();
+
+        self::assertSame('free_run', $response->json('pinned'));
+        self::assertSame(ControlProfile::FreeRun, $this->override()->stored());
+    }
+
+    public function test_mode_reset_clears_the_pin(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+        $this->override()->set(ControlProfile::Fill);
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['action' => 'reset'], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertOk();
+
+        self::assertNull($this->override()->stored());
+    }
+
+    // ---- the one-writer invariant --------------------------------------
+
+    /**
+     * The headline safety test: with Artisan::call() replaced by a mock that
+     * performs no real work, the controller must have no other path left to
+     * mutate orchestrator state. If `mode()` ever grew a direct write to
+     * `settings`, `ControlProfileOverride`, or Redis/WorkerControlStateStore
+     * alongside (or instead of) the Artisan call, this test would see the
+     * `settings` table change despite the real command never having run.
+     */
+    public function test_mode_never_writes_settings_directly_bypassing_the_artisan_command(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        Artisan::shouldReceive('call')
+            ->once()
+            ->with('nntmux:orchestrator-mode', ['action' => 'set', '--json' => true, 'mode' => 'fill'])
+            ->andReturn(0);
+        Artisan::shouldReceive('output')
+            ->once()
+            ->andReturn(json_encode(['pinned' => 'fill', 'previous' => null], JSON_THROW_ON_ERROR));
+
+        self::assertSame(0, DB::table('settings')->count(), 'precondition: settings table starts empty');
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'fill'], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertOk();
+
+        self::assertSame(
+            0,
+            DB::table('settings')->count(),
+            'the controller must not write to `settings` itself -- only the mocked-out Artisan command may, and it never ran for real here'
+        );
+    }
+
+    public function test_mode_never_calls_artisan_for_an_invalid_mode_or_unconfirmed_free_run(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        Artisan::shouldReceive('call')->never();
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'turbo'], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertStatus(422);
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'free_run'], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertStatus(422);
+    }
+}
