@@ -247,6 +247,11 @@ class NzbService
             $XMLWriter->flush();
             unset($XMLWriter);
 
+            // Chmod to fix issues some users have with file permissions. Done
+            // on the private temporary file: once renamed, another worker may
+            // delete the release and its NZB before this one returns.
+            chmod($temporaryPath, 0777);
+
             if (! rename($temporaryPath, $path)) {
                 return false;
             }
@@ -272,9 +277,6 @@ class NzbService
         ]);
 
         $this->cleanupWrittenReleaseCollections((int) $release->id, $collectionIds);
-
-        // Chmod to fix issues some users have with file permissions.
-        chmod($path, 0777);
 
         return true;
     }

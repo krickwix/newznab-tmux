@@ -1,0 +1,7 @@
+FROM docker.io/krickwix/nntmux:microservices-pods-20260714-dated-tv-v137@sha256:cc5ce5860e94e8107b267d76beb902aa3a9fc29e4236032d587856f23a99791b
+
+COPY config/nntmux.php /app/config/nntmux.php
+COPY app/Services/Categorization/Categorizers/TvCategorizer.php /app/app/Services/Categorization/Categorizers/TvCategorizer.php
+COPY app/Services/Orchestrator/PipelineSnapshotRepository.php /app/app/Services/Orchestrator/PipelineSnapshotRepository.php
+
+LABEL org.opencontainers.image.revision="a5570ad5868cfbac423042079278c88eb4e89cef"

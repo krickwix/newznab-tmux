@@ -8,10 +8,13 @@ use App\Console\Commands\ProcessReleasesCommand;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\ReleaseProcessingService;
 use App\Services\Releases\ReleasePump;
+use Illuminate\Console\OutputStyle;
 use Mockery;
 use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionClass;
 use ReflectionMethod;
+use Symfony\Component\Console\Input\ArrayInput;
+use Symfony\Component\Console\Output\BufferedOutput;
 use Tests\TestCase;
 
 final class ReleasePumpCommandDelegationTest extends TestCase
@@ -35,9 +38,32 @@ final class ReleasePumpCommandDelegationTest extends TestCase
             ->andReturnTrue();
         $processing = (new ReflectionClass(ReleaseProcessingService::class))->newInstanceWithoutConstructor();
         $command = new ProcessReleasesCommand($processing, $pump, $telemetry);
+        $buffer = new BufferedOutput;
+        $command->setOutput(new OutputStyle(new ArrayInput([]), $buffer));
         $method = new ReflectionMethod($command, 'processReleasesForGroup');
 
         $method->invoke($command, '91');
+
+        self::assertStringContainsString('Release pass: created=7 budget_exhausted=no', $buffer->fetch());
+    }
+
+    public function test_release_command_reports_a_pass_that_hit_the_deadline(): void
+    {
+        $pump = Mockery::mock(ReleasePump::class);
+        $pump->shouldReceive('run')
+            ->once()
+            ->andReturn(['created' => 0, 'budget_exhausted' => true]);
+        $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);
+        $telemetry->shouldNotReceive('recordItem');
+        $processing = (new ReflectionClass(ReleaseProcessingService::class))->newInstanceWithoutConstructor();
+        $command = new ProcessReleasesCommand($processing, $pump, $telemetry);
+        $buffer = new BufferedOutput;
+        $command->setOutput(new OutputStyle(new ArrayInput([]), $buffer));
+        $method = new ReflectionMethod($command, 'processReleasesForGroup');
+
+        $method->invoke($command, '91');
+
+        self::assertStringContainsString('Release pass: created=0 budget_exhausted=yes', $buffer->fetch());
     }
 
     #[DataProvider('releaseCommandSources')]

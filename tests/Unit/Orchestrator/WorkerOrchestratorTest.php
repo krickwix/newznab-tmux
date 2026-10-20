@@ -1271,6 +1271,63 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
     }
 
+    public function test_delayed_attribution_past_the_max_hold_settles_without_waiting_for_a_quiet_pipeline(): void
+    {
+        $store = $this->queueHeldAttribution(maxHoldSeconds: 1_800, queuedSecondsAgo: 1_801);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn(new PipelineSnapshot(1, 2, 3, 0, 0, eligibleNzbs: 5));
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->twice()->andReturn(['target' => 0, 'non_target' => 0, 'uncategorized' => 0]);
+        $snapshots->shouldNotReceive('backfillPendingCollectionsForCohort');
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldNotReceive('qualityLockBackfillTarget');
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertContains('backfill_delayed_attribution_settled', $result['reasons']);
+        self::assertContains('backfill_delayed_attribution_max_hold', $result['reasons']);
+        self::assertSame('zero_output', $result['delayed_attribution']['settled_result']);
+        self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
+    }
+
+    public function test_delayed_attribution_within_the_max_hold_still_waits_for_a_quiet_pipeline(): void
+    {
+        $store = $this->queueHeldAttribution(maxHoldSeconds: 1_800, queuedSecondsAgo: 1_700);
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andReturn(new PipelineSnapshot(1, 2, 3, 0, 0, eligibleNzbs: 5));
+        $snapshots->shouldReceive('backfillCreatedNzbCategoryCountsForCohort')->once()->andReturn(['target' => 0, 'non_target' => 0, 'uncategorized' => 0]);
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('apply')->once()->andReturn(8);
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertNotContains('backfill_delayed_attribution_settled', $result['reasons']);
+        self::assertSame(['alt.test'], $store->pendingBackfillDelayedAttributionGroups());
+    }
+
+    private function queueHeldAttribution(int $maxHoldSeconds, int $queuedSecondsAgo): WorkerControlStateStore
+    {
+        config([
+            'nntmux.orchestrator.auto_backfill' => false,
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.lock_store' => 'array',
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 7_200,
+            'nntmux.orchestrator.backfill_delayed_attribution_max_hold_seconds' => $maxHoldSeconds,
+        ]);
+        Cache::store('array')->flush();
+        $store = new WorkerControlStateStore;
+        self::assertTrue($store->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.test',
+            'backfill_quantity' => 10_000,
+            'backfill_expected_cursor_delta' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, time() - $queuedSecondsAgo));
+
+        return $store;
+    }
+
     public function test_immature_productive_attribution_settles_when_the_cohort_is_fully_drained(): void
     {
         config([
@@ -2924,6 +2981,10 @@ final class WorkerOrchestratorTest extends TestCase
         $store->shouldReceive('storeState')->once();
         $store->shouldReceive('storeSnapshot')->once()->with($snapshot);
         $store->shouldReceive('storeDecision')->once();
+        // Free-run opens no observation, but must still stamp the grant so
+        // fair-share rotates instead of re-picking the same target forever.
+        $store->shouldReceive('beginPermitObservation')->never();
+        $store->shouldReceive('markBackfillTargetAttempted')->once()->with('alt.test', Mockery::type('int'));
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->once()->with(null)->andReturn($snapshot);
         $applier = Mockery::mock(WorkerProfileApplier::class);

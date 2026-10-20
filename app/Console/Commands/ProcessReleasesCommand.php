@@ -71,6 +71,13 @@ class ProcessReleasesCommand extends Command
         if ($result['created'] > 0) {
             $this->workerTelemetry->recordItem('releases', 'release', 'created', $result['created']);
         }
+        // budget_exhausted tells a pass cut short by the deadline apart from
+        // one that ran out of ready work.
+        $this->line(sprintf(
+            'Release pass: created=%d budget_exhausted=%s',
+            $result['created'],
+            $result['budget_exhausted'] ? 'yes' : 'no',
+        ));
     }
 
     /**

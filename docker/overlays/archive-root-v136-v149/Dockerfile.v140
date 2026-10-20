@@ -1,0 +1,6 @@
+FROM docker.io/krickwix/nntmux:microservices-pods-20260714-tv-series-pack-v139@sha256:d2baf27218c20e32397e3be3eb79b1df29c892005791a54be3387534d993b242
+
+COPY app/Services/Orchestrator/AdaptiveWorkerControlPlanner.php /app/app/Services/Orchestrator/AdaptiveWorkerControlPlanner.php
+COPY app/Services/Tmux/TmuxMonitorService.php /app/app/Services/Tmux/TmuxMonitorService.php
+
+LABEL org.opencontainers.image.revision="13b38d595"

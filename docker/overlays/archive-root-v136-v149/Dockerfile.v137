@@ -1,0 +1,6 @@
+FROM docker.io/krickwix/nntmux:microservices-pods-20260714-byte-quality-v136@sha256:8858461ac3c0eee0810512b2e58feab5016fa2e5f21d8a5e5ca9b6d8feed1cc0
+
+COPY config/nntmux.php /app/config/nntmux.php
+COPY app/Services/Orchestrator/PipelineSnapshotRepository.php /app/app/Services/Orchestrator/PipelineSnapshotRepository.php
+
+LABEL org.opencontainers.image.revision="4d90f0d3b"

@@ -43,10 +43,15 @@ final class AdaptiveWorkerControlPlanner
         $downstreamPressure = max($binariesPressure, $collectionsPressure);
         $inputPressure = max($partsPressure, $downstreamPressure);
 
+        // Each tier is clamped to the one above it so the header timer stays
+        // monotonic in pressure whatever the operator configures.
+        $guardSleep = (int) config('nntmux.orchestrator.adaptive_binaries_sleep_seconds.guard', 160);
+        $throttleSleep = min($guardSleep, (int) config('nntmux.orchestrator.adaptive_binaries_sleep_seconds.throttle', 60));
+        $steadySleep = min($throttleSleep, (int) config('nntmux.orchestrator.adaptive_binaries_sleep_seconds.steady', 40));
         $binariesSleep = match (true) {
-            $inputPressure >= 0.85 => max($base->binariesSleepSeconds, 160),
-            $inputPressure >= 0.70 => max($base->binariesSleepSeconds, 60),
-            $inputPressure >= 0.30 => max($base->binariesSleepSeconds, 40),
+            $inputPressure >= 0.85 => max($base->binariesSleepSeconds, $guardSleep),
+            $inputPressure >= 0.70 => max($base->binariesSleepSeconds, $throttleSleep),
+            $inputPressure >= 0.30 => max($base->binariesSleepSeconds, $steadySleep),
             default => $base->binariesSleepSeconds,
         };
         if ($decision->nextState->qualifiedSupplyStarved) {
@@ -67,7 +72,9 @@ final class AdaptiveWorkerControlPlanner
         $releasesSleep = $releaseDemand ? 10 : max($base->releasesSleepSeconds, 60);
 
         $nzbDemand = $snapshot->eligibleNzbs > 0;
-        $nzbSleep = $nzbDemand ? 20 : max($base->nzbSleepSeconds, 60);
+        $nzbSleep = $nzbDemand
+            ? 20
+            : max($base->nzbSleepSeconds, (int) config('nntmux.orchestrator.adaptive_nzb_idle_sleep_seconds', 60));
         $nzbBatchSize = $nzbDemand ? 20 : 5;
         $backfillPollable = $decision->backfillPermitted || $backfillAttributionPending;
         // A permit or pending attribution is already pressure-qualified by the

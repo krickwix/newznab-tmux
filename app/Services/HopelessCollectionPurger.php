@@ -6,6 +6,7 @@ namespace App\Services;
 
 use App\Enums\CollectionFileCheckStatus;
 use App\Models\Collection;
+use App\Support\HopelessPurgeShard;
 use App\Support\TransientDatabaseError;
 use DateTimeInterface;
 use Illuminate\Support\Facades\DB;
@@ -30,6 +31,10 @@ use Throwable;
  * matched the generic regex: obfuscated groups such as boneless post
  * smaller files the same way, and with no group regex behind them those
  * one-part collections are just as dead.
+ *
+ * The lane can run as several shards; each one only scans the collection
+ * ids that fall in its slice. It also stops each sweep at the newest id
+ * already past the age cutoff, since nothing above it can be deleted yet.
  */
 final class HopelessCollectionPurger
 {
@@ -46,7 +51,9 @@ final class HopelessCollectionPurger
      *
      * `next` is the cursor for the following page, or 0 once the page
      * reached the last collection. $genericMinParts, when set, replaces
-     * $minParts for collections that only matched the generic regex.
+     * $minParts for collections that only matched the generic regex. With
+     * $shard set, the page holds only ids in that shard's slice. With
+     * $maxId set, the page stops at that id and `next` is 0 past it.
      *
      * @return array{next: int, scanned: int, deleted: int}
      *
@@ -60,6 +67,8 @@ final class HopelessCollectionPurger
         int $window,
         bool $echoCLI = false,
         ?int $genericMinParts = null,
+        ?HopelessPurgeShard $shard = null,
+        ?int $maxId = null,
     ): array {
         $minParts = max(2, $minParts);
         $genericMinParts = $genericMinParts === null ? $minParts : max(2, $genericMinParts);
@@ -73,6 +82,8 @@ final class HopelessCollectionPurger
                 ])
                 ->where('id', '>', $after)
                 ->when($groupId !== 0, static fn ($q) => $q->where('groups_id', $groupId))
+                ->when($shard !== null, static fn ($q) => $q->whereRaw('id % ? = ?', [$shard->count, $shard->index]))
+                ->when($maxId !== null, static fn ($q) => $q->where('id', '<=', $maxId))
                 ->orderBy('id')
                 ->limit($window)
                 ->pluck('id')
@@ -113,6 +124,22 @@ final class HopelessCollectionPurger
             'scanned' => \count($page),
             'deleted' => $deleted,
         ];
+    }
+
+    /**
+     * Newest collection id first seen before $cutoff, or 0 when there is none.
+     *
+     * The age test is `dateadded < $cutoff`, so no id above this one can be
+     * deleted at that cutoff. Newly fetched collections hold the highest
+     * ids, and without this bound a sweep spends whole passes on them.
+     *
+     * @throws Throwable
+     */
+    public function newestIdBefore(DateTimeInterface $cutoff): int
+    {
+        return (int) $this->retryTransient(
+            static fn (): mixed => Collection::query()->where('dateadded', '<', $cutoff)->max('id')
+        );
     }
 
     /**

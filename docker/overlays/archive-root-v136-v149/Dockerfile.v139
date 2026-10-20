@@ -1,0 +1,6 @@
+FROM docker.io/krickwix/nntmux:microservices-pods-20260714-complete-tv-v138@sha256:b7c19efcdde98abb66d9c9ed4d23c3ff9a01be20c7b3f628f3be768548f5c4e3
+
+COPY config/nntmux.php /app/config/nntmux.php
+COPY app/Services/Categorization/Categorizers/TvCategorizer.php /app/app/Services/Categorization/Categorizers/TvCategorizer.php
+
+LABEL org.opencontainers.image.revision="b5ae4d097"

@@ -188,6 +188,73 @@ final class WorkerControlPolicyTest extends TestCase
         self::assertContains('backfill_pipeline_not_drained', $decision->reasons);
     }
 
+    public function test_neutral_pressure_admission_grants_backfill_when_the_target_fits_the_headroom(): void
+    {
+        $policy = new WorkerControlPolicy(neutralPressureAdmission: true);
+        $state = new ControlState(profile: ControlProfile::Fill);
+
+        $granted = $policy->decide($this->greenBackfillSnapshot(lowPressure: false), $state, 10_000);
+        self::assertTrue($granted->backfillPermitted);
+
+        // The target's own growth no longer fits one 10k task.
+        $noRoom = $policy->decide(
+            $this->greenBackfillSnapshot(lowPressure: false, backfillSafeQuantity: 9_999),
+            $state,
+            10_000,
+        );
+        self::assertFalse($noRoom->backfillPermitted);
+        self::assertContains('backfill_no_safe_capacity', $noRoom->reasons);
+    }
+
+    public function test_neutral_pressure_admission_keeps_the_high_pressure_database_and_current_group_gates(): void
+    {
+        $policy = new WorkerControlPolicy(neutralPressureAdmission: true);
+        $state = new ControlState(profile: ControlProfile::Fill, lastTransitionAt: 9_999);
+
+        $high = $policy->decide(
+            $this->greenBackfillSnapshot(highPressure: true, lowPressure: false),
+            $state,
+            10_000,
+        );
+        self::assertFalse($high->backfillPermitted);
+        self::assertContains('backfill_high_pressure', $high->reasons);
+
+        $busy = $policy->decide(
+            $this->greenBackfillSnapshot(lowPressure: false, databaseCurrentWaits: 1),
+            $state,
+            10_000,
+        );
+        self::assertFalse($busy->backfillPermitted);
+        self::assertContains('backfill_database_busy', $busy->reasons);
+
+        $blocked = $policy->decide(
+            $this->greenBackfillSnapshot(lowPressure: false, databaseAdmissionSafe: false),
+            $state,
+            10_000,
+        );
+        self::assertFalse($blocked->backfillPermitted);
+
+        $behind = $policy->decide(
+            $this->greenBackfillSnapshot(lowPressure: false, currentGroupsAvailable: false),
+            $state,
+            10_000,
+        );
+        self::assertFalse($behind->backfillPermitted);
+        self::assertContains('backfill_no_current_groups', $behind->reasons);
+    }
+
+    public function test_neutral_pressure_admission_is_off_by_default(): void
+    {
+        $decision = (new WorkerControlPolicy(neutralPressureAdmission: false))->decide(
+            $this->greenBackfillSnapshot(lowPressure: false),
+            new ControlState(profile: ControlProfile::Fill),
+            10_000,
+        );
+
+        self::assertFalse($decision->backfillPermitted);
+        self::assertContains('backfill_pipeline_not_drained', $decision->reasons);
+    }
+
     public function test_five_consecutive_low_samples_are_required_to_move_one_rung_toward_fill(): void
     {
         $policy = new WorkerControlPolicy;

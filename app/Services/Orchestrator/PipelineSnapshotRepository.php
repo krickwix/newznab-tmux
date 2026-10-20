@@ -62,7 +62,13 @@ class PipelineSnapshotRepository
         // counter, not a wider tolerance.
         // Groups paused by an open backfill window are not forward-fetched, so
         // their growing gap must not count as unfetched current content.
-        $pausedGroups = $this->window->pausedGroups();
+        // Configured forward-only groups are left out at every hour: they keep
+        // their forward fetch but must not hold current_groups false or become
+        // the backfill target.
+        $pausedGroups = self::backfillExcludedGroups(
+            $this->window->pausedGroups(),
+            (array) config('nntmux.orchestrator.backfill_ignore_forward_groups', []),
+        );
         $pausedClause = $pausedGroups === []
             ? ''
             : ' AND LOWER(g.name) NOT IN ('.implode(', ', array_fill(0, count($pausedGroups), '?')).')';
@@ -85,7 +91,7 @@ class PipelineSnapshotRepository
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS oldest_release_age,
             (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(adddate), NOW()), 0) FROM releases WHERE nzbstatus = 0) AS oldest_nzb_age,
             NOT EXISTS(SELECT 1 FROM usenet_groups g LEFT JOIN short_groups s ON s.name = g.name
-                WHERE g.active = 1'.$pausedClause.' AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > 10000)) AS current_groups', $pausedGroups);
+                WHERE g.active = 1'.$pausedClause.' AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > '.$this->currentGroupMaxLag().')) AS current_groups', $pausedGroups);
         $statusRows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Innodb_deadlocks', 'Innodb_row_lock_current_waits', 'Innodb_row_lock_waits')");
         $status = [];
         foreach ($statusRows as $row) {
@@ -142,7 +148,7 @@ class PipelineSnapshotRepository
         ];
         $freeRun = $profileOverride === ControlProfile::FreeRun;
         $safeBackfillCandidates = $this->safeBackfillCandidates(
-            self::withoutGroups($this->backfillCandidates($profileOverride), $pausedGroups),
+            self::withoutGroups($this->backfillCandidates(), $pausedGroups),
             $capacityBacklogs,
             $freeRun,
         );
@@ -302,11 +308,12 @@ class PipelineSnapshotRepository
         $windowSeconds = $this->boundedIntConfig('database_row_lock_window_seconds', 120, 60, 600);
         $blockRate = $this->boundedFloatConfig('database_row_lock_admission_block_rate', 4.0, 0.1, 1_000.0);
         $reopenRate = $this->boundedFloatConfig('database_row_lock_admission_reopen_rate', 3.0, 0.0, $blockRate);
-        $hardRate = $this->boundedFloatConfig('database_row_lock_hard_rate', 6.0, $blockRate, 1_000.0);
+        $hardRate = $this->boundedFloatConfig('database_row_lock_hard_rate', 6.0, $blockRate, 2_000.0);
         $burstWaits = $this->boundedIntConfig('database_row_lock_burst_waits', 12, 1, 10_000);
         $burstSeconds = $this->boundedIntConfig('database_row_lock_burst_seconds', 60, 1, $windowSeconds);
         $instantHardRate = $this->boundedFloatConfig('database_row_lock_instant_hard_rate', 30.0, $hardRate, 10_000.0);
         $hardCooldownSeconds = $this->boundedIntConfig('database_row_lock_hard_cooldown_seconds', 600, 60, 86_400);
+        $deadlockHardCount = $this->boundedIntConfig('database_deadlock_hard_count', 1, 1, 1_000);
         $currentWaitHardSeconds = $this->boundedIntConfig('database_current_wait_hard_seconds', 30, 5, 300);
         $profileStableSeconds = $this->boundedIntConfig('database_profile_stable_seconds', 120, 60, $windowSeconds);
         $snapshotMaxAgeSeconds = $this->boundedIntConfig('snapshot_max_age_seconds', 180, 60, 600);
@@ -373,7 +380,7 @@ class PipelineSnapshotRepository
                     : $now;
         }
 
-        $deadlockDelta = $deadlocks > (int) ($previous['database_deadlocks'] ?? $deadlocks);
+        $deadlockDelta = $deadlocks - (int) ($previous['database_deadlocks'] ?? $deadlocks) >= $deadlockHardCount;
         $persistentCurrentWait = $currentWaitStartedAt > 0
             && $now - $currentWaitStartedAt >= $currentWaitHardSeconds;
         $burst = $delta >= $burstWaits && $elapsed <= $burstSeconds;
@@ -418,6 +425,16 @@ class PipelineSnapshotRepository
             'database_current_wait_started_at' => $currentWaitStartedAt,
             'database_admission_safe' => $admissionSafe,
         ];
+    }
+
+    /**
+     * Articles an active group may trail the server's newest and still count
+     * as current. Applies to current_groups and to backfill candidacy. Busy
+     * groups fetch at most one task per header pass, so a 10k lag flickers.
+     */
+    public function currentGroupMaxLag(): int
+    {
+        return $this->boundedIntConfig('current_group_max_lag', 10_000, 1_000, 1_000_000);
     }
 
     private function boundedIntConfig(string $key, int $default, int $minimum, int $maximum): int
@@ -563,6 +580,21 @@ class PipelineSnapshotRepository
     }
 
     /**
+     * Window-paused and forward-only groups, lower-cased and de-duplicated.
+     *
+     * @param  list<string>  $pausedGroups
+     * @param  list<mixed>  $forwardOnlyGroups
+     * @return list<string>
+     */
+    public static function backfillExcludedGroups(array $pausedGroups, array $forwardOnlyGroups): array
+    {
+        return array_values(array_unique(array_filter(array_map(
+            static fn (mixed $group): string => strtolower(trim((string) $group)),
+            [...$pausedGroups, ...$forwardOnlyGroups],
+        ), static fn (string $group): bool => $group !== '')));
+    }
+
+    /**
      * @template T of array{name: string}
      *
      * @param  list<T>  $candidates
@@ -652,14 +684,20 @@ class PipelineSnapshotRepository
         } elseif ($contextRepeat !== null) {
             $contextRepeat['expected_cursor_postdate'] = $expectedCursorPostdate;
         }
-        if ($pendingGroups !== []) {
-            if ($continuationGroup === '') {
-                return null;
-            }
-
+        if ($pendingGroups !== [] && $continuationGroup !== '') {
             $candidates = array_values(array_filter(
                 $candidates,
                 static fn (array $candidate): bool => $candidate['name'] === $continuationGroup,
+            ));
+        } elseif ($pendingGroups !== []) {
+            if (! config('nntmux.orchestrator.backfill_parallel_attribution', false)) {
+                return null;
+            }
+            // A pending group waits for its own attribution; every other
+            // group may take the next permit.
+            $candidates = array_values(array_filter(
+                $candidates,
+                static fn (array $candidate): bool => ! in_array($candidate['name'], $pendingGroups, true),
             ));
         }
 
@@ -1390,7 +1428,7 @@ class PipelineSnapshotRepository
     /**
      * @return list<array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int}>
      */
-    public function backfillCandidates(?ControlProfile $profile = null): array
+    public function backfillCandidates(): array
     {
         $allowedGroups = array_values(array_unique(array_filter(array_map(
             static fn (mixed $group): string => trim((string) $group),
@@ -1434,9 +1472,8 @@ class PipelineSnapshotRepository
             $orderBySql = 'g.last_updated IS NOT NULL, g.last_updated ASC, g.name ASC';
         }
 
-        $sourceAdmissionSql = $profile === ControlProfile::FreeRun
-            ? '(g.backfill = 1 OR g.active = 1)'
-            : 'g.backfill = 1';
+        // The backfill flag is the operator's opt-in in every profile; free_run
+        // must not widen it to active groups an operator disabled.
         $datePendingSql = ($this->eligibility ?? BackfillDateEligibilityPolicy::fromRuntime())->datePendingSql('g');
 
         $rows = DB::select('SELECT
@@ -1446,7 +1483,7 @@ class PipelineSnapshotRepository
             CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) AS remaining_articles
             FROM usenet_groups g
             INNER JOIN short_groups s ON s.name = g.name
-            WHERE '.$sourceAdmissionSql.$nameFilterSql.'
+            WHERE g.backfill = 1'.$nameFilterSql.'
             AND g.first_record IS NOT NULL
             AND g.first_record_postdate >= \'2000-01-01\'
             AND '.$datePendingSql.'
@@ -1455,7 +1492,7 @@ class PipelineSnapshotRepository
             AND CAST(s.last_record AS SIGNED) >= CAST(s.first_record AS SIGNED)
             AND CAST(g.last_record AS SIGNED) BETWEEN CAST(s.first_record AS SIGNED) AND CAST(s.last_record AS SIGNED)
             AND (
-                (g.active = 1 AND CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000)
+                (g.active = 1 AND CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= '.$this->currentGroupMaxLag().')
                 OR (
                     g.active = 0
                     AND g.last_record_postdate >= \'2000-01-01\'

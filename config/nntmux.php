@@ -52,6 +52,9 @@ return [
     // Lower part threshold the lane uses for collections that only matched
     // the generic regex (no group regex). 0 keeps min_parts for them too.
     'hopeless_purge_generic_min_parts' => max(0, (int) env('NNTMUX_HOPELESS_PURGE_GENERIC_MIN_PARTS', 0)),
+    // "i/N" runs this replica as shard i of N (ids with id % N = i), with its
+    // own cursor and worker lock. Empty runs one unsharded lane.
+    'hopeless_purge_shard' => trim((string) env('NNTMUX_HOPELESS_PURGE_SHARD', '')),
     // Already-processed rows each name-fixing lane re-checks per run (methods 18
     // and 21), swept behind a cursor. 0 disables revisits.
     'namefix_subject_revisit_limit' => min(5000, max(0, (int) env('NNTMUX_NAMEFIX_SUBJECT_REVISIT_LIMIT', 50))),
@@ -151,6 +154,20 @@ return [
             ))),
             'collections_low' => max(0, (int) env('NNTMUX_BACKFILL_WINDOW_COLLECTIONS_LOW', 0)),
         ],
+        // Forward-only groups (comma separated, any case). They are never
+        // counted as unfetched and never the backfill target, at any hour,
+        // but their forward fetch is NOT paused. A group far behind the
+        // server would otherwise hold current_groups false all day.
+        'backfill_ignore_forward_groups' => array_values(array_filter(array_map(
+            static fn (string $group): string => strtolower(trim($group)),
+            explode(',', (string) env('NNTMUX_BACKFILL_IGNORE_FORWARD_GROUPS', ''))
+        ))),
+        // Admit backfill at neutral pressure when the target's safe quantity
+        // (sized from its own learned growth) is at least one 10k task.
+        // How far (articles) an active group may trail the server and still
+        // count as current, for current_groups and backfill candidacy.
+        'current_group_max_lag' => (int) env('NNTMUX_ORCHESTRATOR_CURRENT_GROUP_MAX_LAG', 10_000),
+        'backfill_neutral_pressure_admission' => (bool) env('NNTMUX_ORCHESTRATOR_BACKFILL_NEUTRAL_PRESSURE_ADMISSION', false),
         'backfill_stop_cursors' => (string) env('NNTMUX_ORCHESTRATOR_BACKFILL_STOP_CURSORS', ''),
         'current_forward_windows' => (string) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_WINDOWS', ''),
         'current_forward_claim_timeout_seconds' => min(3600, max(300, (int) env('NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_CLAIM_TIMEOUT_SECONDS', 900))),
@@ -192,6 +209,17 @@ return [
         'backfill_incomplete_release_grace_seconds' => min(1200, max(600, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_INCOMPLETE_RELEASE_GRACE_SECONDS', 600))),
         'backfill_productive_settlement_grace_seconds' => min(300, max(30, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_PRODUCTIVE_SETTLEMENT_GRACE_SECONDS', 120))),
         'backfill_delayed_attribution_seconds' => min(21_600, max(300, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_DELAYED_ATTRIBUTION_SECONDS', 9_000))),
+        // Let another group take a backfill permit while earlier permits are
+        // still waiting for their delayed attribution. Each attribution is
+        // scoped to its own group and cursor range, so they do not mix. Off,
+        // any pending attribution blocks every other group.
+        'backfill_parallel_attribution' => (bool) env('NNTMUX_ORCHESTRATOR_BACKFILL_PARALLEL_ATTRIBUTION', false),
+        // Longest a delayed attribution may stay pending, counted from its
+        // first queueing and including chain extensions. Once reached it is
+        // settled on the output so far, without waiting for its cohort to
+        // drain or for pressure, database waits and eligible NZBs to clear.
+        // 0 disables the cap.
+        'backfill_delayed_attribution_max_hold_seconds' => min(86_400, max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_DELAYED_ATTRIBUTION_MAX_HOLD_SECONDS', 0))),
         'backfill_max_quantity' => max(10000, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_MAX_QUANTITY', 200000)),
         'backfill_headroom_fraction' => min(0.5, max(0.01, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_HEADROOM_FRACTION', 0.10))),
         'backfill_growth_per_10k' => [
@@ -231,16 +259,30 @@ return [
         // hard limit of 2 locked every group prematurely. Default raised to 6.
         'ineffective_backfill_limit' => min(50, max(1, (int) env('NNTMUX_ORCHESTRATOR_INEFFECTIVE_BACKFILL_LIMIT', 6))),
         'qualified_supply_binaries_sleep_seconds' => min(1800, max(60, (int) env('NNTMUX_ORCHESTRATOR_QUALIFIED_SUPPLY_BINARIES_SLEEP_SECONDS', 300))),
+        // Header-ingestion sleep per input-pressure tier in the adaptive
+        // profiles: guard at >= 0.85 of a high watermark, throttle at >= 0.70,
+        // steady at >= 0.30. Lower tiers are clamped to the tier above.
+        'adaptive_binaries_sleep_seconds' => [
+            'guard' => min(1800, max(5, (int) env('NNTMUX_ORCHESTRATOR_ADAPTIVE_BINARIES_GUARD_SLEEP_SECONDS', 160))),
+            'throttle' => min(1800, max(5, (int) env('NNTMUX_ORCHESTRATOR_ADAPTIVE_BINARIES_THROTTLE_SLEEP_SECONDS', 60))),
+            'steady' => min(1800, max(5, (int) env('NNTMUX_ORCHESTRATOR_ADAPTIVE_BINARIES_STEADY_SLEEP_SECONDS', 40))),
+        ],
+        // NZB poll interval when no NZB is eligible; with eligible NZBs the
+        // adaptive profiles always poll every 20s.
+        'adaptive_nzb_idle_sleep_seconds' => min(600, max(5, (int) env('NNTMUX_ORCHESTRATOR_ADAPTIVE_NZB_IDLE_SLEEP_SECONDS', 60))),
         'database_memory_limit_bytes' => (int) env('NNTMUX_ORCHESTRATOR_DB_MEMORY_LIMIT_BYTES', 4456448000),
         'database_cpu_limit_cores' => (float) env('NNTMUX_ORCHESTRATOR_DB_CPU_LIMIT_CORES', 3),
         'database_row_lock_window_seconds' => min(600, max(60, (int) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_WINDOW_SECONDS', 120))),
-        'database_row_lock_admission_block_rate' => min(60.0, max(0.1, (float) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_BLOCK_RATE', 4.0))),
-        'database_row_lock_admission_reopen_rate' => min(60.0, max(0.0, (float) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_REOPEN_RATE', 3.0))),
-        'database_row_lock_hard_rate' => min(120.0, max(0.1, (float) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_RATE', 6.0))),
+        'database_row_lock_admission_block_rate' => min(1000.0, max(0.1, (float) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_BLOCK_RATE', 4.0))),
+        'database_row_lock_admission_reopen_rate' => min(1000.0, max(0.0, (float) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_REOPEN_RATE', 3.0))),
+        'database_row_lock_hard_rate' => min(2000.0, max(0.1, (float) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_RATE', 6.0))),
         'database_row_lock_burst_waits' => min(10_000, max(1, (int) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_BURST_WAITS', 12))),
         'database_row_lock_burst_seconds' => min(120, max(10, (int) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_BURST_SECONDS', 60))),
         'database_row_lock_instant_hard_rate' => min(600.0, max(1.0, (float) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_INSTANT_HARD_RATE', 30.0))),
         'database_row_lock_hard_cooldown_seconds' => min(3600, max(60, (int) env('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_COOLDOWN_SECONDS', 600))),
+        // New InnoDB deadlocks since the previous sample that count as a hard
+        // breach. 1 keeps the historical any-deadlock behaviour.
+        'database_deadlock_hard_count' => min(1000, max(1, (int) env('NNTMUX_ORCHESTRATOR_DB_DEADLOCK_HARD_COUNT', 1))),
         'database_current_wait_hard_seconds' => min(300, max(15, (int) env('NNTMUX_ORCHESTRATOR_DB_CURRENT_WAIT_HARD_SECONDS', 30))),
         'database_profile_stable_seconds' => min(600, max(30, (int) env('NNTMUX_ORCHESTRATOR_DB_PROFILE_STABLE_SECONDS', 120))),
         'pressure_projection_horizon_minutes' => max(1, (int) env('NNTMUX_ORCHESTRATOR_PRESSURE_HORIZON_MINUTES', 120)),

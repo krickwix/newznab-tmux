@@ -7,7 +7,6 @@ namespace App\Services\Runners;
 use App\Models\Settings;
 use App\Services\Orchestrator\BackfillDateEligibilityPolicy;
 use App\Services\Orchestrator\BackfillStopCursorPolicy;
-use App\Services\Orchestrator\ControlProfile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -74,8 +73,6 @@ class BackfillRunner extends BaseRunner
         $threads = (int) Settings::settingValue('backfillthreads');
         $minimumSafeRange = $this->minimumSafeBackfillRange();
         $orchestratorGroup = trim((string) Settings::settingValue('orchestrator_bfc_group'));
-        $orchestratorClaimedGeneration = (int) Settings::settingValue('orchestrator_bf_claimed');
-        $orchestratorClaimedProfile = trim((string) Settings::settingValue('orchestrator_bfc_profile'));
         $orchestratorQuantity = (int) Settings::settingValue('orchestrator_bfc_qty');
         $orchestratorStopCursor = (int) Settings::settingValue('orchestrator_bfc_stop');
         $backfill_qty = $this->resolveBackfillQuantity($backfill_qty, $orchestratorGroup, $orchestratorQuantity);
@@ -84,13 +81,6 @@ class BackfillRunner extends BaseRunner
             : ' AND g.name = '.DB::getPdo()->quote($orchestratorGroup);
 
         $backfilldays = $eligibility->datePendingSql('g');
-        $sourceAdmissionSql = $this->safeBackfillSourceAdmissionSql(
-            $generation,
-            $orchestratorGroup,
-            $orchestratorClaimedGeneration,
-            $orchestratorClaimedProfile,
-        );
-
         $sql = 'SELECT g.name,
                 g.first_record AS our_first,
                 g.first_record_postdate AS cursor_postdate,
@@ -101,7 +91,7 @@ class BackfillRunner extends BaseRunner
             WHERE g.first_record IS NOT NULL
             AND CAST(g.first_record AS SIGNED) > 0
             AND g.first_record_postdate IS NOT NULL
-            AND '.$sourceAdmissionSql.'
+            AND g.backfill = 1
             '.$orchestratorGroupFilter.'
             AND '.$backfilldays.'
             AND CAST(a.first_record AS SIGNED) > 0
@@ -327,21 +317,6 @@ class BackfillRunner extends BaseRunner
     private function countScalar(string $sql): int
     {
         return (int) DB::scalar($sql);
-    }
-
-    protected function safeBackfillSourceAdmissionSql(
-        ?int $generation,
-        string $orchestratorGroup,
-        int $claimedGeneration,
-        string $claimedProfile,
-    ): string {
-        return $generation !== null
-            && $generation > 0
-            && $generation === $claimedGeneration
-            && $orchestratorGroup !== ''
-            && $claimedProfile === ControlProfile::FreeRun->value
-            ? '(g.backfill = 1 OR g.active = 1)'
-            : 'g.backfill = 1';
     }
 
     private function minimumSafeBackfillRange(): int

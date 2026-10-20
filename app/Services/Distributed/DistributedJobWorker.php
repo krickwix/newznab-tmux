@@ -140,7 +140,7 @@ class DistributedJobWorker
             'nzb_batch_before' => $before,
             'nzb_batch_after' => $after,
         ];
-        $lockName = 'nntmux:distributed-worker:'.$plan['name'];
+        $lockName = DistributedJobCatalog::lockName($plan['name']);
         $lockStore = (string) config('nntmux.distributed_lock_store', 'redis');
         $cacheStore = Cache::store($lockStore)->getStore();
         if (! $cacheStore instanceof LockProvider) {

@@ -191,6 +191,111 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertFalse($method->invoke($repository, 24, 0, null, $previous, 1_120)['database_waits_safe']);
     }
 
+    public function test_deadlock_hard_count_sets_how_many_new_deadlocks_breach(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'databaseContentionTelemetry');
+        $previous = [
+            'schema_version' => 3,
+            'database_deadlocks' => 24,
+            'database_current_waits' => 0,
+            'database_row_lock_waits' => 100,
+            'database_row_lock_window_started_at' => 1_000,
+            'database_row_lock_window_start_count' => 100,
+            'database_row_lock_admission_blocked' => false,
+            'database_row_lock_hard_breach_at' => 0,
+            'database_current_wait_started_at' => 0,
+            'database_admission_safe' => true,
+            'observed_at' => 1_100,
+        ];
+
+        self::assertFalse($method->invoke($repository, 25, 0, 100, $previous, 1_120)['database_waits_safe']);
+
+        config(['nntmux.orchestrator.database_deadlock_hard_count' => 3]);
+        self::assertTrue($method->invoke($repository, 24, 0, 100, $previous, 1_120)['database_waits_safe']);
+        self::assertTrue($method->invoke($repository, 25, 0, 100, $previous, 1_120)['database_waits_safe']);
+        self::assertTrue($method->invoke($repository, 26, 0, 100, $previous, 1_120)['database_waits_safe']);
+        self::assertFalse($method->invoke($repository, 27, 0, 100, $previous, 1_120)['database_waits_safe']);
+    }
+
+    public function test_row_lock_rates_above_the_former_config_clamps_take_effect(): void
+    {
+        config([
+            'nntmux.orchestrator.database_row_lock_admission_block_rate' => 300.0,
+            'nntmux.orchestrator.database_row_lock_admission_reopen_rate' => 200.0,
+            'nntmux.orchestrator.database_row_lock_hard_rate' => 400.0,
+            'nntmux.orchestrator.database_row_lock_burst_waits' => 10_000,
+        ]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'databaseContentionTelemetry');
+        $previous = [
+            'schema_version' => 3,
+            'database_deadlocks' => 24,
+            'database_current_waits' => 0,
+            'database_row_lock_waits' => 100,
+            'database_row_lock_window_started_at' => 1_000,
+            'database_row_lock_window_start_count' => 100,
+            'database_row_lock_admission_blocked' => true,
+            'database_row_lock_hard_breach_at' => 0,
+            'database_current_wait_started_at' => 0,
+            'database_admission_safe' => false,
+            'observed_at' => 1_000,
+        ];
+
+        // 150 waits/minute over a complete window: hard under the old 120
+        // cap, below the configured reopen rate now.
+        $moderate = $method->invoke($repository, 24, 0, 400, $previous, 1_120);
+        self::assertSame(150.0, $moderate['database_row_lock_window_rate']);
+        self::assertTrue($moderate['database_waits_safe']);
+        self::assertFalse($moderate['database_row_lock_admission_blocked']);
+
+        // 450 waits/minute is still a hard breach.
+        $heavy = $method->invoke($repository, 24, 0, 1_000, $previous, 1_120);
+        self::assertFalse($heavy['database_waits_safe']);
+        self::assertTrue($heavy['database_row_lock_admission_blocked']);
+    }
+
+    public function test_config_file_accepts_row_lock_rates_up_to_the_widened_clamps(): void
+    {
+        $keys = [
+            'NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_BLOCK_RATE' => '300',
+            'NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_REOPEN_RATE' => '200',
+            'NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_RATE' => '400',
+            'NNTMUX_ORCHESTRATOR_DB_DEADLOCK_HARD_COUNT' => '3',
+        ];
+        $saved = [];
+        foreach ($keys as $key => $value) {
+            $saved[$key] = getenv($key);
+            $this->setEnvironmentValue($key, $value);
+        }
+
+        try {
+            $orchestrator = (require base_path('config/nntmux.php'))['orchestrator'];
+            self::assertSame(300.0, $orchestrator['database_row_lock_admission_block_rate']);
+            self::assertSame(200.0, $orchestrator['database_row_lock_admission_reopen_rate']);
+            self::assertSame(400.0, $orchestrator['database_row_lock_hard_rate']);
+            self::assertSame(3, $orchestrator['database_deadlock_hard_count']);
+
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_ADMISSION_BLOCK_RATE', '5000');
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_DB_ROW_LOCK_HARD_RATE', '5000');
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_DB_DEADLOCK_HARD_COUNT', '0');
+            $orchestrator = (require base_path('config/nntmux.php'))['orchestrator'];
+            self::assertSame(1000.0, $orchestrator['database_row_lock_admission_block_rate']);
+            self::assertSame(2000.0, $orchestrator['database_row_lock_hard_rate']);
+            self::assertSame(1, $orchestrator['database_deadlock_hard_count']);
+        } finally {
+            foreach ($saved as $key => $value) {
+                $this->setEnvironmentValue($key, $value === false ? null : $value);
+            }
+        }
+    }
+
     public function test_hard_breach_cooldown_requires_a_post_cooldown_clean_window_before_admission(): void
     {
         $repository = new PipelineSnapshotRepository(
@@ -724,6 +829,39 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertNull($target);
     }
 
+    public function test_parallel_attribution_selects_another_group_while_one_is_pending(): void
+    {
+        config([
+            'nntmux.orchestrator.state_store' => 'array',
+            'nntmux.orchestrator.backfill_probe_groups' => ['alt.pending', 'alt.safe'],
+            'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
+            'nntmux.orchestrator.backfill_parallel_attribution' => true,
+        ]);
+        Cache::store('array')->flush();
+        $state = new WorkerControlStateStore;
+        self::assertTrue($state->queueBackfillDelayedAttribution([
+            'generation' => 7,
+            'backfill_group' => 'alt.pending',
+            'backfill_quantity' => 10_000,
+            'release_high_watermark' => 100,
+            'backfill_cursor_postdate' => '2026-01-02 03:04:05',
+        ], ['cursor_postdate' => '2026-01-01 03:04:05'], 10_000, 1_000));
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            state: $state,
+        );
+        $method = new ReflectionMethod($repository, 'selectBackfillTarget');
+        $pending = ['name' => 'alt.pending', 'cursor' => 40_000, 'cursor_postdate' => '2026-01-03 00:00:00', 'remaining_articles' => 40_000, 'safe_quantity' => 40_000];
+        $safe = ['name' => 'alt.safe', 'cursor' => 30_000, 'cursor_postdate' => '2026-01-02 00:00:00', 'remaining_articles' => 30_000, 'safe_quantity' => 30_000];
+
+        $target = $method->invoke($repository, [$pending, $safe], [], ControlState::initial(), 2_000_000_000);
+
+        self::assertSame('alt.safe', $target['name'] ?? null);
+        // The pending group itself still waits for its attribution.
+        self::assertNull($method->invoke($repository, [$pending], [], ControlState::initial(), 2_000_000_000));
+    }
+
     public function test_repository_allows_only_one_exact_fenced_continuation_when_multiple_groups_are_pending(): void
     {
         config([
@@ -1201,25 +1339,21 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         ]], $repository->backfillCandidates());
     }
 
-    public function test_free_run_backfill_candidates_include_active_date_pending_groups(): void
+    public function test_backfill_candidates_admit_only_groups_with_the_backfill_flag(): void
     {
         config()->set('nntmux.orchestrator.backfill_probe_groups', ['all']);
 
         DB::shouldReceive('select')
             ->once()
             ->withArgs(function (string $sql, array $bindings): bool {
-                self::assertStringContainsString('(g.backfill = 1 OR g.active = 1)', $sql);
+                self::assertStringContainsString('WHERE g.backfill = 1', $sql);
+                self::assertStringNotContainsString('OR g.active = 1', $sql);
                 self::assertStringContainsString('(NOW() - INTERVAL g.backfill_target DAY) < g.first_record_postdate', $sql);
                 self::assertSame([], $bindings);
 
                 return true;
             })
-            ->andReturn([(object) [
-                'name' => 'alt.active',
-                'backfill_cursor' => 200_000,
-                'cursor_postdate' => '2026-01-03 00:00:00',
-                'remaining_articles' => 190_000,
-            ]]);
+            ->andReturn([]);
 
         $repository = new PipelineSnapshotRepository(
             new PrometheusSafetySignalProvider,
@@ -1227,7 +1361,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             eligibility: new BackfillDateEligibilityPolicy(1),
         );
 
-        self::assertSame('alt.active', $repository->backfillCandidates(ControlProfile::FreeRun)[0]['name'] ?? null);
+        self::assertSame([], $repository->backfillCandidates());
     }
 
     public function test_backfill_candidate_remaining_articles_are_capped_at_the_configured_source_stop_cursor(): void
@@ -1268,6 +1402,45 @@ final class PipelineSnapshotRepositoryTest extends TestCase
 
         config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.test:not-a-cursor');
         self::assertSame(0, $method->invoke($repository, 'alt.test', 100_000, 90_000));
+    }
+
+    public function test_backfill_candidates_use_the_configured_current_group_lag(): void
+    {
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['all']);
+        config()->set('nntmux.orchestrator.current_group_max_lag', 50_000);
+        DB::shouldReceive('select')
+            ->once()
+            ->withArgs(function (string $sql): bool {
+                self::assertStringContainsString('CAST(g.last_record AS SIGNED) <= 50000)', $sql);
+                self::assertStringNotContainsString('CAST(g.last_record AS SIGNED) <= 10000)', $sql);
+
+                return true;
+            })
+            ->andReturn([]);
+
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+            eligibility: new BackfillDateEligibilityPolicy(1),
+        );
+
+        self::assertSame([], $repository->backfillCandidates());
+    }
+
+    public function test_current_group_lag_defaults_to_ten_thousand_and_is_bounded(): void
+    {
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame(10_000, $repository->currentGroupMaxLag());
+        config()->set('nntmux.orchestrator.current_group_max_lag', 50_000);
+        self::assertSame(50_000, $repository->currentGroupMaxLag());
+        config()->set('nntmux.orchestrator.current_group_max_lag', 0);
+        self::assertSame(1_000, $repository->currentGroupMaxLag());
+        config()->set('nntmux.orchestrator.current_group_max_lag', 999_999_999);
+        self::assertSame(1_000_000, $repository->currentGroupMaxLag());
     }
 
     public function test_backfill_candidates_fail_closed_without_an_explicit_allowlist(): void
@@ -2035,5 +2208,19 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         $method = new ReflectionMethod($repository, 'bodyRecoveryQueueBacklog');
 
         self::assertSame(1, $method->invoke($repository));
+    }
+
+    private function setEnvironmentValue(string $key, ?string $value): void
+    {
+        if ($value === null) {
+            putenv($key);
+            unset($_ENV[$key], $_SERVER[$key]);
+
+            return;
+        }
+
+        putenv($key.'='.$value);
+        $_ENV[$key] = $value;
+        $_SERVER[$key] = $value;
     }
 }

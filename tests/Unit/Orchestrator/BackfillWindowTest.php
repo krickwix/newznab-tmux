@@ -76,6 +76,27 @@ final class BackfillWindowTest extends TestCase
         self::assertSame($candidates, PipelineSnapshotRepository::withoutGroups($candidates, []));
     }
 
+    public function test_forward_only_groups_are_excluded_at_every_hour_without_pausing_forward_fetch(): void
+    {
+        $window = new BackfillWindow('02:00-06:00', ['alt.binaries.boneless'], 0);
+        $forwardOnly = [' Alt.Binaries.Boneless ', 'a.b.multimedia.aviation', ''];
+
+        // Closed window: nothing is paused, the forward-only groups are still excluded.
+        self::assertSame([], $window->pausedGroups($this->at('12:00')));
+        self::assertSame(
+            ['alt.binaries.boneless', 'a.b.multimedia.aviation'],
+            PipelineSnapshotRepository::backfillExcludedGroups($window->pausedGroups($this->at('12:00')), $forwardOnly)
+        );
+        // Open window: merged with the paused groups, without duplicates.
+        self::assertSame(
+            ['alt.binaries.boneless', 'a.b.multimedia.aviation'],
+            PipelineSnapshotRepository::backfillExcludedGroups($window->pausedGroups($this->at('03:00')), $forwardOnly)
+        );
+        // Forward fetch only ever consults the window, so it stays on.
+        self::assertFalse($window->pauses('a.b.multimedia.aviation', $this->at('03:00')));
+        self::assertFalse($window->pauses('alt.binaries.boneless', $this->at('12:00')));
+    }
+
     private function at(string $time): int
     {
         return (int) strtotime('2026-10-11 '.$time.':00 UTC');

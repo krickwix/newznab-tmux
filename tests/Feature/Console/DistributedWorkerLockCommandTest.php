@@ -47,6 +47,23 @@ class DistributedWorkerLockCommandTest extends TestCase
         $this->assertTrue(Cache::store('array')->lock($lockName, 60)->get());
     }
 
+    public function test_a_sharded_hopeless_purge_replica_releases_only_its_own_shard_lock(): void
+    {
+        config([
+            'nntmux.distributed_lock_store' => 'array',
+            'nntmux.hopeless_purge_shard' => '1/3',
+        ]);
+        $own = Cache::store('array')->lock('nntmux:distributed-worker:hopeless-purge:shard-1-of-3', 60);
+        $sibling = Cache::store('array')->lock('nntmux:distributed-worker:hopeless-purge:shard-0-of-3', 60);
+        $this->assertTrue($own->get());
+        $this->assertTrue($sibling->get());
+
+        $this->artisan('nntmux:release-worker-lock', ['job' => 'hopeless-purge'])->assertExitCode(0);
+
+        $this->assertTrue(Cache::store('array')->lock('nntmux:distributed-worker:hopeless-purge:shard-1-of-3', 60)->get());
+        $this->assertFalse(Cache::store('array')->lock('nntmux:distributed-worker:hopeless-purge:shard-0-of-3', 60)->get());
+    }
+
     public function test_it_rejects_unknown_distributed_worker_jobs(): void
     {
         $this->artisan('nntmux:release-worker-lock', ['job' => 'not-a-job'])

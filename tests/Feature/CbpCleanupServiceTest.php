@@ -871,6 +871,81 @@ class CbpCleanupServiceTest extends TestCase
         $this->assertIsString($nzbPath);
         $this->assertStringContainsString('<group>alt.test</group>', (string) gzdecode((string) file_get_contents($nzbPath)));
         $this->assertSame(1, (int) DB::table('releases')->where('id', 20)->value('nzbstatus'));
+        $this->assertSame(0777, fileperms($nzbPath) & 0777);
+    }
+
+    public function test_nzb_creation_survives_the_nzb_being_deleted_by_another_worker(): void
+    {
+        $guid = str_repeat('e', 36);
+        DB::table('releases')->insert([
+            'id' => 21,
+            'name' => 'Deleted.Meanwhile.Release',
+            'searchname' => 'Deleted.Meanwhile.Release',
+            'totalpart' => 1,
+            'groups_id' => 1,
+            'adddate' => now()->format('Y-m-d H:i:s'),
+            'guid' => $guid,
+            'leftguid' => 'e',
+            'postdate' => now()->format('Y-m-d H:i:s'),
+            'fromname' => 'poster@example.com',
+            'size' => 500,
+            'passwordstatus' => 0,
+            'haspreview' => -1,
+            'categories_id' => 1,
+            'nfostatus' => -1,
+            'nzbstatus' => NzbService::NZB_NONE,
+            'isrenamed' => 1,
+            'iscategorized' => 1,
+            'predb_id' => 0,
+            'source' => null,
+        ]);
+        DB::table('collections')->insert([
+            'id' => 211,
+            'subject' => 'Deleted.Meanwhile.Release',
+            'fromname' => 'poster@example.com',
+            'date' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'dateadded' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'added' => now()->subHours(1)->format('Y-m-d H:i:s'),
+            'xref' => 'alt.test',
+            'groups_id' => 1,
+            'totalfiles' => 1,
+            'filesize' => 500,
+            'filecheck' => CollectionFileCheckStatus::Inserted->value,
+            'collectionhash' => 'deleted-meanwhile-hash',
+            'collection_regexes_id' => 0,
+            'releases_id' => 21,
+            'noise' => '',
+        ]);
+        DB::table('binaries')->insert([
+            'id' => 2110,
+            'name' => 'Deleted.Meanwhile.Release yEnc',
+            'collections_id' => 211,
+            'totalparts' => 1,
+        ]);
+        DB::table('parts')->insert([
+            'binaries_id' => 2110,
+            'number' => 1,
+            'messageid' => '<deleted-meanwhile-1@example.com>',
+            'partnumber' => 1,
+            'size' => 10,
+        ]);
+
+        $release = Release::query()->findOrFail(21);
+        $release->setRelation('category', (object) ['title' => 'Misc', 'parent' => (object) ['title' => 'Other']]);
+        $nzbPath = app(NzbService::class)->getNzbPath($guid);
+
+        // Another worker deletes the release and its NZB right after the
+        // write is recorded (nzb-backlog crashed on chmod() here).
+        Release::updated(static function () use ($nzbPath): void {
+            if (is_file($nzbPath)) {
+                unlink($nzbPath);
+            }
+        });
+
+        $written = app(NzbService::class)->writeNzbForReleaseId($release);
+
+        $this->assertTrue($written);
+        $this->assertFileDoesNotExist($nzbPath);
     }
 
     public function test_release_creation_links_collection_group_when_xref_is_empty(): void

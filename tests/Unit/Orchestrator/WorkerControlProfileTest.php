@@ -146,6 +146,25 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(0, $profile->quantityForYield(0.0, 1_000_000, 0, 1, 10_000, 0, true, 1));
     }
 
+    public function test_fill_floor_above_live_headroom_shrinks_to_the_safe_quantity(): void
+    {
+        config(['nntmux.orchestrator.backfill_fill_quantity' => 350_000]);
+        $profile = WorkerControlProfile::for(ControlProfile::Fill);
+
+        // Headroom above the floor: the floor is issued unchanged.
+        self::assertSame(350_000, $profile->quantityForYield(0.0, 1_000_000_000, 460_000));
+        // Headroom below the floor: issue what fits, not a 10k probe.
+        self::assertSame(320_000, $profile->quantityForYield(0.0, 1_000_000_000, 320_000));
+        self::assertSame(320_000, $profile->quantityForYield(0.0, 1_000_000_000, 325_000));
+        self::assertSame(10_000, $profile->quantityForYield(0.0, 1_000_000_000, 10_000));
+        // Below one quantum there is still no permit.
+        self::assertSame(0, $profile->quantityForYield(0.0, 1_000_000_000, 9_999));
+        // An ineffective strike probes at the shrunken floor.
+        self::assertSame(200_000, $profile->quantityForYield(3.0, 1_000_000_000, 200_000, 2, 10_000, 0, true, 1));
+        // A proven yield never scales past the headroom.
+        self::assertSame(320_000, $profile->quantityForYield(3.0, 1_000_000_000, 320_000));
+    }
+
     public function test_active_profiles_keep_nzb_capacity_above_the_doubled_rate_target(): void
     {
         self::assertSame(20, WorkerControlProfile::for(ControlProfile::Drain)->nzbBatchSize);

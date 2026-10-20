@@ -210,6 +210,37 @@ final class AdaptiveWorkerControlPlannerTest extends TestCase
         }
     }
 
+    public function test_configured_sleeps_shorten_header_tiers_and_idle_nzb_polling(): void
+    {
+        config([
+            'nntmux.orchestrator.adaptive_binaries_sleep_seconds' => ['guard' => 60, 'throttle' => 90, 'steady' => 30],
+            'nntmux.orchestrator.adaptive_nzb_idle_sleep_seconds' => 30,
+        ]);
+        $planner = new AdaptiveWorkerControlPlanner;
+        $timers = [];
+        $nzbTimers = [];
+        foreach ([87_000_000, 90_000_000, 210_000_000, 255_000_000] as $parts) {
+            $decision = $planner->plan(
+                $this->decision(ControlProfile::Fill, false),
+                new PipelineSnapshot(
+                    partsBacklog: $parts,
+                    binariesBacklog: 10_000,
+                    collectionsBacklog: 1_000,
+                    releasesBacklog: 0,
+                    nzbsBacklog: 0,
+                    collectionsTotalBacklog: 5_000,
+                ),
+            );
+            $timers[] = $decision->profile->binariesSleepSeconds;
+            $nzbTimers[] = $decision->profile->nzbSleepSeconds;
+        }
+
+        // The throttle tier is clamped to the guard tier so a misconfigured
+        // value cannot make higher pressure sleep less.
+        self::assertSame([20, 30, 60, 60], $timers);
+        self::assertSame([30, 30, 30, 30], $nzbTimers);
+    }
+
     public function test_fail_safe_profile_is_never_relaxed_by_adaptive_planning(): void
     {
         $decision = (new AdaptiveWorkerControlPlanner)->plan(
