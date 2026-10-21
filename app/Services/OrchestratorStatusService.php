@@ -112,6 +112,7 @@ class OrchestratorStatusService
         $decision = $this->read(fn (): array => $this->store->lastDecision());
         $observation = $this->read(fn (): ?array => $this->store->permitObservation());
         $yieldHistory = $this->read(fn (): array => $this->store->backfillYieldHistory());
+        $groupRecords = $this->groupRecords($yieldHistory);
         $windows = $this->currentForwardWindows();
 
         $freshness = $this->freshness($decision, $now);
@@ -124,6 +125,7 @@ class OrchestratorStatusService
                 'decision' => $decision['available'],
                 'permit_observation' => $observation['available'],
                 'yield_history' => $yieldHistory['available'],
+                'group_records' => $groupRecords['available'],
                 'current_forward_windows' => $windows['available'],
             ],
             'freshness' => $freshness,
@@ -134,7 +136,7 @@ class OrchestratorStatusService
             'backfill' => $this->backfill($settings, $observation, $now),
             'denial' => $this->denial($settings, $state, $decision, $windows, $freshness),
             'current_forward' => $this->currentForward($settings, $decision, $windows, $freshness, $now),
-            'yield' => $this->yield($yieldHistory, $now),
+            'yield' => $this->yield($yieldHistory, $groupRecords, $now),
             'safety' => $this->safety($decision, $freshness),
             'lanes' => $this->lanes($now),
         ];
@@ -495,10 +497,12 @@ class OrchestratorStatusService
 
     /**
      * @param  array{available: bool, value: mixed}  $yieldHistory
+     * @param  array{available: bool, value: mixed}  $groupRecords
      * @return array<string, mixed>
      */
-    private function yield(array $yieldHistory, int $now): array
+    private function yield(array $yieldHistory, array $groupRecords, int $now): array
     {
+        $oldestPosts = is_array($groupRecords['value']) ? $groupRecords['value'] : [];
         $history = is_array($yieldHistory['value']) ? $yieldHistory['value'] : [];
         $groups = [];
         foreach ($history as $group => $entry) {
@@ -507,6 +511,8 @@ class OrchestratorStatusService
             }
             $lastAttemptAt = (int) ($entry['last_attempt_at'] ?? 0);
             $lastEffectiveAt = (int) ($entry['last_effective_at'] ?? 0);
+            $oldestPost = $oldestPosts[$group] ?? null;
+            $oldestPostAt = is_string($oldestPost) && ($parsed = strtotime($oldestPost)) !== false ? $parsed : null;
             $groups[] = [
                 'group' => $group,
                 'attempts' => (int) ($entry['attempts'] ?? 0),
@@ -516,6 +522,9 @@ class OrchestratorStatusService
                 'last_attempt_age_seconds' => $lastAttemptAt > 0 ? max(0, $now - $lastAttemptAt) : null,
                 'last_effective_at' => $lastEffectiveAt,
                 'last_effective_age_seconds' => $lastEffectiveAt > 0 ? max(0, $now - $lastEffectiveAt) : null,
+                // How far back backfill has reached: the group's first_record_postdate.
+                'oldest_post_at' => $oldestPostAt,
+                'oldest_post_age_seconds' => $oldestPostAt !== null ? max(0, $now - $oldestPostAt) : null,
             ];
         }
 
@@ -614,9 +623,32 @@ class OrchestratorStatusService
     }
 
     /**
+     * The oldest fetched post date of each group in the yield history. One
+     * lookup on the unique `usenet_groups.name` index, bounded by the number of
+     * backfill candidates -- never a scan.
+     *
+     * @param  array{available: bool, value: mixed}  $yieldHistory
+     * @return array{available: bool, value: mixed}
+     */
+    private function groupRecords(array $yieldHistory): array
+    {
+        $names = is_array($yieldHistory['value'])
+            ? array_values(array_filter(array_keys($yieldHistory['value']), 'is_string'))
+            : [];
+        if ($names === []) {
+            return ['available' => true, 'value' => []];
+        }
+
+        return $this->read(fn (): array => DB::table('usenet_groups')
+            ->whereIn('name', $names)
+            ->pluck('first_record_postdate', 'name')
+            ->all());
+    }
+
+    /**
      * Lifecycle counts for the additive current-forward ledger.
      *
-     * This is the one relational read beyond the keyed `settings` lookup. It is
+     * Besides the keyed `settings` and `usenet_groups` lookups, this is the only relational read. It is
      * the same grouped count the Prometheus scrape already runs every interval
      * against a small orchestrator-owned ledger -- never against a bulk-loading
      * ingest table.
