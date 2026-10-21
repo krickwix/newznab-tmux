@@ -20,6 +20,7 @@ use App\Services\Releases\ReleaseBrowseService;
 use App\Services\Releases\ReleaseDuplicateFinder;
 use App\Services\Releases\ReleaseManagementService;
 use App\Services\Releases\SplitCollectionReconciler;
+use App\Support\CollectionRetentionOverrides;
 use App\Support\Data\ProcessReleasesSettings;
 use App\Support\Data\ReleaseCreationResult;
 use App\Support\Data\ReleaseDeleteStats;
@@ -604,9 +605,10 @@ final class ReleaseProcessingService
     {
         $normalizedGroupId = $this->normalizeGroupId($groupID);
         $cutoff = now()->subHours($this->settings->partRetentionHours);
+        $overrideCutoffs = CollectionRetentionOverrides::cutoffs($this->settings->partRetentionHours, $normalizedGroupId);
         $ids = DB::table('collections as c')
             ->when($normalizedGroupId !== null, static fn ($q) => $q->where('c.groups_id', $normalizedGroupId))
-            ->where(function ($query) use ($cutoff): void {
+            ->where(function ($query) use ($cutoff, $overrideCutoffs): void {
                 $query->where(function ($retention) use ($cutoff): void {
                     $retention->where('c.dateadded', '<', $cutoff)
                         ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
@@ -621,6 +623,7 @@ final class ReleaseProcessingService
                         ->from('releases as r')
                         ->whereColumn('r.id', 'c.releases_id')
                         ->where('r.nzbstatus', 1));
+                CollectionRetentionOverrides::orWhereExpired($query, $overrideCutoffs);
             })
             ->orderBy('c.id')
             ->limit(max(1, min(self::BATCH_SIZE, $limit)))

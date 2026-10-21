@@ -6,6 +6,7 @@ namespace App\Services;
 
 use App\Models\Settings;
 use App\Services\Nzb\NzbService;
+use App\Support\CollectionRetentionOverrides;
 use App\Support\TransientDatabaseError;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -44,11 +45,16 @@ class CollectionCleanupService
         // Batch-delete old collections using select-then-delete so we can
         // explicitly remove parts/binaries/collections even when FK cascades
         // are not present in the runtime schema.
-        $cutoff = now()->subHours(Settings::settingValue('partretentionhours'));
+        $retentionHours = (int) Settings::settingValue('partretentionhours');
+        $cutoff = now()->subHours($retentionHours);
+        $overrideCutoffs = CollectionRetentionOverrides::cutoffs($retentionHours, $groupId);
         $batchDeleted = 0;
         do {
             $ids = DB::table('collections as c')
-                ->where('c.dateadded', '<', $cutoff)
+                ->where(static function ($query) use ($cutoff, $overrideCutoffs): void {
+                    $query->where('c.dateadded', '<', $cutoff);
+                    CollectionRetentionOverrides::orWhereExpired($query, $overrideCutoffs);
+                })
                 ->when($groupId !== null, static fn ($q) => $q->where('c.groups_id', $groupId))
                 ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
                     ->from('releases as r')
