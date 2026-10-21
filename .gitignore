@@ -75,3 +75,18 @@ pnpm-lock.yaml
 /.omx/
 # superseded root scratch Dockerfiles (use docker/overlays/)
 /Dockerfile.v*
+
+# Ruflo / claude-flow tool state. NOTE: .claude-flow/{memory/store.json,
+# policy/state.json,sessions/current.json,harness-active-policy.json,
+# neural/stats.json}, agentdb.rvf, agentdb.rvf.lock and ruvector.db are ALREADY
+# TRACKED on the default branch of this public repository. A .gitignore pattern
+# has no effect on a tracked file: untracking them needs a `git rm --cached`
+# pass before these entries do anything.
+.claude-flow/
+.swarm/
+.agents/
+.playwright-cli/
+agentdb.rvf
+agentdb.rvf.idmap.json
+agentdb.rvf.lock
+ruvector.db
