@@ -8,6 +8,7 @@ use App\Enums\UserRole;
 use App\Models\Settings;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlProfileOverride;
+use App\Services\Orchestrator\WorkerControlStateStore;
 use App\Services\OrchestratorStatusService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Artisan;
@@ -123,6 +124,51 @@ final class OrchestratorApiControllerTest extends TestCase
         foreach (['sources', 'freshness', 'profile', 'lease', 'fail_safe', 'pressure', 'backfill', 'denial', 'current_forward', 'yield', 'safety', 'lanes'] as $section) {
             self::assertArrayHasKey($section, $response->json());
         }
+    }
+
+    public function test_status_reports_each_yield_groups_oldest_backfilled_post_date(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+        Schema::create('usenet_groups', function (Blueprint $table): void {
+            $table->increments('id');
+            $table->string('name')->unique();
+            $table->dateTime('first_record_postdate')->nullable();
+        });
+        DB::table('usenet_groups')->insert([
+            ['name' => 'alt.binaries.moovee', 'first_record_postdate' => '2024-03-01 12:00:00'],
+            ['name' => 'alt.binaries.teevee', 'first_record_postdate' => null],
+        ]);
+        $now = time();
+        $store = app(WorkerControlStateStore::class);
+        foreach (['alt.binaries.moovee', 'alt.binaries.teevee', 'alt.binaries.unknown'] as $group) {
+            $store->recordBackfillYield($group, 10_000, 1, $now);
+        }
+
+        $response = $this->getJson('/api/v2/admin/orchestrator/status', [
+            'Authorization' => 'Bearer admin-token',
+        ])->assertOk();
+        $groups = collect($response->json('yield.groups'))->keyBy('group');
+
+        self::assertTrue($response->json('sources.group_records'));
+        self::assertSame(strtotime('2024-03-01 12:00:00'), $groups['alt.binaries.moovee']['oldest_post_at']);
+        self::assertGreaterThan(0, $groups['alt.binaries.moovee']['oldest_post_age_seconds']);
+        // Never backfilled, and not a known group: both report null rather than 0.
+        self::assertNull($groups['alt.binaries.teevee']['oldest_post_at']);
+        self::assertNull($groups['alt.binaries.unknown']['oldest_post_age_seconds']);
+    }
+
+    public function test_status_still_reports_yield_when_usenet_groups_is_unreadable(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+        app(WorkerControlStateStore::class)->recordBackfillYield('alt.binaries.moovee', 10_000, 1, time());
+
+        $response = $this->getJson('/api/v2/admin/orchestrator/status', [
+            'Authorization' => 'Bearer admin-token',
+        ])->assertOk();
+
+        self::assertFalse($response->json('sources.group_records'));
+        self::assertNull($response->json('yield.groups.0.oldest_post_at'));
+        self::assertSame('alt.binaries.moovee', $response->json('yield.groups.0.group'));
     }
 
     // ---- mode() auth/validation ---------------------------------------
