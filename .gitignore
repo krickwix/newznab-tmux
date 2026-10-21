@@ -90,3 +90,5 @@ agentdb.rvf
 agentdb.rvf.idmap.json
 agentdb.rvf.lock
 ruvector.db
+.claude/proven-config.json
+.claude/.proven-config-version
