@@ -56,14 +56,22 @@ final class CollectionRetentionOverrides
     public static function orWhereExpired(Builder $query, array $cutoffs): void
     {
         foreach ($cutoffs as $groupId => $cutoff) {
-            $query->orWhere(static fn (Builder $expired) => $expired
-                ->where('c.groups_id', $groupId)
-                ->where('c.dateadded', '<', $cutoff)
-                ->whereNull('c.releases_id')
-                ->whereIn('c.filecheck', [
-                    CollectionFileCheckStatus::Default->value,
-                    CollectionFileCheckStatus::CompleteCollection->value,
-                ]));
+            $query->orWhere(static fn (Builder $expired) => self::whereExpired($expired, $groupId, $cutoff));
         }
+    }
+
+    /**
+     * Restrict $query (collections aliased `c`) to one group's expired incompletes.
+     */
+    public static function whereExpired(Builder $query, int $groupId, DateTimeInterface $cutoff): Builder
+    {
+        return $query
+            ->where('c.groups_id', $groupId)
+            ->where('c.dateadded', '<', $cutoff)
+            ->whereNull('c.releases_id')
+            ->whereIn('c.filecheck', [
+                CollectionFileCheckStatus::Default->value,
+                CollectionFileCheckStatus::CompleteCollection->value,
+            ]);
     }
 }
