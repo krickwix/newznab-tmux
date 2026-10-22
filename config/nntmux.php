@@ -103,6 +103,21 @@ return [
         },
         [],
     ),
+    // group:hours. A listed group's incomplete, unreleased collections expire
+    // after these hours instead of partretentionhours. Only a value below
+    // partretentionhours has any effect. Keep split-reconcile groups off this
+    // list: their cohorts need the full window to merge.
+    'collection_retention_hours_overrides' => array_reduce(
+        array_filter(array_map('trim', explode(',', (string) env('NNTMUX_COLLECTION_RETENTION_HOURS_OVERRIDES', '')))),
+        static function (array $overrides, string $entry): array {
+            if (preg_match('/^([^:\s,]+):([1-9][0-9]*)$/', $entry, $match) === 1) {
+                $overrides[$match[1]] = min(8760, (int) $match[2]);
+            }
+
+            return $overrides;
+        },
+        [],
+    ),
     'orchestrator' => [
         'leader_lock_seconds' => min(600, max(120, (int) env('NNTMUX_ORCHESTRATOR_LEADER_LOCK_SECONDS', 120))),
         'lock_store' => env('NNTMUX_ORCHESTRATOR_LOCK_STORE', 'redis'),
