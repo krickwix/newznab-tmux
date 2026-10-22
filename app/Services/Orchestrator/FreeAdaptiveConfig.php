@@ -29,9 +29,10 @@ final readonly class FreeAdaptiveConfig
         public int $snapToMinBelow = 10,
         public float $growThreshold = 1.0,
         public float $shrinkThreshold = 0.9,
-        public int $horizonMinutes = 30,
+        public int $horizonMinutes = 10,
         public int $settleSeconds = 300,
         public int $staleSeconds = 180,
+        public int $minSamples = 3,
         public array $stages = self::KNOWN_STAGES,
         public array $highWatermarks = [],
     ) {}
@@ -63,7 +64,8 @@ final readonly class FreeAdaptiveConfig
             snapToMinBelow: (int) ($raw['snap_to_min_below_seconds'] ?? $defaults->snapToMinBelow),
             growThreshold: (float) ($raw['grow_threshold'] ?? $defaults->growThreshold),
             shrinkThreshold: (float) ($raw['shrink_threshold'] ?? $defaults->shrinkThreshold),
-            horizonMinutes: (int) ($raw['horizon_minutes'] ?? $defaults->horizonMinutes),
+            horizonMinutes: min(120, max(1, (int) ($raw['horizon_minutes'] ?? $defaults->horizonMinutes))),
+            minSamples: (int) ($raw['min_samples'] ?? $defaults->minSamples),
             settleSeconds: (int) ($raw['settle_seconds'] ?? $defaults->settleSeconds),
             staleSeconds: (int) ($raw['stale_seconds'] ?? $defaults->staleSeconds),
             stages: $stages,
@@ -84,7 +86,7 @@ final readonly class FreeAdaptiveConfig
             && $this->snapToMinBelow >= 0
             && $this->shrinkThreshold > 0.0
             && $this->shrinkThreshold <= $this->growThreshold
-            && $this->horizonMinutes >= 0
+            && $this->minSamples >= 1
             && $this->settleSeconds >= 0
             && $this->staleSeconds > 0
             && $this->stages !== [];

@@ -43,9 +43,40 @@ final class FreeAdaptiveBackfillGovernorTest extends TestCase
         return new FreeAdaptiveState($delay, self::NOW - $changedAgo, self::NOW - 60, self::NOW - 10);
     }
 
+    private function evaluateAt(FreeAdaptiveState $prev, PipelineSnapshot $snapshot, int $now, ?FreeAdaptiveConfig $config = null, bool $entering = false): FreeAdaptiveState
+    {
+        return (new FreeAdaptiveBackfillGovernor)->evaluate($prev, $snapshot, $now, $entering, $config ?? $this->config());
+    }
+
+    /**
+     * Decide on $snapshot as the closing tick of a window that already holds two
+     * samples of the same utilisation (minSamples is 3), so single-sample cases
+     * read as "a steady window at this p".
+     */
     private function evaluate(FreeAdaptiveState $prev, PipelineSnapshot $snapshot, ?FreeAdaptiveConfig $config = null, bool $entering = false): FreeAdaptiveState
     {
-        return (new FreeAdaptiveBackfillGovernor)->evaluate($prev, $snapshot, self::NOW, $entering, $config ?? $this->config());
+        $probe = $this->evaluateAt(new FreeAdaptiveState($prev->delay, $prev->updatedAt, $prev->checkedAt, $prev->lastDoneAt, windowStart: self::NOW - 10), $snapshot, self::NOW, $config);
+        $seeded = new FreeAdaptiveState(
+            $prev->delay, $prev->updatedAt, $prev->checkedAt, $prev->lastDoneAt,
+            windowSum: 2 * $probe->projected, windowSamples: 2, windowStart: self::NOW - 400,
+        );
+
+        return $this->evaluateAt($entering ? $prev : $seeded, $snapshot, self::NOW, $config, $entering);
+    }
+
+    /**
+     * Feed one sample per minute starting right after $state's window opened.
+     *
+     * @param  list<float>  $collectionsBacklogs
+     */
+    private function feed(FreeAdaptiveState $state, array $collectionsBacklogs, int $startAt, array $snapshotOverrides = []): FreeAdaptiveState
+    {
+        foreach ($collectionsBacklogs as $i => $backlog) {
+            $now = $startAt + $i * 60;
+            $state = $this->evaluateAt($state, $this->snapshot((int) $backlog, 0.0, ['observedAt' => $now] + $snapshotOverrides), $now);
+        }
+
+        return $state;
     }
 
     public function test_over_watermark_and_growing_increases_by_the_factor(): void
@@ -100,8 +131,8 @@ final class FreeAdaptiveBackfillGovernorTest extends TestCase
 
     public function test_over_the_watermark_but_shrinking_fast_decreases(): void
     {
-        // (649k - 4k * 30) / 600k = 0.88
-        $next = $this->evaluate($this->stored(120), $this->snapshot(649_000, -4_000.0));
+        // (649k - 12k * 10) / 600k = 0.88
+        $next = $this->evaluate($this->stored(120), $this->snapshot(649_000, -12_000.0));
 
         self::assertSame(96, $next->delay);
         self::assertSame('decrease', $next->reason);
@@ -227,5 +258,132 @@ final class FreeAdaptiveBackfillGovernorTest extends TestCase
         config()->set('nntmux.orchestrator.free_adaptive.increase_step_seconds', 0);
 
         self::assertSame(30, FreeAdaptiveConfig::fromConfig()->increaseStep);
+    }
+
+    public function test_alternating_samples_with_a_mean_in_the_deadband_never_change_the_delay(): void
+    {
+        // The utilisation swings 0.75 / 1.15 (450k / 690k of 600k) every minute, as the
+        // live EWMA flood did. Each 5-sample window averages 0.91 or 0.99, inside the
+        // deadband, whichever phase it starts on; the old single-sample rule flipped
+        // the delay on every swing.
+        $state = new FreeAdaptiveState(120, self::NOW, self::NOW, 0, windowStart: self::NOW);
+        $backlogs = [];
+        for ($i = 0; $i < 30; $i++) {
+            $backlogs[] = $i % 2 === 0 ? 450_000 : 690_000;
+        }
+        $state = $this->feed($state, $backlogs, self::NOW + 60);
+
+        self::assertSame(120, $state->delay);
+    }
+
+    public function test_a_sustained_high_projection_still_climbs(): void
+    {
+        $state = new FreeAdaptiveState(120, self::NOW, self::NOW, 0, windowStart: self::NOW);
+        $state = $this->feed($state, array_fill(0, 12, 700_000), self::NOW + 60);
+
+        self::assertGreaterThan(120, $state->delay);
+    }
+
+    public function test_a_sustained_low_projection_still_decays(): void
+    {
+        $state = new FreeAdaptiveState(120, self::NOW, self::NOW, 0, windowStart: self::NOW);
+        $state = $this->feed($state, array_fill(0, 12, 100_000), self::NOW + 60);
+
+        self::assertLessThan(120, $state->delay);
+    }
+
+    public function test_fewer_than_min_samples_hold_and_keep_collecting(): void
+    {
+        $prev = new FreeAdaptiveState(120, self::NOW - 1000, self::NOW - 60, 0, windowSum: 1.4, windowSamples: 1, windowStart: self::NOW - 400);
+
+        $next = $this->evaluateAt($prev, $this->snapshot(840_000, 0.0), self::NOW);
+
+        self::assertSame(120, $next->delay);
+        self::assertSame('insufficient_samples', $next->reason);
+        self::assertSame(2, $next->windowSamples);
+    }
+
+    public function test_the_window_resets_on_a_change_and_on_entering(): void
+    {
+        $changed = $this->evaluate($this->stored(120), $this->snapshot(700_000, 0.0));
+        self::assertSame(180, $changed->delay);
+        self::assertSame(0, $changed->windowSamples);
+        self::assertSame(0.0, $changed->windowSum);
+        self::assertSame(self::NOW, $changed->windowStart);
+
+        $held = $this->evaluate($this->stored(120), $this->snapshot(570_000, 0.0));
+        self::assertSame(0, $held->windowSamples);
+
+        $prev = new FreeAdaptiveState(900, self::NOW - 1000, self::NOW - 60, 0, windowSum: 5.0, windowSamples: 5, windowStart: self::NOW - 400);
+        $entered = $this->evaluateAt($prev, $this->snapshot(700_000, 0.0), self::NOW, null, true);
+        self::assertSame(0, $entered->windowSamples);
+        self::assertSame(0.0, $entered->windowSum);
+        self::assertSame(120, $entered->delay);
+    }
+
+    public function test_stale_ticks_are_excluded_from_the_mean_and_the_window_still_grows(): void
+    {
+        $prev = new FreeAdaptiveState(120, self::NOW - 1000, self::NOW - 60, 0, windowSum: 0.4, windowSamples: 2, windowStart: self::NOW - 100);
+
+        $stale = $this->evaluateAt($prev, $this->snapshot(0, 0.0, ['telemetryFresh' => false]), self::NOW - 30);
+        self::assertSame(2, $stale->windowSamples);
+        self::assertSame(0.4, $stale->windowSum);
+
+        $closing = new FreeAdaptiveState(120, self::NOW - 1000, self::NOW - 60, 0, windowSum: 0.4, windowSamples: 2, windowStart: self::NOW - 400);
+        $next = $this->evaluateAt($closing, $this->snapshot(0, 0.0, ['telemetryFresh' => false]), self::NOW);
+        self::assertSame(180, $next->delay);
+        self::assertSame('metrics_stale', $next->reason);
+    }
+
+    public function test_a_mostly_stale_window_with_a_fresh_boundary_tick_still_grows(): void
+    {
+        // 4 stale ticks against 2 fresh ones (one of them the boundary), and a mean of 0.2.
+        $prev = new FreeAdaptiveState(120, self::NOW - 1000, self::NOW - 60, 0, windowSum: 0.2, windowSamples: 1, windowStart: self::NOW - 400, windowBad: 4);
+
+        $next = $this->evaluateAt($prev, $this->snapshot(120_000, 0.0), self::NOW);
+
+        self::assertSame(180, $next->delay);
+        self::assertSame('metrics_stale', $next->reason);
+        self::assertSame(0, $next->windowBad);
+    }
+
+    public function test_stale_ticks_are_counted_in_the_window(): void
+    {
+        $prev = new FreeAdaptiveState(120, self::NOW - 1000, self::NOW - 60, 0, windowStart: self::NOW - 100);
+
+        $next = $this->evaluateAt($prev, $this->snapshot(0, 0.0, ['telemetryFresh' => false]), self::NOW - 30);
+
+        self::assertSame(1, $next->windowBad);
+    }
+
+    public function test_a_gap_resets_the_window_but_keeps_the_delay(): void
+    {
+        $prev = new FreeAdaptiveState(900, self::NOW - 5000, self::NOW - 600, 0, windowSum: 9.0, windowSamples: 9, windowStart: self::NOW - 5000, windowBad: 3);
+
+        $next = $this->evaluateAt($prev, $this->snapshot(570_000, 0.0), self::NOW);
+
+        self::assertSame(900, $next->delay);
+        self::assertSame(1, $next->windowSamples);
+        self::assertSame(0, $next->windowBad);
+        self::assertSame(self::NOW, $next->windowStart);
+        self::assertEqualsWithDelta(0.95, $next->windowSum, 0.0001);
+    }
+
+    public function test_the_window_mean_is_reported(): void
+    {
+        $state = $this->feed(new FreeAdaptiveState(120, self::NOW, self::NOW, 0, windowStart: self::NOW), [300_000, 330_000], self::NOW + 60);
+
+        self::assertEqualsWithDelta(0.525, $state->windowMean(), 0.0001);
+        self::assertSame(2, $state->toArray(self::NOW, $this->config())['window_samples']);
+        self::assertEqualsWithDelta(0.525, $state->toArray(self::NOW, $this->config())['window_mean_utilisation'], 0.0001);
+    }
+
+    public function test_the_horizon_is_clamped(): void
+    {
+        config()->set('nntmux.orchestrator.free_adaptive.horizon_minutes', 9999);
+        self::assertSame(120, FreeAdaptiveConfig::fromConfig()->horizonMinutes);
+
+        config()->set('nntmux.orchestrator.free_adaptive.horizon_minutes', 0);
+        self::assertSame(1, FreeAdaptiveConfig::fromConfig()->horizonMinutes);
     }
 }
