@@ -54,7 +54,7 @@ final readonly class WorkerControlProfile
             // not "no limits" -- the connection budget is still whatever
             // FILL_THREADS says, because exceeding the provider's allowance
             // fails the fetch rather than speeding it up.
-            ControlProfile::FreeRun => new self($profile, 0, 0, 0, 0, max(20, $fillNzbBatch), true, $fillGroups, $fillThreads, $fillQuantity),
+            ControlProfile::FreeRun, ControlProfile::FreeAdaptive => new self($profile, 0, 0, 0, 0, max(20, $fillNzbBatch), true, $fillGroups, $fillThreads, $fillQuantity),
         };
     }
 

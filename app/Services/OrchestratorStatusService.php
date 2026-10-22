@@ -8,6 +8,8 @@ use App\Services\Distributed\DistributedJobCatalog;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlState;
+use App\Services\Orchestrator\FreeAdaptiveConfig;
+use App\Services\Orchestrator\FreeAdaptiveStateStore;
 use App\Services\Orchestrator\WorkerControlStateStore;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -40,6 +42,7 @@ class OrchestratorStatusService
         'orchestrator_profile',
         'orchestrator_recovery_ok',
         'orchestrator_free_run',
+        ...FreeAdaptiveStateStore::ALL,
         'orchestrator_lease_until',
         'orchestrator_generation',
         'orchestrator_bins_timer',
@@ -210,6 +213,9 @@ class OrchestratorStatusService
             'redis_profile' => $storedState?->profile->value,
             'redis_available' => $state['available'],
             'generation' => $this->intSetting($settings, 'orchestrator_generation'),
+            'free_adaptive' => $enum === ControlProfile::FreeAdaptive
+                ? FreeAdaptiveStateStore::fromRows(is_array($settings['value']) ? $settings['value'] : [])->toArray(time(), FreeAdaptiveConfig::fromConfig())
+                : null,
             'free_run_published' => $this->setting($settings, 'orchestrator_free_run', '') === '1',
             'free_run_configured' => (bool) config('nntmux.orchestrator.free_run', false),
             'recovery_ok' => $this->setting($settings, 'orchestrator_recovery_ok', '') === '1',

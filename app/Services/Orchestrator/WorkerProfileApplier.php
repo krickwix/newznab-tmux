@@ -22,8 +22,9 @@ class WorkerProfileApplier
         bool $preserveUnclaimedPermit = false,
         ?int $backfillQuantity = null,
         ?int $backfillSafeQuantity = null,
+        bool $manualGrant = false,
     ): int {
-        return DB::transaction(function () use ($decision, $now, $grantPermit, $backfillGroup, $preserveUnclaimedPermit, $backfillQuantity, $backfillSafeQuantity): int {
+        return DB::transaction(function () use ($decision, $now, $grantPermit, $backfillGroup, $preserveUnclaimedPermit, $backfillQuantity, $backfillSafeQuantity, $manualGrant): int {
             $lockedSettings = Settings::query()
                 ->whereIn('name', [
                     'orchestrator_generation',
@@ -35,6 +36,8 @@ class WorkerProfileApplier
                     'orchestrator_bf_qty',
                     'orchestrator_bf_stop',
                     'orchestrator_bf_budget',
+                    FreeAdaptiveStateStore::LAST_DONE_AT,
+                    FreeAdaptiveStateStore::DELAY,
                 ])
                 ->orderBy('name')
                 ->lockForUpdate()
@@ -67,10 +70,29 @@ class WorkerProfileApplier
             $claimedPermitInFlight = $existingClaimed > 0
                 && $existingClaimed !== $existingCompleted
                 && $existingClaimed !== $existingFailed;
+            if ($profile->profile === ControlProfile::FreeAdaptive) {
+                // Entering from free_run must not inherit a permit it queued
+                // (or granted) without a delay: drop the unclaimed one.
+                if ($decision->transitioned && $existingPermit > 0 && $existingPermit !== $existingClaimed) {
+                    $existingPermit = 0;
+                }
+                // The delay gate is enforced here, under the lock, because a
+                // completion can commit between the orchestrator's pre-check
+                // and this transaction. Manual operator grants bypass it.
+                $faReadyAt = (int) $lockedSettings->get(FreeAdaptiveStateStore::LAST_DONE_AT, 0)
+                    + max(0, (int) $lockedSettings->get(FreeAdaptiveStateStore::DELAY, 0));
+                if ($grantPermit && ! $manualGrant && $now < $faReadyAt) {
+                    $grantPermit = false;
+                    $preserveUnclaimedPermit = false;
+                }
+            }
             if ($grantPermit && $existingPermit > 0) {
                 $grantPermit = false;
                 $preserveUnclaimedPermit = $decision->backfillPermitted;
             }
+            // FreeAdaptive is excluded on purpose: a permit queued behind a
+            // running claim would start the moment it finishes, which is a zero
+            // delay. Its permits come only from the governor-gated idle lane.
             $queueBehindClaim = $grantPermit
                 && $claimedPermitInFlight
                 && $profile->profile === ControlProfile::FreeRun;
@@ -86,7 +108,7 @@ class WorkerProfileApplier
             // gate that can hold backfill off, and leaving it in place would
             // make free-run stall behind current-forward attribution -- the
             // exact "permitted but nothing happens" state it exists to remove.
-            $freeRun = $profile->profile === ControlProfile::FreeRun;
+            $freeRun = $profile->profile->isFreeRunFamily();
             if ($currentForwardUnsettled && ! $freeRun) {
                 $grantPermit = false;
                 $preserveUnclaimedPermit = false;
@@ -101,8 +123,10 @@ class WorkerProfileApplier
             $issuedQuantity = $grantPermit
                 ? max(10000, $backfillQuantity ?? $profile->backfillQuantity)
                 : $existingPinnedQuantity;
+            // The refill budget (completion-time chaining) is free_run-only;
+            // free_adaptive keeps it at 0 so the delay cannot be bypassed.
             $refillBudget = 0;
-            if ($backfillAdmissionOpen && $freeRun) {
+            if ($backfillAdmissionOpen && $freeRun && $profile->profile === ControlProfile::FreeRun) {
                 if ($grantPermit) {
                     // Only an idle-lane grant can authorize a completion-time
                     // chain. A permit queued behind a running claim gets no

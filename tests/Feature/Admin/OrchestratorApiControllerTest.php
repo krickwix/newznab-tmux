@@ -8,6 +8,7 @@ use App\Enums\UserRole;
 use App\Models\Settings;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlProfileOverride;
+use App\Services\Orchestrator\FreeAdaptiveStateStore;
 use App\Services\Orchestrator\WorkerControlStateStore;
 use App\Services\OrchestratorStatusService;
 use Illuminate\Database\Schema\Blueprint;
@@ -347,5 +348,76 @@ final class OrchestratorApiControllerTest extends TestCase
             'Authorization' => 'Bearer admin-token',
             'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
         ])->assertStatus(422);
+    }
+
+    public function test_mode_requires_explicit_confirmation_for_free_adaptive(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+        $headers = [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ];
+
+        foreach ([['mode' => 'free_adaptive'], ['mode' => 'free_adaptive', 'confirm' => false]] as $body) {
+            $response = $this->postJson('/api/v2/admin/orchestrator/mode', $body, $headers)->assertStatus(422);
+            self::assertStringContainsString('free_adaptive', (string) $response->json('error'));
+            self::assertNull($this->override()->stored(), 'free_adaptive without confirm must never be pinned');
+        }
+    }
+
+    public function test_mode_never_calls_artisan_for_an_unconfirmed_free_adaptive(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        Artisan::shouldReceive('call')->never();
+
+        $this->postJson('/api/v2/admin/orchestrator/mode', ['mode' => 'free_adaptive'], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertStatus(422);
+    }
+
+    public function test_mode_free_adaptive_with_confirm_true_is_accepted(): void
+    {
+        $this->createUser(UserRole::ADMIN, 'admin-token');
+
+        $response = $this->postJson('/api/v2/admin/orchestrator/mode', [
+            'mode' => 'free_adaptive',
+            'confirm' => true,
+        ], [
+            'Authorization' => 'Bearer admin-token',
+            'X-Orchestrator-Control-Token' => self::CONTROL_TOKEN,
+        ])->assertOk();
+
+        self::assertSame('free_adaptive', $response->json('pinned'));
+        self::assertTrue($response->json('bypasses_safety'));
+        self::assertSame(ControlProfile::FreeAdaptive, $this->override()->stored());
+    }
+
+    public function test_status_reports_the_free_adaptive_governor_only_under_free_adaptive(): void
+    {
+        $now = time();
+        foreach ([
+            'orchestrator_mode' => 'active',
+            'orchestrator_profile' => 'free_run',
+            FreeAdaptiveStateStore::DELAY => '300',
+            FreeAdaptiveStateStore::LAST_DONE_AT => (string) ($now - 60),
+            FreeAdaptiveStateStore::REASON => json_encode(['reason' => 'hold', 'stage' => 'collections', 'p' => 0.95, 'ewma' => 0.0]),
+        ] as $name => $value) {
+            DB::table('settings')->insert(['name' => $name, 'value' => $value]);
+        }
+        Settings::forgetCachedSettings();
+
+        self::assertNull(app(OrchestratorStatusService::class)->report()['profile']['free_adaptive']);
+
+        DB::table('settings')->where('name', 'orchestrator_profile')->update(['value' => 'free_adaptive']);
+        Settings::forgetCachedSettings();
+        $profile = app(OrchestratorStatusService::class)->report()['profile'];
+
+        self::assertSame('free_adaptive', $profile['profile']);
+        self::assertTrue($profile['bypasses_safety']);
+        self::assertSame(300, $profile['free_adaptive']['delay_seconds']);
+        self::assertSame($now + 240, $profile['free_adaptive']['next_eligible_at']);
+        self::assertSame('hold', $profile['free_adaptive']['reason']);
     }
 }

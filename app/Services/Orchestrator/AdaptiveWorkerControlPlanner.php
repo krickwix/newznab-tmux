@@ -27,7 +27,7 @@ final class AdaptiveWorkerControlPlanner
         // -- and free-run would report profile=free_run while the workers kept
         // sleeping. Adaptive modulation is precisely what this mode exists to
         // switch off.
-        if ($base->profile === ControlProfile::FailSafe || $base->profile === ControlProfile::FreeRun) {
+        if ($base->profile === ControlProfile::FailSafe || $base->profile->isFreeRunFamily()) {
             return $decision;
         }
 

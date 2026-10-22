@@ -28,6 +28,7 @@ class WorkerOrchestrator
         private readonly AdaptiveWorkerControlPlanner $adaptiveControls = new AdaptiveWorkerControlPlanner,
         private readonly ?CurrentForwardPermitGate $currentForwardPermits = null,
         private readonly ?CurrentForwardRefreshSettlement $currentForwardSettlement = null,
+        private readonly ?FreeAdaptiveBackfillGovernor $freeAdaptive = null,
     ) {}
 
     /** @return array<string, mixed> */
@@ -406,7 +407,13 @@ class WorkerOrchestrator
             // stop learning while free-run is on. That is the mode's contract.
             // orchestrator_bf_permit === 0 is still required, so a permit that
             // has been granted and not yet claimed is never overwritten.
-            $freeRun = $decision->profile->profile === ControlProfile::FreeRun;
+            $freeRun = $decision->profile->profile->isFreeRunFamily();
+            // free_adaptive adds one gate to the idle-lane grant: the adaptive
+            // delay since the last permit finished. The operator's manual
+            // --grant-permit bypasses it. See FreeAdaptiveBackfillGovernor.
+            $freeAdaptive = $decision->profile->profile === ControlProfile::FreeAdaptive
+                ? ($this->freeAdaptive ?? new FreeAdaptiveBackfillGovernor)->tick($snapshot, $decision->transitioned, time(), ! $shadow)
+                : null;
             $autoGrant = ! $shadow
                 && (bool) config('nntmux.orchestrator.auto_backfill', false)
                 && $decision->backfillPermitted
@@ -420,6 +427,7 @@ class WorkerOrchestrator
                 && trim((string) $snapshot->backfillGroup) !== ''
                 && ($freeRun || $permitObservation === null)
                 && ($freeRun || $delayedAttributionSettled === null)
+                && ($freeAdaptive === null || $freeAdaptive->gateOpen(time()))
                 && (int) Settings::settingValue('orchestrator_bf_permit') === 0;
             $issuePermit = ($grantPermit || $autoGrant)
                 && ($freeRun || $delayedAttributionSettled === null)
@@ -460,6 +468,7 @@ class WorkerOrchestrator
                         $preserveUnclaimedPermit,
                         $backfillQuantity,
                         $snapshot->backfillSafeQuantity,
+                        ...($grantPermit ? [true] : []),
                     )
                     : $this->applier->apply(
                         $decision,
@@ -471,6 +480,9 @@ class WorkerOrchestrator
                 $backfillPermitGranted = $issuePermit
                     && $decision->backfillPermitted
                     && (int) $generation > 0
+                    // The applier re-checks the free_adaptive delay under its
+                    // lock and may drop the grant; only report one that landed.
+                    && ($freeAdaptive === null || (int) Settings::settingValue('orchestrator_bf_permit') === (int) $generation)
                     && (! Schema::hasTable('current_forward_windows')
                         || (int) Settings::settingValue('orchestrator_bf_permit') === (int) $generation);
                 // Free-run opens no permit observation, and that is what keeps
@@ -543,11 +555,13 @@ class WorkerOrchestrator
                     'nzb_batch_size' => $decision->profile->nzbBatchSize,
                 ],
                 'backfill_permitted' => $decision->backfillPermitted,
+                'free_adaptive' => $freeAdaptive?->toArray(time(), FreeAdaptiveConfig::fromConfig()),
                 'permit_granted' => ! $shadow && $backfillPermitGranted,
                 'current_forward' => $currentForward,
                 'current_forward_settlement' => $currentForwardSettlement,
                 'reasons' => [
                     ...$decision->reasons,
+                    ...($freeAdaptive === null ? [] : ['free_adaptive_delay_'.$freeAdaptive->delay.'s', 'free_adaptive_'.$freeAdaptive->reason]),
                     ...($preserveUnclaimedPermit ? ['backfill_permit_claim_grace'] : []),
                     ...($abandonedPermit ? ['backfill_permit_abandoned_after_worker_exit'] : []),
                     ...($delayedAttributionQueued ? ['backfill_delayed_attribution_queued'] : []),

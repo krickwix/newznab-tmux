@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Distributed;
 
+use App\Services\Orchestrator\ControlProfile;
 use App\Support\HopelessPurgeShard;
 
 class DistributedJobCatalog
@@ -254,7 +255,7 @@ class DistributedJobCatalog
         }
 
         $freeRunPermit = $this->hasFreshActiveBackfillPermit($settings)
-            && (string) ($settings['orchestrator_profile'] ?? '') === 'free_run'
+            && ControlProfile::isFreeRunFamilyValue((string) ($settings['orchestrator_profile'] ?? ''))
             && trim((string) ($settings['orchestrator_bf_group'] ?? '')) !== ''
             && (int) ($settings['orchestrator_bf_qty'] ?? 0) >= 10_000;
         if (($killswitch['pp'] ?? false) === true

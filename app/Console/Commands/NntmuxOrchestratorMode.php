@@ -7,6 +7,8 @@ namespace App\Console\Commands;
 use App\Models\Settings;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlProfileOverride;
+use App\Services\Orchestrator\FreeAdaptiveConfig;
+use App\Services\Orchestrator\FreeAdaptiveStateStore;
 use App\Services\Orchestrator\WorkerControlProfile;
 use App\Services\Orchestrator\WorkerControlStateStore;
 use Illuminate\Console\Command;
@@ -59,7 +61,7 @@ class NntmuxOrchestratorMode extends Command
             return [
                 'mode' => $profile->value,
                 'rung' => $profile->rung(),
-                'adaptive' => $profile !== ControlProfile::FreeRun,
+                'adaptive' => ! $profile->isFreeRunFamily(),
                 'bypasses_safety' => $profile->bypassesSafety(),
                 'backfill' => $worker->backfillEnabled,
                 'sleeps' => [
@@ -114,6 +116,9 @@ class NntmuxOrchestratorMode extends Command
             'applied_to_workers' => $applied === '' ? null : $applied,
             'reasons' => $decision['reasons'] ?? [],
             'decided_at' => $decision['observed_at'] ?? null,
+            'free_adaptive' => $pinned === ControlProfile::FreeAdaptive
+                ? (new FreeAdaptiveStateStore)->read()->toArray(time(), FreeAdaptiveConfig::fromConfig())
+                : null,
         ];
 
         if ($this->option('json')) {
@@ -125,6 +130,14 @@ class NntmuxOrchestratorMode extends Command
         $this->line(sprintf('effective mode      : %s', $effective?->value ?? '(adaptive)'));
         $this->line(sprintf('control state       : %s', $state->profile->value));
         $this->line(sprintf('applied to workers  : %s', $payload['applied_to_workers'] ?? '(never applied)'));
+        if ($payload['free_adaptive'] !== null) {
+            $fa = $payload['free_adaptive'];
+            $this->line(sprintf(
+                'free_adaptive       : delay %ds (%d..%d), next permit in %ds, %s on %s p=%s',
+                $fa['delay_seconds'], $fa['min_delay_seconds'], $fa['max_delay_seconds'],
+                $fa['seconds_until_eligible'], $fa['reason'], $fa['binding_stage'] ?: '-', $fa['projected_utilisation'],
+            ));
+        }
         if ($payload['reasons'] !== []) {
             $this->line(sprintf('last reasons        : %s', implode(', ', array_map(strval(...), (array) $payload['reasons']))));
         }

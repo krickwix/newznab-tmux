@@ -666,6 +666,8 @@ class NntmuxPrometheusMetrics
             'orchestrator_cf_blocks',
             'orchestrator_cf_halt',
             'orchestrator_cf_group',
+            'orchestrator_fa_delay',
+            'orchestrator_fa_next_at',
         ])->pluck('value', 'name');
         $mode = (string) ($settings['orchestrator_mode'] ?? 'legacy');
         $profile = (string) ($settings['orchestrator_profile'] ?? 'unknown');
@@ -721,6 +723,14 @@ class NntmuxPrometheusMetrics
             '# HELP nntmux_orchestrator_backfill_permit_quantity Articles pinned atomically to the current one-shot permit.',
             '# TYPE nntmux_orchestrator_backfill_permit_quantity gauge',
             $this->metric('nntmux_orchestrator_backfill_permit_quantity', (int) ($settings['orchestrator_bf_qty'] ?? 0)),
+            ...($profile === 'free_adaptive' ? [
+                '# HELP nntmux_orchestrator_free_adaptive_delay_seconds Current free_adaptive delay between backfill permits.',
+                '# TYPE nntmux_orchestrator_free_adaptive_delay_seconds gauge',
+                $this->metric('nntmux_orchestrator_free_adaptive_delay_seconds', (int) ($settings['orchestrator_fa_delay'] ?? 0)),
+                '# HELP nntmux_orchestrator_free_adaptive_next_eligible_timestamp Unix time the next free_adaptive permit may be issued.',
+                '# TYPE nntmux_orchestrator_free_adaptive_next_eligible_timestamp gauge',
+                $this->metric('nntmux_orchestrator_free_adaptive_next_eligible_timestamp', (int) ($settings['orchestrator_fa_next_at'] ?? 0)),
+            ] : []),
             '# HELP nntmux_orchestrator_safety_sample_held Whether the last tick used a held last-known-good safety sample.',
             '# TYPE nntmux_orchestrator_safety_sample_held gauge',
             $this->metric(
