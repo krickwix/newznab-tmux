@@ -21,7 +21,17 @@ final readonly class FreeAdaptiveState
         public string $bindingStage = '',
         public float $projected = 0.0,
         public float $ewma = 0.0,
+        /** Sum of the fresh utilisation samples in the current decision window. */
+        public float $windowSum = 0.0,
+        public int $windowSamples = 0,
+        /** Start of the current window; a hold at the boundary restarts it. */
+        public int $windowStart = 0,
     ) {}
+
+    public function windowMean(): ?float
+    {
+        return $this->windowSamples > 0 ? $this->windowSum / $this->windowSamples : null;
+    }
 
     public function nextEligibleAt(): int
     {
@@ -52,6 +62,8 @@ final readonly class FreeAdaptiveState
             'reason' => $this->reason,
             'binding_stage' => $this->bindingStage,
             'projected_utilisation' => round($this->projected, 4),
+            'window_mean_utilisation' => $this->windowMean() === null ? null : round($this->windowMean(), 4),
+            'window_samples' => $this->windowSamples,
             'ewma_per_minute' => round($this->ewma, 2),
             'min_delay_seconds' => $config->minDelay,
             'max_delay_seconds' => $config->maxDelay,

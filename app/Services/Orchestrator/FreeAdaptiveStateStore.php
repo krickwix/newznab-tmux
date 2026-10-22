@@ -31,9 +31,17 @@ class FreeAdaptiveStateStore
 
     public const string REASON = 'orchestrator_fa_reason';
 
+    /** Decision-window accumulator: sum and count of fresh samples, and its start. */
+    public const string WINDOW_SUM = 'orchestrator_fa_psum';
+
+    public const string WINDOW_SAMPLES = 'orchestrator_fa_pn';
+
+    public const string WINDOW_START = 'orchestrator_fa_wstart';
+
     /** @var list<string> */
     public const array ALL = [
         self::DELAY, self::UPDATED_AT, self::CHECKED_AT, self::LAST_DONE_AT, self::NEXT_AT, self::REASON,
+        self::WINDOW_SUM, self::WINDOW_SAMPLES, self::WINDOW_START,
     ];
 
     /** Reads the stored state; a missing delay row yields delay -1 (never stored). */
@@ -61,6 +69,9 @@ class FreeAdaptiveStateStore
             bindingStage: (string) ($meta['stage'] ?? ''),
             projected: (float) ($meta['p'] ?? 0.0),
             ewma: (float) ($meta['ewma'] ?? 0.0),
+            windowSum: (float) ($rows[self::WINDOW_SUM] ?? 0.0),
+            windowSamples: (int) ($rows[self::WINDOW_SAMPLES] ?? 0),
+            windowStart: (int) ($rows[self::WINDOW_START] ?? 0),
         );
     }
 
@@ -70,6 +81,9 @@ class FreeAdaptiveStateStore
             self::DELAY => (string) $state->delay,
             self::UPDATED_AT => (string) $state->updatedAt,
             self::CHECKED_AT => (string) $state->checkedAt,
+            self::WINDOW_SUM => (string) round($state->windowSum, 6),
+            self::WINDOW_SAMPLES => (string) $state->windowSamples,
+            self::WINDOW_START => (string) $state->windowStart,
             self::NEXT_AT => (string) $state->nextEligibleAt(),
             self::REASON => json_encode([
                 'reason' => $state->reason,

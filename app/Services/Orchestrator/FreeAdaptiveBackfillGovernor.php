@@ -64,33 +64,66 @@ class FreeAdaptiveBackfillGovernor
             || $entering
             || $prev->checkedAt < $now - 2 * $config->maxDelay;
         if ($discard) {
-            return $this->state($prev, $config->initialDelay, $now, $now, 'entered', $snapshot, $config);
+            [$projected, $stage, $ewma] = $this->projection($snapshot, $config);
+
+            return new FreeAdaptiveState($config->initialDelay, $now, $now, $prev->lastDoneAt, 'entered', $stage, $projected, $ewma, 0.0, 0, $now);
         }
 
         $delay = min($config->maxDelay, max($config->minDelay, $prev->delay));
         [$projected, $stage, $ewma, $missing] = $this->projection($snapshot, $config);
         $stale = ! $snapshot->telemetryFresh || $snapshot->observedAt < $now - $config->staleSeconds;
-        $reason = $stale ? 'metrics_stale' : ($stage === '' ? 'metrics_missing' : null);
-        $direction = $reason !== null || $projected >= $config->growThreshold
-            ? 1
-            : ($projected <= $config->shrinkThreshold ? -1 : 0);
-        $reason ??= match ($direction) {
-            1 => 'increase',
-            -1 => 'decrease',
-            default => 'hold',
+        $bad = $stale ? 'metrics_stale' : ($stage === '' ? 'metrics_missing' : null);
+        // Only fresh samples feed the window mean: a stale tick has no
+        // trustworthy projection and must not drag the average either way.
+        $sum = $prev->windowSum + ($bad === null ? $projected : 0.0);
+        $count = $prev->windowSamples + ($bad === null ? 1 : 0);
+        $start = $prev->windowStart;
+        $anchor = max($prev->updatedAt, $start);
+        $next = $delay;
+        $changedAt = $prev->updatedAt;
+        $reason = 'settling';
+
+        if ($now - $anchor >= $config->settleSeconds) {
+            [$direction, $reason] = $this->decide($bad, $count > 0 ? $sum / $count : 0.0, $count, $config);
+            if ($direction !== 0) {
+                $next = $this->step($delay, $direction, $config);
+                $changedAt = $next === $delay ? $changedAt : $now;
+            }
+            // A decision (change, clamp or hold) closes the window; a window
+            // too short to decide on keeps collecting.
+            if ($reason !== 'insufficient_samples') {
+                [$sum, $count, $start] = [0.0, 0, $now];
+            }
+            if ($missing !== [] && $stage !== '') {
+                $reason .= ' stage_missing:'.implode(',', $missing);
+            }
+        }
+
+        return new FreeAdaptiveState(
+            $next, $changedAt, $now, $prev->lastDoneAt, $reason, $stage, $projected, $ewma, $sum, $count, $start,
+        );
+    }
+
+    /**
+     * Direction (+1 grow, -1 shrink, 0 hold) and reason for a closed window.
+     * A window whose latest sample is stale or missing grows, whatever its mean.
+     *
+     * @return array{0: int, 1: string}
+     */
+    private function decide(?string $bad, float $mean, int $count, FreeAdaptiveConfig $config): array
+    {
+        if ($bad !== null) {
+            return [1, $bad];
+        }
+        if ($count < $config->minSamples) {
+            return [0, 'insufficient_samples'];
+        }
+
+        return match (true) {
+            $mean >= $config->growThreshold => [1, 'increase'],
+            $mean <= $config->shrinkThreshold => [-1, 'decrease'],
+            default => [0, 'hold'],
         };
-        if ($missing !== [] && $stage !== '') {
-            $reason .= ' stage_missing:'.implode(',', $missing);
-        }
-        if ($direction !== 0 && $now - $prev->updatedAt < $config->settleSeconds) {
-            $direction = 0;
-            $reason = 'settling';
-        }
-
-        $next = $direction === 0 ? $delay : $this->step($delay, $direction, $config);
-        $changedAt = $next === $delay ? $prev->updatedAt : $now;
-
-        return $this->state($prev, $next, $changedAt, $now, $reason, $snapshot, $config, [$projected, $stage, $ewma]);
     }
 
     private function step(int $delay, int $direction, FreeAdaptiveConfig $config): int
@@ -136,21 +169,5 @@ class FreeAdaptiveBackfillGovernor
         }
 
         return $best;
-    }
-
-    /** @param  array{0: float, 1: string, 2: float}|null  $projection */
-    private function state(
-        FreeAdaptiveState $prev,
-        int $delay,
-        int $updatedAt,
-        int $checkedAt,
-        string $reason,
-        PipelineSnapshot $snapshot,
-        FreeAdaptiveConfig $config,
-        ?array $projection = null,
-    ): FreeAdaptiveState {
-        [$projected, $stage, $ewma] = $projection ?? $this->projection($snapshot, $config);
-
-        return new FreeAdaptiveState($delay, $updatedAt, $checkedAt, $prev->lastDoneAt, $reason, $stage, $projected, $ewma);
     }
 }
