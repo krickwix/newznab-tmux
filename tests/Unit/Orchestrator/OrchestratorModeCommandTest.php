@@ -7,7 +7,9 @@ namespace Tests\Unit\Orchestrator;
 use App\Models\Settings;
 use App\Services\Orchestrator\ControlProfile;
 use App\Services\Orchestrator\ControlProfileOverride;
+use App\Services\Orchestrator\FreeAdaptiveStateStore;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
@@ -218,5 +220,71 @@ final class OrchestratorModeCommandTest extends TestCase
 
             self::assertNull($this->override()->stored(), var_export($value, true));
         }
+    }
+
+    /** @return array<string, mixed> */
+    private function commandJson(string $command): array
+    {
+        self::assertSame(0, Artisan::call($command));
+
+        return json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+    }
+
+    public function test_set_free_adaptive_pins_it_and_flags_the_safety_bypass(): void
+    {
+        $result = $this->commandJson('nntmux:orchestrator-mode set free_adaptive --json');
+
+        self::assertSame('free_adaptive', $result['pinned']);
+        self::assertTrue($result['bypasses_safety']);
+        self::assertSame(ControlProfile::FreeAdaptive, $this->override()->stored());
+        self::assertSame(ControlProfile::FreeAdaptive, $this->override()->effective());
+    }
+
+    public function test_list_includes_free_adaptive_as_a_non_adaptive_safety_bypassing_mode(): void
+    {
+        $modes = array_column($this->commandJson('nntmux:orchestrator-mode list --json')['modes'], null, 'mode');
+
+        self::assertArrayHasKey('free_adaptive', $modes);
+        self::assertSame(4, $modes['free_adaptive']['rung']);
+        self::assertFalse($modes['free_adaptive']['adaptive']);
+        self::assertFalse($modes['free_run']['adaptive']);
+        self::assertTrue($modes['fill']['adaptive']);
+        self::assertTrue($modes['free_adaptive']['bypasses_safety']);
+        self::assertTrue($modes['free_adaptive']['backfill']);
+        self::assertSame(['binaries' => 0, 'backfill' => 0, 'releases' => 0, 'nzb' => 0], $modes['free_adaptive']['sleeps']);
+    }
+
+    public function test_get_json_reports_the_free_adaptive_governor_only_when_pinned(): void
+    {
+        self::assertNull($this->commandJson('nntmux:orchestrator-mode get --json')['free_adaptive']);
+
+        $this->artisan('nntmux:orchestrator-mode set free_adaptive')->assertSuccessful();
+        $now = time();
+        foreach ([
+            FreeAdaptiveStateStore::DELAY => '300',
+            FreeAdaptiveStateStore::UPDATED_AT => (string) ($now - 100),
+            FreeAdaptiveStateStore::CHECKED_AT => (string) $now,
+            FreeAdaptiveStateStore::LAST_DONE_AT => (string) ($now - 60),
+            FreeAdaptiveStateStore::REASON => json_encode(['reason' => 'increase', 'stage' => 'collections', 'p' => 1.08, 'ewma' => 3400.0]),
+        ] as $name => $value) {
+            Settings::query()->updateOrCreate(['name' => $name], ['value' => $value]);
+        }
+        Settings::forgetCachedSettings();
+
+        $fa = $this->commandJson('nntmux:orchestrator-mode get --json')['free_adaptive'];
+
+        self::assertIsArray($fa);
+        self::assertSame(300, $fa['delay_seconds']);
+        self::assertSame($now + 240, $fa['next_eligible_at']);
+        self::assertGreaterThan(0, $fa['seconds_until_eligible']);
+        self::assertLessThanOrEqual(240, $fa['seconds_until_eligible']);
+        self::assertSame('increase', $fa['reason']);
+        self::assertSame('collections', $fa['binding_stage']);
+        self::assertArrayHasKey('min_delay_seconds', $fa);
+        self::assertArrayHasKey('max_delay_seconds', $fa);
+
+        $this->artisan('nntmux:orchestrator-mode get')
+            ->expectsOutputToContain('free_adaptive       : delay 300s')
+            ->assertSuccessful();
     }
 }
