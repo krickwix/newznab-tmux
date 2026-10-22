@@ -7,6 +7,7 @@ namespace App\Services\Distributed;
 use App\Models\Settings;
 use App\Services\Orchestrator\BackfillDateEligibilityPolicy;
 use App\Services\Orchestrator\BackfillStopCursorPolicy;
+use App\Services\Orchestrator\FreeAdaptiveStateStore;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -175,6 +176,7 @@ class BackfillPermitGate
                 ['name' => 'orchestrator_bf_completed'],
                 ['value' => (string) $generation],
             );
+            $this->stampFreeAdaptiveLastDone();
             Settings::forgetCachedSettings();
 
             return true;
@@ -206,12 +208,31 @@ class BackfillPermitGate
                 ['name' => 'orchestrator_bf_failed'],
                 ['value' => (string) $generation],
             );
+            $this->stampFreeAdaptiveLastDone();
             Settings::forgetCachedSettings();
 
             return true;
         }, 3);
     }
 
+    /**
+     * Anchor for the free_adaptive inter-permit delay. Stamped on failure too,
+     * so a failing permit cannot hot-loop; written for every profile, where it
+     * is unread.
+     */
+    private function stampFreeAdaptiveLastDone(): void
+    {
+        Settings::query()->updateOrCreate(
+            ['name' => FreeAdaptiveStateStore::LAST_DONE_AT],
+            ['value' => (string) time()],
+        );
+    }
+
+    /**
+     * Chains the next free_run permit at completion. The 'free_run' string
+     * checks below intentionally exclude free_adaptive: its permits must come
+     * from the governor-gated orchestrator grant, never from a chain.
+     */
     public function queueFreeRunSuccessor(int $generation): ?int
     {
         return DB::transaction(function () use ($generation): ?int {

@@ -24,6 +24,28 @@ enum ControlProfile: string
     case FreeRun = 'free_run';
 
     /**
+     * Free-run with one governor kept: the idle-lane backfill permit is not
+     * issued until an adaptive delay has passed since the last permit finished.
+     *
+     * Pinned-only, exactly like FreeRun, and it bypasses the same safety gates.
+     * The delay reacts to pipeline backlog only (see FreeAdaptiveBackfillGovernor).
+     */
+    case FreeAdaptive = 'free_adaptive';
+
+    /** Profiles that run with every timer at zero and ignore the safety gates. */
+    public const array FREE_RUN_FAMILY = ['free_run', 'free_adaptive'];
+
+    public function isFreeRunFamily(): bool
+    {
+        return $this === self::FreeRun || $this === self::FreeAdaptive;
+    }
+
+    public static function isFreeRunFamilyValue(string $value): bool
+    {
+        return \in_array($value, self::FREE_RUN_FAMILY, true);
+    }
+
+    /**
      * Operator-facing summary, shown by `nntmux:orchestrator-mode list`.
      */
     public function description(): string
@@ -34,18 +56,19 @@ enum ControlProfile: string
             self::Balanced => 'Steady state. Backfill on at one group/thread, moderate sleeps.',
             self::Fill => 'Top of the adaptive ladder. Backfill at the configured fill width, short sleeps.',
             self::FreeRun => 'Every governor off: no sleeps, no permit gating, no safety demotion. Operator only.',
+            self::FreeAdaptive => 'free_run with an adaptive inter-permit backfill delay. Operator only.',
         };
     }
 
     /**
      * Whether this mode ignores the hard-safety gates.
      *
-     * Only free-run does. Pinning any other mode still yields to a database or
+     * Only the free-run family does. Pinning any other mode still yields to a database or
      * disk in trouble -- the pin replaces the ladder's choice, not the brakes.
      */
     public function bypassesSafety(): bool
     {
-        return $this === self::FreeRun;
+        return $this->isFreeRunFamily();
     }
 
     public function rung(): int
@@ -55,7 +78,7 @@ enum ControlProfile: string
             self::Drain => 1,
             self::Balanced => 2,
             self::Fill => 3,
-            self::FreeRun => 4,
+            self::FreeRun, self::FreeAdaptive => 4,
         };
     }
 
@@ -65,7 +88,7 @@ enum ControlProfile: string
             // FreeRun steps down like Fill. If an operator turns free-run off
             // while pressure is high, the ladder resumes at Balanced rather
             // than dropping straight to fail_safe.
-            self::FreeRun, self::Fill => self::Balanced,
+            self::FreeRun, self::FreeAdaptive, self::Fill => self::Balanced,
             self::Balanced => self::Drain,
             self::Drain, self::FailSafe => self::FailSafe,
         };
@@ -80,6 +103,7 @@ enum ControlProfile: string
             // by promotion, only by explicit config.
             self::Balanced, self::Fill => self::Fill,
             self::FreeRun => self::FreeRun,
+            self::FreeAdaptive => self::FreeAdaptive,
         };
     }
 }

@@ -214,6 +214,25 @@ return [
         // permitted, no admission or fail-safe gating. Defaults OFF and is not
         // reachable from the adaptive ladder -- see ControlProfile::FreeRun.
         'free_run' => filter_var(env('NNTMUX_ORCHESTRATOR_FREE_RUN', false), FILTER_VALIDATE_BOOL),
+        // free_adaptive (pinned only): free_run, but the idle-lane backfill
+        // permit waits an adaptive delay after the previous one finishes. See
+        // FreeAdaptiveBackfillGovernor; an inconsistent set falls back to the
+        // defaults as a whole (FreeAdaptiveConfig).
+        'free_adaptive' => [
+            'initial_delay_seconds' => (int) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_INITIAL_DELAY_SECONDS', 120),
+            'min_delay_seconds' => (int) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_MIN_DELAY_SECONDS', 0),
+            'max_delay_seconds' => (int) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_MAX_DELAY_SECONDS', 3600),
+            'increase_factor' => (float) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_INCREASE_FACTOR', 1.5),
+            'increase_step_seconds' => (int) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_INCREASE_STEP_SECONDS', 30),
+            'decrease_factor' => (float) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_DECREASE_FACTOR', 0.8),
+            'snap_to_min_below_seconds' => (int) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_SNAP_TO_MIN_BELOW_SECONDS', 10),
+            'grow_threshold' => (float) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_GROW_THRESHOLD', 1.0),
+            'shrink_threshold' => (float) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_SHRINK_THRESHOLD', 0.9),
+            'horizon_minutes' => (int) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_HORIZON_MINUTES', 30),
+            'settle_seconds' => (int) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_SETTLE_SECONDS', 300),
+            'stale_seconds' => (int) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_STALE_SECONDS', 180),
+            'stages' => (string) env('NNTMUX_ORCHESTRATOR_FREE_ADAPTIVE_STAGES', 'parts,binaries,collections'),
+        ],
         'free_run_nzb_batch_size' => max(1, (int) env('NNTMUX_ORCHESTRATOR_FREE_RUN_NZB_BATCH_SIZE', 100)),
         'backfill_context_max_chain_windows' => min(4, max(2, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_CONTEXT_MAX_CHAIN_WINDOWS', 3))),
         'backfill_aggressive_explore_below_yield' => max(0.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_AGGRESSIVE_EXPLORE_BELOW_YIELD', 0.0)),

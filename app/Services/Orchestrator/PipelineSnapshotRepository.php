@@ -146,7 +146,7 @@ class PipelineSnapshotRepository
             'releases' => $backlogs['releases'],
             'nzbs' => $backlogs['nzbs'],
         ];
-        $freeRun = $profileOverride === ControlProfile::FreeRun;
+        $freeRun = $profileOverride?->isFreeRunFamily() === true;
         $safeBackfillCandidates = $this->safeBackfillCandidates(
             self::withoutGroups($this->backfillCandidates(), $pausedGroups),
             $capacityBacklogs,
@@ -707,7 +707,7 @@ class PipelineSnapshotRepository
             $now,
             $state->ineffectiveBackfillPermitsByTarget,
             $contextRepeat,
-            $profileOverride === ControlProfile::FreeRun,
+            $profileOverride?->isFreeRunFamily() === true,
         );
     }
 

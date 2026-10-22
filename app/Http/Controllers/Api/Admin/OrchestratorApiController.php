@@ -51,9 +51,9 @@ class OrchestratorApiController extends Controller
             ]);
         }
 
-        if ($action === 'set' && $mode === ControlProfile::FreeRun->value && $request->boolean('confirm') !== true) {
+        if ($action === 'set' && $mode !== null && ControlProfile::from($mode)->isFreeRunFamily() && $request->boolean('confirm') !== true) {
             return response()->json([
-                'error' => 'free_run requires an explicit confirm: true in the request body.',
+                'error' => $mode.' requires an explicit confirm: true in the request body.',
             ], 422);
         }
 

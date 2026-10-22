@@ -109,7 +109,7 @@ final class ControlProfileOverrideTest extends TestCase
      * If a refactor ever made the pin uniform, this fails and the free-run
      * contract is gone.
      */
-    public function test_free_run_remains_the_only_mode_that_overrides_safety(): void
+    public function test_only_the_free_run_family_overrides_safety(): void
     {
         $decision = $this->decide($this->snapshot([
             'profileOverride' => ControlProfile::FreeRun,
@@ -122,7 +122,7 @@ final class ControlProfileOverrideTest extends TestCase
         self::assertSame(['free_run_operator_override'], $decision->reasons);
 
         foreach (ControlProfile::cases() as $mode) {
-            self::assertSame($mode === ControlProfile::FreeRun, $mode->bypassesSafety(), $mode->value);
+            self::assertSame($mode->isFreeRunFamily(), $mode->bypassesSafety(), $mode->value);
         }
     }
 

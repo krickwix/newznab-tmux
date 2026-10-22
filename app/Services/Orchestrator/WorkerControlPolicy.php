@@ -122,14 +122,14 @@ final class WorkerControlPolicy
     {
         $pinned = $this->pinnedProfile($snapshot);
 
-        if ($pinned === ControlProfile::FreeRun) {
+        if ($pinned?->isFreeRunFamily() === true) {
             return new ControlDecision(
-                profile: WorkerControlProfile::for(ControlProfile::FreeRun),
+                profile: WorkerControlProfile::for($pinned),
                 backfillPermitted: true,
-                reasons: ['free_run_operator_override'],
+                reasons: [$pinned->value.'_operator_override'],
                 nextState: new ControlState(
-                    profile: ControlProfile::FreeRun,
-                    lastTransitionAt: $state->profile === ControlProfile::FreeRun ? $state->lastTransitionAt : $now,
+                    profile: $pinned,
+                    lastTransitionAt: $state->profile === $pinned ? $state->lastTransitionAt : $now,
                     // No cooldown: free-run never steps itself down, so a
                     // cooldown would only delay the ladder resuming once the
                     // operator turns it off.
@@ -149,7 +149,7 @@ final class WorkerControlPolicy
                     qualifiedSupplyLastObservedAt: $snapshot->observedAt,
                     qualifiedSupplyRecoverySamples: 0,
                 ),
-                transitioned: $state->profile !== ControlProfile::FreeRun,
+                transitioned: $state->profile !== $pinned,
             );
         }
 
