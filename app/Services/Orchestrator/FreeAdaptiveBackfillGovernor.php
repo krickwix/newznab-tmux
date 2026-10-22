@@ -32,14 +32,17 @@ class FreeAdaptiveBackfillGovernor
 
     /**
      * One orchestrator cycle: evaluate, persist, return the state to gate on.
+     * Shadow mode passes $persist = false: it evaluates but writes nothing.
      * Never throws; on any failure it returns a maximum-delay closed gate.
      */
-    public function tick(PipelineSnapshot $snapshot, bool $entering, int $now): FreeAdaptiveState
+    public function tick(PipelineSnapshot $snapshot, bool $entering, int $now, bool $persist = true): FreeAdaptiveState
     {
         $config = FreeAdaptiveConfig::fromConfig();
         try {
             $state = $this->evaluate($this->store->read(), $snapshot, $now, $entering, $config);
-            $this->store->write($state);
+            if ($persist) {
+                $this->store->write($state);
+            }
 
             return $state;
         } catch (Throwable $e) {

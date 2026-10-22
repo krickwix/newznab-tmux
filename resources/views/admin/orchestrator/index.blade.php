@@ -158,7 +158,7 @@
             label="Control profile"
             :value="$profile['profile'] !== '' ? $profile['profile'] : 'unknown'"
             icon="fas fa-gauge-high"
-            :color="$profile['profile'] === 'fail_safe' ? 'red' : ($profile['profile'] === 'free_run' ? 'yellow' : 'blue')"
+            :color="$profile['profile'] === 'fail_safe' ? 'red' : (\App\Services\Orchestrator\ControlProfile::isFreeRunFamilyValue((string) $profile['profile']) ? 'yellow' : 'blue')"
             :footer="'mode: '.($profile['mode'] !== '' ? $profile['mode'] : 'unknown').' · generation '.$count($profile['generation'])" />
 
         <x-admin.stat-card

@@ -103,12 +103,13 @@ final class FreeAdaptiveOrchestratorTest extends TestCase
             Mockery::type(PipelineSnapshot::class),
             $expectEntering,
             Mockery::type('int'),
+            true,
         )->andReturn($state);
 
         return $governor;
     }
 
-    private function applierExpecting(bool $grant): WorkerProfileApplier
+    private function applierExpecting(bool $grant, bool $manual = false): WorkerProfileApplier
     {
         $applier = Mockery::mock(WorkerProfileApplier::class);
         $isFreeAdaptive = static fn (ControlDecision $decision): bool => $decision->backfillPermitted
@@ -116,7 +117,14 @@ final class FreeAdaptiveOrchestratorTest extends TestCase
         if ($grant) {
             $applier->shouldReceive('apply')->once()->with(
                 Mockery::on($isFreeAdaptive), Mockery::type('int'), true, 'alt.test', false, 10_000, 10_000,
-            )->andReturn(8);
+                ...($manual ? [true] : []),
+            )->andReturnUsing(static function (): int {
+                // The real applier publishes the permit; the orchestrator checks it landed.
+                DB::table('settings')->updateOrInsert(['name' => 'orchestrator_bf_permit'], ['value' => '8']);
+                Settings::forgetCachedSettings();
+
+                return 8;
+            });
         } else {
             $applier->shouldReceive('apply')->once()->with(
                 Mockery::on($isFreeAdaptive), Mockery::type('int'), false, 'alt.test', false,
@@ -185,7 +193,7 @@ final class FreeAdaptiveOrchestratorTest extends TestCase
         $closed = new FreeAdaptiveState(3_600, time(), time(), time(), 'increase');
 
         $result = (new WorkerOrchestrator(
-            $this->snapshots($snapshot), new WorkerControlPolicy, $store, $this->applierExpecting(true),
+            $this->snapshots($snapshot), new WorkerControlPolicy, $store, $this->applierExpecting(true, true),
             freeAdaptive: $this->governor($closed),
         ))->runOnce(false, true);
 

@@ -25,7 +25,7 @@ final readonly class FreeAdaptiveState
 
     public function nextEligibleAt(): int
     {
-        return $this->lastDoneAt + $this->delay;
+        return $this->lastDoneAt + max(0, $this->delay);
     }
 
     /**
@@ -40,10 +40,13 @@ final readonly class FreeAdaptiveState
     /** @return array<string, mixed> */
     public function toArray(int $now, FreeAdaptiveConfig $config): array
     {
+        // Before the first governor tick there is no delay to show.
+        $stored = $this->delay >= 0;
+
         return [
-            'delay_seconds' => $this->delay,
-            'next_eligible_at' => $this->nextEligibleAt(),
-            'seconds_until_eligible' => max(0, $this->nextEligibleAt() - $now),
+            'delay_seconds' => $stored ? $this->delay : null,
+            'next_eligible_at' => $stored ? $this->nextEligibleAt() : null,
+            'seconds_until_eligible' => $stored ? max(0, $this->nextEligibleAt() - $now) : null,
             'last_done_at' => $this->lastDoneAt,
             'last_change_at' => $this->updatedAt,
             'reason' => $this->reason,

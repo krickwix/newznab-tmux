@@ -212,4 +212,20 @@ final class FreeAdaptiveBackfillGovernorTest extends TestCase
 
         self::assertSame(['collections'], FreeAdaptiveConfig::fromConfig()->stages);
     }
+
+    public function test_high_watermarks_come_from_the_same_config_the_pressure_stages_report(): void
+    {
+        config()->set('nntmux.orchestrator.high_watermarks', ['parts' => 7, 'binaries' => 8, 'collections' => 600_000]);
+
+        $config = FreeAdaptiveConfig::fromConfig();
+
+        self::assertSame(['parts' => 7, 'binaries' => 8, 'collections' => 600_000], $config->highWatermarks);
+    }
+
+    public function test_a_zero_increase_step_is_rejected(): void
+    {
+        config()->set('nntmux.orchestrator.free_adaptive.increase_step_seconds', 0);
+
+        self::assertSame(30, FreeAdaptiveConfig::fromConfig()->increaseStep);
+    }
 }

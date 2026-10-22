@@ -79,7 +79,7 @@ final readonly class FreeAdaptiveConfig
             && $this->minDelay <= $this->initialDelay
             && $this->initialDelay <= $this->maxDelay
             && $this->increaseFactor > 1.0
-            && $this->increaseStep >= 0
+            && $this->increaseStep >= 1
             && $this->decreaseFactor > 0.0 && $this->decreaseFactor < 1.0
             && $this->snapToMinBelow >= 0
             && $this->shrinkThreshold > 0.0

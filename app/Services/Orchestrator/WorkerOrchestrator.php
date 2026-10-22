@@ -412,7 +412,7 @@ class WorkerOrchestrator
             // delay since the last permit finished. The operator's manual
             // --grant-permit bypasses it. See FreeAdaptiveBackfillGovernor.
             $freeAdaptive = $decision->profile->profile === ControlProfile::FreeAdaptive
-                ? ($this->freeAdaptive ?? new FreeAdaptiveBackfillGovernor)->tick($snapshot, $decision->transitioned, time())
+                ? ($this->freeAdaptive ?? new FreeAdaptiveBackfillGovernor)->tick($snapshot, $decision->transitioned, time(), ! $shadow)
                 : null;
             $autoGrant = ! $shadow
                 && (bool) config('nntmux.orchestrator.auto_backfill', false)
@@ -468,6 +468,7 @@ class WorkerOrchestrator
                         $preserveUnclaimedPermit,
                         $backfillQuantity,
                         $snapshot->backfillSafeQuantity,
+                        ...($grantPermit ? [true] : []),
                     )
                     : $this->applier->apply(
                         $decision,
@@ -479,6 +480,9 @@ class WorkerOrchestrator
                 $backfillPermitGranted = $issuePermit
                     && $decision->backfillPermitted
                     && (int) $generation > 0
+                    // The applier re-checks the free_adaptive delay under its
+                    // lock and may drop the grant; only report one that landed.
+                    && ($freeAdaptive === null || (int) Settings::settingValue('orchestrator_bf_permit') === (int) $generation)
                     && (! Schema::hasTable('current_forward_windows')
                         || (int) Settings::settingValue('orchestrator_bf_permit') === (int) $generation);
                 // Free-run opens no permit observation, and that is what keeps

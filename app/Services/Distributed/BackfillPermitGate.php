@@ -222,10 +222,16 @@ class BackfillPermitGate
      */
     private function stampFreeAdaptiveLastDone(): void
     {
-        Settings::query()->updateOrCreate(
-            ['name' => FreeAdaptiveStateStore::LAST_DONE_AT],
-            ['value' => (string) time()],
-        );
+        // Best effort: the stamp is only read by free_adaptive, so it must
+        // never turn a completed or failed permit into a failed completion.
+        try {
+            Settings::query()->updateOrCreate(
+                ['name' => FreeAdaptiveStateStore::LAST_DONE_AT],
+                ['value' => (string) time()],
+            );
+        } catch (\Throwable $e) {
+            report($e);
+        }
     }
 
     /**

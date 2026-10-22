@@ -22,8 +22,9 @@ class WorkerProfileApplier
         bool $preserveUnclaimedPermit = false,
         ?int $backfillQuantity = null,
         ?int $backfillSafeQuantity = null,
+        bool $manualGrant = false,
     ): int {
-        return DB::transaction(function () use ($decision, $now, $grantPermit, $backfillGroup, $preserveUnclaimedPermit, $backfillQuantity, $backfillSafeQuantity): int {
+        return DB::transaction(function () use ($decision, $now, $grantPermit, $backfillGroup, $preserveUnclaimedPermit, $backfillQuantity, $backfillSafeQuantity, $manualGrant): int {
             $lockedSettings = Settings::query()
                 ->whereIn('name', [
                     'orchestrator_generation',
@@ -35,6 +36,8 @@ class WorkerProfileApplier
                     'orchestrator_bf_qty',
                     'orchestrator_bf_stop',
                     'orchestrator_bf_budget',
+                    FreeAdaptiveStateStore::LAST_DONE_AT,
+                    FreeAdaptiveStateStore::DELAY,
                 ])
                 ->orderBy('name')
                 ->lockForUpdate()
@@ -67,6 +70,22 @@ class WorkerProfileApplier
             $claimedPermitInFlight = $existingClaimed > 0
                 && $existingClaimed !== $existingCompleted
                 && $existingClaimed !== $existingFailed;
+            if ($profile->profile === ControlProfile::FreeAdaptive) {
+                // Entering from free_run must not inherit a permit it queued
+                // (or granted) without a delay: drop the unclaimed one.
+                if ($decision->transitioned && $existingPermit > 0 && $existingPermit !== $existingClaimed) {
+                    $existingPermit = 0;
+                }
+                // The delay gate is enforced here, under the lock, because a
+                // completion can commit between the orchestrator's pre-check
+                // and this transaction. Manual operator grants bypass it.
+                $faReadyAt = (int) $lockedSettings->get(FreeAdaptiveStateStore::LAST_DONE_AT, 0)
+                    + max(0, (int) $lockedSettings->get(FreeAdaptiveStateStore::DELAY, 0));
+                if ($grantPermit && ! $manualGrant && $now < $faReadyAt) {
+                    $grantPermit = false;
+                    $preserveUnclaimedPermit = false;
+                }
+            }
             if ($grantPermit && $existingPermit > 0) {
                 $grantPermit = false;
                 $preserveUnclaimedPermit = $decision->backfillPermitted;

@@ -17,12 +17,14 @@ class FreeAdaptiveStateStore
 {
     public const string DELAY = 'orchestrator_fa_delay';
 
-    public const string UPDATED_AT = 'orchestrator_fa_updated_at';
+    public const string UPDATED_AT = 'orchestrator_fa_changed';
 
-    public const string CHECKED_AT = 'orchestrator_fa_checked_at';
+    public const string CHECKED_AT = 'orchestrator_fa_checked';
+
+    // Setting names must fit settings.name varchar(25).
 
     /** Stamped by BackfillPermitGate on complete() and fail(). */
-    public const string LAST_DONE_AT = 'orchestrator_fa_last_done_at';
+    public const string LAST_DONE_AT = 'orchestrator_fa_done';
 
     /** Derived (last_done_at + delay), published for display only. */
     public const string NEXT_AT = 'orchestrator_fa_next_at';
