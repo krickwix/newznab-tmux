@@ -75,16 +75,23 @@ class FreeAdaptiveBackfillGovernor
         $bad = $stale ? 'metrics_stale' : ($stage === '' ? 'metrics_missing' : null);
         // Only fresh samples feed the window mean: a stale tick has no
         // trustworthy projection and must not drag the average either way.
-        $sum = $prev->windowSum + ($bad === null ? $projected : 0.0);
-        $count = $prev->windowSamples + ($bad === null ? 1 : 0);
-        $start = $prev->windowStart;
+        // After an orchestrator gap (down or not leading) the old samples
+        // describe a pipeline that no longer exists: start the window over.
+        // The delay itself survives; the 2*max rule above governs a full reset.
+        $gap = $prev->checkedAt > 0 && $now - $prev->checkedAt > 3 * $config->staleSeconds;
+        [$prevSum, $prevCount, $prevBad, $start] = $gap
+            ? [0.0, 0, 0, $now]
+            : [$prev->windowSum, $prev->windowSamples, $prev->windowBad, $prev->windowStart];
+        $sum = $prevSum + ($bad === null ? $projected : 0.0);
+        $count = $prevCount + ($bad === null ? 1 : 0);
+        $badCount = $prevBad + ($bad === null ? 0 : 1);
         $anchor = max($prev->updatedAt, $start);
         $next = $delay;
         $changedAt = $prev->updatedAt;
         $reason = 'settling';
 
         if ($now - $anchor >= $config->settleSeconds) {
-            [$direction, $reason] = $this->decide($bad, $count > 0 ? $sum / $count : 0.0, $count, $config);
+            [$direction, $reason] = $this->decide($bad, $count > 0 ? $sum / $count : 0.0, $count, $badCount, $config);
             if ($direction !== 0) {
                 $next = $this->step($delay, $direction, $config);
                 $changedAt = $next === $delay ? $changedAt : $now;
@@ -92,7 +99,7 @@ class FreeAdaptiveBackfillGovernor
             // A decision (change, clamp or hold) closes the window; a window
             // too short to decide on keeps collecting.
             if ($reason !== 'insufficient_samples') {
-                [$sum, $count, $start] = [0.0, 0, $now];
+                [$sum, $count, $badCount, $start] = [0.0, 0, 0, $now];
             }
             if ($missing !== [] && $stage !== '') {
                 $reason .= ' stage_missing:'.implode(',', $missing);
@@ -100,20 +107,21 @@ class FreeAdaptiveBackfillGovernor
         }
 
         return new FreeAdaptiveState(
-            $next, $changedAt, $now, $prev->lastDoneAt, $reason, $stage, $projected, $ewma, $sum, $count, $start,
+            $next, $changedAt, $now, $prev->lastDoneAt, $reason, $stage, $projected, $ewma, $sum, $count, $start, $badCount,
         );
     }
 
     /**
      * Direction (+1 grow, -1 shrink, 0 hold) and reason for a closed window.
-     * A window whose latest sample is stale or missing grows, whatever its mean.
+     * Fails long: a window whose latest sample is stale or missing, or in which
+     * stale ticks are at least as many as fresh ones, grows whatever its mean.
      *
      * @return array{0: int, 1: string}
      */
-    private function decide(?string $bad, float $mean, int $count, FreeAdaptiveConfig $config): array
+    private function decide(?string $bad, float $mean, int $count, int $badCount, FreeAdaptiveConfig $config): array
     {
-        if ($bad !== null) {
-            return [1, $bad];
+        if ($bad !== null || $badCount >= $count && $badCount > 0) {
+            return [1, $bad ?? 'metrics_stale'];
         }
         if ($count < $config->minSamples) {
             return [0, 'insufficient_samples'];

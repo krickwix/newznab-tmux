@@ -335,6 +335,40 @@ final class FreeAdaptiveBackfillGovernorTest extends TestCase
         self::assertSame('metrics_stale', $next->reason);
     }
 
+    public function test_a_mostly_stale_window_with_a_fresh_boundary_tick_still_grows(): void
+    {
+        // 4 stale ticks against 2 fresh ones (one of them the boundary), and a mean of 0.2.
+        $prev = new FreeAdaptiveState(120, self::NOW - 1000, self::NOW - 60, 0, windowSum: 0.2, windowSamples: 1, windowStart: self::NOW - 400, windowBad: 4);
+
+        $next = $this->evaluateAt($prev, $this->snapshot(120_000, 0.0), self::NOW);
+
+        self::assertSame(180, $next->delay);
+        self::assertSame('metrics_stale', $next->reason);
+        self::assertSame(0, $next->windowBad);
+    }
+
+    public function test_stale_ticks_are_counted_in_the_window(): void
+    {
+        $prev = new FreeAdaptiveState(120, self::NOW - 1000, self::NOW - 60, 0, windowStart: self::NOW - 100);
+
+        $next = $this->evaluateAt($prev, $this->snapshot(0, 0.0, ['telemetryFresh' => false]), self::NOW - 30);
+
+        self::assertSame(1, $next->windowBad);
+    }
+
+    public function test_a_gap_resets_the_window_but_keeps_the_delay(): void
+    {
+        $prev = new FreeAdaptiveState(900, self::NOW - 5000, self::NOW - 600, 0, windowSum: 9.0, windowSamples: 9, windowStart: self::NOW - 5000, windowBad: 3);
+
+        $next = $this->evaluateAt($prev, $this->snapshot(570_000, 0.0), self::NOW);
+
+        self::assertSame(900, $next->delay);
+        self::assertSame(1, $next->windowSamples);
+        self::assertSame(0, $next->windowBad);
+        self::assertSame(self::NOW, $next->windowStart);
+        self::assertEqualsWithDelta(0.95, $next->windowSum, 0.0001);
+    }
+
     public function test_the_window_mean_is_reported(): void
     {
         $state = $this->feed(new FreeAdaptiveState(120, self::NOW, self::NOW, 0, windowStart: self::NOW), [300_000, 330_000], self::NOW + 60);

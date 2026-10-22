@@ -26,6 +26,8 @@ final readonly class FreeAdaptiveState
         public int $windowSamples = 0,
         /** Start of the current window; a hold at the boundary restarts it. */
         public int $windowStart = 0,
+        /** Stale or missing ticks in the window; they count against it, not into the mean. */
+        public int $windowBad = 0,
     ) {}
 
     public function windowMean(): ?float

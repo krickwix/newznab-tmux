@@ -38,10 +38,12 @@ class FreeAdaptiveStateStore
 
     public const string WINDOW_START = 'orchestrator_fa_wstart';
 
+    public const string WINDOW_BAD = 'orchestrator_fa_pbad';
+
     /** @var list<string> */
     public const array ALL = [
         self::DELAY, self::UPDATED_AT, self::CHECKED_AT, self::LAST_DONE_AT, self::NEXT_AT, self::REASON,
-        self::WINDOW_SUM, self::WINDOW_SAMPLES, self::WINDOW_START,
+        self::WINDOW_SUM, self::WINDOW_SAMPLES, self::WINDOW_START, self::WINDOW_BAD,
     ];
 
     /** Reads the stored state; a missing delay row yields delay -1 (never stored). */
@@ -72,6 +74,7 @@ class FreeAdaptiveStateStore
             windowSum: (float) ($rows[self::WINDOW_SUM] ?? 0.0),
             windowSamples: (int) ($rows[self::WINDOW_SAMPLES] ?? 0),
             windowStart: (int) ($rows[self::WINDOW_START] ?? 0),
+            windowBad: (int) ($rows[self::WINDOW_BAD] ?? 0),
         );
     }
 
@@ -84,6 +87,7 @@ class FreeAdaptiveStateStore
             self::WINDOW_SUM => (string) round($state->windowSum, 6),
             self::WINDOW_SAMPLES => (string) $state->windowSamples,
             self::WINDOW_START => (string) $state->windowStart,
+            self::WINDOW_BAD => (string) $state->windowBad,
             self::NEXT_AT => (string) $state->nextEligibleAt(),
             self::REASON => json_encode([
                 'reason' => $state->reason,
