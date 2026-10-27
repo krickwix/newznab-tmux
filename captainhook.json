@@ -43,9 +43,16 @@
                 "conditions": []
             },
             {
-                "action": "vendor/bin/pint",
+                "action": "vendor/bin/pint {$STAGED_FILES|of-type:php}",
                 "options": [],
-                "conditions": []
+                "conditions": [
+                    {
+                        "exec": "\\CaptainHook\\App\\Hook\\Condition\\FileStaged\\OfType",
+                        "args": [
+                            "php"
+                        ]
+                    }
+                ]
             }
         ]
     },
