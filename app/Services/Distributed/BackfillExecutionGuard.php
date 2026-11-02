@@ -108,6 +108,66 @@ class BackfillExecutionGuard
             ]);
     }
 
+    /**
+     * Drop settled receipts once they are older than the retention window.
+     *
+     * Nothing prunes this table otherwise, so it grew to 1,075 abandoned rows
+     * from a ten-day window in July and sat there for 95 days. With
+     * enforcement on it gains one row per chunk -- 35 per 350k permit -- so it
+     * needs a floor sweep, not a one-off cleanup.
+     *
+     * Two guards make this safe to run while backfill is live:
+     *  - generation < orchestrator_bf_claimed, so the in-flight generation and
+     *    anything newer are untouchable. complete() reads a generation's
+     *    receipts seconds after the claim; deleting them would fail a permit
+     *    that did its work.
+     *  - claimed_at older than the window. claimed_at is NOT NULL, while
+     *    completed_at is null for CLAIMED and FAILED rows.
+     *
+     * @return array{retention_days: int, cutoff: string, floor_generation: int, deleted: int, applied: bool}
+     */
+    public function pruneSettledReceipts(?int $retentionDays = null, int $limit = 20_000, bool $apply = false): array
+    {
+        $retentionDays = max(1, $retentionDays ?? (int) config('nntmux.backfill_receipt_retention_days', 14));
+        $limit = max(1, $limit);
+        $cutoff = now()->subDays($retentionDays);
+        $summary = [
+            'retention_days' => $retentionDays,
+            'cutoff' => $cutoff->toDateTimeString(),
+            'floor_generation' => 0,
+            'deleted' => 0,
+            'applied' => $apply,
+        ];
+        if (! Schema::hasTable('backfill_execution_ranges')) {
+            return $summary;
+        }
+
+        // A claimed generation with no settlement yet is the live one. Fall
+        // back to the completed marker, and to 0 (prune nothing) if neither is
+        // readable, so a missing settings row cannot widen the delete.
+        $claimed = (int) Settings::settingValue('orchestrator_bf_claimed');
+        $completed = (int) Settings::settingValue('orchestrator_bf_completed');
+        $floor = max(0, $claimed > 0 ? $claimed : $completed);
+        $summary['floor_generation'] = $floor;
+        if ($floor <= 0) {
+            return $summary;
+        }
+
+        $query = DB::table('backfill_execution_ranges')
+            ->where('generation', '<', $floor)
+            ->where('claimed_at', '<', $cutoff);
+
+        if (! $apply) {
+            $summary['deleted'] = (int) (clone $query)->limit($limit)->count();
+
+            return $summary;
+        }
+
+        $summary['deleted'] = (int) $query->limit($limit)->delete();
+
+        return $summary;
+    }
+
     private function validateLocked(int $generation, string $group, int $first, int $last): void
     {
         $rows = Settings::query()
