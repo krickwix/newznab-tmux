@@ -34,6 +34,10 @@ Schedule::command('nntmux:disable-expired-registration-periods')->everyFiveMinut
 Schedule::command('nntmux:remove-bad')->hourly()->withoutOverlapping();
 Schedule::command('cloudflare:reload')->daily()->withoutOverlapping();
 Schedule::command('cache:prune-stale-tags')->hourly();
+// Bound backfill_execution_ranges. Outside 02:00-06:00 UTC: that is the
+// backfill window, where the row-lock hard gate is already sensitive and a
+// delete competing with header ingest buys nothing.
+Schedule::command('nntmux:prune-backfill-receipts --apply')->dailyAt('07:10')->withoutOverlapping();
 Schedule::command('nntmux:collect-stats')->everyFifteenMinutes()->withoutOverlapping();
 Schedule::command('nntmux:populate-steam-apps')->monthly();
 // Collect system metrics every 5 minutes

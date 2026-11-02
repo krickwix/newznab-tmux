@@ -67,6 +67,11 @@ return [
     // granting a permit the lane would skip leaves orchestrator_bf_permit set
     // and wedges backfill, because a new grant needs it back at 0.
     'safe_backfill_min_articles' => max(1, (int) env('NNTMUX_SAFE_BACKFILL_MIN_ARTICLES', 100)),
+    // How long a settled backfill range receipt is kept. complete() reads a
+    // generation's receipts seconds after the claim, so this window is purely
+    // forensic: long enough to inspect a failed generation, short enough that
+    // the table cannot grow without bound at 35 rows per 350k permit.
+    'backfill_receipt_retention_days' => min(365, max(1, (int) env('NNTMUX_BACKFILL_RECEIPT_RETENTION_DAYS', 14))),
     'distributed_control_sleep_slice_seconds' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_CONTROL_SLEEP_SLICE_SECONDS', 5))),
     'split_collection_reconcile_groups' => array_values(array_unique(array_filter(array_map(
         'trim',
