@@ -15,7 +15,10 @@ final class BackfillStopCursorPolicyTest extends TestCase
         config()->set('nntmux.orchestrator.backfill_stop_cursors', 'alt.test:60000');
         $policy = new BackfillStopCursorPolicy;
 
-        self::assertSame(50_000, $policy->remainingArticles('alt.test', 100_000, 90_000));
+        // Planning and execution agree exactly: the range left to work and the
+        // largest grant both end on the audited cursor. They used to differ by
+        // a 10k provider reserve the executor never spent.
+        self::assertSame(40_000, $policy->remainingArticles('alt.test', 100_000, 90_000));
         self::assertSame(40_000, $policy->clampQuantity('alt.test', 100_000, 60_000));
         self::assertSame(5_000, $policy->clampQuantity('alt.test', 65_000, 40_000));
         self::assertSame(0, $policy->clampQuantity('alt.test', 60_000, 40_000));

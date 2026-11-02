@@ -198,7 +198,10 @@ class WorkerControlStateStore
         $priorReleaseCohort = $this->takeIncompleteReleaseCohort($snapshot->backfillGroup, $now);
         $requestedQuantity = max(10_000, $quantity);
         $expectedCursorDelta = $snapshot->backfillRemainingArticles > 0
-            ? min($requestedQuantity, max(0, $snapshot->backfillRemainingArticles - 10_000))
+            ? min(
+                $requestedQuantity,
+                max(0, $snapshot->backfillRemainingArticles - WorkerControlProfile::providerReserveArticles()),
+            )
             : $requestedQuantity;
         $observation = [
             'schema_version' => 2,

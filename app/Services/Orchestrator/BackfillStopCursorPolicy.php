@@ -52,9 +52,12 @@ final class BackfillStopCursorPolicy
             return 0;
         }
 
-        // The planner subtracts a 10k provider reserve when deriving a permit.
+        // The planner subtracts the provider reserve when deriving a permit.
         // Add it around the explicit floor so the final grant lands on it.
-        return min($remainingArticles, $cursor - $stopCursor + 10_000);
+        return min(
+            $remainingArticles,
+            $cursor - $stopCursor + WorkerControlProfile::providerReserveArticles(),
+        );
     }
 
     public function clampQuantity(string $group, int $cursor, int $requested): int

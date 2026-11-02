@@ -62,6 +62,11 @@ return [
     // so a revisit set smaller than the budget is not re-read every cycle. 0 disables.
     'namefix_revisit_min_sweep_seconds' => max(0, (int) env('NNTMUX_NAMEFIX_REVISIT_MIN_SWEEP_SECONDS', 3600)),
     'distributed_release_sweep_groups' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_RELEASE_SWEEP_GROUPS', 1))),
+    // Smallest remaining range the backfill lane will work. It is also the
+    // floor the orchestrator's candidate query and permit gate must respect:
+    // granting a permit the lane would skip leaves orchestrator_bf_permit set
+    // and wedges backfill, because a new grant needs it back at 0.
+    'safe_backfill_min_articles' => max(1, (int) env('NNTMUX_SAFE_BACKFILL_MIN_ARTICLES', 100)),
     'distributed_control_sleep_slice_seconds' => min(10, max(1, (int) env('NNTMUX_DISTRIBUTED_CONTROL_SLEEP_SLICE_SECONDS', 5))),
     'split_collection_reconcile_groups' => array_values(array_unique(array_filter(array_map(
         'trim',
@@ -269,8 +274,16 @@ return [
         'backfill_growth_learning_prior_floor_fraction' => min(1.0, max(0.10, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_PRIOR_FLOOR_FRACTION', 0.25))),
         'backfill_growth_learning_latest_sample_seconds' => min(86400, max(300, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_GROWTH_LEARNING_LATEST_SAMPLE_SECONDS', 7200))),
         'backfill_target_lock_retry_seconds' => min(86400, max(300, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_TARGET_LOCK_RETRY_SECONDS', 21600))),
-        'backfill_terminal_min_attempts' => max(3, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_ATTEMPTS', 3)),
-        'backfill_terminal_min_yield' => max(1.0, (float) env('NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_YIELD', 1.0)),
+        // Articles left untouched above the provider's own low-water mark on an
+        // orchestrator-managed permit. This used to be a hardcoded 10k in the
+        // planner, the permit gate, the observation and the backfill lane, and
+        // it stranded every group that walked down to provider_first + 10000:
+        // the candidate query wanted more than 10k remaining, the selector
+        // wanted 20k, and the permit quantity was floored to 0. Twelve groups
+        // sat there with frozen 2008-2025 cursor dates. 0 lets a group finish
+        // on its provider floor; raise it only to re-create that reserve, and
+        // never above the lane's own `safe_backfill_min_articles` floor.
+        'backfill_provider_reserve_articles' => max(0, (int) env('NNTMUX_ORCHESTRATOR_BACKFILL_PROVIDER_RESERVE_ARTICLES', 0)),
         'prometheus_url' => env('NNTMUX_ORCHESTRATOR_PROMETHEUS_URL', 'http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090'),
         'prometheus_retry_attempts' => min(5, max(1, (int) env('NNTMUX_ORCHESTRATOR_PROMETHEUS_RETRY_ATTEMPTS', 3))),
         'prometheus_sample_max_age_seconds' => min(600, max(30, (int) env('NNTMUX_ORCHESTRATOR_PROMETHEUS_SAMPLE_MAX_AGE_SECONDS', 120))),

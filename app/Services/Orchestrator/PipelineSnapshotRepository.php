@@ -157,7 +157,6 @@ class PipelineSnapshotRepository
             $yieldHistory,
             $controlState,
             time(),
-            $profileOverride,
         );
         $backfillPermitHandoffSafe = $this->permitHandoffTargetSafe(
             $safeBackfillCandidates,
@@ -666,7 +665,6 @@ class PipelineSnapshotRepository
         array $history,
         ControlState $state,
         int $now,
-        ?ControlProfile $profileOverride = null,
     ): ?array {
         $pendingGroups = $this->state->pendingBackfillDelayedAttributionGroups();
         $contextRepeat = $this->state->backfillContextRepeat($now);
@@ -707,7 +705,6 @@ class PipelineSnapshotRepository
             $now,
             $state->ineffectiveBackfillPermitsByTarget,
             $contextRepeat,
-            $profileOverride?->isFreeRunFamily() === true,
         );
     }
 
@@ -1501,7 +1498,7 @@ class PipelineSnapshotRepository
                     AND CAST(g.first_record AS SIGNED) <= CAST(g.last_record AS SIGNED) + 1
                 )
             )
-            AND CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) > 10000
+            AND CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= '.$this->minimumBackfillRangeArticles().'
             ORDER BY '.$orderBySql.'
             LIMIT '.self::BACKFILL_CANDIDATE_LIMIT, $bindings);
 
@@ -1520,6 +1517,16 @@ class PipelineSnapshotRepository
     private function remainingArticlesWithinStopCursor(string $group, int $cursor, int $remainingArticles): int
     {
         return (new BackfillStopCursorPolicy)->remainingArticles($group, $cursor, $remainingArticles);
+    }
+
+    /**
+     * Smallest remaining range worth a permit. It must never be below the
+     * backfill lane's own floor: a permit the lane skips is never claimed, and
+     * an unclaimed permit blocks every later grant.
+     */
+    private function minimumBackfillRangeArticles(): int
+    {
+        return max(1, (int) config('nntmux.safe_backfill_min_articles', 100));
     }
 
     /**

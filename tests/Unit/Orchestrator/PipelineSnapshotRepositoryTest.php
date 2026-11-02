@@ -722,7 +722,7 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertSame(10_000, $target['safe_quantity'] ?? null);
     }
 
-    public function test_repository_allows_only_free_run_to_consume_an_unproven_terminal_window(): void
+    public function test_repository_targets_a_near_floor_window_in_every_profile(): void
     {
         config([
             'nntmux.orchestrator.state_store' => 'array',
@@ -736,33 +736,27 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         );
         $method = new ReflectionMethod($repository, 'selectBackfillTarget');
         $candidate = [[
-            'name' => 'alt.terminal',
+            'name' => 'alt.near-floor',
             'cursor' => 147_219_426,
             'cursor_postdate' => '2008-10-24 01:12:31',
             'remaining_articles' => 10_505,
             'safe_quantity' => 40_000,
         ]];
 
-        self::assertNull($method->invoke(
-            $repository,
-            $candidate,
-            [],
-            new ControlState(profile: ControlProfile::Balanced),
-            2_000_000_000,
-            ControlProfile::Balanced,
-        ));
+        // This window used to need the free-run profile; under the pinned fill
+        // profile the group was parked above its source floor for good.
+        foreach ([ControlProfile::Balanced, ControlProfile::Fill, ControlProfile::FreeRun] as $profile) {
+            $target = $method->invoke(
+                $repository,
+                $candidate,
+                [],
+                new ControlState(profile: $profile),
+                2_000_000_000,
+            );
 
-        $target = $method->invoke(
-            $repository,
-            $candidate,
-            [],
-            new ControlState(profile: ControlProfile::Balanced),
-            2_000_000_000,
-            ControlProfile::FreeRun,
-        );
-
-        self::assertSame('alt.terminal', $target['name'] ?? null);
-        self::assertSame(10_000, $target['safe_quantity'] ?? null);
+            self::assertSame('alt.near-floor', $target['name'] ?? null, $profile->value);
+            self::assertSame(10_000, $target['safe_quantity'] ?? null, $profile->value);
+        }
     }
 
     public function test_repository_rejects_all_supply_when_pending_context_candidate_cursor_drifted(): void
@@ -1058,8 +1052,6 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             'nntmux.orchestrator.state_store' => 'array',
             'nntmux.orchestrator.backfill_probe_groups' => ['alt.terminal'],
             'nntmux.orchestrator.backfill_delayed_attribution_seconds' => 9_000,
-            'nntmux.orchestrator.backfill_terminal_min_attempts' => 3,
-            'nntmux.orchestrator.backfill_terminal_min_yield' => 1.0,
         ]);
         Cache::store('array')->flush();
         $state = new WorkerControlStateStore;
@@ -1309,7 +1301,9 @@ final class PipelineSnapshotRepositoryTest extends TestCase
                 self::assertStringContainsString('CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) <= 10000', $sql);
                 self::assertStringContainsString('CAST(g.last_record AS SIGNED) BETWEEN CAST(s.first_record AS SIGNED) AND CAST(s.last_record AS SIGNED)', $sql);
                 self::assertStringContainsString('CAST(g.first_record AS SIGNED) <= CAST(g.last_record AS SIGNED) + 1', $sql);
-                self::assertStringContainsString('CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) > 10000', $sql);
+                // The lane's own floor, not a 10k provider reserve: granting a
+                // permit the lane would skip leaves it unclaimed forever.
+                self::assertStringContainsString('CAST(g.first_record AS SIGNED) - CAST(s.first_record AS SIGNED) >= 100', $sql);
                 self::assertStringContainsString("g.first_record_postdate >= '2000-01-01'", $sql);
                 self::assertStringContainsString("g.last_record_postdate >= '2000-01-01'", $sql);
                 self::assertStringContainsString('CAST(g.last_record AS SIGNED) < 9223372036854775807', $sql);
@@ -1381,11 +1375,14 @@ final class PipelineSnapshotRepositoryTest extends TestCase
             eligibility: new BackfillDateEligibilityPolicy(1),
         );
 
+        // Exactly the distance to the audited floor, so the final permit lands
+        // on it. It used to report 10k more -- the provider reserve the lane
+        // never spent -- and no permit ever reached the boundary.
         self::assertSame([[
             'name' => 'alt.test',
             'cursor' => 100_000,
             'cursor_postdate' => '2020-01-01 00:00:00',
-            'remaining_articles' => 50_000,
+            'remaining_articles' => 40_000,
         ]], $repository->backfillCandidates());
     }
 

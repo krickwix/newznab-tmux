@@ -1069,7 +1069,7 @@ final class WorkerOrchestratorTest extends TestCase
         self::assertSame(9, $nextObservation['generation']);
     }
 
-    public function test_completed_terminal_fringe_queues_delayed_attribution_without_an_early_strike(): void
+    public function test_completed_near_floor_permit_queues_delayed_attribution_without_an_early_strike(): void
     {
         config([
             'nntmux.orchestrator.auto_backfill' => false,
@@ -1121,13 +1121,16 @@ final class WorkerOrchestratorTest extends TestCase
             lowPressure: true,
             eligibleBackfillSupply: true,
             backfillGroup: 'alt.test',
-            backfillCursor: 10_002,
+            // The permit walked its whole 10k: 16_389 - 10_000. It used to
+            // stop at 10_002, a 6_387 walk, because the planner expected the
+            // range minus a 10k provider reserve.
+            backfillCursor: 6_389,
             backfillSafeQuantity: 50_000,
         );
         $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
         $snapshots->shouldReceive('capture')->once()->andReturn($current);
         $snapshots->shouldReceive('backfillOutcomeForGroup')->once()->with('alt.test')->andReturn([
-            'cursor' => 10_002,
+            'cursor' => 6_389,
             'cursor_postdate' => '2026-01-01 03:04:05',
             'ready_collections' => 0,
             'releases' => 4_211,

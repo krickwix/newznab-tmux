@@ -717,7 +717,7 @@ final class WorkerControlStateStoreTest extends TestCase
         self::assertSame([], $store->pendingBackfillDelayedAttributionGroups());
     }
 
-    public function test_terminal_observation_queues_the_exact_fringe_above_the_provider_reserve(): void
+    public function test_near_floor_observation_queues_the_whole_remaining_range(): void
     {
         $store = new WorkerControlStateStore;
         $store->beginPermitObservation(new PipelineSnapshot(
@@ -738,20 +738,23 @@ final class WorkerControlStateStoreTest extends TestCase
         ], quantity: 10_000);
         $observation = $store->permitObservation();
 
-        self::assertSame(6_387, $observation['backfill_expected_cursor_delta'] ?? null);
+        // The grant is the expected walk: 10k of the 16_387 left above the
+        // source floor. It used to be 6_387, the fringe over a 10k reserve the
+        // lane never spent, so the real delta never matched the expectation.
+        self::assertSame(10_000, $observation['backfill_expected_cursor_delta'] ?? null);
         self::assertFalse($store->queueBackfillDelayedAttribution(
-            $observation ?? [],
-            ['cursor_postdate' => '2008-10-18 20:34:25'],
-            10_000,
-            1_100,
-        ));
-        self::assertTrue($store->queueBackfillDelayedAttribution(
             $observation ?? [],
             ['cursor_postdate' => '2008-10-18 20:34:25'],
             6_387,
             1_100,
         ));
-        self::assertSame(6_387, $store->matureBackfillDelayedAttribution(10_100)['cursor_delta'] ?? null);
+        self::assertTrue($store->queueBackfillDelayedAttribution(
+            $observation ?? [],
+            ['cursor_postdate' => '2008-10-18 20:34:25'],
+            10_000,
+            1_100,
+        ));
+        self::assertSame(10_000, $store->matureBackfillDelayedAttribution(10_100)['cursor_delta'] ?? null);
     }
 
     public function test_delayed_yield_is_generation_idempotent(): void

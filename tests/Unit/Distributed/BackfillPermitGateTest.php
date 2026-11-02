@@ -415,6 +415,108 @@ class BackfillPermitGateTest extends TestCase
         ];
     }
 
+    /**
+     * @param  array{provider_first?: int, cursor?: int}  $range
+     */
+    private function nearFloorSuccessorFixture(array $range = []): void
+    {
+        config()->set('nntmux.orchestrator.backfill_days_override', 1);
+        config()->set('nntmux.orchestrator.backfill_probe_groups', ['all']);
+        Schema::create('usenet_groups', function (Blueprint $table): void {
+            $table->id();
+            $table->string('name')->unique();
+            $table->boolean('active');
+            $table->boolean('backfill');
+            $table->unsignedInteger('backfill_target');
+            $table->unsignedBigInteger('first_record');
+            $table->dateTime('first_record_postdate');
+            $table->unsignedBigInteger('last_record');
+            $table->dateTime('last_record_postdate');
+        });
+        Schema::create('short_groups', function (Blueprint $table): void {
+            $table->string('name')->unique();
+            $table->unsignedBigInteger('first_record');
+            $table->unsignedBigInteger('last_record');
+            $table->dateTime('updated');
+        });
+        $cursor = $range['cursor'] ?? 59_969;
+        DB::table('usenet_groups')->insert([
+            'name' => 'alt.test',
+            'active' => 1,
+            'backfill' => 1,
+            // A target this wide keeps the cursor date pending whatever the
+            // real clock says, so the fixture cannot rot.
+            'backfill_target' => 99_999,
+            'first_record' => $cursor,
+            'first_record_postdate' => '2011-10-25 08:08:51',
+            'last_record' => 400_000,
+            'last_record_postdate' => '2011-10-26 00:00:00',
+        ]);
+        DB::table('short_groups')->insert([
+            'name' => 'alt.test',
+            'first_record' => $range['provider_first'] ?? 50_000,
+            'last_record' => 400_000,
+            'updated' => now(),
+        ]);
+        $this->settings('active', time() + 600, 0, 0);
+        Settings::query()->insert([
+            ['name' => 'orchestrator_generation', 'value' => '17'],
+            ['name' => 'orchestrator_free_run', 'value' => '1'],
+            ['name' => 'orchestrator_bf_budget', 'value' => '200000'],
+            ['name' => 'orchestrator_bf_completed', 'value' => '17'],
+            ['name' => 'orchestrator_bf_failed', 'value' => '0'],
+            ['name' => 'orchestrator_bfc_group', 'value' => 'alt.test'],
+            ['name' => 'orchestrator_bfc_profile', 'value' => 'free_run'],
+            ['name' => 'orchestrator_bfc_qty', 'value' => '100000'],
+            ['name' => 'orchestrator_bfc_stop', 'value' => '0'],
+            ['name' => 'orchestrator_bfc_first', 'value' => (string) $cursor],
+            ['name' => 'orchestrator_bfc_last', 'value' => (string) ($cursor + 99_999)],
+        ]);
+        Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '17']);
+    }
+
+    public function test_free_run_successor_grants_the_short_final_permit_down_to_the_provider_floor(): void
+    {
+        // 9_969 articles left above the provider's first. The grant used to be
+        // floored to a 10k multiple, which made it 0 and refused the permit,
+        // so the group parked here for good with a frozen cursor date.
+        $this->nearFloorSuccessorFixture();
+
+        self::assertSame(18, (new BackfillPermitGate)->queueFreeRunSuccessor(17));
+        self::assertSame('alt.test', Settings::settingValue('orchestrator_bf_group'));
+        self::assertSame(9_969, Settings::settingValue('orchestrator_bf_qty'));
+        self::assertSame(18, Settings::settingValue('orchestrator_bf_permit'));
+        self::assertSame(190_031, Settings::settingValue('orchestrator_bf_budget'));
+    }
+
+    public function test_free_run_successor_refuses_a_range_below_the_backfill_lane_floor(): void
+    {
+        // 99 articles: the lane's own `safe_backfill_min_articles` query skips
+        // this group, so a permit for it would never be claimed or completed.
+        $this->nearFloorSuccessorFixture(['provider_first' => 59_870]);
+
+        self::assertNull((new BackfillPermitGate)->queueFreeRunSuccessor(17));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+    }
+
+    public function test_a_short_final_permit_is_claimable_but_a_sub_floor_one_is_not(): void
+    {
+        $this->settings('active', time() + 60, 0, 17);
+        Settings::query()->where('name', 'orchestrator_bf_qty')->update(['value' => '9969']);
+
+        self::assertSame(17, (new BackfillPermitGate)->claimGeneration());
+        self::assertSame(9_969, Settings::settingValue('orchestrator_bfc_qty'));
+        self::assertSame(0, Settings::settingValue('orchestrator_bf_permit'));
+
+        Settings::query()->where('name', 'orchestrator_bf_permit')->update(['value' => '18']);
+        Settings::query()->where('name', 'orchestrator_bf_claimed')->update(['value' => '0']);
+        Settings::query()->where('name', 'orchestrator_bf_qty')->update(['value' => '99']);
+        Settings::forgetCachedSettings();
+
+        self::assertNull((new BackfillPermitGate)->claimGeneration());
+        self::assertSame(18, Settings::settingValue('orchestrator_bf_permit'));
+    }
+
     private function settings(string $mode, int $lease, int $paused, int $permit): void
     {
         Settings::query()->insert([
