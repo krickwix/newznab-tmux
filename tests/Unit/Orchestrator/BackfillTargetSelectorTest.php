@@ -572,14 +572,14 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertSame('alt.probe.criterion', $target['name'] ?? null);
     }
 
-    public function test_it_excludes_invalid_dates_and_ranges_below_the_safe_probe_floor(): void
+    public function test_it_excludes_invalid_dates_and_ranges_below_the_lane_floor(): void
     {
         $selector = new BackfillTargetSelector(
             probeGroups: ['alt.probe.metal', 'alt.probe.criterion'],
             historyTtlSeconds: 86_400,
         );
         $tooSmall = $this->candidate('alt.probe.metal', '2008-08-15 09:08:32');
-        $tooSmall['remaining_articles'] = 19_999;
+        $tooSmall['remaining_articles'] = 99;
         $invalidDate = $this->candidate('alt.invalid', '0000-12-12 15:09:20');
 
         $target = $selector->select([
@@ -955,65 +955,42 @@ final class BackfillTargetSelectorTest extends TestCase
         self::assertSame('alt.stale-one-strike', $target['name'] ?? null);
     }
 
-    public function test_recent_proven_zero_strike_terminal_range_is_selected_and_clamped_to_exactly_10k(): void
+    public function test_near_floor_range_is_selected_and_clamped_to_exactly_10k(): void
     {
-        $selector = new BackfillTargetSelector(
-            probeGroups: [],
-            historyTtlSeconds: 86_400,
-            terminalMinAttempts: 3,
-            terminalMinYield: 1.0,
-        );
-        $terminal = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
+        $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
+        $nearFloor = [...$this->candidate('alt.near-floor', '2008-10-24 01:12:31'),
             'remaining_articles' => 16_387,
             'safe_quantity' => 80_000,
         ];
 
-        $target = $selector->select([$terminal], [
-            'alt.terminal' => [
-                'attempts' => 54,
-                'ewma_nzbs_per_10k' => 1.442194,
-                'last_attempt_at' => 1_999_999_000,
-                'last_effective_at' => 1_999_998_000,
-                'last_cursor_delta' => 80_000,
-            ],
-        ], now: 2_000_000_000);
+        $target = $selector->select([$nearFloor], history: [], now: 2_000_000_000);
 
-        self::assertSame('alt.terminal', $target['name'] ?? null);
+        self::assertSame('alt.near-floor', $target['name'] ?? null);
         self::assertSame(10_000, $target['safe_quantity'] ?? null);
-        self::assertTrue($target['terminal_positive'] ?? false);
+        self::assertTrue($target['near_floor_range'] ?? false);
     }
 
-    public function test_terminal_lane_includes_both_10_001_and_19_999_boundaries(): void
+    public function test_near_floor_lane_covers_the_old_ten_thousand_dead_zone(): void
     {
-        $selector = new BackfillTargetSelector(
-            probeGroups: [],
-            historyTtlSeconds: 86_400,
-            terminalMinAttempts: 3,
-            terminalMinYield: 1.0,
-        );
-        $history = [
-            'alt.terminal' => [
-                'attempts' => 3,
-                'ewma_nzbs_per_10k' => 1.0,
-                'last_attempt_at' => 1_999_999_000,
-                'last_effective_at' => 1_999_998_000,
-                'last_cursor_delta' => 10_000,
-            ],
-        ];
+        $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
 
-        foreach ([10_001, 19_999] as $remainingArticles) {
-            $candidate = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
+        // Exactly 10k remaining is where a group used to park for good: the
+        // candidate query wanted more than 10k and the selector wanted 20k,
+        // so the last quantum above the provider floor was never fetched.
+        foreach ([100, 9_969, 10_000, 10_001, 19_999] as $remainingArticles) {
+            $candidate = [...$this->candidate('alt.near-floor', '2008-10-24 01:12:31'),
                 'remaining_articles' => $remainingArticles,
                 'safe_quantity' => 50_000,
             ];
-            $target = $selector->select([$candidate], $history, now: 2_000_000_000);
+            $target = $selector->select([$candidate], history: [], now: 2_000_000_000);
 
-            self::assertSame(10_000, $target['safe_quantity'] ?? null);
-            self::assertTrue($target['terminal_positive'] ?? false);
+            self::assertSame('alt.near-floor', $target['name'] ?? null, (string) $remainingArticles);
+            self::assertSame(10_000, $target['safe_quantity'] ?? null, (string) $remainingArticles);
+            self::assertTrue($target['near_floor_range'] ?? false, (string) $remainingArticles);
         }
     }
 
-    public function test_ordinary_20k_range_does_not_require_terminal_history(): void
+    public function test_ordinary_20k_range_keeps_its_safe_quantity_untouched(): void
     {
         $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
         $candidate = [...$this->candidate('alt.ordinary', '2008-10-24 01:12:31'),
@@ -1024,82 +1001,77 @@ final class BackfillTargetSelectorTest extends TestCase
         $target = $selector->select([$candidate], history: [], now: 2_000_000_000);
 
         self::assertSame('alt.ordinary', $target['name'] ?? null);
-        self::assertArrayNotHasKey('terminal_positive', $target ?? []);
+        self::assertArrayNotHasKey('near_floor_range', $target ?? []);
     }
 
-    public function test_free_run_can_select_an_unproven_terminal_range_without_weakening_its_floor(): void
+    public function test_a_near_floor_range_needs_no_special_profile_but_keeps_every_other_floor(): void
     {
         $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
-        $candidate = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
+        $candidate = [...$this->candidate('alt.near-floor', '2008-10-24 01:12:31'),
             'remaining_articles' => 10_505,
             'safe_quantity' => 40_000,
         ];
 
-        self::assertNull($selector->select([$candidate], history: [], now: 2_000_000_000));
+        $target = $selector->select([$candidate], history: [], now: 2_000_000_000);
 
-        $target = $selector->select(
-            [$candidate],
-            history: [],
-            now: 2_000_000_000,
-            allowUnprovenTerminalWindow: true,
-        );
-
-        self::assertSame('alt.terminal', $target['name'] ?? null);
+        self::assertSame('alt.near-floor', $target['name'] ?? null);
         self::assertSame(10_000, $target['safe_quantity'] ?? null);
-        self::assertTrue($target['terminal_positive'] ?? false);
+        self::assertTrue($target['near_floor_range'] ?? false);
 
+        // Below the backfill lane's own floor the planner must not target the
+        // group: the lane skips that range, so the permit is never claimed and
+        // an unclaimed permit blocks every later grant.
         self::assertNull($selector->select(
-            [[...$candidate, 'remaining_articles' => 10_000]],
+            [[...$candidate, 'remaining_articles' => 99]],
             history: [],
             now: 2_000_000_000,
-            allowUnprovenTerminalWindow: true,
         ));
-
         self::assertNull($selector->select(
             [[...$candidate, 'safe_quantity' => 9_999]],
             history: [],
             now: 2_000_000_000,
-            allowUnprovenTerminalWindow: true,
         ));
-
         self::assertNull($selector->select(
             [$candidate],
             history: [],
             now: 2_000_000_000,
             ineffectivePermitsByTarget: [
-                'alt.terminal' => WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT,
+                'alt.near-floor' => WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT,
             ],
-            allowUnprovenTerminalWindow: true,
         ));
     }
 
-    public function test_context_repeat_cannot_bypass_terminal_productivity_guards(): void
+    public function test_context_repeat_still_requires_a_range_above_the_lane_floor(): void
     {
         $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
-        $candidate = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
+        $candidate = [...$this->candidate('alt.near-floor', '2008-10-24 01:12:31'),
             'remaining_articles' => 16_387,
             'safe_quantity' => 10_000,
         ];
+        $contextRepeat = ['group' => 'alt.near-floor', 'marked_at' => 1_999_999_900];
 
         $target = $selector->select(
             [$candidate],
             history: [],
             now: 2_000_000_000,
-            contextRepeat: ['group' => 'alt.terminal', 'marked_at' => 1_999_999_900],
+            contextRepeat: $contextRepeat,
         );
 
-        self::assertNull($target);
+        self::assertSame('alt.near-floor', $target['name'] ?? null);
+        self::assertSame(10_000, $target['safe_quantity'] ?? null);
+
+        self::assertNull($selector->select(
+            [[...$candidate, 'remaining_articles' => 99]],
+            history: [],
+            now: 2_000_000_000,
+            contextRepeat: $contextRepeat,
+        ));
     }
 
-    public function test_terminal_range_fails_closed_without_every_productivity_guard(): void
+    public function test_a_range_at_or_below_the_floor_fails_closed(): void
     {
-        $selector = new BackfillTargetSelector(
-            probeGroups: [],
-            historyTtlSeconds: 86_400,
-            terminalMinAttempts: 3,
-            terminalMinYield: 1.0,
-        );
-        $candidate = [...$this->candidate('alt.terminal', '2008-10-24 01:12:31'),
+        $selector = new BackfillTargetSelector(probeGroups: [], historyTtlSeconds: 86_400);
+        $candidate = [...$this->candidate('alt.near-floor', '2008-10-24 01:12:31'),
             'remaining_articles' => 16_387,
             'safe_quantity' => 80_000,
         ];
@@ -1112,24 +1084,19 @@ final class BackfillTargetSelectorTest extends TestCase
         ];
 
         $cases = [
-            'fewer than 10k articles' => [[...$candidate, 'remaining_articles' => 9_999], $history, 0],
-            'exact provider reserve' => [[...$candidate, 'remaining_articles' => 10_000], $history, 0],
-            'insufficient attempts' => [$candidate, [...$history, 'attempts' => 2], 0],
-            'insufficient yield' => [$candidate, [...$history, 'ewma_nzbs_per_10k' => 0.999], 0],
-            'no effective result' => [$candidate, [...$history, 'last_effective_at' => 0], 0],
-            'stale history' => [$candidate, [...$history, 'last_attempt_at' => 1_999_913_600], 0],
-            'future history' => [$candidate, [...$history, 'last_attempt_at' => 2_000_000_001], 0],
-            'future effectiveness' => [$candidate, [...$history, 'last_effective_at' => 2_000_000_001], 0],
-            'one ineffective strike' => [$candidate, $history, 1],
+            'one article short of the lane floor' => [[...$candidate, 'remaining_articles' => 99], $history, 0],
+            'already on the floor' => [[...$candidate, 'remaining_articles' => 0], $history, 0],
+            'past the floor' => [[...$candidate, 'remaining_articles' => -1], $history, 0],
+            'strike limit reached' => [$candidate, $history, WorkerControlPolicy::INEFFECTIVE_BACKFILL_LIMIT],
             'insufficient safe capacity' => [[...$candidate, 'safe_quantity' => 9_999], $history, 0],
         ];
 
-        foreach ($cases as $message => [$terminal, $terminalHistory, $strikes]) {
+        foreach ($cases as $message => [$nearFloor, $nearFloorHistory, $strikes]) {
             $target = $selector->select(
-                [$terminal],
-                ['alt.terminal' => $terminalHistory],
+                [$nearFloor],
+                ['alt.near-floor' => $nearFloorHistory],
                 now: 2_000_000_000,
-                ineffectivePermitsByTarget: ['alt.terminal' => $strikes],
+                ineffectivePermitsByTarget: ['alt.near-floor' => $strikes],
             );
 
             self::assertNull($target, $message);

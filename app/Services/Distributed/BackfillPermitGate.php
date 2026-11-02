@@ -8,6 +8,7 @@ use App\Models\Settings;
 use App\Services\Orchestrator\BackfillDateEligibilityPolicy;
 use App\Services\Orchestrator\BackfillStopCursorPolicy;
 use App\Services\Orchestrator\FreeAdaptiveStateStore;
+use App\Services\Orchestrator\WorkerControlProfile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -83,7 +84,12 @@ class BackfillPermitGate
                 || (int) $rows->get('orchestrator_bf_paused', 1) !== 0
                 || (int) $rows->get('orchestrator_bf_permit', 0) <= 0
                 || $group === ''
-                || (int) $rows->get('orchestrator_bf_qty', 0) < 10000) {
+                // A short final permit -- the last partial quantum down to the
+                // source floor -- must still be claimable. Holding this at 10k
+                // while the grant could legitimately be smaller would leave
+                // orchestrator_bf_permit set with nobody able to consume it,
+                // which blocks every later grant.
+                || (int) $rows->get('orchestrator_bf_qty', 0) < $this->minimumRangeArticles()) {
                 return null;
             }
 
@@ -375,14 +381,20 @@ class BackfillPermitGate
                 $cursor,
                 max(0, $cursor - $providerFirst),
             );
-            $sourceQuantity = $remainingArticles > 10_000 && $remainingArticles < 20_000
-                ? 10_000
-                : min($quantity, intdiv(max(0, $remainingArticles - 10_000), 10_000) * 10_000);
+            // Grant at most what is left above the source floor, including a
+            // final partial quantum: flooring this to a 10k multiple refused
+            // every permit from `provider_first + reserve` down, which parked
+            // the group there for good. The lane chunks any size by maxmssgs
+            // and re-derives the same floor, so a short last grant is safe.
+            $sourceQuantity = min(
+                $quantity,
+                max(0, $remainingArticles - WorkerControlProfile::providerReserveArticles()),
+            );
             $quantity = min(
                 (int) $rows->get('orchestrator_bf_budget', 0),
                 $sourceQuantity,
             );
-            if ($quantity < 10_000) {
+            if ($quantity < $this->minimumRangeArticles()) {
                 return null;
             }
 
@@ -404,6 +416,16 @@ class BackfillPermitGate
 
             return $nextGeneration;
         }, 3);
+    }
+
+    /**
+     * Smallest range the backfill lane will still work, and therefore the
+     * smallest permit worth claiming: a permit the lane skips is never
+     * completed, and an uncompleted permit blocks every later grant.
+     */
+    private function minimumRangeArticles(): int
+    {
+        return max(1, (int) config('nntmux.safe_backfill_min_articles', 100));
     }
 
     private function groupIsAllowed(string $group): bool

@@ -1029,8 +1029,12 @@ final class NntmuxDeploymentManifestTest extends TestCase
         self::assertSame('30', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_CURRENT_WAIT_HARD_SECONDS'] ?? null);
         self::assertSame('120', $orchestratorEnv['NNTMUX_ORCHESTRATOR_DB_PROFILE_STABLE_SECONDS'] ?? null);
         self::assertSame('19000', $orchestratorEnv['NNTMUX_ORCHESTRATOR_CURRENT_FORWARD_PROVIDER_RESERVE'] ?? null);
-        self::assertSame('3', $orchestratorEnv['NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_ATTEMPTS'] ?? null);
-        self::assertSame('1.0', $orchestratorEnv['NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_YIELD'] ?? null);
+        // The terminal-window thresholds are gone with the 10k provider
+        // reserve; neither the orchestrator nor the lane may carry a reserve
+        // the other does not know about, so both stay on the code default.
+        self::assertArrayNotHasKey('NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_ATTEMPTS', $orchestratorEnv);
+        self::assertArrayNotHasKey('NNTMUX_ORCHESTRATOR_BACKFILL_TERMINAL_MIN_YIELD', $orchestratorEnv);
+        self::assertArrayNotHasKey('NNTMUX_ORCHESTRATOR_BACKFILL_PROVIDER_RESERVE_ARTICLES', $orchestratorEnv);
         self::assertIsArray($bodyRecovery);
         self::assertSame('*/5 * * * *', $bodyRecovery['spec']['schedule'] ?? null);
         self::assertTrue($bodyRecovery['spec']['suspend'] ?? null);

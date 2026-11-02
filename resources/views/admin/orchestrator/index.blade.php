@@ -568,7 +568,7 @@
     {{-- Per-group yield --}}
     <x-admin.card>
         <x-admin.page-header title="Per-group backfill yield (EWMA)" icon="fas fa-chart-line"
-            :subtitle="'Scale threshold '.round($yield['scale_min_yield'], 2).' NZBs/10k · terminal threshold '.round($yield['terminal_min_yield'], 2).' after '.$yield['terminal_min_attempts'].' attempts'" />
+            :subtitle="'Scale threshold '.round($yield['scale_min_yield'], 2).' NZBs/10k · targets any range from '.$count($yield['min_range_articles']).' articles up, holding back '.$count($yield['provider_reserve_articles']).' above the source floor'" />
         @if(! $yield['available'])
             <div class="px-6 py-8 text-center text-sm {{ $toneClass('muted') }}">
                 Yield history unavailable — the Redis state store could not be read.
@@ -587,7 +587,7 @@
                     <tr class="hover:bg-gray-50 dark:hover:bg-gray-700">
                         <td class="px-6 py-3 text-sm text-gray-900 dark:text-gray-100 font-mono">{{ $entry['group'] }}</td>
                         <td class="px-6 py-3 text-sm text-right text-gray-900 dark:text-gray-100">{{ $count($entry['attempts']) }}</td>
-                        <td class="px-6 py-3 text-sm text-right {{ $toneClass($entry['ewma_nzbs_per_10k'] < $yield['terminal_min_yield'] ? 'bad' : ($entry['ewma_nzbs_per_10k'] < $yield['scale_min_yield'] ? 'warn' : 'ok')) }}">
+                        <td class="px-6 py-3 text-sm text-right {{ $toneClass($entry['ewma_nzbs_per_10k'] <= 0.0 ? 'bad' : ($entry['ewma_nzbs_per_10k'] < $yield['scale_min_yield'] ? 'warn' : 'ok')) }}">
                             {{ round($entry['ewma_nzbs_per_10k'], 3) }}
                         </td>
                         <td class="px-6 py-3 text-sm text-right text-gray-900 dark:text-gray-100">{{ $count($entry['last_cursor_delta']) }}</td>

@@ -100,11 +100,25 @@ final readonly class WorkerControlProfile
         $targetNzbs = (int) config('nntmux.orchestrator.backfill_target_nzbs_per_permit', 60);
         $quantity = (int) ceil($targetNzbs / $nzbsPer10k) * 10000;
 
+        // The whole range down to the source floor is available. Rounding this
+        // down to a 10k multiple used to zero the last partial quantum, which
+        // is how a group ended up parked just above its provider floor.
         $availableQuantity = max(
             $floor,
-            intdiv(max(0, $remainingArticles - 10000), 10000) * 10000,
+            max(0, $remainingArticles - self::providerReserveArticles()),
         );
 
         return max($floor, min($rampLimit, $availableQuantity, $safeQuantity, $quantity));
+    }
+
+    /**
+     * Articles left untouched above the source's own floor. 0 lets a group
+     * finish; the permit gate and the backfill lane read the same value.
+     */
+    public static function providerReserveArticles(): int
+    {
+        return Container::getInstance()->bound('config')
+            ? max(0, (int) config('nntmux.orchestrator.backfill_provider_reserve_articles', 0))
+            : 0;
     }
 }

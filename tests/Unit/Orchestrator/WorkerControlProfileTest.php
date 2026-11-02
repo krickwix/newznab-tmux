@@ -37,7 +37,7 @@ final class WorkerControlProfileTest extends TestCase
             'nntmux.orchestrator.backfill_target_nzbs_per_permit' => 60,
         ]);
 
-        self::assertSame(40_000, WorkerControlProfile::for(ControlProfile::Fill)->quantityForYield(
+        self::assertSame(50_000, WorkerControlProfile::for(ControlProfile::Fill)->quantityForYield(
             0.207337,
             50_000,
             600_000,
@@ -55,8 +55,21 @@ final class WorkerControlProfileTest extends TestCase
         self::assertSame(10_000, WorkerControlProfile::for(ControlProfile::Balanced)->quantityForYield(10.0, 1_000_000));
     }
 
-    public function test_scaled_quantity_preserves_a_ten_thousand_article_source_reserve(): void
+    public function test_scaled_quantity_spends_the_whole_range_down_to_the_source_floor(): void
     {
+        $profile = WorkerControlProfile::for(ControlProfile::Fill);
+
+        self::assertSame(30_000, $profile->quantityForYield(10.0, 30_000));
+        self::assertSame(20_000, $profile->quantityForYield(10.0, 20_000));
+        // A last partial quantum asks for the probe floor and the permit gate
+        // clamps it to what is actually left; rounding it down to a 10k
+        // multiple here is what parked a group above its provider floor.
+        self::assertSame(10_000, $profile->quantityForYield(10.0, 9_969));
+    }
+
+    public function test_a_configured_provider_reserve_is_held_back_again(): void
+    {
+        config(['nntmux.orchestrator.backfill_provider_reserve_articles' => 10_000]);
         $profile = WorkerControlProfile::for(ControlProfile::Fill);
 
         self::assertSame(20_000, $profile->quantityForYield(10.0, 30_000));

@@ -19,9 +19,7 @@ final readonly class BackfillTargetSelector
 
     private int $lockRetrySeconds;
 
-    private int $terminalMinAttempts;
-
-    private float $terminalMinYield;
+    private int $minimumRangeArticles;
 
     private bool $fairShareNewestCursor;
 
@@ -34,8 +32,7 @@ final readonly class BackfillTargetSelector
         ?int $exploitAttemptsBeforeExplore = null,
         ?float $aggressiveExploreBelowYield = null,
         ?int $lockRetrySeconds = null,
-        ?int $terminalMinAttempts = null,
-        ?float $terminalMinYield = null,
+        ?int $minimumRangeArticles = null,
         ?bool $fairShareNewestCursor = null,
         ?int $ineffectiveBackfillLimit = null,
     ) {
@@ -67,17 +64,14 @@ final readonly class BackfillTargetSelector
                 ? (int) config('nntmux.orchestrator.backfill_target_lock_retry_seconds', 21_600)
                 : 21_600),
         );
-        $this->terminalMinAttempts = max(
-            3,
-            $terminalMinAttempts ?? ($container->bound('config')
-                ? (int) config('nntmux.orchestrator.backfill_terminal_min_attempts', 3)
-                : 3),
-        );
-        $this->terminalMinYield = max(
-            1.0,
-            $terminalMinYield ?? ($container->bound('config')
-                ? (float) config('nntmux.orchestrator.backfill_terminal_min_yield', 1.0)
-                : 1.0),
+        // Must stay at or above the backfill lane's own floor
+        // (`safe_backfill_min_articles`): a target the lane would skip yields a
+        // permit nobody claims, and an unclaimed permit blocks every later one.
+        $this->minimumRangeArticles = max(
+            1,
+            $minimumRangeArticles ?? ($container->bound('config')
+                ? (int) config('nntmux.safe_backfill_min_articles', 100)
+                : 100),
         );
         $this->fairShareNewestCursor = $fairShareNewestCursor ?? ($container->bound('config')
             ? (bool) config('nntmux.orchestrator.backfill_fair_share_newest_cursor', false)
@@ -100,25 +94,23 @@ final readonly class BackfillTargetSelector
         int $now,
         array $ineffectivePermitsByTarget = [],
         ?array $contextRepeat = null,
-        bool $allowUnprovenTerminalWindow = false,
     ): ?array {
         $candidates = array_values(array_filter(
             $candidates,
-            function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget, $allowUnprovenTerminalWindow): bool {
+            function (array $candidate) use ($history, $now, $ineffectivePermitsByTarget): bool {
                 $timestamp = strtotime($candidate['cursor_postdate']);
                 $entry = $history[$candidate['name']] ?? null;
                 $ineffectivePermits = (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0);
                 $lockRetryDue = $this->lockRetryDue($entry, $history, $now);
                 $remainingArticles = (int) $candidate['remaining_articles'];
-                $terminalWindow = $remainingArticles > 10_000 && $remainingArticles < 20_000;
-                $rangeEligible = $remainingArticles >= 20_000
-                    || ($allowUnprovenTerminalWindow && $terminalWindow)
-                    || $this->isTerminalPositiveCandidate(
-                        $candidate,
-                        $entry,
-                        $now,
-                        $ineffectivePermits,
-                    );
+                // Any range the lane can still work is eligible, down to its
+                // own floor. The old rule wanted 20k, or 10k-20k backed by a
+                // proven yield, which no barren group ever earns -- so a group
+                // that walked down to its provider floor + 10k was parked for
+                // good instead of spending one last permit and leaving the
+                // pool. Repeated empty permits are still bounded by the
+                // ineffective-permit limit below.
+                $rangeEligible = $remainingArticles >= $this->minimumRangeArticles;
 
                 return $candidate['cursor'] > 0
                     && $rangeEligible
@@ -138,9 +130,11 @@ final readonly class BackfillTargetSelector
             $entry = $history[$candidate['name']] ?? null;
             $candidate['lock_retry_due'] = $this->lockRetryDue($entry, $history, $now)
                 && (int) ($ineffectivePermitsByTarget[$candidate['name']] ?? 0) >= $this->ineffectiveBackfillLimit;
+            // A near-floor range takes one capped permit rather than a full
+            // fill-sized ask it could never spend.
             if ((int) $candidate['remaining_articles'] < 20_000) {
                 $candidate['safe_quantity'] = 10_000;
-                $candidate['terminal_positive'] = true;
+                $candidate['near_floor_range'] = true;
             }
 
             return $candidate;
@@ -303,10 +297,6 @@ final readonly class BackfillTargetSelector
     }
 
     /**
-     * @param  array{name: string, cursor: int, cursor_postdate: string, remaining_articles: int, safe_quantity?: int}  $candidate
-     * @param  array{attempts?: int, ewma_nzbs_per_10k?: float, last_attempt_at?: int, last_effective_at?: int, last_cursor_delta?: int}|null  $entry
-     */
-    /**
      * A locked target is retried once its last attempt is old enough. History
      * keeps only the most recent groups, so a locked target can lose its
      * entry, and it would then never be retried. An evicted group was last
@@ -330,29 +320,6 @@ final readonly class BackfillTargetSelector
         ), static fn (int $at): bool => $at > 0);
 
         return $kept !== [] && $now - min($kept) >= $this->lockRetrySeconds;
-    }
-
-    private function isTerminalPositiveCandidate(
-        array $candidate,
-        ?array $entry,
-        int $now,
-        int $ineffectivePermits,
-    ): bool {
-        $remainingArticles = (int) $candidate['remaining_articles'];
-        $lastAttemptAt = (int) ($entry['last_attempt_at'] ?? 0);
-        $lastEffectiveAt = (int) ($entry['last_effective_at'] ?? 0);
-
-        return $remainingArticles > 10_000
-            && $remainingArticles < 20_000
-            && is_array($entry)
-            && (int) ($entry['attempts'] ?? 0) >= $this->terminalMinAttempts
-            && (float) ($entry['ewma_nzbs_per_10k'] ?? 0.0) >= $this->terminalMinYield
-            && $lastAttemptAt > 0
-            && $lastAttemptAt <= $now
-            && $now - $lastAttemptAt < $this->historyTtlSeconds
-            && $lastEffectiveAt > 0
-            && $lastEffectiveAt <= $now
-            && $ineffectivePermits === 0;
     }
 
     /**

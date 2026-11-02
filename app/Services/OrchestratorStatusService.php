@@ -538,8 +538,11 @@ class OrchestratorStatusService
             'available' => $yieldHistory['available'],
             'groups' => $groups,
             'scale_min_yield' => (float) config('nntmux.orchestrator.backfill_scale_min_yield', 1.0),
-            'terminal_min_yield' => (float) config('nntmux.orchestrator.backfill_terminal_min_yield', 1.0),
-            'terminal_min_attempts' => (int) config('nntmux.orchestrator.backfill_terminal_min_attempts', 3),
+            // Smallest range still worth a permit. It replaced the terminal
+            // yield thresholds, which gated the last 10k of a group on a yield
+            // a barren group could never earn.
+            'min_range_articles' => max(1, (int) config('nntmux.safe_backfill_min_articles', 100)),
+            'provider_reserve_articles' => max(0, (int) config('nntmux.orchestrator.backfill_provider_reserve_articles', 0)),
         ];
     }
 

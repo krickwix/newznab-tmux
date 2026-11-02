@@ -7,6 +7,7 @@ namespace App\Services\Runners;
 use App\Models\Settings;
 use App\Services\Orchestrator\BackfillDateEligibilityPolicy;
 use App\Services\Orchestrator\BackfillStopCursorPolicy;
+use App\Services\Orchestrator\WorkerControlProfile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -115,7 +116,12 @@ class BackfillRunner extends BaseRunner
             $backfill_qty,
             $maxMessages,
             $threads,
-            $orchestratorGroup === '' ? 0 : 10000,
+            // Articles held back above the provider's own low-water mark.
+            // This was a hardcoded 10k for every orchestrator-pinned permit,
+            // so a pinned group stopped 10k short of the floor and the planner
+            // then refused to target it again. Unmanaged backfill never had the
+            // reserve; both now read the same configured value (0 by default).
+            WorkerControlProfile::providerReserveArticles(),
             $orchestratorStopCursor,
             $generation,
         );
@@ -266,7 +272,10 @@ class BackfillRunner extends BaseRunner
 
     protected function resolveBackfillQuantity(int $legacyQuantity, string $orchestratorGroup, int $pinnedQuantity): int
     {
-        return $orchestratorGroup !== '' && $pinnedQuantity >= 10000
+        // Any positive pinned quantity wins, including a short final permit.
+        // Falling back to the legacy setting there could fetch fewer articles
+        // than the permit expects, which reads as an ineffective permit.
+        return $orchestratorGroup !== '' && $pinnedQuantity > 0
             ? $pinnedQuantity
             : $legacyQuantity;
     }
@@ -319,6 +328,11 @@ class BackfillRunner extends BaseRunner
         return (int) DB::scalar($sql);
     }
 
+    /**
+     * Smallest remaining range worth a backfill pass. The orchestrator's
+     * candidate query, target selector and permit gate read the same value, so
+     * they never grant a permit this lane would skip.
+     */
     private function minimumSafeBackfillRange(): int
     {
         return max(1, (int) config('nntmux.safe_backfill_min_articles', 100));
