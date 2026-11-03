@@ -138,7 +138,6 @@ class LoginController extends Controller
                                     session([config('google2fa.session_var').'.auth.passed_at' => time()]);
 
                                     // Skip 2FA - proceed with login
-                                    Auth::logoutOtherDevices($request->input('password'));
                                     $this->rotateSessionTokenForCurrentSession($request, $user);
                                     $this->clearLoginAttempts($request);
 
@@ -161,9 +160,6 @@ class LoginController extends Controller
                         // Store rememberme preference in the session for 2FA flow
                         $request->session()->put('2fa:remember', $rememberMe);
 
-                        // Store password hash for breach check after 2FA (we hash it to avoid storing plain text)
-                        $request->session()->put('2fa:password_check', $request->input('password'));
-
                         Auth::logout();
 
                         // Store user ID in the session for 2FA verification
@@ -172,7 +168,6 @@ class LoginController extends Controller
                         return redirect()->route('2fa.verify');
                     }
 
-                    Auth::logoutOtherDevices($request->input('password'));
                     $this->rotateSessionTokenForCurrentSession($request, $user);
                     $this->clearLoginAttempts($request);
 
@@ -288,6 +283,20 @@ class LoginController extends Controller
         return $redirect;
     }
 
+    /**
+     * Invalidate every other session for this user and bind the new one to the
+     * current request.
+     *
+     * Do NOT add Auth::logoutOtherDevices() alongside this. It is redundant --
+     * EnforceSessionToken already logs other devices out by comparing
+     * users.session_token against the session's session_token_web -- and it is
+     * actively harmful here: it calls rehashPasswordIfRequired(force: true),
+     * so the stored password hash changes AFTER SessionGuard::login() has
+     * already written hashPasswordForCookie() of the previous hash into
+     * password_hash_web. AuthenticateSession compares those two on the next
+     * request, finds them different, and logs the user straight back out, so
+     * every password login bounces to /login with no error shown.
+     */
     private function rotateSessionTokenForCurrentSession(Request $request, User $user): void
     {
         $newSessionToken = Str::random(60);
