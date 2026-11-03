@@ -196,13 +196,12 @@ class PasswordSecurityController extends Controller
         // Store the timestamp for determining how long the 2FA session is valid
         session([config('google2fa.session_var').'.auth.passed_at' => time()]);
 
-        // Clean up the temporary session variables
-        $passwordToCheck = $request->session()->get('2fa:password_check');
-
-        if (is_string($passwordToCheck) && $passwordToCheck !== '') {
-            Auth::logoutOtherDevices($passwordToCheck);
-        }
-
+        // Other sessions are invalidated by the session_token rotation below,
+        // which EnforceSessionToken checks on every request. Auth::logoutOtherDevices()
+        // must NOT be used for that: it force-rehashes the stored password after
+        // Auth::login() has already written the previous hash into password_hash_web,
+        // so AuthenticateSession would log this session straight back out on the
+        // next request. See LoginController::rotateSessionTokenForCurrentSession().
         $newSessionToken = Str::random(60);
         $user->forceFill([
             'session_token' => $newSessionToken,
