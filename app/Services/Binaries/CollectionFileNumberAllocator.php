@@ -234,11 +234,12 @@ class CollectionFileNumberAllocator
         foreach (array_chunk($binaryIdList, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
             $placeholders = implode(',', array_fill(0, \count($chunk), '?'));
 
-            // Non-locking read by primary key. This transaction already holds an
-            // X lock on every one of these rows -- rows it inserted by way of
-            // the insert itself, rows that pre-existed via
-            // BinaryHandler::prelockForPartWrites() -- so FOR UPDATE here would
-            // buy nothing and only widen the ingest path's lock footprint.
+            // Non-locking read by primary key. A binary's hash and collection
+            // never change after insert, so a plain read already shows which
+            // file owns each row; FOR UPDATE would only widen the ingest
+            // path's lock footprint. Rows this transaction inserted are X-locked
+            // by the insert itself; pre-existing rows are deliberately not
+            // locked at all (see BinaryHandler::bulkInsertAndResolve()).
             $rows = DB::select(
                 "SELECT id, collections_id, {$hashExpression} AS hashvalue FROM binaries WHERE id IN ({$placeholders})",
                 $chunk,
