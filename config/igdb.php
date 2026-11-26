@@ -20,5 +20,5 @@ return [
      *
      * Recommended: 86400 (24 hours) for game data that rarely changes
      */
-    'cache_lifetime' => (int) env('IGDB_CACHE_LIFETIME', 86400),
+    'cache_lifetime' => filter_var(env('IGDB_CACHE_LIFETIME'), FILTER_VALIDATE_INT, ['options' => ['default' => 86400, 'min_range' => 0]]),
 ];

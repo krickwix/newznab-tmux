@@ -307,6 +307,14 @@ class RegexService
      */
     protected function _fetchRegex(string $groupName): void
     {
+        // tryRegex() runs once per header, so serve repeat lookups from this
+        // process before paying a cache-server round trip and unserialize.
+        if (isset($this->_regexCache[$groupName]['ttl']) && $this->_regexCache[$groupName]['ttl'] > time()) {
+            return;
+        }
+
+        $ttlSeconds = max(0, (int) config('nntmux.cache_expiry_long')) * 60;
+
         // Get all regex from DB which match the current group name. Cache them for 15 minutes. #CACHEDQUERY#
         $sql = sprintf(
             'SELECT r.id, r.regex %s FROM %s r WHERE \'%s\' REGEXP r.group_regex AND r.status = 1 ORDER BY r.ordinal ASC, r.group_regex ASC',
@@ -315,13 +323,15 @@ class RegexService
             $groupName
         );
 
-        $this->_regexCache[$groupName]['regex'] = Cache::get(md5($sql));
+        $this->_regexCache[$groupName] = [
+            'regex' => Cache::get(md5($sql)),
+            'ttl' => time() + $ttlSeconds,
+        ];
         if ($this->_regexCache[$groupName]['regex'] !== null) {
             return;
         }
         $this->_regexCache[$groupName]['regex'] = DB::select($sql);
-        $expiresAt = now()->addMinutes(config('nntmux.cache_expiry_long'));
-        Cache::put(md5($sql), $this->_regexCache[$groupName]['regex'], $expiresAt);
+        Cache::put(md5($sql), $this->_regexCache[$groupName]['regex'], now()->addSeconds($ttlSeconds));
     }
 
     /**

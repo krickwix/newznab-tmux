@@ -2087,8 +2087,11 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         $source = file_get_contents(__DIR__.'/../../../app/Services/Orchestrator/PipelineSnapshotRepository.php');
 
         self::assertIsString($source);
+        self::assertStringContainsString('sc.ready_collections AS releases_backlog', $source);
+        self::assertStringContainsString('COALESCE(SUM(c.filecheck = 3), 0) AS ready_collections', $source);
         self::assertStringContainsString(
-            '(SELECT COUNT(*) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS releases_backlog',
+            'FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id
+                WHERE c.filecheck IN (0, 1, 2, 3, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS sc',
             $source,
         );
         self::assertStringNotContainsString(
