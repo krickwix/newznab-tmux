@@ -195,17 +195,20 @@ class BinariesStorageInternalsTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
-    public function test_binary_handler_prelocks_existing_ids_before_missing_binary_inserts(): void
+    public function test_binary_resolution_does_not_lock_existing_binaries(): void
     {
+        // Concurrent chunks of one large file must be able to insert its parts
+        // together; an X lock on the parent row here serialised them for the
+        // whole chunk transaction.
         $source = (string) file_get_contents(app_path('Services/Binaries/BinaryHandler.php'));
-        $method = strpos($source, 'private function bulkInsertAndResolve');
-        $prelock = strpos($source, '$this->prelockForPartWrites(array_values($this->withoutOverflowed($idsByKey)));', $method);
-        $insert = strpos($source, '$this->bulkInsertBinariesMysql($insertRows);', $method);
+        $start = strpos($source, 'private function bulkInsertAndResolve');
+        $end = strpos($source, 'private function sortBinaryInsertRows', (int) $start);
 
-        self::assertNotFalse($method);
-        self::assertNotFalse($prelock);
-        self::assertNotFalse($insert);
-        self::assertLessThan($insert, $prelock);
+        self::assertNotFalse($start);
+        self::assertNotFalse($end);
+        $body = substr($source, (int) $start, (int) $end - (int) $start);
+        self::assertStringNotContainsString('prelockForPartWrites(', $body);
+        self::assertStringNotContainsString('FOR UPDATE', $body);
     }
 
     public function test_binary_handler_sorts_missing_inserts_by_stable_unique_key(): void
@@ -223,46 +226,59 @@ class BinariesStorageInternalsTest extends TestCase
         self::assertSame(['aaa', 'ccc', 'bbb'], array_column($rows, 'hash'));
     }
 
-    public function test_header_storage_locks_and_updates_binaries_before_any_part_write(): void
+    public function test_header_storage_writes_binary_aggregates_only_after_commit(): void
     {
         $source = (string) file_get_contents(app_path('Services/Binaries/HeaderStorageService.php'));
-        $method = strpos($source, 'private function processHeaderChunk');
-        $resolve = strpos($source, '$this->binaryHandler->getOrCreateBinaries', $method);
-        $aggregate = strpos($source, '$this->binaryHandler->flushUpdates', $resolve);
-        $part = strpos($source, '$this->partHandler->addPart', $resolve);
+        $chunk = strpos($source, 'private function processHeaderChunk');
+        $chunkEnd = strpos($source, 'private function extractFileNumberAndTotal', (int) $chunk);
+        self::assertNotFalse($chunk);
+        self::assertNotFalse($chunkEnd);
+        self::assertStringNotContainsString(
+            'binaryHandler->flushUpdates',
+            substr($source, (int) $chunk, (int) $chunkEnd - (int) $chunk),
+            'an aggregate UPDATE inside the chunk transaction X-locks every touched binary until commit',
+        );
 
-        self::assertNotFalse($method);
-        self::assertNotFalse($resolve);
-        self::assertNotFalse($aggregate);
-        self::assertNotFalse($part);
-        self::assertLessThan($aggregate, $resolve);
-        self::assertLessThan($part, $aggregate);
+        $once = strpos($source, 'private function storeChunkOnce');
+        $finish = strpos($source, '$transaction->finish()', (int) $once);
+        $sync = strpos($source, '$this->binaryHandler->syncPartCounts(', (int) $once);
+        self::assertNotFalse($once);
+        self::assertNotFalse($finish);
+        self::assertNotFalse($sync);
+        self::assertLessThan($sync, $finish);
+        self::assertLessThan((int) $chunkEnd, $sync, 'the recount belongs to storeChunkOnce, before processHeaderChunk');
     }
 
-    public function test_binary_part_existence_check_uses_plain_read_under_read_committed(): void
+    public function test_part_recount_reads_parts_without_locks_and_never_lowers_a_count(): void
     {
         $handler = new BinaryHandler;
-        $method = new \ReflectionMethod($handler, 'existingPartKeysForResolvedRows');
+        $this->setPrivateProperty($handler, 'touchedBinaryIds', [9 => true, 7 => true]);
 
+        DB::shouldReceive('getDriverName')->once()->andReturn('mariadb');
         DB::shouldReceive('select')
             ->once()
             ->with(
                 Mockery::on(static fn (string $sql): bool => str_contains($sql, 'FROM parts')
-                    && ! str_contains($sql, 'FOR UPDATE')),
-                [7, 100],
+                    && ! str_contains($sql, 'FOR UPDATE')
+                    && ! str_contains($sql, 'LOCK IN SHARE MODE')),
+                [7, 9],
             )
-            ->andReturn([(object) ['binaries_id' => 7, 'number' => 100]]);
+            ->andReturn([
+                (object) ['binaries_id' => 7, 'parts' => 3, 'bytes' => 300],
+                (object) ['binaries_id' => 9, 'parts' => 1, 'bytes' => 50],
+            ]);
+        DB::shouldReceive('statement')
+            ->once()
+            ->with(
+                Mockery::on(static fn (string $sql): bool => str_starts_with($sql, 'UPDATE binaries b INNER JOIN (')
+                    && ! str_contains($sql, 'parts p')
+                    && str_contains($sql, 'GREATEST(b.currentparts, u.parts)')
+                    && str_contains($sql, 'GREATEST(b.partsize, u.bytes)')),
+                [7, 3, 300, 9, 1, 50],
+            )
+            ->andReturnTrue();
 
-        $existing = $method->invoke($handler, [
-            'article' => [
-                'hash' => 'abc',
-                'collections_id' => 1,
-                'filenumber' => 1,
-                'number' => 100,
-            ],
-        ], ['abc:hash:1' => 7]);
-
-        self::assertSame(['7:100' => true], $existing);
+        self::assertTrue($handler->syncPartCounts());
     }
 
     public function test_header_storage_transaction_uses_read_committed_on_mariadb(): void

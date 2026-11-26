@@ -31,7 +31,7 @@ class BinaryLookupBatchingTest extends TestCase
             partsize INT,
             UNIQUE(collections_id, filenumber)
         )');
-        DB::statement('CREATE TABLE parts (binaries_id INT, number INT, UNIQUE(binaries_id, number))');
+        DB::statement('CREATE TABLE parts (binaries_id INT, number INT, size INT DEFAULT 0, UNIQUE(binaries_id, number))');
     }
 
     public function test_lookup_round_trips_do_not_scale_with_collections_in_the_chunk(): void
@@ -80,8 +80,14 @@ class BinaryLookupBatchingTest extends TestCase
         $this->assertSame($resolved[0], $resolved[3]);
         $this->assertNotSame($resolved[0], $resolved[2]);
 
-        $this->assertTrue($handler->flushUpdates());
-        // Article 11 appears twice in the chunk but is counted once.
+        // The count is the parts rows that exist: article 11 appears twice in
+        // the chunk but is one row.
+        DB::table('parts')->insert([
+            ['binaries_id' => $resolved[0], 'number' => 11],
+            ['binaries_id' => $resolved[0], 'number' => 12],
+            ['binaries_id' => $resolved[2], 'number' => 21],
+        ]);
+        $this->assertTrue($handler->syncPartCounts());
         $this->assertSame(2, (int) DB::table('binaries')->where('id', $resolved[0])->value('currentparts'));
         $this->assertSame(1, (int) DB::table('binaries')->where('id', $resolved[2])->value('currentparts'));
     }

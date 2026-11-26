@@ -84,9 +84,14 @@ final class BinaryOverflowGuardTest extends TestCase
         self::assertSame([0 => true, 2 => true], $handler->getOverflowSkippedIndexes());
         self::assertSame([10], $handler->getOverflowedBinaryIds());
 
-        self::assertTrue($handler->flushUpdates());
+        // Parts exist for both; only the normal binary is recounted.
+        DB::table('parts')->insert([
+            ['binaries_id' => 10, 'number' => 70_001, 'size' => 100],
+            ['binaries_id' => 20, 'number' => 70_002, 'size' => 100],
+        ]);
+        self::assertTrue($handler->syncPartCounts());
         self::assertSame(64_235, (int) DB::table('binaries')->where('id', 10)->value('currentparts'));
-        self::assertSame(11, (int) DB::table('binaries')->where('id', 20)->value('currentparts'));
+        self::assertSame(10, (int) DB::table('binaries')->where('id', 20)->value('currentparts'), 'never lowered below its counter');
 
         // State is per call: a clean chunk reports nothing skipped.
         $handler->reset();

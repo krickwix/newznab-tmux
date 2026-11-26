@@ -40,6 +40,9 @@ final class BinaryHandler
     /** @var array<int, array{Size: int, Parts: int}> Pending binary updates */
     private array $binariesUpdate = [];
 
+    /** @var array<int, true> Binaries that received parts in this batch; recounted after commit */
+    private array $touchedBinaryIds = [];
+
     /** @var array<int, true> IDs of binaries created in this batch */
     private array $insertedBinaryIds = [];
 
@@ -74,6 +77,7 @@ final class BinaryHandler
     public function reset(): void
     {
         $this->binariesUpdate = [];
+        $this->touchedBinaryIds = [];
         $this->insertedBinaryIds = [];
         $this->articles = [];
         $this->overflowedBinaryIds = [];
@@ -198,7 +202,6 @@ final class BinaryHandler
         $resolved = [];
         $pending = [];
         $indexesByArticleKey = [];
-        $extraUpdatesByArticleKey = [];
 
         foreach ($records as $index => $record) {
             $header = $record['header'];
@@ -208,8 +211,7 @@ final class BinaryHandler
 
             if (isset($this->articles[$articleKey])) {
                 $binaryId = $this->articles[$articleKey]['BinaryID'];
-                $this->binariesUpdate[$binaryId]['Size'] += (int) $header['Bytes'];
-                $this->binariesUpdate[$binaryId]['Parts']++;
+                $this->touchedBinaryIds[$binaryId] = true;
                 $resolved[$index] = $binaryId;
 
                 continue;
@@ -217,11 +219,6 @@ final class BinaryHandler
 
             $indexesByArticleKey[$articleKey][] = $index;
             if (isset($pending[$articleKey])) {
-                $extraUpdatesByArticleKey[$articleKey][] = [
-                    'number' => (int) $header['Number'],
-                    'partsize' => (int) $header['Bytes'],
-                ];
-
                 continue;
             }
 
@@ -250,9 +247,6 @@ final class BinaryHandler
         try {
             $result = $this->bulkInsertAndResolve($pending);
             $idsByKey = $result['ids'];
-            // Overflowed binaries get no part writes, so their part keys need no lookup.
-            $existingPartKeys = $this->existingPartKeysForResolvedRows($pending, $this->withoutOverflowed($idsByKey), $extraUpdatesByArticleKey);
-            $seenPartKeys = [];
             foreach ($pending as $articleKey => $row) {
                 $hashLookupKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
                 $fileLookupKey = $this->binaryFileLookupKey((int) $row['collections_id'], (int) $row['filenumber']);
@@ -269,23 +263,7 @@ final class BinaryHandler
                     continue;
                 }
 
-                $this->binariesUpdate[$binaryId] = $this->binariesUpdate[$binaryId] ?? ['Size' => 0, 'Parts' => 0];
-                $this->addBinaryUpdateForNewPart(
-                    $binaryId,
-                    (int) $row['number'],
-                    (int) $row['partsize'],
-                    $existingPartKeys,
-                    $seenPartKeys
-                );
-                foreach ($extraUpdatesByArticleKey[$articleKey] ?? [] as $extraPart) {
-                    $this->addBinaryUpdateForNewPart(
-                        $binaryId,
-                        (int) $extraPart['number'],
-                        (int) $extraPart['partsize'],
-                        $existingPartKeys,
-                        $seenPartKeys
-                    );
-                }
+                $this->touchedBinaryIds[$binaryId] = true;
 
                 $this->articles[$articleKey] = [
                     'CollectionID' => (int) $row['collections_id'],
@@ -346,8 +324,13 @@ final class BinaryHandler
         }
 
         $this->sortBinaryInsertRows($insertRows);
-        // Overflowed rows get no update and no parts, so they are never locked.
-        $this->prelockForPartWrites(array_values($this->withoutOverflowed($idsByKey)));
+        // Existing binaries are deliberately NOT locked here. The chunk
+        // transaction no longer updates them: part inserts take only the
+        // shared FK lock on the parent row, which concurrent chunks of the
+        // same file can hold together. The aggregate is recounted after
+        // commit by syncPartCounts(). Before, every chunk X-locked the row
+        // for its whole transaction, so the parallel range workers took turns
+        // on any large file they shared.
 
         if (DB::getDriverName() === 'sqlite') {
             $this->bulkInsertBinariesSqlite($insertRows);
@@ -418,15 +401,6 @@ final class BinaryHandler
         }
 
         return $resolved;
-    }
-
-    /**
-     * @param  array<string, int>  $idsByKey
-     * @return array<string, int>
-     */
-    private function withoutOverflowed(array $idsByKey): array
-    {
-        return array_filter($idsByKey, fn (int $id): bool => ! isset($this->overflowedBinaryIds[$id]));
     }
 
     /**
@@ -602,75 +576,6 @@ final class BinaryHandler
         return $results;
     }
 
-    /**
-     * @param  array<string, array<string, mixed>>  $rowsByArticleKey
-     * @param  array<string, int>  $idsByKey
-     * @param  array<string, list<array{number: int, partsize: int}>>  $extraPartsByArticleKey
-     * @return array<string, true>
-     */
-    private function existingPartKeysForResolvedRows(array $rowsByArticleKey, array $idsByKey, array $extraPartsByArticleKey = []): array
-    {
-        $pairs = [];
-        foreach ($rowsByArticleKey as $articleKey => $row) {
-            $hashLookupKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
-            $fileLookupKey = $this->binaryFileLookupKey((int) $row['collections_id'], (int) $row['filenumber']);
-            $binaryId = $idsByKey[$hashLookupKey] ?? $idsByKey[$fileLookupKey] ?? 0;
-            if ($binaryId > 0) {
-                $pairs[$this->partKey($binaryId, (int) $row['number'])] = [$binaryId, (int) $row['number']];
-                foreach ($extraPartsByArticleKey[$articleKey] ?? [] as $extraPart) {
-                    $pairs[$this->partKey($binaryId, (int) $extraPart['number'])] = [$binaryId, (int) $extraPart['number']];
-                }
-            }
-        }
-
-        if ($pairs === []) {
-            return [];
-        }
-
-        $existing = [];
-        foreach (array_chunk(array_values($pairs), self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
-            $tuples = implode(',', array_fill(0, \count($chunk), '(?,?)'));
-            $bindings = [];
-            foreach ($chunk as [$binaryId, $number]) {
-                $bindings[] = $binaryId;
-                $bindings[] = $number;
-            }
-
-            // Header storage uses READ COMMITTED and holds each parent binary's
-            // X lock before this current read. A locking read for absent part
-            // keys would add next-key/gap locks that later part inserts must
-            // convert, creating PRIMARY-supremum deadlocks across transactions.
-            $rows = DB::select("SELECT binaries_id, number FROM parts WHERE (binaries_id, number) IN ({$tuples})", $bindings);
-            foreach ($rows as $row) {
-                $existing[$this->partKey((int) $row->binaries_id, (int) $row->number)] = true;
-            }
-        }
-
-        return $existing;
-    }
-
-    /**
-     * @param  array<string, true>  $existingPartKeys
-     * @param  array<string, true>  $seenPartKeys
-     */
-    private function addBinaryUpdateForNewPart(
-        int $binaryId,
-        int $number,
-        int $partsize,
-        array $existingPartKeys,
-        array &$seenPartKeys
-    ): void {
-        $partKey = $this->partKey($binaryId, $number);
-        if (isset($existingPartKeys[$partKey]) || isset($seenPartKeys[$partKey])) {
-            return;
-        }
-
-        $seenPartKeys[$partKey] = true;
-
-        $this->binariesUpdate[$binaryId]['Size'] += $partsize;
-        $this->binariesUpdate[$binaryId]['Parts']++;
-    }
-
     private function binaryHashLookupKey(string $hash, int $collectionId): string
     {
         return strtolower($hash).':hash:'.$collectionId;
@@ -679,11 +584,6 @@ final class BinaryHandler
     private function binaryFileLookupKey(int $collectionId, int $fileNumber): string
     {
         return $collectionId.':file:'.$fileNumber;
-    }
-
-    private function partKey(int $binaryId, int $number): string
-    {
-        return $binaryId.':'.$number;
     }
 
     /**
@@ -770,6 +670,95 @@ final class BinaryHandler
         );
 
         return (int) ($bin->id ?? 0);
+    }
+
+    /**
+     * Set currentparts/partsize of every binary that received parts in this
+     * batch from the parts rows that actually exist. Call it AFTER the chunk
+     * transaction commits, so the X lock it needs on each binary row is held
+     * for one short statement instead of the whole chunk transaction.
+     *
+     * Absolute, not incremental: the count no longer depends on a pre-insert
+     * "does this part exist" read, which concurrent chunks of the same file
+     * would race once they stop serialising on the parent row. GREATEST()
+     * keeps the counter monotonic as before (purges that drop parts never
+     * lowered it), and stops a recount whose snapshot predates another
+     * chunk's commit from undoing that chunk's own, later recount. A recount
+     * missed because the process died between commit and this call is
+     * repaired by the next chunk that touches the same binary.
+     *
+     * Failure here never rolls anything back -- the parts are committed --
+     * so it is retried, then logged.
+     */
+    public function syncPartCounts(int $chunkSize = self::MAX_SQL_ROWS_PER_STATEMENT): bool
+    {
+        $ids = array_keys(array_diff_key($this->touchedBinaryIds, $this->overflowedBinaryIds));
+        if ($ids === []) {
+            return true;
+        }
+
+        sort($ids, SORT_NUMERIC);
+        $chunkSize = max(1, min($chunkSize, self::MAX_SQL_ROWS_PER_STATEMENT));
+        $driver = DB::getDriverName();
+
+        try {
+            foreach (array_chunk($ids, $chunkSize) as $chunk) {
+                $this->runBinaryWriteWithRetry(fn (): bool => $this->syncPartCountChunk($driver, $chunk));
+            }
+        } catch (Throwable $e) {
+            Log::warning('Binary part-count recount failed after commit', [
+                'driver' => $driver,
+                'binaries' => \count($ids),
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /** @param  list<int>  $ids */
+    private function syncPartCountChunk(string $driver, array $ids): bool
+    {
+        $placeholders = implode(',', array_fill(0, \count($ids), '?'));
+
+        // A plain SELECT: a consistent, non-locking read under any isolation
+        // level. Folding it into UPDATE ... JOIN parts would, at the session's
+        // default REPEATABLE READ, take shared next-key locks across each
+        // binary's part range and block the inserts of every other chunk.
+        $counts = DB::select(
+            "SELECT binaries_id, COUNT(*) AS parts, COALESCE(SUM(size), 0) AS bytes FROM parts WHERE binaries_id IN ({$placeholders}) GROUP BY binaries_id ORDER BY binaries_id",
+            $ids,
+        );
+        if ($counts === []) {
+            return true;
+        }
+
+        if ($driver === 'sqlite') {
+            foreach ($counts as $row) {
+                DB::statement(
+                    'UPDATE binaries SET currentparts = MAX(currentparts, ?), partsize = MAX(partsize, ?) WHERE id = ?',
+                    [(int) $row->parts, (int) $row->bytes, (int) $row->binaries_id],
+                );
+            }
+
+            return true;
+        }
+
+        $selects = [];
+        $bindings = [];
+        foreach ($counts as $row) {
+            $selects[] = 'SELECT ? AS id, ? AS parts, ? AS bytes';
+            array_push($bindings, (int) $row->binaries_id, (int) $row->parts, (int) $row->bytes);
+        }
+
+        return DB::statement(
+            'UPDATE binaries b INNER JOIN ('.implode(' UNION ALL ', $selects).') u ON u.id = b.id '
+            .'SET b.currentparts = GREATEST(b.currentparts, u.parts), b.partsize = GREATEST(b.partsize, u.bytes)',
+            $bindings,
+        );
     }
 
     /**

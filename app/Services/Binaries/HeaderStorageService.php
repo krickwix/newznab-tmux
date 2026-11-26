@@ -348,6 +348,11 @@ final class HeaderStorageService
             throw $e;
         }
 
+        // Committed: now the one short X lock per binary, outside the chunk
+        // transaction. A failure is logged by the handler; the parts are
+        // committed and the next chunk touching the binary recounts it.
+        $this->binaryHandler->syncPartCounts($this->config->binariesUpdateChunkSize);
+
         $this->failedInserts = array_merge(
             $this->failedInserts,
             $this->partHandler->getFailedNumbers()
@@ -467,14 +472,11 @@ final class HeaderStorageService
             $this->fileNumbers->assertOrdinalsHeld($allocations, $binaryIds);
         }
 
-        // Acquire/update binary parents before parts take shared foreign-key
-        // locks. This preserves collection -> binary -> parts lock order and
-        // prevents concurrent writers from deadlocking during late upgrades.
-        if (! $this->binaryHandler->flushUpdates($this->config->binariesUpdateChunkSize)) {
-            $transaction->markError();
-
-            return ['collections' => [], 'binaries' => []];
-        }
+        // Binary aggregates are NOT written in this transaction: parts take
+        // only shared FK locks on their parent binary here, and
+        // storeChunkOnce() recounts the parents after commit. Updating them
+        // in here would X-lock every touched binary until commit, which is
+        // what made the parallel range workers queue on a shared large file.
 
         $overflowSkipped = $this->binaryHandler->getOverflowSkippedIndexes();
         foreach ($this->binaryHandler->getOverflowedBinaryIds() as $binaryId) {
