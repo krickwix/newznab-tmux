@@ -76,22 +76,42 @@ class PipelineSnapshotRepository
             COALESCE(MAX(CASE WHEN TABLE_NAME = 'parts' THEN TABLE_ROWS END), 0) AS parts_count
             FROM information_schema.TABLES
             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'parts'");
+        // Each scan below runs once per orchestrator cycle (~24 s). The
+        // binaries/collections/groups join is the costly one (~2 s on 600k
+        // pending binaries), so its count, part sum and oldest age share one
+        // pass in `sb`, and every processable-collection figure shares `sc`.
+        // Aggregates without GROUP BY always yield one row, so the cross
+        // joins never drop the snapshot.
         $pipeline = DB::selectOne('SELECT
             (SELECT COUNT(*) FROM collections WHERE filecheck IN (0, 1, 2, 15, 16)) AS collections_backlog,
             (SELECT COUNT(*) FROM binaries WHERE partcheck = 0) AS binaries_backlog,
-            (SELECT COALESCE(SUM(b.currentparts), 0) FROM binaries b INNER JOIN collections c ON c.id = b.collections_id INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE b.partcheck = 0 AND c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS schedulable_parts_backlog,
-            (SELECT COUNT(*) FROM binaries b INNER JOIN collections c ON c.id = b.collections_id INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE b.partcheck = 0 AND c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS schedulable_binaries_backlog,
-            (SELECT COUNT(*) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS schedulable_collections_backlog,
-            (SELECT COUNT(*) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS ready_collections,
-            (SELECT COUNT(*) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS releases_backlog,
+            sb.schedulable_parts_backlog,
+            sb.schedulable_binaries_backlog,
+            sc.schedulable_collections_backlog,
+            sc.ready_collections,
+            sc.ready_collections AS releases_backlog,
             (SELECT COUNT(*) FROM releases) AS release_total,
-            (SELECT COUNT(*) FROM releases WHERE nzbstatus = 0) AS nzbs_backlog,
-            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM binaries b INNER JOIN collections c ON c.id = b.collections_id INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE b.partcheck = 0 AND c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS oldest_binary_age,
-            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS oldest_collection_age,
-            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id WHERE c.filecheck = 3 AND (g.active = 1 OR g.backfill = 1)) AS oldest_release_age,
-            (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(adddate), NOW()), 0) FROM releases WHERE nzbstatus = 0) AS oldest_nzb_age,
+            nz.nzbs_backlog,
+            sb.oldest_binary_age,
+            sc.oldest_collection_age,
+            sc.oldest_release_age,
+            nz.oldest_nzb_age,
             NOT EXISTS(SELECT 1 FROM usenet_groups g LEFT JOIN short_groups s ON s.name = g.name
-                WHERE g.active = 1'.$pausedClause.' AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > '.$this->currentGroupMaxLag().')) AS current_groups', $pausedGroups);
+                WHERE g.active = 1'.$pausedClause.' AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > '.$this->currentGroupMaxLag().')) AS current_groups
+            FROM (SELECT COUNT(*) AS schedulable_binaries_backlog,
+                    COALESCE(SUM(b.currentparts), 0) AS schedulable_parts_backlog,
+                    COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) AS oldest_binary_age
+                FROM binaries b INNER JOIN collections c ON c.id = b.collections_id INNER JOIN usenet_groups g ON g.id = c.groups_id
+                WHERE b.partcheck = 0 AND c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS sb
+            CROSS JOIN (SELECT COALESCE(SUM(c.filecheck IN (0, 1, 2, 15, 16)), 0) AS schedulable_collections_backlog,
+                    COALESCE(SUM(c.filecheck = 3), 0) AS ready_collections,
+                    COALESCE(TIMESTAMPDIFF(SECOND, MIN(CASE WHEN c.filecheck IN (0, 1, 2, 15, 16) THEN c.dateadded END), NOW()), 0) AS oldest_collection_age,
+                    COALESCE(TIMESTAMPDIFF(SECOND, MIN(CASE WHEN c.filecheck = 3 THEN c.dateadded END), NOW()), 0) AS oldest_release_age
+                FROM collections c INNER JOIN usenet_groups g ON g.id = c.groups_id
+                WHERE c.filecheck IN (0, 1, 2, 3, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS sc
+            CROSS JOIN (SELECT COUNT(*) AS nzbs_backlog,
+                    COALESCE(TIMESTAMPDIFF(SECOND, MIN(adddate), NOW()), 0) AS oldest_nzb_age
+                FROM releases WHERE nzbstatus = 0) AS nz', $pausedGroups);
         $statusRows = DB::select("SHOW GLOBAL STATUS WHERE Variable_name IN ('Innodb_deadlocks', 'Innodb_row_lock_current_waits', 'Innodb_row_lock_waits')");
         $status = [];
         foreach ($statusRows as $row) {

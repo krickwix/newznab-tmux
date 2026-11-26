@@ -13,9 +13,12 @@ return [
     'echocli' => env('ECHOCLI', true),
     'rename_par2' => env('RENAME_PAR2', true),
     'rename_music_mediainfo' => env('RENAME_MUSIC_MEDIAINFO', true),
-    'cache_expiry_short' => (int) env('CACHE_EXPIRY_SHORT', 5),
-    'cache_expiry_medium' => (int) env('CACHE_EXPIRY_MEDIUM', 10),
-    'cache_expiry_long' => (int) env('CACHE_EXPIRY_LONG', 15),
+    // An empty value (e.g. CACHE_EXPIRY_LONG= rendered by envsubst for an unset
+    // variable) falls back to the default instead of casting to 0, which would
+    // make every Cache::put() a no-op.
+    'cache_expiry_short' => filter_var(env('CACHE_EXPIRY_SHORT'), FILTER_VALIDATE_INT, ['options' => ['default' => 5, 'min_range' => 0]]),
+    'cache_expiry_medium' => filter_var(env('CACHE_EXPIRY_MEDIUM'), FILTER_VALIDATE_INT, ['options' => ['default' => 10, 'min_range' => 0]]),
+    'cache_expiry_long' => filter_var(env('CACHE_EXPIRY_LONG'), FILTER_VALIDATE_INT, ['options' => ['default' => 15, 'min_range' => 0]]),
     'admin_username' => env('ADMIN_USER', 'admin'),
     'admin_password' => env('ADMIN_PASS', 'admin'),
     'admin_email' => env('ADMIN_EMAIL', 'admin@example.com'),
