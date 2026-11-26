@@ -421,37 +421,17 @@ final class BinaryHandler
         $driver = DB::getDriverName();
         $hashExpression = $driver === 'sqlite' ? 'binaryhash' : 'LOWER(HEX(binaryhash))';
 
-        // Group lookups by collections_id and run small `binaryhash IN (...)`
-        // queries per collection. This avoids producing a single
-        // `WHERE (... AND ...) OR (... AND ...) OR ...` expression with
-        // thousands of clauses and bindings, which both bloats the SQL
-        // string in PHP and can force MySQL into pathological plans.
-        $rowsByCollection = [];
+        $hashesByCollection = [];
         foreach ($rows as $row) {
-            $rowsByCollection[(int) $row['collections_id']][] = (string) $row['hash'];
+            $hashesByCollection[(int) $row['collections_id']][] = (string) $row['hash'];
         }
 
-        $results = [];
-        foreach ($rowsByCollection as $collectionId => $hashes) {
-            $hashes = array_values(array_unique($hashes));
-            foreach (array_chunk($hashes, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
-                $placeholders = implode(',', array_fill(0, \count($chunk), $driver === 'sqlite' ? '?' : 'UNHEX(?)'));
-                $bindings = $chunk;
-                $bindings[] = $collectionId;
-
-                $rowsResult = DB::select(
-                    "SELECT id, {$hashExpression} AS hashvalue, collections_id FROM binaries "
-                    ."WHERE binaryhash IN ({$placeholders}) AND collections_id = ?",
-                    $bindings
-                );
-
-                foreach ($rowsResult as $r) {
-                    $results[] = $r;
-                }
-            }
-        }
-
-        return $results;
+        return $this->selectBinariesPerCollection(
+            "id, {$hashExpression} AS hashvalue, collections_id",
+            'binaryhash',
+            $driver === 'sqlite' ? '?' : 'UNHEX(?)',
+            $hashesByCollection
+        );
     }
 
     /**
@@ -464,28 +444,76 @@ final class BinaryHandler
             return [];
         }
 
-        $rowsByCollection = [];
+        $fileNumbersByCollection = [];
         foreach ($rows as $row) {
-            $rowsByCollection[(int) $row['collections_id']][] = (int) $row['filenumber'];
+            $fileNumbersByCollection[(int) $row['collections_id']][] = (int) $row['filenumber'];
+        }
+
+        return $this->selectBinariesPerCollection(
+            'id, filenumber, collections_id',
+            'filenumber',
+            '?',
+            $fileNumbersByCollection
+        );
+    }
+
+    /**
+     * Non-locking lookup of binaries by `{$column} IN (...) AND collections_id = ?`.
+     *
+     * Each collection keeps its own branch with exactly that predicate, so
+     * every branch uses the same (collections_id, ...) index access as a
+     * standalone per-collection query and no thousand-clause OR expression is
+     * ever produced. The branches are joined with UNION ALL and packed up to
+     * MAX_SQL_ROWS_PER_STATEMENT values per statement: a header chunk that
+     * touches many collections with one file each used to cost one round
+     * trip per collection, it now costs one per 500 values.
+     *
+     * Plain SELECT, no FOR UPDATE: it takes no locks, so packing the branches
+     * changes neither the lock set nor the order prelockForPartWrites() locks
+     * in. Results are only merged into maps keyed by collection, so row order
+     * across branches is irrelevant.
+     *
+     * @param  array<int, list<int|string>>  $valuesByCollection
+     * @return list<object>
+     */
+    private function selectBinariesPerCollection(
+        string $columns,
+        string $column,
+        string $valuePlaceholder,
+        array $valuesByCollection
+    ): array {
+        $statements = [];
+        $branches = [];
+        $bindings = [];
+        $valueCount = 0;
+
+        foreach ($valuesByCollection as $collectionId => $values) {
+            $values = array_values(array_unique($values));
+            while ($values !== []) {
+                $take = array_splice($values, 0, self::MAX_SQL_ROWS_PER_STATEMENT - $valueCount);
+                $placeholders = implode(',', array_fill(0, \count($take), $valuePlaceholder));
+                $branches[] = "SELECT {$columns} FROM binaries WHERE {$column} IN ({$placeholders}) AND collections_id = ?";
+                array_push($bindings, ...$take);
+                $bindings[] = $collectionId;
+                $valueCount += \count($take);
+
+                if ($valueCount >= self::MAX_SQL_ROWS_PER_STATEMENT) {
+                    $statements[] = [$branches, $bindings];
+                    $branches = [];
+                    $bindings = [];
+                    $valueCount = 0;
+                }
+            }
+        }
+
+        if ($branches !== []) {
+            $statements[] = [$branches, $bindings];
         }
 
         $results = [];
-        foreach ($rowsByCollection as $collectionId => $fileNumbers) {
-            $fileNumbers = array_values(array_unique($fileNumbers));
-            foreach (array_chunk($fileNumbers, self::MAX_SQL_ROWS_PER_STATEMENT) as $chunk) {
-                $placeholders = implode(',', array_fill(0, \count($chunk), '?'));
-                $bindings = $chunk;
-                $bindings[] = $collectionId;
-
-                $rowsResult = DB::select(
-                    'SELECT id, filenumber, collections_id FROM binaries '
-                    ."WHERE filenumber IN ({$placeholders}) AND collections_id = ?",
-                    $bindings
-                );
-
-                foreach ($rowsResult as $r) {
-                    $results[] = $r;
-                }
+        foreach ($statements as [$statementBranches, $statementBindings]) {
+            foreach (DB::select(implode(' UNION ALL ', $statementBranches), $statementBindings) as $row) {
+                $results[] = $row;
             }
         }
 
