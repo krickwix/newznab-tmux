@@ -22,6 +22,21 @@ final class BinaryHandler
      */
     private const MAX_SQL_ROWS_PER_STATEMENT = 500;
 
+    /**
+     * A binary stops taking parts once it holds this many times its declared
+     * part count (and at least OVERFLOW_MIN_PARTS). binaryhash is
+     * md5(name + poster + group), so every repost of an identical subject
+     * folds into one row: on 2026-11-26 one alt.binaries.boneless file
+     * declared 250 parts and held 64,235. Every header chunk touching it
+     * X-locked that row for the whole ~2.4 s chunk transaction, and 81% of
+     * all ingest row-lock waits queued behind it. Such a binary can never
+     * become a release, so further parts are skipped, not failed: they do
+     * not go to part repair and never take the row lock.
+     */
+    private const OVERFLOW_PART_RATIO = 4;
+
+    private const OVERFLOW_MIN_PARTS = 1000;
+
     /** @var array<int, array{Size: int, Parts: int}> Pending binary updates */
     private array $binariesUpdate = [];
 
@@ -30,6 +45,12 @@ final class BinaryHandler
 
     /** @var array<string, array{CollectionID: int, BinaryID: int}> Processed articles */
     private array $articles = [];
+
+    /** @var array<int, true> Existing binaries found over the overflow limit in this batch */
+    private array $overflowedBinaryIds = [];
+
+    /** @var array<int, true> Header indexes skipped because their binary overflowed */
+    private array $overflowSkippedIndexes = [];
 
     public function __construct() {}
 
@@ -55,6 +76,33 @@ final class BinaryHandler
         $this->binariesUpdate = [];
         $this->insertedBinaryIds = [];
         $this->articles = [];
+        $this->overflowedBinaryIds = [];
+        $this->overflowSkippedIndexes = [];
+    }
+
+    /**
+     * Header indexes from the last getOrCreateBinaries() call that resolved to
+     * an overflowed binary. They are absent from its result on purpose and
+     * must be counted as skipped, not failed.
+     *
+     * @return array<int, true>
+     */
+    public function getOverflowSkippedIndexes(): array
+    {
+        return $this->overflowSkippedIndexes;
+    }
+
+    /** @return list<int> */
+    public function getOverflowedBinaryIds(): array
+    {
+        return array_keys($this->overflowedBinaryIds);
+    }
+
+    public static function isOverflowed(int $currentParts, int $totalParts): bool
+    {
+        return $totalParts > 0
+            && $currentParts >= self::OVERFLOW_MIN_PARTS
+            && $currentParts >= $totalParts * self::OVERFLOW_PART_RATIO;
     }
 
     /** @param list<int> $binaryIds */
@@ -146,6 +194,7 @@ final class BinaryHandler
      */
     public function getOrCreateBinaries(array $records, int $groupId): array
     {
+        $this->overflowSkippedIndexes = [];
         $resolved = [];
         $pending = [];
         $indexesByArticleKey = [];
@@ -201,13 +250,22 @@ final class BinaryHandler
         try {
             $result = $this->bulkInsertAndResolve($pending);
             $idsByKey = $result['ids'];
-            $existingPartKeys = $this->existingPartKeysForResolvedRows($pending, $idsByKey, $extraUpdatesByArticleKey);
+            // Overflowed binaries get no part writes, so their part keys need no lookup.
+            $existingPartKeys = $this->existingPartKeysForResolvedRows($pending, $this->withoutOverflowed($idsByKey), $extraUpdatesByArticleKey);
             $seenPartKeys = [];
             foreach ($pending as $articleKey => $row) {
                 $hashLookupKey = $this->binaryHashLookupKey((string) $row['hash'], (int) $row['collections_id']);
                 $fileLookupKey = $this->binaryFileLookupKey((int) $row['collections_id'], (int) $row['filenumber']);
                 $binaryId = $idsByKey[$hashLookupKey] ?? $idsByKey[$fileLookupKey] ?? 0;
                 if ($binaryId <= 0) {
+                    continue;
+                }
+
+                if (isset($this->overflowedBinaryIds[$binaryId])) {
+                    foreach ($indexesByArticleKey[$articleKey] ?? [] as $index) {
+                        $this->overflowSkippedIndexes[$index] = true;
+                    }
+
                     continue;
                 }
 
@@ -288,7 +346,8 @@ final class BinaryHandler
         }
 
         $this->sortBinaryInsertRows($insertRows);
-        $this->prelockForPartWrites(array_values($idsByKey));
+        // Overflowed rows get no update and no parts, so they are never locked.
+        $this->prelockForPartWrites(array_values($this->withoutOverflowed($idsByKey)));
 
         if (DB::getDriverName() === 'sqlite') {
             $this->bulkInsertBinariesSqlite($insertRows);
@@ -340,6 +399,7 @@ final class BinaryHandler
     {
         $resolved = [];
         foreach ($this->selectBinaryRowsByHash($rows) as $row) {
+            $this->noteOverflow($row);
             $resolved[$this->binaryHashLookupKey((string) $row->hashvalue, (int) $row->collections_id)] = (int) $row->id;
         }
 
@@ -358,6 +418,28 @@ final class BinaryHandler
         }
 
         return $resolved;
+    }
+
+    /**
+     * @param  array<string, int>  $idsByKey
+     * @return array<string, int>
+     */
+    private function withoutOverflowed(array $idsByKey): array
+    {
+        return array_filter($idsByKey, fn (int $id): bool => ! isset($this->overflowedBinaryIds[$id]));
+    }
+
+    /**
+     * Only an identity (hash) match can mark a binary overflowed: a file-number
+     * match may be a different file sharing the ordinal, and skipping it would
+     * hide the collision CollectionFileNumberAllocator::assertOrdinalsHeld()
+     * exists to raise.
+     */
+    private function noteOverflow(object $row): void
+    {
+        if (self::isOverflowed((int) ($row->currentparts ?? 0), (int) ($row->totalparts ?? 0))) {
+            $this->overflowedBinaryIds[(int) $row->id] = true;
+        }
     }
 
     /** @param  list<array<string, mixed>>  $rows */
@@ -427,7 +509,7 @@ final class BinaryHandler
         }
 
         return $this->selectBinariesPerCollection(
-            "id, {$hashExpression} AS hashvalue, collections_id",
+            "id, {$hashExpression} AS hashvalue, collections_id, currentparts, totalparts",
             'binaryhash',
             $driver === 'sqlite' ? '?' : 'UNHEX(?)',
             $hashesByCollection

@@ -199,7 +199,7 @@ class BinariesStorageInternalsTest extends TestCase
     {
         $source = (string) file_get_contents(app_path('Services/Binaries/BinaryHandler.php'));
         $method = strpos($source, 'private function bulkInsertAndResolve');
-        $prelock = strpos($source, '$this->prelockForPartWrites(array_values($idsByKey));', $method);
+        $prelock = strpos($source, '$this->prelockForPartWrites(array_values($this->withoutOverflowed($idsByKey)));', $method);
         $insert = strpos($source, '$this->bulkInsertBinariesMysql($insertRows);', $method);
 
         self::assertNotFalse($method);

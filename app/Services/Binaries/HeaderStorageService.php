@@ -55,6 +55,16 @@ final class HeaderStorageService
      */
     private int $rekeyedHeaders = 0;
 
+    /**
+     * Headers this batch skipped because their binary already holds far more
+     * parts than it declares (BinaryHandler::isOverflowed()): a repost flood
+     * folded into one row. Not failures -- they never go to part repair.
+     */
+    private int $overflowSkippedHeaders = 0;
+
+    /** @var array<int, true> */
+    private array $overflowedBinaryIds = [];
+
     public function __construct(
         ?CollectionHandler $collectionHandler = null,
         ?BinaryHandler $binaryHandler = null,
@@ -97,6 +107,8 @@ final class HeaderStorageService
         $this->failedInserts = [];
         $this->partCounterKeyedHeaders = 0;
         $this->rekeyedHeaders = 0;
+        $this->overflowSkippedHeaders = 0;
+        $this->overflowedBinaryIds = [];
 
         // Use the dedicated header chunk size, NOT partsChunkSize. The latter
         // controls single-row part flushes and is normally much larger; using
@@ -117,6 +129,7 @@ final class HeaderStorageService
 
         $this->reportPartCounterKeying((string) ($groupMySQL['name'] ?? ''));
         $this->reportRekeying((string) ($groupMySQL['name'] ?? ''));
+        $this->reportOverflowSkips((string) ($groupMySQL['name'] ?? ''));
 
         return array_values(array_unique($this->failedInserts));
     }
@@ -144,6 +157,25 @@ final class HeaderStorageService
         Log::info('ingest re-keyed collections off a leaked counter', [
             'group' => $groupName,
             'headers' => $this->rekeyedHeaders,
+        ]);
+    }
+
+    /** Headers skipped in the last store() call because their binary overflowed. */
+    public function overflowSkippedHeaders(): int
+    {
+        return $this->overflowSkippedHeaders;
+    }
+
+    private function reportOverflowSkips(string $groupName): void
+    {
+        if ($this->overflowSkippedHeaders === 0) {
+            return;
+        }
+
+        Log::info('ingest skipped headers for overflowed binaries', [
+            'group' => $groupName,
+            'headers' => $this->overflowSkippedHeaders,
+            'binaries' => array_keys($this->overflowedBinaryIds),
         ]);
     }
 
@@ -444,8 +476,19 @@ final class HeaderStorageService
             return ['collections' => [], 'binaries' => []];
         }
 
+        $overflowSkipped = $this->binaryHandler->getOverflowSkippedIndexes();
+        foreach ($this->binaryHandler->getOverflowedBinaryIds() as $binaryId) {
+            $this->overflowedBinaryIds[$binaryId] = true;
+        }
+
         foreach ($binaryRecords as $index => $record) {
             $header = $record['header'];
+            if (isset($overflowSkipped[$index])) {
+                $this->overflowSkippedHeaders++;
+
+                continue;
+            }
+
             if (! isset($binaryIds[$index])) {
                 $this->markHeaderFailed($header, $transaction, $addToPartRepair);
 
