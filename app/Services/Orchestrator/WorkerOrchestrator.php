@@ -597,6 +597,7 @@ class WorkerOrchestrator
                     'total' => $snapshot->physicalCollectionsBacklog(),
                     'ordinary' => $snapshot->collectionsBacklog,
                     'body_recovery_sources' => $snapshot->bodyRecoverySourceBacklog,
+                    'in_flight' => $snapshot->collectionsInFlight,
                 ],
                 'database_contention' => [
                     'row_lock_waits' => $snapshot->databaseRowLockWaits,
