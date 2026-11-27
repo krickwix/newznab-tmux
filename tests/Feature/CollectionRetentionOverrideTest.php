@@ -169,6 +169,20 @@ class CollectionRetentionOverrideTest extends TestCase
         $this->assertRemaining([64, 65]);
     }
 
+    public function test_nzb_done_branch_is_unordered_so_the_releases_id_index_drives_it(): void
+    {
+        DB::enableQueryLog();
+        (new ReleaseProcessingService)->deleteCollectionsSlice(2, 10);
+
+        $nzbDone = array_values(array_filter(
+            array_column(DB::getQueryLog(), 'query'),
+            static fn (string $sql): bool => str_contains($sql, '"r"."nzbstatus" = ?'),
+        ));
+        $this->assertCount(1, $nzbDone);
+        $this->assertStringNotContainsString('order by', strtolower($nzbDone[0]));
+        $this->assertStringContainsString('limit 10', strtolower($nzbDone[0]));
+    }
+
     public function test_orphan_sweep_runs_once_per_interval_per_group(): void
     {
         $this->collection(70, groupId: 2, ageHours: 1);

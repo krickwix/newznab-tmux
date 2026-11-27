@@ -631,8 +631,12 @@ final class ReleaseProcessingService
                     ->whereColumn('pending_release.id', 'c.releases_id')
                     ->where('pending_release.nzbstatus', NzbService::NZB_NONE)),
             // Its release has its NZB. The NOT NULL test lets the
-            // releases_id index drive the query.
+            // releases_id index drive the query; unordered, because with
+            // ORDER BY id LIMIT MariaDB walks the primary key hoping to fill
+            // the limit early and, on a group with few such rows, reads all
+            // collections (0.2 s vs 0.02 s). The merge below sorts anyway.
             $candidates()
+                ->reorder()
                 ->whereNotNull('c.releases_id')
                 ->whereExists(fn ($q) => $q->select(DB::raw(1))
                     ->from('releases as r')
