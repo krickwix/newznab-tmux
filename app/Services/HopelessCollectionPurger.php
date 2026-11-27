@@ -107,11 +107,28 @@ final class HopelessCollectionPurger
                     'MIN(b.totalparts) >= CASE WHEN MAX(c.collection_regexes_id) = ? THEN ? ELSE ? END',
                     [CollectionsCleaningService::REGEX_GENERIC_MATCH, $genericMinParts, $minParts]
                 )
-                ->havingRaw('MAX((SELECT COUNT(*) FROM parts p WHERE p.binaries_id = b.id)) <= 1')
                 ->pluck('c.id')
                 ->map(static fn ($id): int => (int) $id)
                 ->all()
         );
+
+        // currentparts can undercount (it is recounted after each chunk
+        // commits), so confirm against parts — but only for the few
+        // candidates left: inside the HAVING it was counted for every binary
+        // of the page (12.7k per page, 0.93 s vs 0.07 s without it).
+        if ($ids !== []) {
+            $ids = $this->retryTransient(
+                static fn (): array => DB::table('binaries as b')
+                    ->whereIn('b.collections_id', $ids)
+                    ->whereRaw('(SELECT COUNT(*) FROM parts p WHERE p.binaries_id = b.id) <= 1')
+                    ->orderBy('b.collections_id')
+                    ->pluck('b.collections_id')
+                    ->map(static fn ($id): int => (int) $id)
+                    ->unique()
+                    ->values()
+                    ->all()
+            );
+        }
 
         $deleted = $ids === [] ? 0 : $this->collectionCleanupService->deleteCollectionsAndDescendants(
             $ids,

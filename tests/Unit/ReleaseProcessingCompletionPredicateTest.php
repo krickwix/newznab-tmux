@@ -63,14 +63,14 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
             'Stage 6 should prove eligibility in SQL so incomplete prefixes cannot starve later work.'
         );
         self::assertStringContainsString(
-            "->leftJoin('binaries as incomplete'",
+            'SUM(CASE WHEN existing.currentparts < CEIL(existing.totalparts * ? / 100) OR existing.totalparts <= 0 THEN 1 ELSE 0 END) = 0',
             $eligibleSource,
-            'Stage 6 should anti-join incomplete binaries through the collection index.'
+            'Stage 6 should reject collections with an incomplete binary from the rows it already joined.'
         );
-        self::assertStringContainsString(
-            "->whereNull('incomplete.id')",
+        self::assertStringNotContainsString(
+            "'binaries as incomplete'",
             $eligibleSource,
-            'Stage 6 should keep only collections with no incomplete binaries.'
+            'Stage 6 should not read binaries a second time: the LEFT JOIN anti-join re-scanned each collection per file.'
         );
         self::assertStringContainsString(
             "->pluck('collections.id')",

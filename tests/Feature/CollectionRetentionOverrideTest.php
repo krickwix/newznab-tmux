@@ -151,6 +151,47 @@ class CollectionRetentionOverrideTest extends TestCase
         $this->assertRemaining([50]);
     }
 
+    public function test_slice_merges_every_deletion_reason_in_id_order_up_to_the_limit(): void
+    {
+        DB::table('releases')->insert([['id' => 8, 'nzbstatus' => 1], ['id' => 9, 'nzbstatus' => 0]]);
+        $this->collection(64, groupId: 2, ageHours: 1);              // keeps: nothing applies
+        $this->collection(63, groupId: 1, ageHours: 30);             // teevee override
+        $this->collection(62, groupId: 2, ageHours: 1, releasesId: 8); // NZB done
+        $this->collection(61, groupId: 2, ageHours: 100);            // past retention
+        $this->collection(60, groupId: 2, ageHours: 1);              // no binaries left
+        DB::table('binaries')->where('collections_id', 60)->delete();
+        $this->collection(65, groupId: 2, ageHours: 100, releasesId: 9); // waits for its NZB
+
+        (new ReleaseProcessingService)->deleteCollectionsSlice('', 3);
+        $this->assertRemaining([63, 64, 65]);
+
+        (new ReleaseProcessingService)->deleteCollectionsSlice('', 3);
+        $this->assertRemaining([64, 65]);
+    }
+
+    public function test_orphan_sweep_runs_once_per_interval_per_group(): void
+    {
+        $this->collection(70, groupId: 2, ageHours: 1);
+        DB::table('binaries')->where('collections_id', 70)->delete();
+        (new ReleaseProcessingService)->deleteCollectionsSlice(2, 10);
+        $this->assertRemaining([]);
+
+        $this->collection(71, groupId: 2, ageHours: 1);
+        DB::table('binaries')->where('collections_id', 71)->delete();
+        (new ReleaseProcessingService)->deleteCollectionsSlice(2, 10);
+        $this->assertRemaining([71]);
+
+        // Another scope keeps its own interval.
+        (new ReleaseProcessingService)->deleteCollectionsSlice('', 10);
+        $this->assertRemaining([]);
+
+        $this->collection(72, groupId: 2, ageHours: 1);
+        DB::table('binaries')->where('collections_id', 72)->delete();
+        $this->travel(16)->minutes();
+        (new ReleaseProcessingService)->deleteCollectionsSlice(2, 10);
+        $this->assertRemaining([]);
+    }
+
     private function collection(
         int $id,
         int $groupId,
