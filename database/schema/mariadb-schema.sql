@@ -694,6 +694,7 @@ CREATE TABLE `predb` (
   KEY `ix_predb_predate` (`predate`),
   KEY `ix_predb_source` (`source`),
   KEY `ix_predb_searched` (`searched`),
+  KEY `ix_predb_filename` (`filename`),
   FULLTEXT KEY `ft_predb_filename` (`filename`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci;
 DROP TABLE IF EXISTS `predb_crcs`;

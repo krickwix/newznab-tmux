@@ -600,36 +600,66 @@ final class ReleaseProcessingService
         ));
     }
 
+    /**
+     * Seconds between orphan sweeps (collections with no binaries left) per
+     * group. Every other deletion reason is checked on each slice.
+     */
+    private const ORPHAN_COLLECTION_SWEEP_SECONDS = 900;
+
     /** @throws Throwable */
     public function deleteCollectionsSlice(int|string|null $groupID, int $limit): int
     {
         $normalizedGroupId = $this->normalizeGroupId($groupID);
+        $limit = max(1, min(self::BATCH_SIZE, $limit));
         $cutoff = now()->subHours($this->settings->partRetentionHours);
         $overrideCutoffs = CollectionRetentionOverrides::cutoffs($this->settings->partRetentionHours, $normalizedGroupId);
-        $ids = DB::table('collections as c')
+
+        // One indexed query per deletion reason, merged here. As one OR'd
+        // WHERE the reasons forced a scan of every collection in the group
+        // (420k for boneless, ~0.9 s per slice, almost always to find none).
+        $candidates = static fn () => DB::table('collections as c')
             ->when($normalizedGroupId !== null, static fn ($q) => $q->where('c.groups_id', $normalizedGroupId))
-            ->where(function ($query) use ($cutoff, $overrideCutoffs): void {
-                $query->where(function ($retention) use ($cutoff): void {
-                    $retention->where('c.dateadded', '<', $cutoff)
-                        ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
-                            ->from('releases as pending_release')
-                            ->whereColumn('pending_release.id', 'c.releases_id')
-                            ->where('pending_release.nzbstatus', NzbService::NZB_NONE));
-                })
-                    ->orWhereNotExists(fn ($q) => $q->select(DB::raw(1))
-                        ->from('binaries as b')
-                        ->whereColumn('b.collections_id', 'c.id'))
-                    ->orWhereExists(fn ($q) => $q->select(DB::raw(1))
-                        ->from('releases as r')
-                        ->whereColumn('r.id', 'c.releases_id')
-                        ->where('r.nzbstatus', 1));
-                CollectionRetentionOverrides::orWhereExpired($query, $overrideCutoffs);
-            })
             ->orderBy('c.id')
-            ->limit(max(1, min(self::BATCH_SIZE, $limit)))
-            ->pluck('c.id')
-            ->map(static fn ($id): int => (int) $id)
-            ->all();
+            ->limit($limit);
+
+        $queries = [
+            // Past retention, unless its release still waits for an NZB.
+            $candidates()
+                ->where('c.dateadded', '<', $cutoff)
+                ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
+                    ->from('releases as pending_release')
+                    ->whereColumn('pending_release.id', 'c.releases_id')
+                    ->where('pending_release.nzbstatus', NzbService::NZB_NONE)),
+            // Its release has its NZB. The NOT NULL test lets the
+            // releases_id index drive the query.
+            $candidates()
+                ->whereNotNull('c.releases_id')
+                ->whereExists(fn ($q) => $q->select(DB::raw(1))
+                    ->from('releases as r')
+                    ->whereColumn('r.id', 'c.releases_id')
+                    ->where('r.nzbstatus', 1)),
+        ];
+        foreach ($overrideCutoffs as $overrideGroupId => $overrideCutoff) {
+            $queries[] = CollectionRetentionOverrides::whereExpired($candidates(), $overrideGroupId, $overrideCutoff);
+        }
+        // No binaries left: an anti-join over the whole group with no index
+        // to narrow it, and a safety net (retention also removes these), so
+        // it runs once per interval per group rather than on every slice.
+        if (Cache::add('releases:orphan-collection-sweep:'.($normalizedGroupId ?? 'all'), true, self::ORPHAN_COLLECTION_SWEEP_SECONDS)) {
+            $queries[] = $candidates()->whereNotExists(fn ($q) => $q->select(DB::raw(1))
+                ->from('binaries as b')
+                ->whereColumn('b.collections_id', 'c.id'));
+        }
+
+        $ids = [];
+        foreach ($queries as $query) {
+            foreach ($query->pluck('c.id') as $id) {
+                $ids[(int) $id] = true;
+            }
+        }
+        $ids = array_keys($ids);
+        sort($ids, SORT_NUMERIC);
+        $ids = \array_slice($ids, 0, $limit);
 
         return $this->collectionCleanupService->deleteCollectionsAndDescendants(
             $ids,
@@ -1768,13 +1798,6 @@ final class ReleaseProcessingService
             fn (): array => DB::table('collections')
                 ->select('collections.id')
                 ->join('binaries as existing', 'existing.collections_id', '=', 'collections.id')
-                ->leftJoin('binaries as incomplete', static function ($join) use ($completion): void {
-                    $join->on('incomplete.collections_id', '=', 'collections.id')
-                        ->whereRaw(
-                            '(incomplete.currentparts < CEIL(incomplete.totalparts * ? / 100) OR incomplete.totalparts <= 0)',
-                            [$completion],
-                        );
-                })
                 ->where('collections.id', '>', $lastCollectionId)
                 ->when($page !== null, static fn ($q) => $q->whereIn('collections.id', $page))
                 ->where('collections.dateadded', '<', now()->subHours($this->settings->collectionDelayTime))
@@ -1784,8 +1807,15 @@ final class ReleaseProcessingService
                     10,
                 ])
                 ->when($normalizedGroupId !== null, static fn ($q) => $q->where('collections.groups_id', $normalizedGroupId))
-                ->whereNull('incomplete.id')
                 ->groupBy(['collections.id', 'collections.totalfiles'])
+                // No incomplete binary, judged on the rows `existing` already
+                // reads. A second pass over binaries was either a LEFT JOIN that
+                // re-scanned the collection per file (21 s on one group) or a
+                // NOT EXISTS that MariaDB materialised over the whole table.
+                ->havingRaw(
+                    'SUM(CASE WHEN existing.currentparts < CEIL(existing.totalparts * ? / 100) OR existing.totalparts <= 0 THEN 1 ELSE 0 END) = 0',
+                    [$completion],
+                )
                 ->havingRaw(
                     'COUNT(DISTINCT CASE WHEN existing.filenumber > 0 THEN existing.filenumber ELSE existing.id END) >= GREATEST(1, '.$required.' - '.$forgiveOne.')',
                     [$completion, $completion],
