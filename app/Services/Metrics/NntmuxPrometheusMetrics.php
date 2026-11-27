@@ -834,9 +834,9 @@ class NntmuxPrometheusMetrics
         $lines[] = '# HELP nntmux_orchestrator_database_hard_breach_timestamp_seconds Last hard contention breach timestamp; zero means none retained.';
         $lines[] = '# TYPE nntmux_orchestrator_database_hard_breach_timestamp_seconds gauge';
         $lines[] = $this->metric('nntmux_orchestrator_database_hard_breach_timestamp_seconds', (int) ($contention['hard_breach_at'] ?? 0));
-        $lines[] = '# HELP nntmux_orchestrator_collection_backlog Collection backlog split into physical total, ordinary pressure, and proven BODY recovery sources.';
+        $lines[] = '# HELP nntmux_orchestrator_collection_backlog Collection backlog split into physical total, ordinary pressure, and proven BODY recovery sources; in_flight is the young purge-bound pool already excluded from the others.';
         $lines[] = '# TYPE nntmux_orchestrator_collection_backlog gauge';
-        foreach (['total', 'ordinary', 'body_recovery_sources'] as $scope) {
+        foreach (['total', 'ordinary', 'body_recovery_sources', 'in_flight'] as $scope) {
             $lines[] = $this->metric(
                 'nntmux_orchestrator_collection_backlog',
                 (int) ($decision['collection_backlogs'][$scope] ?? 0),

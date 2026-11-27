@@ -1222,6 +1222,158 @@ final class PipelineSnapshotRepositoryTest extends TestCase
         self::assertTrue($method->invoke($repository, 1, 1, 0, 60_000, 60_000));
     }
 
+    public function test_in_flight_collections_leave_every_gated_collection_figure_together(): void
+    {
+        // 2026-11-27 live reading: 519,402 pending collections, 341,627 of them
+        // boneless one-binary collections younger than the 20 minute purge age.
+        $method = new ReflectionMethod(PipelineSnapshotRepository::class, 'withoutInFlightCollections');
+
+        self::assertSame(
+            ['total' => 177_775, 'ordinary' => 177_775, 'schedulable' => 158_373, 'in_flight' => 341_627],
+            $method->invoke(null, 519_402, 519_402, 500_000, 341_627),
+        );
+        // Disabled: nothing moves.
+        self::assertSame(
+            ['total' => 519_402, 'ordinary' => 500_000, 'schedulable' => 490_000, 'in_flight' => 0],
+            $method->invoke(null, 519_402, 500_000, 490_000, 0),
+        );
+        // Counts read at different instants: never negative, never more than the total.
+        self::assertSame(
+            ['total' => 0, 'ordinary' => 0, 'schedulable' => 0, 'in_flight' => 1_000],
+            $method->invoke(null, 1_000, 900, 800, 5_000),
+        );
+        self::assertSame(
+            ['total' => 0, 'ordinary' => 0, 'schedulable' => 0, 'in_flight' => 0],
+            $method->invoke(null, 0, 0, 0, -3),
+        );
+    }
+
+    public function test_in_flight_collections_move_the_physical_capacity_fence(): void
+    {
+        config(['nntmux.orchestrator.high_watermarks' => [
+            'parts' => 300_000_000,
+            'binaries' => 1_500_000,
+            'collections' => 600_000,
+            'collections_total' => 600_000,
+            'recovery_sources' => 60_000,
+        ]]);
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $fence = new ReflectionMethod($repository, 'physicalCapacityHigh');
+        $split = new ReflectionMethod(PipelineSnapshotRepository::class, 'withoutInFlightCollections');
+
+        // The 2026-11-26 peak: 682k raw, held high; ~400k of it in flight.
+        self::assertTrue($fence->invoke($repository, 1, 1, 682_497, 682_497, 0));
+        $gated = $split->invoke(null, 682_497, 682_497, 660_000, 400_000);
+        self::assertFalse($fence->invoke($repository, 1, 1, $gated['ordinary'], $gated['total'], 0));
+        // A real backlog still trips it with the pool removed.
+        $gated = $split->invoke(null, 1_050_000, 1_050_000, 1_000_000, 400_000);
+        self::assertTrue($fence->invoke($repository, 1, 1, $gated['ordinary'], $gated['total'], 0));
+    }
+
+    public function test_in_flight_count_issues_no_query_unless_both_groups_and_minutes_are_set(): void
+    {
+        DB::shouldReceive('select')->never();
+        DB::shouldReceive('scalar')->never();
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+        $method = new ReflectionMethod($repository, 'inFlightCollections');
+
+        foreach ([[[], 20], [['alt.binaries.boneless'], 0], [[], 0]] as [$groups, $minutes]) {
+            config()->set('nntmux.orchestrator.in_flight_collection_groups', $groups);
+            config()->set('nntmux.orchestrator.in_flight_collection_minutes', $minutes);
+            self::assertSame(0, $method->invoke($repository));
+        }
+    }
+
+    public function test_in_flight_count_matches_the_gated_population_and_binds_its_inputs(): void
+    {
+        config()->set('nntmux.orchestrator.in_flight_collection_groups', ['alt.binaries.boneless', 'alt.binaries.other']);
+        config()->set('nntmux.orchestrator.in_flight_collection_minutes', 20);
+        $groupsQuery = $countQuery = null;
+        DB::shouldReceive('select')->once()->andReturnUsing(
+            function (string $sql, array $bindings) use (&$groupsQuery): array {
+                $groupsQuery = [$sql, $bindings];
+
+                return [(object) ['id' => 111240], (object) ['id' => 7]];
+            }
+        );
+        DB::shouldReceive('scalar')->once()->andReturnUsing(
+            function (string $sql, array $bindings) use (&$countQuery): int {
+                $countQuery = [$sql, $bindings];
+
+                return 341_627;
+            }
+        );
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame(341_627, (new ReflectionMethod($repository, 'inFlightCollections'))->invoke($repository));
+        // Must stay a subset of collections_backlog and the schedulable count:
+        // the same pending filechecks, the same active-or-backfill groups.
+        self::assertStringContainsString('name IN (?, ?)', $groupsQuery[0]);
+        self::assertStringNotContainsString('LOWER(', $groupsQuery[0], 'LOWER(name) cannot use ix_groups_name.');
+        self::assertStringContainsString('(active = 1 OR backfill = 1)', $groupsQuery[0]);
+        self::assertSame(['alt.binaries.boneless', 'alt.binaries.other'], $groupsQuery[1]);
+        self::assertStringNotContainsString('JOIN', $countQuery[0], 'Joined, the count walks the whole stage6 index.');
+        self::assertStringContainsString('groups_id IN (?, ?)', $countQuery[0]);
+        self::assertStringContainsString('filecheck IN (0, 1, 2, 15, 16)', $countQuery[0]);
+        self::assertStringContainsString('dateadded > NOW() - INTERVAL ? MINUTE', $countQuery[0]);
+        self::assertSame([111240, 7, 20], $countQuery[1]);
+    }
+
+    public function test_in_flight_count_is_zero_without_counting_when_no_listed_group_is_active(): void
+    {
+        config()->set('nntmux.orchestrator.in_flight_collection_groups', ['alt.binaries.boneless']);
+        config()->set('nntmux.orchestrator.in_flight_collection_minutes', 20);
+        DB::shouldReceive('select')->once()->andReturn([]);
+        DB::shouldReceive('scalar')->never();
+        $repository = new PipelineSnapshotRepository(
+            new PrometheusSafetySignalProvider,
+            app(NzbBacklogCreationService::class),
+        );
+
+        self::assertSame(0, (new ReflectionMethod($repository, 'inFlightCollections'))->invoke($repository));
+    }
+
+    public function test_config_file_parses_in_flight_collection_groups_and_clamps_minutes(): void
+    {
+        $keys = ['NNTMUX_ORCHESTRATOR_IN_FLIGHT_COLLECTION_GROUPS', 'NNTMUX_ORCHESTRATOR_IN_FLIGHT_COLLECTION_MINUTES'];
+        $saved = [];
+        foreach ($keys as $key) {
+            $saved[$key] = getenv($key);
+        }
+
+        try {
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_IN_FLIGHT_COLLECTION_GROUPS', null);
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_IN_FLIGHT_COLLECTION_MINUTES', null);
+            $orchestrator = (require base_path('config/nntmux.php'))['orchestrator'];
+            self::assertSame([], $orchestrator['in_flight_collection_groups']);
+            self::assertSame(0, $orchestrator['in_flight_collection_minutes']);
+
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_IN_FLIGHT_COLLECTION_GROUPS', ' Alt.Binaries.Boneless , ,alt.binaries.x ');
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_IN_FLIGHT_COLLECTION_MINUTES', '20');
+            $orchestrator = (require base_path('config/nntmux.php'))['orchestrator'];
+            self::assertSame(['alt.binaries.boneless', 'alt.binaries.x'], $orchestrator['in_flight_collection_groups']);
+            self::assertSame(20, $orchestrator['in_flight_collection_minutes']);
+
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_IN_FLIGHT_COLLECTION_MINUTES', '9999');
+            self::assertSame(120, (require base_path('config/nntmux.php'))['orchestrator']['in_flight_collection_minutes']);
+            $this->setEnvironmentValue('NNTMUX_ORCHESTRATOR_IN_FLIGHT_COLLECTION_MINUTES', '-5');
+            self::assertSame(0, (require base_path('config/nntmux.php'))['orchestrator']['in_flight_collection_minutes']);
+        } finally {
+            foreach ($saved as $key => $value) {
+                $this->setEnvironmentValue($key, $value === false ? null : $value);
+            }
+        }
+    }
+
     public function test_stale_or_future_previous_snapshots_cannot_influence_rates_or_ewma(): void
     {
         config(['nntmux.orchestrator.snapshot_max_age_seconds' => 180]);

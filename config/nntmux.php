@@ -190,6 +190,16 @@ return [
             static fn (string $group): string => strtolower(trim($group)),
             explode(',', (string) env('NNTMUX_BACKFILL_IGNORE_FORWARD_GROUPS', ''))
         ))),
+        // Per-article obfuscated groups (comma separated, any case) whose young
+        // collections are purge-bound, not backlog. Pending collections in these
+        // groups younger than in_flight_collection_minutes are left out of every
+        // collection count the gates and pressure read. Set the minutes to
+        // NNTMUX_HOPELESS_PURGE_AGE_MINUTES. Either one empty or 0 disables it.
+        'in_flight_collection_groups' => array_values(array_filter(array_map(
+            static fn (string $group): string => strtolower(trim($group)),
+            explode(',', (string) env('NNTMUX_ORCHESTRATOR_IN_FLIGHT_COLLECTION_GROUPS', ''))
+        ))),
+        'in_flight_collection_minutes' => min(120, max(0, (int) env('NNTMUX_ORCHESTRATOR_IN_FLIGHT_COLLECTION_MINUTES', 0))),
         // Admit backfill at neutral pressure when the target's safe quantity
         // (sized from its own learned growth) is at least one 10k task.
         // How far (articles) an active group may trail the server and still

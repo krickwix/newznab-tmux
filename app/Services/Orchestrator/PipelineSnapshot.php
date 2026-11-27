@@ -60,6 +60,8 @@ final readonly class PipelineSnapshot
         public int $backfillSafeQuantity = 10000,
         public int $bodyRecoveryQueueBacklog = 0,
         public int $collectionsTotalBacklog = 0,
+        // Already subtracted from every collection backlog above; reported, never gated on.
+        public int $collectionsInFlight = 0,
         public int $bodyRecoverySourceBacklog = 0,
         public int $oldestBodyRecoverySourceAgeSeconds = 0,
         public int $backfillPermitGeneration = 0,
@@ -159,6 +161,7 @@ final readonly class PipelineSnapshot
             backfillSafeQuantity: $this->backfillSafeQuantity,
             bodyRecoveryQueueBacklog: $this->bodyRecoveryQueueBacklog,
             collectionsTotalBacklog: $this->collectionsTotalBacklog,
+            collectionsInFlight: $this->collectionsInFlight,
             bodyRecoverySourceBacklog: $this->bodyRecoverySourceBacklog,
             oldestBodyRecoverySourceAgeSeconds: $this->oldestBodyRecoverySourceAgeSeconds,
             backfillPermitGeneration: max(0, $generation),

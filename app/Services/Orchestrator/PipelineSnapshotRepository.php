@@ -123,10 +123,23 @@ class PipelineSnapshotRepository
         $profileOverride = (new ControlProfileOverride)->effective();
         $yieldHistory = $this->state->backfillYieldHistory();
 
-        $totalCollections = (int) ($pipeline->collections_backlog ?? 0);
+        $rawTotalCollections = (int) ($pipeline->collections_backlog ?? 0);
         $recoverySourceCollections = (int) $recoverySources['backlog'];
-        $ordinaryCollections = max(0, $totalCollections - $recoverySourceCollections);
-        $splitConsistent = $recoverySourceCollections <= $totalCollections;
+        // Checked on the raw counts: the split is a property of the table,
+        // not of what the gates are later told to ignore.
+        $splitConsistent = $recoverySourceCollections <= $rawTotalCollections;
+        $inFlightCollections = $this->inFlightCollections();
+        [
+            'total' => $totalCollections,
+            'ordinary' => $ordinaryCollections,
+            'schedulable' => $schedulableCollectionsGated,
+            'in_flight' => $inFlightCollections,
+        ] = self::withoutInFlightCollections(
+            $rawTotalCollections,
+            max(0, $rawTotalCollections - $recoverySourceCollections),
+            (int) ($pipeline->schedulable_collections_backlog ?? 0),
+            $inFlightCollections,
+        );
         $physicalParts = (int) ($tables->parts_count ?? 0);
         // Exact, not information_schema.TABLES.TABLE_ROWS. That column is an
         // InnoDB sample, and on 2026-08-07 it read 1,006,566 against an exact
@@ -149,7 +162,7 @@ class PipelineSnapshotRepository
         $binariesBacklog = (int) ($pipeline->binaries_backlog ?? 0);
         $schedulableParts = (int) ($pipeline->schedulable_parts_backlog ?? 0);
         $schedulableBinaries = (int) ($pipeline->schedulable_binaries_backlog ?? 0);
-        $schedulableCollections = (int) ($pipeline->schedulable_collections_backlog ?? 0);
+        $schedulableCollections = $schedulableCollectionsGated;
         $backlogs = [
             'parts' => $schedulableParts,
             'binaries' => $schedulableBinaries,
@@ -275,6 +288,7 @@ class PipelineSnapshotRepository
             backfillSafeQuantity: (int) ($backfillTarget['safe_quantity'] ?? 0),
             bodyRecoveryQueueBacklog: $this->bodyRecoveryQueueBacklog(),
             collectionsTotalBacklog: $totalCollections,
+            collectionsInFlight: $inFlightCollections,
             bodyRecoverySourceBacklog: $recoverySourceCollections,
             oldestBodyRecoverySourceAgeSeconds: (int) $recoverySources['oldest_age'],
             backfillPermitHandoffSafe: $backfillPermitHandoffSafe,
@@ -1574,6 +1588,83 @@ class PipelineSnapshotRepository
         }
 
         return [$rates, $ewma];
+    }
+
+    /**
+     * Collections the hopeless purge has not been allowed to judge yet.
+     *
+     * Per-article obfuscated groups (alt.binaries.boneless) turn every article
+     * into a collection of one binary that no later article can join. The
+     * hopeless-purge lane deletes them once they are older than its age
+     * cutoff, so at any moment the table holds roughly inflow x cutoff of
+     * them: measured 2026-11-27, 330k of boneless's 401k collections were
+     * under 20 minutes old, against a 600k collections_total watermark. That
+     * pool is in transit, not backlog. Counting it held physical capacity
+     * high, shut the current-forward gate and denied backfill for hours a
+     * day, while the purge was keeping up.
+     *
+     * Only the configured groups, only pending filechecks in active or
+     * backfill groups (the same population the schedulable and total counts
+     * use), and only rows younger than the configured minutes are counted.
+     * Keep the minutes equal to NNTMUX_HOPELESS_PURGE_AGE_MINUTES: shorter
+     * still counts part of the pool, longer would also hide collections the
+     * purge has already declined to delete. Real collections in these groups
+     * are hidden from the gates for at most those minutes.
+     *
+     * Two statements on purpose. Joined to usenet_groups, MariaDB walks
+     * ix_collections_release_stage6 end to end (type=index, ~400 ms on 2026-11-27
+     * data); with the ids resolved first the count is a range scan on
+     * (groups_id, filecheck, dateadded, id), ~180 ms for 374k matching rows,
+     * the same cost as the existing total count. usenet_groups.name is
+     * utf8mb4_unicode_ci, so the plain IN uses ix_groups_name (~1 ms) and is
+     * as case-insensitive as the lowercased config; LOWER(name) would scan all
+     * 111k groups.
+     */
+    private function inFlightCollections(): int
+    {
+        $groups = (array) config('nntmux.orchestrator.in_flight_collection_groups', []);
+        $minutes = (int) config('nntmux.orchestrator.in_flight_collection_minutes', 0);
+        if ($groups === [] || $minutes <= 0) {
+            return 0;
+        }
+
+        $ids = array_map(
+            static fn (object $row): int => (int) $row->id,
+            DB::select('SELECT id FROM usenet_groups
+                WHERE name IN ('.implode(', ', array_fill(0, count($groups), '?')).')
+                    AND (active = 1 OR backfill = 1)', $groups),
+        );
+        if ($ids === []) {
+            return 0;
+        }
+
+        return max(0, (int) DB::scalar('SELECT COUNT(*) FROM collections
+            WHERE groups_id IN ('.implode(', ', array_fill(0, count($ids), '?')).')
+                AND filecheck IN (0, 1, 2, 15, 16)
+                AND dateadded > NOW() - INTERVAL ? MINUTE', [...$ids, $minutes]));
+    }
+
+    /**
+     * Remove the in-flight pool from every collection figure the gates read.
+     *
+     * All three move together. The schedulable count also feeds the growth
+     * rates, whose previous value is persisted from this same figure; mixing
+     * adjusted and raw readings would report the pool's size as a drain or a
+     * flood on every cycle. In-flight rows are a subset of each count, so the
+     * clamp only matters if the counts were read at different instants.
+     *
+     * @return array{total: int, ordinary: int, schedulable: int, in_flight: int}
+     */
+    private static function withoutInFlightCollections(int $total, int $ordinary, int $schedulable, int $inFlight): array
+    {
+        $inFlight = max(0, min($inFlight, $total));
+
+        return [
+            'total' => $total - $inFlight,
+            'ordinary' => max(0, $ordinary - $inFlight),
+            'schedulable' => max(0, $schedulable - $inFlight),
+            'in_flight' => $inFlight,
+        ];
     }
 
     private function physicalCapacityHigh(
