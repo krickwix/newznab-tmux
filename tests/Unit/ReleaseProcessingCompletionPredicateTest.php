@@ -118,6 +118,18 @@ final class ReleaseProcessingCompletionPredicateTest extends TestCase
         self::assertStringContainsString("['groups_id', 'filecheck', 'id', 'totalfiles']", $migrationSource);
     }
 
+    public function test_stage0_selection_index_puts_totalfiles_before_id(): void
+    {
+        // `totalfiles = 0` must be an equality key ahead of id, or the
+        // stage 0 scans walk every filecheck-0 row of the group.
+        $migrationSource = file_get_contents(__DIR__.'/../../database/migrations/2026_11_27_120000_add_release_stage0_selection_index.php');
+
+        self::assertIsString($migrationSource);
+        self::assertStringContainsString('ix_collections_release_stage0', $migrationSource);
+        self::assertStringContainsString('(groups_id, filecheck, totalfiles, id)', $migrationSource);
+        self::assertStringContainsString("['groups_id', 'filecheck', 'totalfiles', 'id']", $migrationSource);
+    }
+
     public function test_stage1_collects_candidate_ids_before_updating_filecheck(): void
     {
         $stageSource = $this->releaseProcessingMethodSource('runCollectionFileCheckStage1');
