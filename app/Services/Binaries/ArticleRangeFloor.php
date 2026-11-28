@@ -371,10 +371,21 @@ class ArticleRangeFloor
             // persisted so it could not be counted either. claim() detects an
             // unsettled claim from its state instead.
             $entries[(string) $key] = [
-                // Entries written before the lanes were split carry no lane.
-                // Treated as forward, which is the lane that existed to be
-                // protected; a stale backfill entry read as forward can only
-                // hold a cursor back, never advance one past an unread range.
+                // Entries written before the lanes were split carry no lane,
+                // and are read as forward.
+                //
+                // Not harmless, and not claimed to be: a legacy backfill entry
+                // read this way holds the FORWARD cursor back until the key
+                // expires. The alternative is worse -- treating a lane-less
+                // entry as settled stops it protecting its range, which lets a
+                // cursor advance past something genuinely unread and
+                // reintroduces the loss this class exists to prevent. A
+                // TTL-bounded stall beats an unbounded loss.
+                //
+                // Empty in practice, because the flag has never been non-zero.
+                // If it is ever enabled, deployed, and then upgraded across
+                // this commit, flush the nntmux:binaries:article-ranges:
+                // prefix as part of the rollout.
                 'lane' => (string) ($entry['lane'] ?? self::LANE_FORWARD),
                 'first' => (int) $entry['first'],
                 'last' => (int) $entry['last'],
