@@ -139,6 +139,69 @@ final class ArticleRangeFloorTest extends TestCase
         self::assertSame(999, $floor->floorFor(5));
     }
 
+    public function test_a_child_killed_before_it_can_report_is_still_bounded(): void
+    {
+        config(['nntmux.binaries_article_range_stale_claim_seconds' => 60]);
+        $floor = new ArticleRangeFloor;
+
+        // SIGKILL and the OOM reaper give a child no chance to reach
+        // markFailed(), so nothing charges the attempt. Before this was fixed
+        // the claim kept protecting its range with attempts stuck at 0, the
+        // write-off bound never fired, and the cursor stayed pinned until the
+        // whole key expired -- the open-ended hold the bound exists to prevent.
+        // Four abandonments, the same budget markFailed() gets: the attempt is
+        // charged on re-claim, so the nth claim carries n-1 abandonments.
+        for ($cycle = 1; $cycle <= 4; $cycle++) {
+            $floor->claim(5, 1_000, 1_199);
+            $this->ageClaims(5, 120);
+
+            self::assertSame(999, $floor->floorFor(5), 'Cycle '.$cycle.' should still hold the cursor.');
+        }
+
+        // The fifth claim is the one that exceeds the budget.
+        $floor->claim(5, 1_000, 1_199);
+
+        self::assertNull($floor->floorFor(5), 'The bound must fire for killed children too.');
+        self::assertSame(1, $this->items()['article_range']['written_off']);
+    }
+
+    public function test_an_ordinary_failure_is_not_charged_twice(): void
+    {
+        config(['nntmux.binaries_article_range_stale_claim_seconds' => 60]);
+        $floor = new ArticleRangeFloor;
+
+        // markFailed() already counts the attempt, so a re-claim of a range
+        // that failed normally must not count it again -- that would spend the
+        // budget at double rate and abandon a recoverable range early.
+        for ($cycle = 1; $cycle <= 3; $cycle++) {
+            $floor->claim(5, 1_000, 1_199);
+            $floor->markFailed(5, 1_000, 1_199);
+        }
+
+        self::assertSame(999, $floor->floorFor(5));
+        self::assertSame(3, $this->items()['article_range']['floored']);
+        self::assertSame(0, $this->items()['article_range']['written_off']);
+    }
+
+    public function test_a_lock_timeout_is_reported_rather_than_silently_dropping_a_claim(): void
+    {
+        config(['nntmux.binaries_article_range_lock_wait_seconds' => 1]);
+        $floor = new ArticleRangeFloor;
+        // Hold the group's lock so the claim cannot take it. A dropped claim
+        // leaves its range unprotected, which must not be invisible.
+        $held = Cache::store('array')->lock('nntmux:binaries:article-ranges:5:lock', 30);
+        self::assertTrue($held->get());
+
+        try {
+            $floor->claim(5, 1_000, 1_199);
+        } finally {
+            $held->release();
+        }
+
+        self::assertNull($floor->floorFor(5), 'The claim was lost, so nothing is held.');
+        self::assertSame(1, $this->items()['article_range']['lock_timeout']);
+    }
+
     public function test_backfill_is_bounded_in_the_other_direction(): void
     {
         $floor = new ArticleRangeFloor;

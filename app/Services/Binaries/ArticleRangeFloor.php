@@ -62,16 +62,35 @@ class ArticleRangeFloor
      *
      * Re-claiming the same range carries its attempt count forward, so a range
      * that keeps failing is counted per range rather than per group.
+     *
+     * An attempt is charged here only when the previous claim was abandoned --
+     * a child that died without reaching markFailed(). Charging every re-claim
+     * would double-count the ordinary failure path, which markFailed() has
+     * already counted.
      */
     public function claim(int $groupId, int $first, int $last): void
     {
         $this->mutate($groupId, function (array $entries) use ($first, $last): array {
             $key = self::rangeKey($first, $last);
+            $existing = $entries[$key] ?? null;
+            $attempts = (int) ($existing['attempts'] ?? 0);
+
+            if (($existing['abandoned'] ?? false) === true) {
+                $attempts++;
+
+                if ($attempts > $this->maxAttempts()) {
+                    unset($entries[$key]);
+                    $this->reportWriteOff($first, $last, $attempts - 1);
+
+                    return $entries;
+                }
+            }
+
             $entries[$key] = [
                 'first' => $first,
                 'last' => $last,
                 'state' => self::STATE_IN_FLIGHT,
-                'attempts' => (int) ($entries[$key]['attempts'] ?? 0),
+                'attempts' => $attempts,
                 'at' => time(),
             ];
 
@@ -237,6 +256,15 @@ class ArticleRangeFloor
         return max(0, (int) config('nntmux.binaries_article_range_floor_seconds', 0));
     }
 
+    /**
+     * How long a child waits for the per-group lock before giving up and
+     * reporting the claim as lost.
+     */
+    public function lockWaitSeconds(): int
+    {
+        return max(1, (int) config('nntmux.binaries_article_range_lock_wait_seconds', 5));
+    }
+
     public function maxAttempts(): int
     {
         return max(1, (int) config('nntmux.binaries_article_range_max_attempts', 3));
@@ -256,7 +284,7 @@ class ArticleRangeFloor
     }
 
     /**
-     * @return array<string, array{first: int, last: int, state: string, attempts: int, at: int}>
+     * @return array<string, array{first: int, last: int, state: string, attempts: int, at: int, abandoned: bool}>
      */
     private function entries(int $groupId): array
     {
@@ -285,17 +313,22 @@ class ArticleRangeFloor
             }
 
             // An abandoned claim still protects its range; it just stops being
-            // open-ended. Counting it keeps the write-off bound meaningful.
-            if ($entry['state'] === self::STATE_IN_FLIGHT && (int) $entry['at'] < $cutoff) {
-                $entry['state'] = self::STATE_FAILED;
-            }
+            // open-ended. Flagged rather than silently rewritten, because the
+            // flag is what lets claim() charge the abandonment an attempt --
+            // a child killed by SIGKILL or the OOM reaper never reaches
+            // markFailed(), so without this its attempts stay at 0 and the
+            // write-off bound never fires. The range would then hold the
+            // cursor until the whole key expired, which is the open-ended
+            // hold this class exists to avoid.
+            $abandoned = $entry['state'] === self::STATE_IN_FLIGHT && (int) $entry['at'] < $cutoff;
 
             $entries[(string) $key] = [
                 'first' => (int) $entry['first'],
                 'last' => (int) $entry['last'],
-                'state' => (string) $entry['state'],
+                'state' => $abandoned ? self::STATE_FAILED : (string) $entry['state'],
                 'attempts' => (int) $entry['attempts'],
                 'at' => (int) $entry['at'],
+                'abandoned' => $abandoned,
             ];
         }
 
@@ -310,7 +343,7 @@ class ArticleRangeFloor
      * silently stops being protected, which is the bug this class exists to
      * prevent.
      *
-     * @param  callable(array<string, array{first: int, last: int, state: string, attempts: int, at: int}>): array<string, mixed>  $change
+     * @param  callable(array<string, array{first: int, last: int, state: string, attempts: int, at: int, abandoned: bool}>): array<string, mixed>  $change
      */
     private function mutate(int $groupId, callable $change): void
     {
@@ -321,6 +354,18 @@ class ArticleRangeFloor
         $store = $this->store();
 
         if ($store === null) {
+            // Not counted, because the counter lives in the store that is
+            // unavailable -- recordItem() would silently fail too and leave a
+            // flat line that reads as "never happened". The log is the signal
+            // here, and it is unconditional rather than debug-gated: a lost
+            // claim means a range is unprotected, which is the failure this
+            // class exists to prevent.
+            Log::warning(sprintf(
+                'Article range claim for group %d was not recorded: the shared cache is unavailable, '
+                .'so this range is not protected from a sibling advancing past it.',
+                $groupId,
+            ));
+
             return;
         }
 
@@ -330,7 +375,15 @@ class ArticleRangeFloor
                 ? $lockProvider->lock(self::KEY_PREFIX.$groupId.':lock', 10)
                 : null;
 
-            if ($lock !== null && ! $lock->block(5)) {
+            if ($lock !== null && ! $lock->block($this->lockWaitSeconds())) {
+                // The store is reachable here, so this one does count.
+                $this->telemetry->recordItem('binaries', 'article_range', 'lock_timeout');
+                Log::warning(sprintf(
+                    'Article range claim for group %d was not recorded: the per-group lock timed out, '
+                    .'so this range is not protected from a sibling advancing past it.',
+                    $groupId,
+                ));
+
                 return;
             }
 
@@ -348,6 +401,12 @@ class ArticleRangeFloor
                 $lock?->release();
             }
         } catch (Throwable $e) {
+            $this->telemetry->recordItem('binaries', 'article_range', 'lock_timeout');
+            Log::warning(sprintf(
+                'Article range claim for group %d was not recorded: %s',
+                $groupId,
+                $e->getMessage(),
+            ));
             $this->logFailure('write', $e);
         }
     }

@@ -445,6 +445,11 @@ return [
     // range, so the claim must keep protecting it -- but as a counted failure,
     // not as an open-ended hold.
     'binaries_article_range_stale_claim_seconds' => max(60, (int) env('NNTMUX_BINARIES_ARTICLE_RANGE_STALE_CLAIM_SECONDS', 1800)),
+    // Seconds a child waits for a group's range lock before giving up. A lost
+    // claim leaves its range unprotected, so it is reported as
+    // nntmux_worker_items_total{worker="binaries",item="article_range",result="lock_timeout"}
+    // and logged rather than dropped silently.
+    'binaries_article_range_lock_wait_seconds' => max(1, (int) env('NNTMUX_BINARIES_ARTICLE_RANGE_LOCK_WAIT_SECONDS', 5)),
     // Seconds a tmux monitor statistics snapshot may be reused from the shared
     // cache. Every distributed worker that gates on release/collection counts
     // recomputes the same ~20 statements on its own schedule, so one pod's
