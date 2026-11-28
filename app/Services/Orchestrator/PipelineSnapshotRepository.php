@@ -40,7 +40,15 @@ class PipelineSnapshotRepository
                             INNER JOIN collections c ON c.groups_id = g.id
                             INNER JOIN binaries b ON b.collections_id = c.id
                             WHERE g.active <> 1 AND g.backfill <> 1
-                              AND c.filecheck IN (0, 1, 2, 15, 16) AND b.partcheck = 0) AS x) AS xb
+                              AND c.filecheck IN (0, 1, 2, 15, 16) AND b.partcheck = 0
+                        UNION ALL
+                        SELECT STRAIGHT_JOIN COUNT(*) AS pending, COALESCE(SUM(b.currentparts), 0) AS parts
+                            FROM (SELECT dg.groups_id FROM (SELECT DISTINCT groups_id FROM collections) dg
+                                    LEFT JOIN usenet_groups g ON g.id = dg.groups_id
+                                    WHERE g.id IS NULL) og
+                            INNER JOIN collections c ON c.groups_id = og.groups_id
+                            INNER JOIN binaries b ON b.collections_id = c.id
+                            WHERE c.filecheck IN (0, 1, 2, 15, 16) AND b.partcheck = 0) AS x) AS xb
                 CROSS JOIN (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(p.dateadded), NOW()), 0) AS oldest_binary_age FROM (
                         SELECT (SELECT c.dateadded FROM collections c
                                 WHERE c.groups_id = g.id AND c.filecheck = f.stage AND c.dateadded IS NOT NULL
@@ -136,6 +144,17 @@ class PipelineSnapshotRepository
         //   usenet_groups, which probes collections.groups_id and misses
         //   immediately for the ~109k groups that hold nothing: 0.23 s
         //   instead of 0.55 s when the optimizer drives from collections.
+        // - there are two group terms, not one, because there is no foreign
+        //   key on collections.groups_id. A collection whose group row is
+        //   gone was excluded by the original's INNER JOIN usenet_groups, but
+        //   matches neither the filecheck branch nor the inactive-group branch
+        //   of the complement, so it would be counted as schedulable and
+        //   inflate the numbers the backfill gate reads. The orphan branch
+        //   drives from the distinct group ids that actually hold collections
+        //   -- a loose index scan over ~15 values, 0.9 ms -- so it costs 3 ms
+        //   while the orphan set is empty, which it is today. Folding it into
+        //   the inactive-group branch as a LEFT JOIN instead made that branch
+        //   drive from collections and cost 0.59 s against 0.22 s.
         // - oldest_binary_age is not invertible, so it is answered by ordered
         //   probes instead: one index walk of ix_collections_release_stage6
         //   per (group, filecheck) pair, stopping at the first collection

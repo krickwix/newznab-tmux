@@ -61,15 +61,31 @@ final class PipelineSnapshotSchedulableBinariesQueryTest extends TestCase
         $this->seedFixture();
 
         // Guards the comparison above: if the fixture only held schedulable
-        // rows, the complement would be trivially right.
+        // rows, the complement would be trivially right. binaries_backlog
+        // counts every pending binary including the orphaned one, because it
+        // never carried a group filter; schedulable excludes it.
         self::assertSame([
             'schedulable_binaries_backlog' => 4,
             'schedulable_parts_backlog' => 46,
-            'binaries_backlog' => 7,
+            'binaries_backlog' => 8,
         ], array_intersect_key(
             $this->sbRow($this->currentSql()),
             array_flip(['schedulable_binaries_backlog', 'schedulable_parts_backlog', 'binaries_backlog']),
         ));
+    }
+
+    public function test_a_collection_whose_group_row_is_gone_is_not_counted_as_schedulable(): void
+    {
+        $this->seedFixture();
+
+        // Without the orphan branch of the complement this reads 5 and 946:
+        // the row matches neither the filecheck exclusion nor the
+        // inactive-group exclusion, so it survives the subtraction while the
+        // join form it replaced dropped it.
+        $row = $this->sbRow($this->currentSql());
+
+        self::assertSame(4, $row['schedulable_binaries_backlog']);
+        self::assertSame(46, $row['schedulable_parts_backlog']);
     }
 
     public function test_binaries_backlog_is_the_same_count_the_separate_scalar_subquery_used_to_issue(): void
@@ -184,6 +200,10 @@ final class PipelineSnapshotSchedulableBinariesQueryTest extends TestCase
             ['id' => 6, 'groups_id' => 3, 'filecheck' => 0, 'dateadded' => $old],
             // a NULL dateadded must not blank out its (group, filecheck) probe
             ['id' => 7, 'groups_id' => 1, 'filecheck' => 2, 'dateadded' => null],
+            // orphaned: there is no foreign key on collections.groups_id, and
+            // group 99 does not exist. The join form excluded it, so the
+            // complement has to exclude it too or it counts as schedulable.
+            ['id' => 8, 'groups_id' => 99, 'filecheck' => 0, 'dateadded' => $mid],
         ]);
 
         DB::table('binaries')->insert([
@@ -195,6 +215,7 @@ final class PipelineSnapshotSchedulableBinariesQueryTest extends TestCase
             ['id' => 6, 'collections_id' => 5, 'partcheck' => 0, 'currentparts' => 600],
             ['id' => 7, 'collections_id' => 6, 'partcheck' => 0, 'currentparts' => 700],
             ['id' => 8, 'collections_id' => 7, 'partcheck' => 0, 'currentparts' => 10],
+            ['id' => 9, 'collections_id' => 8, 'partcheck' => 0, 'currentparts' => 900],
         ]);
     }
 }
