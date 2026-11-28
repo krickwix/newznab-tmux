@@ -74,32 +74,42 @@ final class PipelineSnapshotSchedulableBinariesQueryTest extends TestCase
         ));
     }
 
-    public function test_the_pending_binary_test_is_never_an_exists_semi_join(): void
+    public function test_oldest_binary_age_is_the_single_pass_join_not_a_per_partition_probe(): void
     {
         $sql = $this->currentSql();
 
-        // The 2026-11-29 incident. MariaDB may implement an EXISTS semi-join
-        // either as FirstMatch -- a per-row ref probe, 1.8 ms -- or by
-        // materializing the whole partcheck = 0 set, which database measured
-        // at 2311.5 ms for a single probe. The choice is cost-based on that
-        // set's cardinality, so it flipped silently as the pending count grew,
-        // and this probe runs inside a DEPENDENT SUBQUERY evaluated once per
-        // (group, stage) row. 180 rebuilds of a ~1M-row set is the 3,801 s
-        // statement that wedged the orchestrator.
+        // The 2026-11-29 incident: the ordered-probe form of this term wedged
+        // the statement for 3,801 s and took the orchestrator's lease with it.
+        // Two explanations survive and neither is provable, because there is
+        // no plan for the hung statement -- the slow log was off and
+        // performance_schema statement history is off. database's is a
+        // semi-join strategy flip on the probe's EXISTS (2311.5 ms when the
+        // ~1M-row partcheck = 0 set is materialized, 1.8 ms when it is not,
+        // same SQL). Mine is walk distance, since the probe walks a
+        // (group, filecheck) partition in dateadded order until it finds a
+        // pending binary.
         //
-        // A scalar subquery is not eligible for semi-join materialization, so
-        // the plan cannot flip this way. This is a shape assertion because the
-        // defect is in the shape: the two forms return identical values, which
-        // is exactly why nothing else would catch a change back.
+        // The single-pass join has neither property: no per-partition walk and
+        // no semi-join whose strategy the optimizer can flip. It is slower --
+        // 6.0-7.1 s against 0.04 s -- and that is the trade, because what is
+        // at risk is the lease rather than the cycle time.
+        //
+        // A shape assertion because the two forms return identical values. No
+        // value test can catch a change back to the probe.
         self::assertStringNotContainsString(
-            'EXISTS(SELECT 1 FROM binaries',
+            'ORDER BY c.dateadded LIMIT 1',
             $sql,
-            'An EXISTS here is materialization-eligible and can flip to a ~1M-row rebuild per probe.'
+            'The per-partition ordered probe is what wedged capture() on 2026-11-29.'
+        );
+        self::assertStringNotContainsString(
+            'UNION ALL SELECT 15',
+            $sql,
+            'The (group, stage) lattice the probe iterated must be gone with it.'
         );
         self::assertStringContainsString(
-            'WHERE b.collections_id = c.id AND b.partcheck = 0 LIMIT 1) IS NOT NULL',
+            'COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) AS oldest_binary_age',
             $sql,
-            'The pending-binary test must stay a scalar subquery.'
+            'oldest_binary_age must stay the single-pass MIN over the join.'
         );
     }
 

@@ -51,16 +51,12 @@ class PipelineSnapshotRepository
                             INNER JOIN collections c ON c.groups_id = og.groups_id
                             INNER JOIN binaries b ON b.collections_id = c.id
                             WHERE c.filecheck IN (0, 1, 2, 15, 16) AND b.partcheck = 0) AS x) AS xb
-                CROSS JOIN (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(p.dateadded), NOW()), 0) AS oldest_binary_age FROM (
-                        SELECT (SELECT c.dateadded FROM collections c
-                                WHERE c.groups_id = g.id AND c.filecheck = f.stage AND c.dateadded IS NOT NULL
-                                  AND (SELECT 1 FROM binaries b
-                                        WHERE b.collections_id = c.id AND b.partcheck = 0 LIMIT 1) IS NOT NULL
-                                ORDER BY c.dateadded LIMIT 1) AS dateadded
-                            FROM usenet_groups g
-                            CROSS JOIN (SELECT 0 AS stage UNION ALL SELECT 1 UNION ALL SELECT 2
-                                UNION ALL SELECT 15 UNION ALL SELECT 16) AS f
-                            WHERE g.active = 1 OR g.backfill = 1) AS p) AS oba) AS sb';
+                CROSS JOIN (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) AS oldest_binary_age
+                        FROM binaries b
+                        INNER JOIN collections c ON c.id = b.collections_id
+                        INNER JOIN usenet_groups g ON g.id = c.groups_id
+                        WHERE b.partcheck = 0 AND c.filecheck IN (0, 1, 2, 15, 16)
+                          AND (g.active = 1 OR g.backfill = 1)) AS oba) AS sb';
 
     private readonly BackfillTargetSelector $targets;
 
@@ -246,30 +242,39 @@ class PipelineSnapshotRepository
         //   while the orphan set is empty, which it is today. Folding it into
         //   the inactive-group branch as a LEFT JOIN instead made that branch
         //   drive from collections and cost 0.59 s against 0.22 s.
-        // - the pending-binary test inside the probe is a scalar subquery, not
-        //   EXISTS, and that is the whole of the 2026-11-29 incident.
-        //   MariaDB may implement an EXISTS semi-join either as FirstMatch --
-        //   a per-row ref probe on ix_binaries_collection, 1.8 ms -- or by
-        //   MATERIALIZING the entire partcheck = 0 set, which database
-        //   measured at 2311.5 ms for a single probe. The choice is cost-based
-        //   on that set's cardinality, so it flipped silently as the pending
-        //   count grew, and the probe sits in a DEPENDENT SUBQUERY evaluated
-        //   once per (group, stage) row: 180 rebuilds of a ~1M-row set is the
-        //   3,801 s statement. A scalar subquery is not eligible for semi-join
-        //   materialization at all, so the plan cannot flip this way. Same
-        //   trick as the group-readiness query in ReleasesRunner, for a
-        //   different reason.
+        // - oldest_binary_age is deliberately the slow form: one pass over
+        //   binaries -> collections -> usenet_groups taking MIN(c.dateadded).
+        //   6.0-7.1 s at the incident's cardinality, against 0.04 s for the
+        //   ordered probes it replaces. That is the right trade here, and the
+        //   reason is the 2026-11-29 incident: the probe form wedged this
+        //   statement for 3,801 s, the orchestrator sat in capture() holding
+        //   the leader lock while its own lease expired, and every lane fell
+        //   back to its timer.
         //
-        //   Verified equivalent inside one START TRANSACTION WITH CONSISTENT
-        //   SNAPSHOT: both forms returned MIN(dateadded) = 2026-11-24
-        //   12:51:07. Measured after: probe 1.8 ms against 2311.5 ms, whole
-        //   oba term 36.4 ms, and EXPLAIN carries no MATERIALIZED line.
-        // - oldest_binary_age is not invertible, so it is answered by ordered
-        //   probes instead: one index walk of ix_collections_release_stage6
-        //   per (group, filecheck) pair, stopping at the first collection
-        //   that still has a pending binary. 180 probes, 0.04 s. The
-        //   IS NOT NULL guard reproduces MIN()'s NULL handling -- without it
-        //   a NULL dateadded would sort first and blank out that pair.
+        //   Why not a narrower fix. Two hypotheses survive and neither is
+        //   provable, because there is no plan for the hung statement: the
+        //   slow log was off, performance_schema statement history is off, and
+        //   the on-disk slow log's last entry predates the incident by twelve
+        //   hours. database's is a semi-join strategy flip -- the probe's
+        //   EXISTS can be implemented by materializing the ~1M-row
+        //   partcheck = 0 set, measured at 2311.5 ms against 1.8 ms for the
+        //   non-materialized plan on the identical SQL. Mine is walk distance
+        //   -- the probe walks a (group, filecheck) partition in dateadded
+        //   order until it finds a pending binary, which is unbounded in how
+        //   far that is. Switching the EXISTS to a scalar subquery kills the
+        //   first and leaves the second: a scalar probe still walks.
+        //
+        //   This form has neither property. It is linear in the pending set,
+        //   with no per-partition walk and no semi-join for the optimizer to
+        //   choose a strategy for, so its cost is predictable and sits inside
+        //   the statement timeout with room. When the thing at risk is the
+        //   orchestrator's lease, predictable beats fast.
+        //
+        //   Neither of us can reproduce the hang: pending binaries were
+        //   1.19M at 10:26 and peaked at 1.46M, against the 607,718 live now,
+        //   and that cardinality is the input to the cost decision. So this is
+        //   not a fix verified against the failure; it is the removal of the
+        //   construct both candidate explanations need.
         // - the exact same pending-binary count also feeds binaries_backlog,
         //   which used to issue its own COUNT(*) (0.24 s) over the same rows.
         //
