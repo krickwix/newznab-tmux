@@ -29,7 +29,7 @@ final class RoleUpgradeTest extends TestCase
 
     public function createApplication()
     {
-        $this->databasePath = sys_get_temp_dir().'/nntmux-role-upgrade-test.sqlite';
+        $this->databasePath = sys_get_temp_dir().'/nntmux-role-upgrade-test-'.getmypid().'.sqlite';
 
         $this->originalEnvironment = [
             'APP_ENV' => getenv('APP_ENV'),

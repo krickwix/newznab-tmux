@@ -18,7 +18,7 @@ class PurgeRetentionOverridesCommandTest extends TestCase
 
     public function createApplication()
     {
-        $this->bootstrapDatabasePath = sys_get_temp_dir().'/nntmux-retention-purge-test.sqlite';
+        $this->bootstrapDatabasePath = sys_get_temp_dir().'/nntmux-retention-purge-test-'.getmypid().'.sqlite';
         $this->originalEnvironment = [
             'APP_ENV' => getenv('APP_ENV'),
             'DB_CONNECTION' => getenv('DB_CONNECTION'),
