@@ -152,7 +152,7 @@ class GetArticleRange extends Command
             // range for the whole time it is at risk.
             $rangeFloor = app(ArticleRangeFloor::class);
             $claimedRangeGroupId = (int) $groupMySQL['id'];
-            $rangeFloor->claim($claimedRangeGroupId, $firstArticle, $lastArticle);
+            $rangeFloor->claim($mode, $claimedRangeGroupId, $firstArticle, $lastArticle);
 
             try {
                 $return = $binaries->scan(
@@ -166,7 +166,7 @@ class GetArticleRange extends Command
                 );
             } finally {
                 if ($binaries->lastFetchFailed()) {
-                    $rangeFloor->markFailed($claimedRangeGroupId, $firstArticle, $lastArticle);
+                    $rangeFloor->markFailed($mode, $claimedRangeGroupId, $firstArticle, $lastArticle);
                     $rangeSettled = true;
                 }
             }
@@ -182,7 +182,7 @@ class GetArticleRange extends Command
                 // An empty range that was actually read holds nothing back;
                 // the cursor has to be allowed past it or it stalls there.
                 if (! $rangeSettled) {
-                    $rangeFloor->release($claimedRangeGroupId, $firstArticle, $lastArticle);
+                    $rangeFloor->release($mode, $claimedRangeGroupId, $firstArticle, $lastArticle);
                     $rangeSettled = true;
                 }
 
@@ -198,7 +198,7 @@ class GetArticleRange extends Command
             // Released before the cursor update, so this child's own range
             // does not bound its own advance.
             if (! $rangeSettled) {
-                $rangeFloor->release($claimedRangeGroupId, $firstArticle, $lastArticle);
+                $rangeFloor->release($mode, $claimedRangeGroupId, $firstArticle, $lastArticle);
                 $rangeSettled = true;
             }
 
@@ -217,7 +217,7 @@ class GetArticleRange extends Command
             // that throws every cycle is written off rather than wedging the
             // group for as long as the claim lives.
             if ($rangeFloor !== null && ! $rangeSettled && $claimedRangeGroupId > 0) {
-                $rangeFloor->markFailed($claimedRangeGroupId, $firstArticle, $lastArticle);
+                $rangeFloor->markFailed($mode, $claimedRangeGroupId, $firstArticle, $lastArticle);
             }
             if ($claimedGeneration !== null && $permitGate !== null) {
                 $permitGate->fail($claimedGeneration, $e->getMessage());
@@ -299,7 +299,7 @@ class GetArticleRange extends Command
                     ));
                     $lastRecord = $floor;
                 } else {
-                    $rangeFloor->pruneIfSettled($groupId);
+                    $rangeFloor->pruneIfSettled(ArticleRangeFloor::LANE_FORWARD, $groupId);
                 }
 
                 if ($lastRecord <= (int) $groupMySQL['last_record']) {
@@ -338,7 +338,7 @@ class GetArticleRange extends Command
                     ));
                     $firstRecord = $ceiling;
                 } else {
-                    $rangeFloor->pruneIfSettled($groupId);
+                    $rangeFloor->pruneIfSettled(ArticleRangeFloor::LANE_BACKFILL, $groupId);
                 }
 
                 if ($firstRecord >= (int) $groupMySQL['first_record']) {

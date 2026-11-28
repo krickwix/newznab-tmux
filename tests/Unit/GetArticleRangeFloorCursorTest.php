@@ -79,10 +79,10 @@ final class GetArticleRangeFloorCursorTest extends TestCase
         $floor = new ArticleRangeFloor;
         // Two children of one cycle: the low one failed, the high one is about
         // to record its success.
-        $floor->claim(1, 1_001, 1_200);
-        $floor->markFailed(1, 1_001, 1_200);
-        $floor->claim(1, 1_201, 1_400);
-        $floor->release(1, 1_201, 1_400);
+        $floor->claim(ArticleRangeFloor::LANE_FORWARD, 1, 1_001, 1_200);
+        $floor->markFailed(ArticleRangeFloor::LANE_FORWARD, 1, 1_001, 1_200);
+        $floor->claim(ArticleRangeFloor::LANE_FORWARD, 1, 1_201, 1_400);
+        $floor->release(ArticleRangeFloor::LANE_FORWARD, 1, 1_201, 1_400);
 
         $this->updateGroupRecords('binaries', 1_400);
 
@@ -97,9 +97,9 @@ final class GetArticleRangeFloorCursorTest extends TestCase
         // Still fetching -- not yet known to have failed. This is the case a
         // floor published only on failure cannot cover, because the sibling
         // below is slower than the one recording its success here.
-        $floor->claim(1, 1_001, 1_200);
-        $floor->claim(1, 1_201, 1_400);
-        $floor->release(1, 1_201, 1_400);
+        $floor->claim(ArticleRangeFloor::LANE_FORWARD, 1, 1_001, 1_200);
+        $floor->claim(ArticleRangeFloor::LANE_FORWARD, 1, 1_201, 1_400);
+        $floor->release(ArticleRangeFloor::LANE_FORWARD, 1, 1_201, 1_400);
 
         $this->updateGroupRecords('binaries', 1_400);
 
@@ -110,13 +110,13 @@ final class GetArticleRangeFloorCursorTest extends TestCase
     {
         $floor = new ArticleRangeFloor;
         foreach ([[1_001, 1_200], [1_201, 1_400], [1_401, 1_600]] as [$first, $last]) {
-            $floor->claim(1, $first, $last);
+            $floor->claim(ArticleRangeFloor::LANE_FORWARD, 1, $first, $last);
         }
         // The high chunks finish first; the lowest finishes last and is the
         // one that performs this update.
-        $floor->release(1, 1_401, 1_600);
-        $floor->release(1, 1_201, 1_400);
-        $floor->release(1, 1_001, 1_200);
+        $floor->release(ArticleRangeFloor::LANE_FORWARD, 1, 1_401, 1_600);
+        $floor->release(ArticleRangeFloor::LANE_FORWARD, 1, 1_201, 1_400);
+        $floor->release(ArticleRangeFloor::LANE_FORWARD, 1, 1_001, 1_200);
 
         $this->updateGroupRecords('binaries', 1_200);
 
@@ -141,7 +141,7 @@ final class GetArticleRangeFloorCursorTest extends TestCase
     {
         DB::table('usenet_groups')->where('id', 1)->update(['last_record' => 5_000]);
         $floor = new ArticleRangeFloor;
-        $floor->claim(1, 1_001, 1_200);
+        $floor->claim(ArticleRangeFloor::LANE_FORWARD, 1, 1_001, 1_200);
 
         $this->updateGroupRecords('binaries', 1_400, lastRecord: 5_000);
 
@@ -155,10 +155,10 @@ final class GetArticleRangeFloorCursorTest extends TestCase
         $floor = new ArticleRangeFloor;
         // Backfill walks down: the child covering 901-999 failed, the one
         // covering 601-700 succeeded and is recording it.
-        $floor->claim(1, 901, 999);
-        $floor->markFailed(1, 901, 999);
-        $floor->claim(1, 601, 700);
-        $floor->release(1, 601, 700);
+        $floor->claim(ArticleRangeFloor::LANE_BACKFILL, 1, 901, 999);
+        $floor->markFailed(ArticleRangeFloor::LANE_BACKFILL, 1, 901, 999);
+        $floor->claim(ArticleRangeFloor::LANE_BACKFILL, 1, 601, 700);
+        $floor->release(ArticleRangeFloor::LANE_BACKFILL, 1, 601, 700);
 
         $this->updateGroupRecords('backfill', 601);
 
@@ -171,12 +171,12 @@ final class GetArticleRangeFloorCursorTest extends TestCase
     {
         $floor = new ArticleRangeFloor;
         // 901-999 was read by some child of this cycle, 801-900 was not.
-        $floor->claim(1, 901, 999);
-        $floor->release(1, 901, 999);
-        $floor->claim(1, 801, 900);
-        $floor->markFailed(1, 801, 900);
-        $floor->claim(1, 601, 700);
-        $floor->release(1, 601, 700);
+        $floor->claim(ArticleRangeFloor::LANE_BACKFILL, 1, 901, 999);
+        $floor->release(ArticleRangeFloor::LANE_BACKFILL, 1, 901, 999);
+        $floor->claim(ArticleRangeFloor::LANE_BACKFILL, 1, 801, 900);
+        $floor->markFailed(ArticleRangeFloor::LANE_BACKFILL, 1, 801, 900);
+        $floor->claim(ArticleRangeFloor::LANE_BACKFILL, 1, 601, 700);
+        $floor->release(ArticleRangeFloor::LANE_BACKFILL, 1, 601, 700);
 
         $this->updateGroupRecords('backfill', 601);
 
@@ -189,12 +189,12 @@ final class GetArticleRangeFloorCursorTest extends TestCase
     public function test_binaries_still_advances_up_to_the_edge_of_the_unread_gap(): void
     {
         $floor = new ArticleRangeFloor;
-        $floor->claim(1, 1_001, 1_200);
-        $floor->release(1, 1_001, 1_200);
-        $floor->claim(1, 1_201, 1_400);
-        $floor->markFailed(1, 1_201, 1_400);
-        $floor->claim(1, 1_401, 1_600);
-        $floor->release(1, 1_401, 1_600);
+        $floor->claim(ArticleRangeFloor::LANE_FORWARD, 1, 1_001, 1_200);
+        $floor->release(ArticleRangeFloor::LANE_FORWARD, 1, 1_001, 1_200);
+        $floor->claim(ArticleRangeFloor::LANE_FORWARD, 1, 1_201, 1_400);
+        $floor->markFailed(ArticleRangeFloor::LANE_FORWARD, 1, 1_201, 1_400);
+        $floor->claim(ArticleRangeFloor::LANE_FORWARD, 1, 1_401, 1_600);
+        $floor->release(ArticleRangeFloor::LANE_FORWARD, 1, 1_401, 1_600);
 
         $this->updateGroupRecords('binaries', 1_600);
 
@@ -206,8 +206,8 @@ final class GetArticleRangeFloorCursorTest extends TestCase
     {
         $floor = new ArticleRangeFloor;
         foreach ([[601, 700], [701, 800], [801, 900]] as [$first, $last]) {
-            $floor->claim(1, $first, $last);
-            $floor->release(1, $first, $last);
+            $floor->claim(ArticleRangeFloor::LANE_BACKFILL, 1, $first, $last);
+            $floor->release(ArticleRangeFloor::LANE_BACKFILL, 1, $first, $last);
         }
 
         // The child covering 801-900 finishes last and performs the update.

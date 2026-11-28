@@ -37,6 +37,19 @@ use Throwable;
  *   - backfill moves first_record down, so the bound is a ceiling: the highest
  *     unread `last` plus one.
  *
+ * The two cursors are tracked separately. They share a group but move in
+ * opposite directions, and a shared bound freezes both: a backfill claim down
+ * at the first_record region would drive the forward floor below last_record,
+ * and updateGroupRecords('binaries') would then cap and return without
+ * advancing -- forever, while scan() kept storing the same articles every
+ * cycle. Each entry carries its lane, floorFor() reads forward claims only and
+ * ceilingFor() backfill claims only, and the lane is part of the key so the
+ * two can never collide.
+ *
+ * That collision also mattered for the death proof below: two lanes claiming
+ * the same start would have looked like one lane dying, charging a spurious
+ * attempt and writing off a live range after three.
+ *
  * Scope: this guards the get_range path only. Groups whose remaining gap is
  * within maxmssgs * 2 are queued by BinariesRunner as a single
  * update_group_headers task, which runs one sequential child with no siblings
@@ -60,6 +73,10 @@ class ArticleRangeFloor
     private const string STATE_FAILED = 'failed';
 
     private const string STATE_DONE = 'done';
+
+    public const string LANE_FORWARD = 'binaries';
+
+    public const string LANE_BACKFILL = 'backfill';
 
     /**
      * Causes already reported in this process, so a Redis outage does not
@@ -85,6 +102,14 @@ class ArticleRangeFloor
      * re-claimed while outstanding: chunks within a cycle are disjoint, and
      * the next cycle cannot re-claim a range whose holder settled it.
      *
+     * The proof rests on the parent joining its children before the next cycle
+     * starts (BinariesRunner waits for every child, then sleeps) and on
+     * BaseRunner having no retry, so a child killed at
+     * multiprocessing_max_child_time is not re-run inside the cycle. If cycles
+     * are ever allowed to overlap, a live claim becomes indistinguishable from
+     * a dead one and this charges attempts against ranges that are still being
+     * fetched.
+     *
      * Detected from the state rather than from a staleness clock. A clock only
      * catches a child that died long enough ago, and the realistic trigger is
      * the opposite -- the binaries pod has a 2Gi limit, so an OOM kill lands
@@ -97,10 +122,10 @@ class ArticleRangeFloor
      * double-count the ordinary failure path, where markFailed() has already
      * counted it, and halve a recoverable range's budget.
      */
-    public function claim(int $groupId, int $first, int $last): void
+    public function claim(string $lane, int $groupId, int $first, int $last): void
     {
-        $this->mutate($groupId, function (array $entries) use ($first, $last): array {
-            $key = self::rangeKey($first);
+        $this->mutate($groupId, function (array $entries) use ($lane, $first, $last): array {
+            $key = self::rangeKey($lane, $first);
             $existing = $entries[$key] ?? null;
             $attempts = (int) ($existing['attempts'] ?? 0);
 
@@ -117,6 +142,7 @@ class ArticleRangeFloor
             }
 
             $entries[$key] = [
+                'lane' => $lane,
                 'first' => $first,
                 'last' => $last,
                 'state' => self::STATE_IN_FLIGHT,
@@ -139,11 +165,12 @@ class ArticleRangeFloor
      * cannot see would be re-fetched next cycle. Keeping the read ranges lets
      * that child advance to the furthest article the cycle actually read.
      */
-    public function release(int $groupId, int $first, int $last): void
+    public function release(string $lane, int $groupId, int $first, int $last): void
     {
-        $this->mutate($groupId, static function (array $entries) use ($first, $last): array {
-            $key = self::rangeKey($first);
+        $this->mutate($groupId, static function (array $entries) use ($lane, $first, $last): array {
+            $key = self::rangeKey($lane, $first);
             $entries[$key] = [
+                'lane' => $lane,
                 'first' => $first,
                 'last' => $last,
                 'state' => self::STATE_DONE,
@@ -159,10 +186,10 @@ class ArticleRangeFloor
      * The fetch failed. Keep holding the cursor, and count the attempt against
      * this range so a permanently dead one eventually gets written off.
      */
-    public function markFailed(int $groupId, int $first, int $last): void
+    public function markFailed(string $lane, int $groupId, int $first, int $last): void
     {
-        $this->mutate($groupId, function (array $entries) use ($first, $last): array {
-            $key = self::rangeKey($first);
+        $this->mutate($groupId, function (array $entries) use ($lane, $first, $last): array {
+            $key = self::rangeKey($lane, $first);
             $attempts = (int) ($entries[$key]['attempts'] ?? 0) + 1;
 
             if ($attempts > $this->maxAttempts()) {
@@ -173,6 +200,7 @@ class ArticleRangeFloor
             }
 
             $entries[$key] = [
+                'lane' => $lane,
                 'first' => $first,
                 'last' => $last,
                 'state' => self::STATE_FAILED,
@@ -191,7 +219,7 @@ class ArticleRangeFloor
      */
     public function floorFor(int $groupId): ?int
     {
-        $firsts = $this->unreadValues($groupId, 'first');
+        $firsts = $this->unreadValues($groupId, self::LANE_FORWARD, 'first');
 
         return $firsts === [] ? null : max(0, min($firsts) - 1);
     }
@@ -202,7 +230,7 @@ class ArticleRangeFloor
      */
     public function ceilingFor(int $groupId): ?int
     {
-        $lasts = $this->unreadValues($groupId, 'last');
+        $lasts = $this->unreadValues($groupId, self::LANE_BACKFILL, 'last');
 
         return $lasts === [] ? null : max($lasts) + 1;
     }
@@ -213,7 +241,7 @@ class ArticleRangeFloor
      */
     public function readMaxFor(int $groupId): ?int
     {
-        $lasts = $this->readValues($groupId, 'last');
+        $lasts = $this->readValues($groupId, self::LANE_FORWARD, 'last');
 
         return $lasts === [] ? null : max($lasts);
     }
@@ -223,7 +251,7 @@ class ArticleRangeFloor
      */
     public function readMinFor(int $groupId): ?int
     {
-        $firsts = $this->readValues($groupId, 'first');
+        $firsts = $this->readValues($groupId, self::LANE_BACKFILL, 'first');
 
         return $firsts === [] ? null : min($firsts);
     }
@@ -235,29 +263,37 @@ class ArticleRangeFloor
      * cycle read, so the next cycle starts from an empty set rather than
      * inheriting completed ranges that would cap it.
      */
-    public function pruneIfSettled(int $groupId): void
+    public function pruneIfSettled(string $lane, int $groupId): void
     {
-        $this->mutate($groupId, static function (array $entries): array {
-            foreach ($entries as $entry) {
+        $this->mutate($groupId, static function (array $entries) use ($lane): array {
+            $pruned = $entries;
+
+            foreach ($entries as $key => $entry) {
+                if ($entry['lane'] !== $lane) {
+                    continue;
+                }
+
                 if ($entry['state'] !== self::STATE_DONE) {
                     return $entries;
                 }
+
+                unset($pruned[$key]);
             }
 
-            return [];
+            return $pruned;
         });
     }
 
     /**
      * @return list<int>
      */
-    private function unreadValues(int $groupId, string $field): array
+    private function unreadValues(int $groupId, string $lane, string $field): array
     {
         return array_values(array_map(
             static fn (array $entry): int => $entry[$field],
             array_filter(
                 $this->entries($groupId),
-                static fn (array $entry): bool => $entry['state'] !== self::STATE_DONE,
+                static fn (array $entry): bool => $entry['lane'] === $lane && $entry['state'] !== self::STATE_DONE,
             ),
         ));
     }
@@ -265,13 +301,13 @@ class ArticleRangeFloor
     /**
      * @return list<int>
      */
-    private function readValues(int $groupId, string $field): array
+    private function readValues(int $groupId, string $lane, string $field): array
     {
         return array_values(array_map(
             static fn (array $entry): int => $entry[$field],
             array_filter(
                 $this->entries($groupId),
-                static fn (array $entry): bool => $entry['state'] === self::STATE_DONE,
+                static fn (array $entry): bool => $entry['lane'] === $lane && $entry['state'] === self::STATE_DONE,
             ),
         ));
     }
@@ -301,7 +337,7 @@ class ArticleRangeFloor
     }
 
     /**
-     * @return array<string, array{first: int, last: int, state: string, attempts: int, at: int}>
+     * @return array<string, array{lane: string, first: int, last: int, state: string, attempts: int, at: int}>
      */
     private function entries(int $groupId): array
     {
@@ -335,6 +371,11 @@ class ArticleRangeFloor
             // persisted so it could not be counted either. claim() detects an
             // unsettled claim from its state instead.
             $entries[(string) $key] = [
+                // Entries written before the lanes were split carry no lane.
+                // Treated as forward, which is the lane that existed to be
+                // protected; a stale backfill entry read as forward can only
+                // hold a cursor back, never advance one past an unread range.
+                'lane' => (string) ($entry['lane'] ?? self::LANE_FORWARD),
                 'first' => (int) $entry['first'],
                 'last' => (int) $entry['last'],
                 'state' => (string) $entry['state'],
@@ -354,7 +395,7 @@ class ArticleRangeFloor
      * silently stops being protected, which is the bug this class exists to
      * prevent.
      *
-     * @param  callable(array<string, array{first: int, last: int, state: string, attempts: int, at: int}>): array<string, mixed>  $change
+     * @param  callable(array<string, array{lane: string, first: int, last: int, state: string, attempts: int, at: int}>): array<string, mixed>  $change
      */
     private function mutate(int $groupId, callable $change): void
     {
@@ -443,9 +484,9 @@ class ArticleRangeFloor
      * max_headers_iteration only moves the trailing partial chunk, which this
      * keying does survive.
      */
-    private static function rangeKey(int $first): string
+    private static function rangeKey(string $lane, int $first): string
     {
-        return (string) $first;
+        return $lane.':'.$first;
     }
 
     /**
