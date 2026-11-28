@@ -37,6 +37,14 @@ use Throwable;
  *   - backfill moves first_record down, so the bound is a ceiling: the highest
  *     unread `last` plus one.
  *
+ * Scope: this guards the get_range path only. Groups whose remaining gap is
+ * within maxmssgs * 2 are queued by BinariesRunner as a single
+ * update_group_headers task, which runs one sequential child with no siblings
+ * to leapfrog it and never claims. Today that means the floor is active for
+ * boneless and inactive for teevee, hdtv.x264, moovee, rail and
+ * midnightmovies -- correct, because those lanes cannot lose a range this
+ * way, but not the coverage someone might assume from the name.
+ *
  * Bounded on purpose. A range that can never be fetched -- expired, withdrawn,
  * a group the provider has lost -- must not wedge the group behind it forever,
  * which would be a worse outcome than the leapfrog. After maxAttempts()
@@ -52,6 +60,14 @@ class ArticleRangeFloor
     private const string STATE_FAILED = 'failed';
 
     private const string STATE_DONE = 'done';
+
+    /**
+     * Causes already reported in this process, so a Redis outage does not
+     * drown the worker log in the warning it exists to surface.
+     *
+     * @var array<string, true>
+     */
+    private static array $reportedLostClaims = [];
 
     public function __construct(
         private readonly DistributedWorkerTelemetry $telemetry = new DistributedWorkerTelemetry,
@@ -84,7 +100,7 @@ class ArticleRangeFloor
     public function claim(int $groupId, int $first, int $last): void
     {
         $this->mutate($groupId, function (array $entries) use ($first, $last): array {
-            $key = self::rangeKey($first, $last);
+            $key = self::rangeKey($first);
             $existing = $entries[$key] ?? null;
             $attempts = (int) ($existing['attempts'] ?? 0);
 
@@ -126,7 +142,7 @@ class ArticleRangeFloor
     public function release(int $groupId, int $first, int $last): void
     {
         $this->mutate($groupId, static function (array $entries) use ($first, $last): array {
-            $key = self::rangeKey($first, $last);
+            $key = self::rangeKey($first);
             $entries[$key] = [
                 'first' => $first,
                 'last' => $last,
@@ -146,7 +162,7 @@ class ArticleRangeFloor
     public function markFailed(int $groupId, int $first, int $last): void
     {
         $this->mutate($groupId, function (array $entries) use ($first, $last): array {
-            $key = self::rangeKey($first, $last);
+            $key = self::rangeKey($first);
             $attempts = (int) ($entries[$key]['attempts'] ?? 0) + 1;
 
             if ($attempts > $this->maxAttempts()) {
@@ -355,11 +371,7 @@ class ArticleRangeFloor
             // here, and it is unconditional rather than debug-gated: a lost
             // claim means a range is unprotected, which is the failure this
             // class exists to prevent.
-            Log::warning(sprintf(
-                'Article range claim for group %d was not recorded: the shared cache is unavailable, '
-                .'so this range is not protected from a sibling advancing past it.',
-                $groupId,
-            ));
+            $this->reportLostClaim('store_unavailable', $groupId, 'The shared cache is unavailable.');
 
             return;
         }
@@ -373,11 +385,7 @@ class ArticleRangeFloor
             if ($lock !== null && ! $lock->block($this->lockWaitSeconds())) {
                 // The store is reachable here, so this one does count.
                 $this->telemetry->recordItem('binaries', 'article_range', 'lock_timeout');
-                Log::warning(sprintf(
-                    'Article range claim for group %d was not recorded: the per-group lock timed out, '
-                    .'so this range is not protected from a sibling advancing past it.',
-                    $groupId,
-                ));
+                $this->reportLostClaim('lock_timeout', $groupId, 'The per-group lock timed out.');
 
                 return;
             }
@@ -397,11 +405,7 @@ class ArticleRangeFloor
             }
         } catch (Throwable $e) {
             $this->telemetry->recordItem('binaries', 'article_range', 'lock_timeout');
-            Log::warning(sprintf(
-                'Article range claim for group %d was not recorded: %s',
-                $groupId,
-                $e->getMessage(),
-            ));
+            $this->reportLostClaim('write_failed', $groupId, $e->getMessage());
             $this->logFailure('write', $e);
         }
     }
@@ -418,9 +422,57 @@ class ArticleRangeFloor
         ));
     }
 
-    private static function rangeKey(int $first, int $last): string
+    /**
+     * Keyed on the range's first article alone, not on the first/last pair.
+     *
+     * BinariesRunner::safeBinaryQueueEntries() builds every full chunk as
+     * start = cursor + j * maxmssgs + 1, so chunk starts lie on a maxmssgs
+     * lattice anchored at the cursor. The floor holds the cursor at
+     * min(unread first) - 1, which is a lattice point minus one, so the next
+     * cycle's lattice realigns exactly and an abandoned range reappears with
+     * an identical start even though its index shifted. Only `last` can move,
+     * which is why keying on the pair left a range whose end changed unable to
+     * carry its attempt count -- bounded only by the key TTL instead of the
+     * attempt budget.
+     *
+     * If the end shrank, the floor protects slightly more than the re-fetched
+     * range. Since the bound is first - 1 either way, that costs nothing.
+     *
+     * Changing maxmssgs changes the lattice step and invalidates the keys of
+     * any floor in flight; no keying choice survives that. Changing
+     * max_headers_iteration only moves the trailing partial chunk, which this
+     * keying does survive.
+     */
+    private static function rangeKey(int $first): string
     {
-        return $first.'-'.$last;
+        return (string) $first;
+    }
+
+    /**
+     * Report a lost claim once per cause per process.
+     *
+     * mutate() runs about three times per child, so with Redis down an
+     * unconditional line per call is ~60 per cycle per group and roughly 55
+     * cycles an hour. The signal this exists to make visible would bury
+     * everything else in the worker log. A get_range child is short-lived, so
+     * once per process is once per affected fetch.
+     */
+    private function reportLostClaim(string $cause, int $groupId, string $detail): void
+    {
+        if (isset(self::$reportedLostClaims[$cause])) {
+            return;
+        }
+
+        self::$reportedLostClaims[$cause] = true;
+
+        Log::warning(sprintf(
+            'Article range claim for group %d was not recorded (%s): %s This range is not '
+            .'protected from a sibling advancing past it. Further occurrences in this process '
+            .'are not logged.',
+            $groupId,
+            $cause,
+            $detail,
+        ));
     }
 
     private function store(): ?Repository

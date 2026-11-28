@@ -7,6 +7,8 @@ namespace Tests\Unit\Binaries;
 use App\Services\Binaries\ArticleRangeFloor;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
+use ReflectionProperty;
 use Tests\TestCase;
 
 /**
@@ -30,6 +32,11 @@ final class ArticleRangeFloorTest extends TestCase
             'nntmux.binaries_article_range_max_attempts' => 3,
         ]);
         Cache::store('array')->flush();
+
+        // The lost-claim log is deduplicated per process, so the registry has
+        // to be cleared or only the first test in a run would see a warning.
+        $reported = new ReflectionProperty(ArticleRangeFloor::class, 'reportedLostClaims');
+        $reported->setValue(null, []);
     }
 
     public function test_an_in_flight_range_holds_the_forward_cursor_below_it(): void
@@ -214,6 +221,66 @@ final class ArticleRangeFloorTest extends TestCase
 
         self::assertNull($floor->floorFor(5), 'The claim was lost, so nothing is held.');
         self::assertSame(1, $this->items()['article_range']['lock_timeout']);
+    }
+
+    public function test_a_rechunked_window_still_carries_its_attempt_count(): void
+    {
+        $floor = new ArticleRangeFloor;
+
+        // Chunk starts sit on a maxmssgs lattice anchored at the cursor, and
+        // the floor holds the cursor at first - 1, so the start realigns
+        // exactly next cycle. The end can move -- a trailing partial chunk
+        // shrinks as the server advances, and the lead moved
+        // max_headers_iteration twice inside ten minutes today. Keying the
+        // attempt on the pair left such a range unable to carry its count, so
+        // it was bounded only by the key TTL.
+        $floor->claim(5, 1_000, 1_199);
+        $floor->claim(5, 1_000, 1_150);
+        $floor->claim(5, 1_000, 1_099);
+        $floor->claim(5, 1_000, 1_199);
+
+        self::assertSame(3, $this->items()['article_range']['abandoned']);
+        self::assertSame(999, $floor->floorFor(5), 'Three abandonments are inside the budget.');
+
+        // Fifth claim, still the same start, exceeds it.
+        $floor->claim(5, 1_000, 1_050);
+
+        self::assertNull($floor->floorFor(5));
+        self::assertSame(1, $this->items()['article_range']['written_off']);
+    }
+
+    public function test_a_moved_end_is_tracked_so_the_ceiling_follows_it(): void
+    {
+        $floor = new ArticleRangeFloor;
+        $floor->claim(5, 1_000, 1_199);
+        $floor->claim(5, 1_000, 1_099);
+
+        // Keying on the start must not freeze the end: backfill's ceiling is
+        // derived from it.
+        self::assertSame(1_100, $floor->ceilingFor(5));
+    }
+
+    public function test_a_lost_claim_is_logged_once_per_process(): void
+    {
+        config(['nntmux.binaries_article_range_lock_wait_seconds' => 1]);
+        Log::spy();
+        $floor = new ArticleRangeFloor;
+        $held = Cache::store('array')->lock('nntmux:binaries:article-ranges:5:lock', 30);
+        self::assertTrue($held->get());
+
+        try {
+            $floor->claim(5, 1_000, 1_199);
+            $floor->claim(5, 1_200, 1_399);
+            $floor->claim(5, 1_400, 1_599);
+        } finally {
+            $held->release();
+        }
+
+        // mutate() runs ~3 times per child, so an unconditional line would be
+        // ~60 per cycle per group with Redis down and would bury the signal it
+        // exists to surface. The counter still records every occurrence.
+        Log::shouldHaveReceived('warning')->once();
+        self::assertSame(3, $this->items()['article_range']['lock_timeout']);
     }
 
     public function test_backfill_is_bounded_in_the_other_direction(): void
