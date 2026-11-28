@@ -270,18 +270,34 @@ class PipelineSnapshotRepository
         //   the leader lock while its own lease expired, and every lane fell
         //   back to its timer.
         //
-        //   Why not a narrower fix. Two hypotheses survive and neither is
-        //   provable, because there is no plan for the hung statement: the
-        //   slow log was off, performance_schema statement history is off, and
-        //   the on-disk slow log's last entry predates the incident by twelve
-        //   hours. database's is a semi-join strategy flip -- the probe's
-        //   EXISTS can be implemented by materializing the ~1M-row
-        //   partcheck = 0 set, measured at 2311.5 ms against 1.8 ms for the
-        //   non-materialized plan on the identical SQL. Mine is walk distance
-        //   -- the probe walks a (group, filecheck) partition in dateadded
-        //   order until it finds a pending binary, which is unbounded in how
-        //   far that is. Switching the EXISTS to a scalar subquery kills the
-        //   first and leaves the second: a scalar probe still walks.
+        //   Why not a narrower fix. The incident has no established
+        //   mechanism, and that is the honest state rather than a gap waiting
+        //   to be filled. No plan exists for the hung statement: the slow log
+        //   was off, performance_schema statement history is off, and the
+        //   on-disk slow log's last entry predates the incident by twelve
+        //   hours with a 7.11 s maximum.
+        //
+        //   Two explanations were offered and both are dead. database's was a
+        //   semi-join materialization flip on the probe's EXISTS; they
+        //   retracted it themselves after finding their reproduction used
+        //   literal constants (groups_id = 111240 AND filecheck = 0) while
+        //   the deployed statement always correlates (groups_id = g.id AND
+        //   filecheck = f.stage). Materialization is reachable only in the
+        //   constant form -- the correlated reference prevents the
+        //   decorrelation it needs -- so EXPLAIN on the shipped shape returns
+        //   FirstMatch at every cardinality tested, including 1,272,999
+        //   pending binaries, above the incident's 1.19M. Mine was walk
+        //   distance, the probe walking a (group, filecheck) partition in
+        //   dateadded order until it finds a pending binary; never
+        //   reproduced, and the probe measures 0.043 s at above-incident
+        //   cardinality.
+        //
+        //   So the construct is gone not because we know what it did, but
+        //   because its cost was not bounded by anything either reviewer
+        //   could characterise, and nothing in the configuration would have
+        //   captured the plan if it had been. Do not go looking for a
+        //   materialization flip here: you will find FirstMatch every time
+        //   and conclude this revert was unnecessary.
         //
         //   This form has neither property. It is linear in the pending set,
         //   with no per-partition walk and no semi-join for the optimizer to

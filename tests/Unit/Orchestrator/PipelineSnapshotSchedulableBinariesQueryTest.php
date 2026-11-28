@@ -80,19 +80,21 @@ final class PipelineSnapshotSchedulableBinariesQueryTest extends TestCase
 
         // The 2026-11-29 incident: the ordered-probe form of this term wedged
         // the statement for 3,801 s and took the orchestrator's lease with it.
-        // Two explanations survive and neither is provable, because there is
-        // no plan for the hung statement -- the slow log was off and
-        // performance_schema statement history is off. database's is a
-        // semi-join strategy flip on the probe's EXISTS (2311.5 ms when the
-        // ~1M-row partcheck = 0 set is materialized, 1.8 ms when it is not,
-        // same SQL). Mine is walk distance, since the probe walks a
-        // (group, filecheck) partition in dateadded order until it finds a
-        // pending binary.
         //
-        // The single-pass join has neither property: no per-partition walk and
-        // no semi-join whose strategy the optimizer can flip. It is slower --
-        // 6.0-7.1 s against 0.04 s -- and that is the trade, because what is
-        // at risk is the lease rather than the cycle time.
+        // The incident has no established mechanism. No plan was captured --
+        // the slow log was off and performance_schema statement history is
+        // off -- and both proposed explanations are now dead. A semi-join
+        // materialization flip on the probe's EXISTS was refuted by its own
+        // author: that plan is reachable only when the predicates are literal
+        // constants, while the deployed statement correlates them, and the
+        // shipped shape returns FirstMatch at every cardinality tested
+        // including above the incident's. A long ordered walk per partition
+        // was never reproduced either.
+        //
+        // The single-pass join is here because its cost is linear and bounded
+        // in the pending set, not because we know what the probe did. It is
+        // slower -- 5.8-6.5 s against 0.04 s -- and that is the trade, because
+        // what is at risk is the lease rather than the cycle time.
         //
         // A shape assertion because the two forms return identical values. No
         // value test can catch a change back to the probe.
