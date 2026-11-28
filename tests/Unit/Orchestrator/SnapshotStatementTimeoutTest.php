@@ -7,11 +7,14 @@ namespace Tests\Unit\Orchestrator;
 use App\Services\Nzb\NzbBacklogCreationService;
 use App\Services\Orchestrator\PipelineSnapshotRepository;
 use App\Services\Orchestrator\PrometheusSafetySignalProvider;
+use App\Services\Orchestrator\SnapshotStatementTimeout;
 use App\Services\Orchestrator\WorkerControlPolicy;
 use App\Services\Orchestrator\WorkerControlStateStore;
 use App\Services\Orchestrator\WorkerOrchestrator;
 use App\Services\Orchestrator\WorkerProfileApplier;
 use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Mockery;
 use ReflectionMethod;
@@ -174,6 +177,147 @@ final class SnapshotStatementTimeoutTest extends TestCase
         self::assertSame(1, $calls);
     }
 
+    public function test_a_statement_timeout_is_recognised_by_code_not_by_message(): void
+    {
+        // Message text is locale- and version-dependent; matching on it would
+        // silently stop working and send every timeout down the fail-closed
+        // path again.
+        self::assertTrue(SnapshotStatementTimeout::matches($this->timeoutException()));
+        self::assertTrue(SnapshotStatementTimeout::matches(
+            new QueryException('mariadb', 'SELECT 1', [], new \PDOException('whatever', 0))
+        ) === false, 'A QueryException without the timeout codes is not a timeout.');
+        self::assertFalse(SnapshotStatementTimeout::matches(new RuntimeException('max_statement_time exceeded')));
+    }
+
+    public function test_one_timeout_skips_the_cycle_without_failing_closed(): void
+    {
+        config(['nntmux.orchestrator.snapshot_timeout_fail_closed_streak' => 5]);
+
+        $lock = Mockery::mock(Lock::class);
+        $lock->shouldReceive('get')->once()->andReturn(true);
+        $lock->shouldReceive('release')->once()->andReturn(true);
+
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
+        $store->shouldReceive('leaderLock')->once()->andReturn($lock);
+        $store->shouldReceive('recordSnapshotTimeout')->once()->andReturn(1);
+        $store->shouldReceive('clearSnapshotTimeoutStreak')->never();
+
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andThrow($this->timeoutException());
+
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        // The whole point: a timeout is not evidence the pipeline is broken,
+        // and failClosed() would zero the lease and revoke every permit.
+        $applier->shouldReceive('failClosed')->never();
+
+        $result = (new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier))->runOnce(false);
+
+        self::assertTrue($result['leader']);
+        self::assertFalse($result['applied']);
+        self::assertSame('snapshot_statement_timeout', $result['reason']);
+        self::assertSame(1, $result['consecutive_snapshot_timeouts']);
+    }
+
+    public function test_the_streak_limit_escalates_to_the_existing_fail_closed_path(): void
+    {
+        config(['nntmux.orchestrator.snapshot_timeout_fail_closed_streak' => 5]);
+
+        $lock = Mockery::mock(Lock::class);
+        $lock->shouldReceive('get')->once()->andReturn(true);
+        $lock->shouldReceive('release')->once()->andReturn(true);
+
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
+        $store->shouldReceive('leaderLock')->once()->andReturn($lock);
+        $store->shouldReceive('recordSnapshotTimeout')->once()->andReturn(5);
+
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andThrow($this->timeoutException());
+
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        $applier->shouldReceive('failClosed')->once();
+
+        $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
+
+        // A persistent timeout still fails closed, at the fifth cycle rather
+        // than the first -- about two minutes, well inside the ~600 s lease.
+        $this->expectException(QueryException::class);
+
+        $orchestrator->runOnce(false);
+    }
+
+    public function test_a_non_timeout_capture_error_still_fails_closed(): void
+    {
+        $lock = Mockery::mock(Lock::class);
+        $lock->shouldReceive('get')->once()->andReturn(true);
+        $lock->shouldReceive('release')->once()->andReturn(true);
+
+        $store = Mockery::mock(WorkerControlStateStore::class)->shouldIgnoreMissing();
+        $store->shouldReceive('leaderLock')->once()->andReturn($lock);
+        // Not a timeout, so it is not a skipped cycle and the streak is
+        // neither recorded nor cleared.
+        $store->shouldReceive('recordSnapshotTimeout')->never();
+        $store->shouldReceive('clearSnapshotTimeoutStreak')->never();
+
+        $snapshots = Mockery::mock(PipelineSnapshotRepository::class);
+        $snapshots->shouldReceive('capture')->once()->andThrow(new RuntimeException('schema is gone'));
+
+        $applier = Mockery::mock(WorkerProfileApplier::class);
+        // A capture that errors may be evidence the pipeline is broken, which
+        // a timeout is not. This path keeps today's behaviour exactly.
+        $applier->shouldReceive('failClosed')->once();
+
+        $orchestrator = new WorkerOrchestrator($snapshots, new WorkerControlPolicy, $store, $applier);
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('schema is gone');
+
+        $orchestrator->runOnce(false);
+    }
+
+    public function test_the_capture_duration_gauge_round_trips(): void
+    {
+        config(['nntmux.orchestrator.state_store' => 'array']);
+        Cache::store('array')->flush();
+
+        $store = new WorkerControlStateStore;
+        $store->recordSnapshotCaptureSeconds(6.5319);
+
+        // Rounded to milliseconds: this feeds a Prometheus gauge, and the
+        // point of it is the trend. On 2026-11-29 this statement went from 2 s
+        // to 3,801 s with no capture-duration metric to notice it.
+        self::assertSame(6.532, $store->snapshotCaptureSeconds());
+    }
+
+    public function test_the_gauge_ignores_nonsense_rather_than_publishing_it(): void
+    {
+        config(['nntmux.orchestrator.state_store' => 'array']);
+        Cache::store('array')->flush();
+
+        $store = new WorkerControlStateStore;
+        $store->recordSnapshotCaptureSeconds(-1.0);
+        $store->recordSnapshotCaptureSeconds(INF);
+
+        self::assertSame(0.0, $store->snapshotCaptureSeconds());
+    }
+
+    public function test_the_timeout_streak_counts_up_and_clears(): void
+    {
+        config(['nntmux.orchestrator.state_store' => 'array']);
+        Cache::store('array')->flush();
+
+        $store = new WorkerControlStateStore;
+
+        self::assertSame(0, $store->snapshotTimeoutStreak());
+        self::assertSame(1, $store->recordSnapshotTimeout());
+        self::assertSame(2, $store->recordSnapshotTimeout());
+        self::assertSame(2, $store->snapshotTimeoutStreak());
+
+        // Cleared after any successful capture, so timeouts spread across a
+        // day never add up to an escalation.
+        $store->clearSnapshotTimeoutStreak();
+        self::assertSame(0, $store->snapshotTimeoutStreak());
+    }
+
     public function test_a_timed_out_capture_fails_closed_and_releases_the_leader_lock(): void
     {
         // The whole point of making the statement fail: this path already
@@ -200,6 +344,14 @@ final class SnapshotStatementTimeoutTest extends TestCase
         $this->expectExceptionMessage('max_statement_time exceeded');
 
         $orchestrator->runOnce(false);
+    }
+
+    private function timeoutException(): QueryException
+    {
+        $pdo = new \PDOException('Query execution was interrupted (max_statement_time exceeded)');
+        $pdo->errorInfo = ['70100', 1969, 'Query execution was interrupted'];
+
+        return new QueryException('mariadb', 'SELECT 1', [], $pdo);
     }
 
     private function withTimeout(callable $work): mixed

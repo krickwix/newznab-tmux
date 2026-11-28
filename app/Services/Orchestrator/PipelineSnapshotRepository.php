@@ -87,7 +87,26 @@ class PipelineSnapshotRepository
     /** @param array<string, int|float>|null $previous */
     public function capture(?array $previous = null): PipelineSnapshot
     {
-        return $this->withStatementTimeout(fn (): PipelineSnapshot => $this->captureSnapshot($previous));
+        $startedAt = microtime(true);
+
+        try {
+            return $this->withStatementTimeout(fn (): PipelineSnapshot => $this->captureSnapshot($previous));
+        } finally {
+            // Published even when the capture failed, because a capture that
+            // is getting slower is the trend worth seeing: on 2026-11-29 this
+            // statement went from 2 s to 3,801 s with nothing in between to
+            // look at, and there was no capture-duration metric at all.
+            $seconds = microtime(true) - $startedAt;
+            $this->state->recordSnapshotCaptureSeconds($seconds);
+            $warnAbove = max(0.0, (float) config('nntmux.orchestrator.snapshot_capture_warn_seconds', 5));
+
+            if ($warnAbove > 0.0 && $seconds >= $warnAbove) {
+                Log::warning('NNTmux snapshot capture is slow', [
+                    'seconds' => round($seconds, 3),
+                    'warn_above_seconds' => $warnAbove,
+                ]);
+            }
+        }
     }
 
     /**

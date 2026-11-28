@@ -172,6 +172,18 @@ return [
         // handled; a capture that neither returns nor fails was not. This
         // turns the second into the first.
         'snapshot_statement_timeout_seconds' => max(0, (int) env('NNTMUX_ORCHESTRATOR_SNAPSHOT_STATEMENT_TIMEOUT_SECONDS', 20)),
+        // Consecutive snapshot statement timeouts before the orchestrator
+        // stops skipping cycles and fails closed. One timeout means only that
+        // the pipeline could not be measured in time, which is not evidence
+        // anything is wrong -- and failClosed() zeroes the lease and revokes
+        // every permit, which costs the lanes far more than a skipped cycle.
+        // The lease is ~600 s and the cycle ~24 s, so 5 escalates in about two
+        // minutes, well inside it.
+        'snapshot_timeout_fail_closed_streak' => max(1, (int) env('NNTMUX_ORCHESTRATOR_SNAPSHOT_TIMEOUT_FAIL_CLOSED_STREAK', 5)),
+        // Warn when a capture takes at least this long, in seconds. 0 silences
+        // it. The point is the trend: on 2026-11-29 this statement went from
+        // 2 s to 3,801 s with no capture-duration metric to notice it.
+        'snapshot_capture_warn_seconds' => max(0, (int) env('NNTMUX_ORCHESTRATOR_SNAPSHOT_CAPTURE_WARN_SECONDS', 5)),
         'leader_lock_seconds' => min(600, max(120, (int) env('NNTMUX_ORCHESTRATOR_LEADER_LOCK_SECONDS', 120))),
         'lock_store' => env('NNTMUX_ORCHESTRATOR_LOCK_STORE', 'redis'),
         'state_store' => env('NNTMUX_ORCHESTRATOR_STATE_STORE', 'redis'),
