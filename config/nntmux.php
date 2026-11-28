@@ -442,18 +442,6 @@ return [
     // nntmux_metric_cache_age_seconds so a reused body is never mistaken for a
     // fresh one. 0 recomputes on every scrape, as before.
     'metrics_render_cache_seconds' => max(0, (int) env('NNTMUX_METRICS_RENDER_CACHE_SECONDS', 60)),
-    // How long a failed header-fetch range holds the group cursor back, in
-    // seconds. A cycle fans ~20 get_range children over one window and each
-    // advances usenet_groups.last_record with a monotonic max, so without this
-    // a child that succeeded on a higher chunk carries the cursor past a lower
-    // chunk that failed -- a range nothing stored and nothing queued for
-    // repair. 0 restores that behaviour.
-    'binaries_failed_range_floor_seconds' => max(0, (int) env('NNTMUX_BINARIES_FAILED_RANGE_FLOOR_SECONDS', 3600)),
-    // Consecutive failed fetches of the same range before the cursor is
-    // released and the range abandoned with an error log. Bounded on purpose:
-    // a range that can never be fetched -- expired or withdrawn -- must not
-    // wedge the group behind it forever.
-    'binaries_failed_range_max_attempts' => max(1, (int) env('NNTMUX_BINARIES_FAILED_RANGE_MAX_ATTEMPTS', 3)),
     'allow_large_cbp_fk_restore' => (bool) env('NNTMUX_ALLOW_LARGE_CBP_FK_RESTORE', false),
     'purge_inactive_users' => env('PURGE_INACTIVE_USERS', false),
     'purge_inactive_users_days' => env('PURGE_INACTIVE_USERS_DAYS', 180),
