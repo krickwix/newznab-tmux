@@ -478,7 +478,10 @@ class DistributedJobWorkerTest extends TestCase
 
         $monitor = Mockery::mock(TmuxMonitorService::class);
         $monitor->shouldReceive('initializeMonitor')->once();
-        $monitor->shouldReceive('collectStatistics')->once()->andReturn($staleRunVar);
+        // current-forward resolves from settings alone, so it reads the
+        // monitor settings rather than paying for the statistics pass.
+        $monitor->shouldReceive('collectStatistics')->never();
+        $monitor->shouldReceive('refreshMonitorSettings')->once()->andReturn($staleRunVar);
         $monitor->shouldReceive('refreshCurrentForwardControlSettings')->once()->andReturn($freshRunVar);
 
         $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);

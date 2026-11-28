@@ -65,7 +65,15 @@ class DistributedJobWorker
                     $plan = $this->catalog->resolve($job, $runVar);
                 }
             } else {
-                $runVar = $this->monitorService->collectStatistics();
+                // Lanes whose plan is decided from settings alone used to pay
+                // for the full statistics pass before they even learned
+                // whether they were enabled -- nine category counts over
+                // releases, four proc_query aggregates and the
+                // information_schema reads, once per loop, in every pod, for
+                // counts nothing in their plan reads.
+                $runVar = $this->catalog->readsStatistics($job)
+                    ? $this->monitorService->collectStatistics()
+                    : $this->monitorService->refreshMonitorSettings();
                 if ($job === 'current-forward') {
                     $runVar = $this->monitorService->refreshCurrentForwardControlSettings();
                 }

@@ -398,6 +398,12 @@ return [
     'distributed_current_forward_max_run_seconds' => min(600, max(60, (int) env('NNTMUX_DISTRIBUTED_CURRENT_FORWARD_MAX_RUN_SECONDS', 600))),
     'distributed_long_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_LONG_LOCK_SECONDS', 3600),
     'distributed_lock_store' => env('NNTMUX_DISTRIBUTED_LOCK_STORE', 'redis'),
+    // Seconds a tmux monitor statistics snapshot may be reused from the shared
+    // cache. Every distributed worker that gates on release/collection counts
+    // recomputes the same ~20 statements on its own schedule, so one pod's
+    // snapshot answers for all of them. 0 disables sharing and each process
+    // computes its own, as before.
+    'distributed_statistics_cache_seconds' => max(0, (int) env('NNTMUX_DISTRIBUTED_STATISTICS_CACHE_SECONDS', 20)),
     'allow_large_cbp_fk_restore' => (bool) env('NNTMUX_ALLOW_LARGE_CBP_FK_RESTORE', false),
     'purge_inactive_users' => env('PURGE_INACTIVE_USERS', false),
     'purge_inactive_users_days' => env('PURGE_INACTIVE_USERS_DAYS', 180),
