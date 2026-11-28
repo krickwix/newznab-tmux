@@ -67,6 +67,7 @@ class DistributedWorkerTelemetry
     public const ITEM_RESULTS = [
         'floored',
         'written_off',
+        'abandoned',
         'lock_timeout',
         'scanned',
         'selected',

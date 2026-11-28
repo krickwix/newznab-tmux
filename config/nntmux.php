@@ -440,11 +440,6 @@ return [
     // and logged by article number. Bounded on purpose: a range that can never
     // be fetched must not wedge the group behind it forever.
     'binaries_article_range_max_attempts' => max(1, (int) env('NNTMUX_BINARIES_ARTICLE_RANGE_MAX_ATTEMPTS', 3)),
-    // How long an in-flight claim stands before it counts as a failure. A
-    // child killed mid-fetch never releases its claim and never read its
-    // range, so the claim must keep protecting it -- but as a counted failure,
-    // not as an open-ended hold.
-    'binaries_article_range_stale_claim_seconds' => max(60, (int) env('NNTMUX_BINARIES_ARTICLE_RANGE_STALE_CLAIM_SECONDS', 1800)),
     // Seconds a child waits for a group's range lock before giving up. A lost
     // claim leaves its range unprotected, so it is reported as
     // nntmux_worker_items_total{worker="binaries",item="article_range",result="lock_timeout"}

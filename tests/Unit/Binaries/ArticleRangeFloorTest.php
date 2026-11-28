@@ -126,34 +126,33 @@ final class ArticleRangeFloorTest extends TestCase
         self::assertSame(1, $this->items()['article_range']['written_off']);
     }
 
-    public function test_an_abandoned_claim_still_protects_its_range(): void
+    public function test_an_unsettled_claim_keeps_protecting_its_range(): void
     {
-        config(['nntmux.binaries_article_range_stale_claim_seconds' => 60]);
         $floor = new ArticleRangeFloor;
         $floor->claim(5, 1_000, 1_199);
 
         // A child killed mid-fetch never releases and never read its range, so
-        // the claim must keep protecting it rather than ageing into a release.
-        $this->ageClaims(5, 120);
-
+        // an in-flight claim counts as unread for as long as it stands.
         self::assertSame(999, $floor->floorFor(5));
+        self::assertSame(1_199, $floor->ceilingFor(5) - 1);
     }
 
     public function test_a_child_killed_before_it_can_report_is_still_bounded(): void
     {
-        config(['nntmux.binaries_article_range_stale_claim_seconds' => 60]);
         $floor = new ArticleRangeFloor;
 
-        // SIGKILL and the OOM reaper give a child no chance to reach
-        // markFailed(), so nothing charges the attempt. Before this was fixed
-        // the claim kept protecting its range with attempts stuck at 0, the
-        // write-off bound never fired, and the cursor stayed pinned until the
-        // whole key expired -- the open-ended hold the bound exists to prevent.
-        // Four abandonments, the same budget markFailed() gets: the attempt is
-        // charged on re-claim, so the nth claim carries n-1 abandonments.
+        // SIGKILL and the OOM reaper give a child no chance to reach either
+        // release() or markFailed(), so nothing charges the attempt. The claim
+        // kept protecting its range with attempts stuck at 0, the write-off
+        // bound never fired, and the cursor stayed pinned -- the open-ended
+        // hold the bound exists to prevent.
+        //
+        // No clock is involved: the kill lands seconds into the fetch and the
+        // range is re-claimed a cycle later, so a staleness window would never
+        // elapse. An in-flight claim being re-claimed is itself the proof its
+        // holder died.
         for ($cycle = 1; $cycle <= 4; $cycle++) {
             $floor->claim(5, 1_000, 1_199);
-            $this->ageClaims(5, 120);
 
             self::assertSame(999, $floor->floorFor(5), 'Cycle '.$cycle.' should still hold the cursor.');
         }
@@ -163,11 +162,26 @@ final class ArticleRangeFloorTest extends TestCase
 
         self::assertNull($floor->floorFor(5), 'The bound must fire for killed children too.');
         self::assertSame(1, $this->items()['article_range']['written_off']);
+        self::assertSame(4, $this->items()['article_range']['abandoned']);
+    }
+
+    public function test_a_claim_killed_within_seconds_is_counted_just_the_same(): void
+    {
+        $floor = new ArticleRangeFloor;
+
+        // The realistic trigger: the binaries pod has a 2Gi limit, so an OOM
+        // kill lands seconds in and the next cycle re-claims ~65 s later. A
+        // staleness clock of any sensible length never fires here, and the
+        // first version of this fix looped forever on it.
+        $floor->claim(5, 1_000, 1_199);
+        $floor->claim(5, 1_000, 1_199);
+
+        self::assertSame(1, $this->items()['article_range']['abandoned']);
+        self::assertSame(999, $floor->floorFor(5));
     }
 
     public function test_an_ordinary_failure_is_not_charged_twice(): void
     {
-        config(['nntmux.binaries_article_range_stale_claim_seconds' => 60]);
         $floor = new ArticleRangeFloor;
 
         // markFailed() already counts the attempt, so a re-claim of a range
@@ -231,18 +245,5 @@ final class ArticleRangeFloorTest extends TestCase
     private function items(): array
     {
         return (new DistributedWorkerTelemetry)->snapshot(['binaries'])['workers']['binaries']['items'];
-    }
-
-    private function ageClaims(int $groupId, int $seconds): void
-    {
-        $key = 'nntmux:binaries:article-ranges:'.$groupId;
-        $entries = Cache::store('array')->get($key);
-        self::assertIsArray($entries);
-
-        foreach ($entries as $rangeKey => $entry) {
-            $entries[$rangeKey]['at'] = $entry['at'] - $seconds;
-        }
-
-        Cache::store('array')->put($key, $entries, 3600);
     }
 }

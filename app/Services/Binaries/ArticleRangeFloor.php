@@ -63,10 +63,23 @@ class ArticleRangeFloor
      * Re-claiming the same range carries its attempt count forward, so a range
      * that keeps failing is counted per range rather than per group.
      *
-     * An attempt is charged here only when the previous claim was abandoned --
-     * a child that died without reaching markFailed(). Charging every re-claim
-     * would double-count the ordinary failure path, which markFailed() has
-     * already counted.
+     * An attempt is charged here when the previous claim on this range was
+     * still in flight, which means its holder died without reaching either
+     * release() or markFailed(). That is the only way a range can be
+     * re-claimed while outstanding: chunks within a cycle are disjoint, and
+     * the next cycle cannot re-claim a range whose holder settled it.
+     *
+     * Detected from the state rather than from a staleness clock. A clock only
+     * catches a child that died long enough ago, and the realistic trigger is
+     * the opposite -- the binaries pod has a 2Gi limit, so an OOM kill lands
+     * seconds into the fetch and the range is re-claimed a cycle later, far
+     * inside any sensible staleness window. The first version of this fix
+     * used the clock and would have looped forever on exactly the case ingest
+     * described.
+     *
+     * Only an unsettled claim is charged. Charging every re-claim would
+     * double-count the ordinary failure path, where markFailed() has already
+     * counted it, and halve a recoverable range's budget.
      */
     public function claim(int $groupId, int $first, int $last): void
     {
@@ -75,8 +88,9 @@ class ArticleRangeFloor
             $existing = $entries[$key] ?? null;
             $attempts = (int) ($existing['attempts'] ?? 0);
 
-            if (($existing['abandoned'] ?? false) === true) {
+            if (($existing['state'] ?? null) === self::STATE_IN_FLIGHT) {
                 $attempts++;
+                $this->telemetry->recordItem('binaries', 'article_range', 'abandoned');
 
                 if ($attempts > $this->maxAttempts()) {
                     unset($entries[$key]);
@@ -271,20 +285,7 @@ class ArticleRangeFloor
     }
 
     /**
-     * How long an in-flight claim may stand before it is treated as a failure.
-     *
-     * A child killed mid-fetch never releases its claim, and the range was not
-     * read, so the claim must keep protecting it -- but as a failure, which is
-     * counted and therefore bounded, rather than as an in-flight claim that
-     * would hold the cursor until the whole key expired.
-     */
-    public function staleClaimSeconds(): int
-    {
-        return max(60, (int) config('nntmux.binaries_article_range_stale_claim_seconds', 1800));
-    }
-
-    /**
-     * @return array<string, array{first: int, last: int, state: string, attempts: int, at: int, abandoned: bool}>
+     * @return array<string, array{first: int, last: int, state: string, attempts: int, at: int}>
      */
     private function entries(int $groupId): array
     {
@@ -305,30 +306,24 @@ class ArticleRangeFloor
         }
 
         $entries = [];
-        $cutoff = time() - $this->staleClaimSeconds();
 
         foreach ($stored as $key => $entry) {
             if (! is_array($entry) || ! isset($entry['first'], $entry['last'], $entry['state'], $entry['attempts'], $entry['at'])) {
                 continue;
             }
 
-            // An abandoned claim still protects its range; it just stops being
-            // open-ended. Flagged rather than silently rewritten, because the
-            // flag is what lets claim() charge the abandonment an attempt --
-            // a child killed by SIGKILL or the OOM reaper never reaches
-            // markFailed(), so without this its attempts stay at 0 and the
-            // write-off bound never fires. The range would then hold the
-            // cursor until the whole key expired, which is the open-ended
-            // hold this class exists to avoid.
-            $abandoned = $entry['state'] === self::STATE_IN_FLIGHT && (int) $entry['at'] < $cutoff;
-
+            // In-flight claims are left in flight. An earlier version
+            // reclassified stale ones as failed, which turned out to do
+            // nothing: unreadValues() already treats both as unread, so
+            // protection was identical, and the reclassification was not
+            // persisted so it could not be counted either. claim() detects an
+            // unsettled claim from its state instead.
             $entries[(string) $key] = [
                 'first' => (int) $entry['first'],
                 'last' => (int) $entry['last'],
-                'state' => $abandoned ? self::STATE_FAILED : (string) $entry['state'],
+                'state' => (string) $entry['state'],
                 'attempts' => (int) $entry['attempts'],
                 'at' => (int) $entry['at'],
-                'abandoned' => $abandoned,
             ];
         }
 
@@ -343,7 +338,7 @@ class ArticleRangeFloor
      * silently stops being protected, which is the bug this class exists to
      * prevent.
      *
-     * @param  callable(array<string, array{first: int, last: int, state: string, attempts: int, at: int, abandoned: bool}>): array<string, mixed>  $change
+     * @param  callable(array<string, array{first: int, last: int, state: string, attempts: int, at: int}>): array<string, mixed>  $change
      */
     private function mutate(int $groupId, callable $change): void
     {
