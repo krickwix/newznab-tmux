@@ -24,7 +24,7 @@ final class NzbImportServiceTest extends TestCase
 
     public function createApplication()
     {
-        $this->databasePath = sys_get_temp_dir().'/nntmux-nzb-import-test.sqlite';
+        $this->databasePath = sys_get_temp_dir().'/nntmux-nzb-import-test-'.getmypid().'.sqlite';
 
         $this->originalEnvironment = [
             'APP_ENV' => getenv('APP_ENV'),

@@ -21,7 +21,17 @@ abstract class ImdbScraperTestCase extends TestCase
 
     public function createApplication()
     {
-        $this->databasePath = sys_get_temp_dir().'/nntmux-imdb-scraper-test.sqlite';
+        // Per process, not a fixed name. This file is unlinked and recreated
+        // at the start of every test, so two phpunit processes sharing the
+        // path destroy each other's database mid-test: "disk I/O error",
+        // "attempt to write a readonly database", "no such table" and
+        // "table already exists", scattered across whichever tests happened to
+        // be running. That is not hypothetical -- two concurrent runs of
+        // tests/Unit/Services produce ~40 errors each, against 0 when either
+        // runs alone, and it reproduces identically on commits that predate
+        // this comment. One developer running the suite while CI or another
+        // shell runs it is enough.
+        $this->databasePath = sys_get_temp_dir().'/nntmux-imdb-scraper-test-'.getmypid().'.sqlite';
 
         $this->originalEnvironment = [
             'APP_ENV' => getenv('APP_ENV'),

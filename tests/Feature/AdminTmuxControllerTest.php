@@ -25,7 +25,7 @@ final class AdminTmuxControllerTest extends TestCase
 
     public function createApplication()
     {
-        $this->databasePath = sys_get_temp_dir().'/nntmux-admin-tmux-test.sqlite';
+        $this->databasePath = sys_get_temp_dir().'/nntmux-admin-tmux-test-'.getmypid().'.sqlite';
 
         $this->originalEnvironment = [
             'APP_ENV' => getenv('APP_ENV'),

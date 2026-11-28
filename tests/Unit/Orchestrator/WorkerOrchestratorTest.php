@@ -38,7 +38,7 @@ final class WorkerOrchestratorTest extends TestCase
 
     public function createApplication()
     {
-        $this->databasePath = sys_get_temp_dir().'/nntmux-worker-orchestrator-test.sqlite';
+        $this->databasePath = sys_get_temp_dir().'/nntmux-worker-orchestrator-test-'.getmypid().'.sqlite';
         $this->originalEnvironment = [
             'APP_ENV' => getenv('APP_ENV'),
             'DB_CONNECTION' => getenv('DB_CONNECTION'),

@@ -32,7 +32,7 @@ class CbpCleanupServiceTest extends TestCase
 
     public function createApplication()
     {
-        $this->bootstrapDatabasePath = sys_get_temp_dir().'/nntmux-cbp-cleanup-test.sqlite';
+        $this->bootstrapDatabasePath = sys_get_temp_dir().'/nntmux-cbp-cleanup-test-'.getmypid().'.sqlite';
         $this->originalEnvironment = [
             'APP_ENV' => getenv('APP_ENV'),
             'DB_CONNECTION' => getenv('DB_CONNECTION'),
