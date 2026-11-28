@@ -38,6 +38,13 @@ class BinariesService
 
     private BinariesConfig $config;
 
+    /**
+     * Resolved lazily rather than in the constructor: several callers build
+     * this service with newInstanceWithoutConstructor() to reach one method,
+     * and an uninitialised typed property would make those paths fatal.
+     */
+    private ?FailedArticleRangeFloor $failedRangeFloor = null;
+
     private HeaderParser $headerParser;
 
     private HeaderStorageService $headerStorage;
@@ -116,7 +123,8 @@ class BinariesService
         ?HeaderParser $headerParser = null,
         ?HeaderStorageService $headerStorage = null,
         ?MissedPartHandler $missedPartHandler = null,
-        ?NNTPService $nntp = null
+        ?NNTPService $nntp = null,
+        ?FailedArticleRangeFloor $failedRangeFloor = null
     ) {
         $this->config = $config ?? BinariesConfig::fromSettings();
         $this->headerParser = $headerParser ?? new HeaderParser;
@@ -127,6 +135,7 @@ class BinariesService
             $this->config->bulkSqlChunkSize
         );
         $this->nntp = $nntp;
+        $this->failedRangeFloor = $failedRangeFloor;
         $this->startUpdate = Carbon::now();
     }
 
@@ -331,9 +340,11 @@ class BinariesService
      * @param  int  $last  The newest wanted header.
      * @param  string  $type  Is this part repair or update or backfill?
      * @param  list<int>|null  $missingParts  If we are running in part repair, the list of missing article numbers.
-     * @return array<string, mixed> Empty on failure. `['misalignedHeaders' => true]` when the
-     *                              overview fields arrived misaligned, in which case the caller
-     *                              must leave the group cursor where it is so the range is retried.
+     * @return array<string, mixed> Empty when the range held no articles. `['fetchFailed' => true]`
+     *                              when the headers could not be downloaded, and
+     *                              `['misalignedHeaders' => true]` when the overview fields
+     *                              arrived misaligned. On either flag the caller must leave the
+     *                              group cursor where it is so the range is retried.
      *
      * @throws \Exception
      * @throws \Throwable
@@ -374,7 +385,14 @@ class BinariesService
                 $this->missedPartHandler->incrementRangeAttempts($groupMySQL['id'], $first, $last);
             }
 
-            return $returnArray;
+            // Not the same thing as an empty range, and the difference decides
+            // whether the group cursor may move. A failed fetch stored nothing
+            // and queued nothing, so advancing past it loses the range for
+            // good; an empty range must be advanced past or the cursor stalls.
+            // Both used to return the same bare [] and were treated as the
+            // latter. Part repair keeps its own attempt accounting above and
+            // ignores this flag, so its behaviour is unchanged.
+            return ['fetchFailed' => true];
         }
 
         $this->startCleaning = Carbon::now();
@@ -1141,8 +1159,30 @@ class BinariesService
             // next chunk, so stop the group here and leave the cursor untouched. Advancing would
             // skip this range permanently: it was neither stored nor queued for part repair.
             if (($scanSummary['misalignedHeaders'] ?? false) === true) {
+                $this->failedRangeFloor()->record((int) $groupMySQL['id'], $first, $last);
+
                 return;
             }
+
+            // A failed download is not an empty range. Stop the group here and
+            // hold the cursor below this chunk, so a sibling child that
+            // succeeded on a higher chunk of the same cycle cannot carry
+            // last_record past a range nothing read.
+            if (($scanSummary['fetchFailed'] ?? false) === true) {
+                $this->logError(sprintf(
+                    'Header fetch failed for %s articles %d-%d; holding the group cursor below %d.',
+                    (string) ($groupMySQL['name'] ?? 'unknown'),
+                    $first,
+                    $last,
+                    $first,
+                ));
+                $this->failedRangeFloor()->record((int) $groupMySQL['id'], $first, $last);
+
+                return;
+            }
+
+            // This chunk is read, so a floor protecting it has done its job.
+            $this->failedRangeFloor()->clearIfCovered((int) $groupMySQL['id'], $first, $last);
 
             // Update group record
             $this->updateGroupAfterScan($groupMySQL, $groupNNTP, $scanSummary, $last);
@@ -1162,6 +1202,15 @@ class BinariesService
      */
     private function updateGroupAfterScan(array &$groupMySQL, array $groupNNTP, array $scanSummary, int $last): void
     {
+        // The ~20 get_range children of one cycle each advance this cursor
+        // with a monotonic max, so without a shared floor a child that
+        // succeeded on a higher chunk carries last_record past a lower chunk
+        // that failed -- and nothing stored or queued that range, so it is
+        // simply lost. Capping every advance at the floor is enough: the
+        // WHERE last_record < ? below means a capped value at or beneath the
+        // current cursor is a no-op rather than a regression.
+        $floor = $this->effectiveFailedRangeFloor((int) $groupMySQL['id']);
+
         if (! empty($scanSummary)) {
             // New group - update first record
             if ($groupMySQL['first_record_postdate'] === null && (int) $groupMySQL['first_record'] === 0) {
@@ -1179,23 +1228,80 @@ class BinariesService
             $lastArticleDate = NntpArticleDate::timestamp($scanSummary['lastArticleDate'] ?? null)
                 ?? $this->postdate($scanSummary['lastArticleNumber'], $groupNNTP);
 
+            $lastRecord = (int) $scanSummary['lastArticleNumber'];
+
+            if ($floor !== null && $lastRecord > $floor) {
+                $this->logError(sprintf(
+                    'Not advancing %s past article %d: a lower range of this cycle failed to download.',
+                    (string) ($groupMySQL['name'] ?? 'unknown'),
+                    $floor,
+                ));
+                $lastRecord = $floor;
+            }
+
             UsenetGroup::query()
                 ->where('id', $groupMySQL['id'])
-                ->where('last_record', '<', $scanSummary['lastArticleNumber'])
+                ->where('last_record', '<', $lastRecord)
                 ->update([
-                    'last_record' => $scanSummary['lastArticleNumber'],
+                    'last_record' => $lastRecord,
                     'last_record_postdate' => Carbon::createFromTimestamp($lastArticleDate, date_default_timezone_get()),
                     'last_updated' => now(),
                 ]);
         } else {
+            // An empty range still has to be advanced past or the cursor
+            // stalls on it forever, but not past a failed lower range.
+            $lastRecord = ($floor !== null && $last > $floor) ? $floor : $last;
+
             UsenetGroup::query()
                 ->where('id', $groupMySQL['id'])
-                ->where('last_record', '<', $last)
+                ->where('last_record', '<', $lastRecord)
                 ->update([
-                    'last_record' => $last,
+                    'last_record' => $lastRecord,
                     'last_updated' => now(),
                 ]);
         }
+    }
+
+    /**
+     * The failed-range floor, but only while it can still achieve something.
+     *
+     * A floor below the group's current cursor protects a range the forward
+     * scan has already passed and will never offer again -- only backfill
+     * reads below last_record. Honouring it there would not get the range
+     * re-read; it would just stop the group dead until the attempt budget ran
+     * out. That happens when a sibling's advance lands before the failing
+     * child records its floor, which is the one case this mechanism cannot
+     * win, so the range is written off out loud instead of stalling the lane.
+     */
+    private function failedRangeFloor(): FailedArticleRangeFloor
+    {
+        return $this->failedRangeFloor ??= new FailedArticleRangeFloor;
+    }
+
+    private function effectiveFailedRangeFloor(int $groupId): ?int
+    {
+        $floor = $this->failedRangeFloor()->floorFor($groupId);
+
+        if ($floor === null) {
+            return null;
+        }
+
+        $current = (int) (UsenetGroup::query()->where('id', $groupId)->value('last_record') ?? 0);
+
+        if ($floor >= $current) {
+            return $floor;
+        }
+
+        $this->logError(sprintf(
+            'Group id %d has already advanced to article %d, past a range that failed to download '
+            .'(floor %d); that range is behind the forward cursor and will not be read again.',
+            $groupId,
+            $current,
+            $floor,
+        ));
+        $this->failedRangeFloor()->clear($groupId);
+
+        return null;
     }
 
     /**
