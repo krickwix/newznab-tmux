@@ -7,6 +7,7 @@ namespace App\Services\Orchestrator;
 use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Support\Facades\Cache;
+use Throwable;
 
 class WorkerControlStateStore
 {
@@ -17,6 +18,10 @@ class WorkerControlStateStore
     private const string PERMIT_OBSERVATION_KEY = 'nntmux:orchestrator:permit-observation';
 
     private const string BACKFILL_YIELD_KEY = 'nntmux:orchestrator:backfill-yield';
+
+    private const string SNAPSHOT_TIMEOUT_STREAK_KEY = 'nntmux:orchestrator:snapshot-timeout-streak';
+
+    private const string SNAPSHOT_CAPTURE_SECONDS_KEY = 'nntmux:orchestrator:snapshot-capture-seconds';
 
     private const string BACKFILL_GROWTH_KEY = 'nntmux:orchestrator:backfill-growth';
 
@@ -1268,5 +1273,77 @@ class WorkerControlStateStore
         $decision = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))->get(self::DECISION_KEY);
 
         return is_array($decision) ? $decision : [];
+    }
+
+    /**
+     * Consecutive snapshot statement timeouts, so a single one can be skipped
+     * while a persistent one still escalates.
+     *
+     * Expires on its own: a streak is only meaningful while it is current, and
+     * an orchestrator that stops running should not leave a stale count behind
+     * to escalate on its first cycle back.
+     */
+    public function recordSnapshotTimeout(int $ttlSeconds = 900): int
+    {
+        try {
+            $store = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'));
+            $streak = max(0, (int) $store->get(self::SNAPSHOT_TIMEOUT_STREAK_KEY, 0)) + 1;
+            $store->put(self::SNAPSHOT_TIMEOUT_STREAK_KEY, $streak, $ttlSeconds);
+
+            return $streak;
+        } catch (Throwable) {
+            // An unreachable store must not turn a skipped cycle into a
+            // crash. Reporting 1 keeps the caller on the skip path, which is
+            // the conservative side: escalation needs evidence.
+            return 1;
+        }
+    }
+
+    public function clearSnapshotTimeoutStreak(): void
+    {
+        try {
+            Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+                ->forget(self::SNAPSHOT_TIMEOUT_STREAK_KEY);
+        } catch (Throwable) {
+            // Nothing to do: the key expires on its own.
+        }
+    }
+
+    public function snapshotTimeoutStreak(): int
+    {
+        try {
+            return max(0, (int) Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+                ->get(self::SNAPSHOT_TIMEOUT_STREAK_KEY, 0));
+        } catch (Throwable) {
+            return 0;
+        }
+    }
+
+    /**
+     * Wall time of the last snapshot capture, so a plan degrading over days
+     * shows up as a trend instead of as an incident.
+     */
+    public function recordSnapshotCaptureSeconds(float $seconds): void
+    {
+        if (! is_finite($seconds) || $seconds < 0) {
+            return;
+        }
+
+        try {
+            Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+                ->forever(self::SNAPSHOT_CAPTURE_SECONDS_KEY, round($seconds, 3));
+        } catch (Throwable) {
+            // Best effort: losing the gauge must never fail a capture.
+        }
+    }
+
+    public function snapshotCaptureSeconds(): float
+    {
+        try {
+            return max(0.0, (float) Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
+                ->get(self::SNAPSHOT_CAPTURE_SECONDS_KEY, 0.0));
+        } catch (Throwable) {
+            return 0.0;
+        }
     }
 }

@@ -281,9 +281,12 @@ class NntmuxPrometheusMetrics
             $this->metric('nntmux_nzb_worker_config_info', 1, [
                 'inline_creation' => config('nntmux.inline_nzb_creation', true) ? 'enabled' : 'disabled',
             ]),
-            '# HELP nntmux_nzb_worker_batch_limit Configured maximum releases attempted per dedicated NZB worker cycle.',
+            '# HELP nntmux_nzb_worker_batch_limit Effective maximum releases attempted per dedicated NZB worker cycle, after the hard cap.',
             '# TYPE nntmux_nzb_worker_batch_limit gauge',
-            $this->metric('nntmux_nzb_worker_batch_limit', max(1, (int) config('nntmux.distributed_nzb_limit', 1))),
+            $this->metric('nntmux_nzb_worker_batch_limit', DistributedJobCatalog::nzbLimitCeiling()),
+            '# HELP nntmux_nzb_worker_batch_limit_cap Hard ceiling on the NZB worker batch limit, 0 when uncapped. Below the batch limit means an orchestrator lease can raise the lane above the configured default.',
+            '# TYPE nntmux_nzb_worker_batch_limit_cap gauge',
+            $this->metric('nntmux_nzb_worker_batch_limit_cap', DistributedJobCatalog::nzbLimitCap()),
             '# HELP nntmux_nzb_worker_sleep_seconds Configured sleep between dedicated NZB worker cycles.',
             '# TYPE nntmux_nzb_worker_sleep_seconds gauge',
             $this->metric('nntmux_nzb_worker_sleep_seconds', max(1, (int) config('nntmux.distributed_nzb_sleep', 60))),
@@ -814,10 +817,14 @@ class NntmuxPrometheusMetrics
         $currentForwardGroup = trim((string) ($settings['orchestrator_cf_group'] ?? ''));
         $currentForwardBlocks = array_values(array_filter(explode(',', (string) ($settings['orchestrator_cf_blocks'] ?? ''))));
 
+        // Constructed outside the try because the gauges below read it after
+        // this block, and its own accessors each fail soft to 0. Leaving it
+        // inside left it undefined whenever the Redis read threw.
+        $stateStore = new WorkerControlStateStore;
+
         try {
             $decision = Cache::store((string) config('nntmux.orchestrator.state_store', 'redis'))
                 ->get(WorkerControlStateStore::DECISION_KEY);
-            $stateStore = new WorkerControlStateStore;
             $backfillYieldHistory = $stateStore->backfillYieldHistory();
             $targetIneffectivePermits = $stateStore->loadState()->ineffectiveBackfillPermitsByTarget;
         } catch (Throwable) {
@@ -990,6 +997,12 @@ class NntmuxPrometheusMetrics
             $lines[] = '# TYPE nntmux_orchestrator_backfill_planned_quantity gauge';
             $lines[] = $this->metric('nntmux_orchestrator_backfill_planned_quantity', (int) ($decision['backfill_target']['quantity'] ?? 0), ['group' => $targetGroup]);
         }
+        $lines[] = '# HELP nntmux_orchestrator_snapshot_capture_seconds Wall time of the last pipeline snapshot capture.';
+        $lines[] = '# TYPE nntmux_orchestrator_snapshot_capture_seconds gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_snapshot_capture_seconds', $stateStore->snapshotCaptureSeconds());
+        $lines[] = '# HELP nntmux_orchestrator_snapshot_timeout_streak Consecutive snapshot statement timeouts; the orchestrator fails closed once this reaches its configured limit.';
+        $lines[] = '# TYPE nntmux_orchestrator_snapshot_timeout_streak gauge';
+        $lines[] = $this->metric('nntmux_orchestrator_snapshot_timeout_streak', $stateStore->snapshotTimeoutStreak());
         $lines[] = '# HELP nntmux_orchestrator_backfill_yield_nzbs_per_10k Recent target NZB yield EWMA per 10,000 cursor articles.';
         $lines[] = '# TYPE nntmux_orchestrator_backfill_yield_nzbs_per_10k gauge';
         $lines[] = '# HELP nntmux_orchestrator_backfill_yield_attempts Recent attributed permits by target group.';

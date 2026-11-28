@@ -401,6 +401,110 @@ class DistributedJobCatalogTest extends TestCase
         self::assertTrue($nzb['commands'][0]['arguments']['--quarantine-terminal-stale']);
     }
 
+    /**
+     * The cap is the whole point of the knob: a fresh lease must not raise it.
+     *
+     * Without it, NNTMUX_DISTRIBUTED_NZB_LIMIT=1 bought nothing as soon as the
+     * orchestrator held a lease -- live orchestrator_nzb_limit is 100, which
+     * the 5..20 clamp turns into 20. That is 20x the intended drain rate for a
+     * lane whose per-release cost is ~13,800 parts rows.
+     */
+    public function test_the_hard_cap_holds_under_a_fresh_lease(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 1,
+            'nntmux.distributed_nzb_limit_max' => 1,
+        ]);
+        $plan = (new DistributedJobCatalog)->resolve('nzb-backlog', $this->runVar([
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() + 300,
+            'orchestrator_nzb_limit' => 100,
+        ]));
+
+        self::assertSame(1, $plan['commands'][0]['arguments']['--limit']);
+    }
+
+    public function test_the_default_cap_of_zero_changes_nothing(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 1,
+            'nntmux.distributed_nzb_limit_max' => 0,
+        ]);
+        $catalog = new DistributedJobCatalog;
+        $fresh = $this->runVar([
+            'orchestrator_mode' => 'active',
+            'orchestrator_lease_until' => time() + 300,
+            'orchestrator_nzb_limit' => 100,
+        ]);
+
+        // The pre-cap behaviour, asserted so a regression in capNzbLimit()
+        // cannot pass as "the cap was off".
+        self::assertSame(20, $catalog->resolve('nzb-backlog', $fresh)['commands'][0]['arguments']['--limit']);
+        self::assertSame(1, $catalog->resolve('nzb-backlog', $this->runVar([]))['commands'][0]['arguments']['--limit']);
+    }
+
+    public function test_the_cap_applies_without_a_lease_too(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 20,
+            'nntmux.distributed_nzb_limit_max' => 3,
+        ]);
+        $catalog = new DistributedJobCatalog;
+
+        // Unmanaged: the static limit, capped.
+        self::assertSame(3, $catalog->resolve('nzb-backlog', $this->runVar([]))['commands'][0]['arguments']['--limit']);
+
+        // Timer-managed with a stale lease: min(5, static), still capped.
+        $staleFailsafe = $this->runVar([
+            'orchestrator_mode' => 'failsafe',
+            'orchestrator_lease_until' => time() - 10,
+        ]);
+        self::assertSame(3, $catalog->resolve('nzb-backlog', $staleFailsafe)['commands'][0]['arguments']['--limit']);
+
+        // ... and min(5, static) is what the cap is clamping, not the static 20.
+        config(['nntmux.distributed_nzb_limit_max' => 0]);
+        self::assertSame(5, $catalog->resolve('nzb-backlog', $staleFailsafe)['commands'][0]['arguments']['--limit']);
+    }
+
+    /**
+     * A cap above the resolved limit must not raise it.
+     */
+    public function test_a_cap_is_a_ceiling_not_a_target(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 2,
+            'nntmux.distributed_nzb_limit_max' => 50,
+        ]);
+
+        self::assertSame(2, (new DistributedJobCatalog)->resolve('nzb-backlog', $this->runVar([]))['commands'][0]['arguments']['--limit']);
+    }
+
+    /**
+     * A cap never stops the lane: that is what enabled = false is for.
+     */
+    public function test_a_nonsense_cap_cannot_zero_the_lane(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 10,
+            'nntmux.distributed_nzb_limit_max' => -5,
+        ]);
+        $catalog = new DistributedJobCatalog;
+
+        self::assertSame(10, $catalog->resolve('nzb-backlog', $this->runVar([]))['commands'][0]['arguments']['--limit']);
+        self::assertSame(0, DistributedJobCatalog::nzbLimitCap());
+    }
+
+    public function test_the_reported_ceiling_follows_the_cap(): void
+    {
+        config(['nntmux.distributed_nzb_limit' => 20, 'nntmux.distributed_nzb_limit_max' => 0]);
+        self::assertSame(20, DistributedJobCatalog::nzbLimitCeiling());
+        self::assertSame(0, DistributedJobCatalog::nzbLimitCap());
+
+        config(['nntmux.distributed_nzb_limit' => 20, 'nntmux.distributed_nzb_limit_max' => 1]);
+        self::assertSame(1, DistributedJobCatalog::nzbLimitCeiling());
+        self::assertSame(1, DistributedJobCatalog::nzbLimitCap());
+    }
+
     public function test_terminal_stale_quarantine_remains_off_by_default_with_a_fresh_lease(): void
     {
         config(['nntmux.distributed_nzb_terminal_stale_enabled' => false]);

@@ -8,7 +8,9 @@ use App\Models\Settings;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Nzb\NzbBacklogCreationService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use LogicException;
+use Throwable;
 
 class PipelineSnapshotRepository
 {
@@ -49,16 +51,12 @@ class PipelineSnapshotRepository
                             INNER JOIN collections c ON c.groups_id = og.groups_id
                             INNER JOIN binaries b ON b.collections_id = c.id
                             WHERE c.filecheck IN (0, 1, 2, 15, 16) AND b.partcheck = 0) AS x) AS xb
-                CROSS JOIN (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(p.dateadded), NOW()), 0) AS oldest_binary_age FROM (
-                        SELECT (SELECT c.dateadded FROM collections c
-                                WHERE c.groups_id = g.id AND c.filecheck = f.stage AND c.dateadded IS NOT NULL
-                                  AND EXISTS(SELECT 1 FROM binaries b
-                                        WHERE b.collections_id = c.id AND b.partcheck = 0)
-                                ORDER BY c.dateadded LIMIT 1) AS dateadded
-                            FROM usenet_groups g
-                            CROSS JOIN (SELECT 0 AS stage UNION ALL SELECT 1 UNION ALL SELECT 2
-                                UNION ALL SELECT 15 UNION ALL SELECT 16) AS f
-                            WHERE g.active = 1 OR g.backfill = 1) AS p) AS oba) AS sb';
+                CROSS JOIN (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) AS oldest_binary_age
+                        FROM binaries b
+                        INNER JOIN collections c ON c.id = b.collections_id
+                        INNER JOIN usenet_groups g ON g.id = c.groups_id
+                        WHERE b.partcheck = 0 AND c.filecheck IN (0, 1, 2, 15, 16)
+                          AND (g.active = 1 OR g.backfill = 1)) AS oba) AS sb';
 
     private readonly BackfillTargetSelector $targets;
 
@@ -88,6 +86,114 @@ class PipelineSnapshotRepository
 
     /** @param array<string, int|float>|null $previous */
     public function capture(?array $previous = null): PipelineSnapshot
+    {
+        $startedAt = microtime(true);
+
+        try {
+            return $this->withStatementTimeout(fn (): PipelineSnapshot => $this->captureSnapshot($previous));
+        } finally {
+            // Published even when the capture failed, because a capture that
+            // is getting slower is the trend worth seeing: on 2026-11-29 this
+            // statement went from 2 s to 3,801 s with nothing in between to
+            // look at, and there was no capture-duration metric at all.
+            $seconds = microtime(true) - $startedAt;
+            $this->state->recordSnapshotCaptureSeconds($seconds);
+            $warnAbove = max(0.0, (float) config('nntmux.orchestrator.snapshot_capture_warn_seconds', 5));
+
+            if ($warnAbove > 0.0 && $seconds >= $warnAbove) {
+                Log::warning('NNTmux snapshot capture is slow', [
+                    'seconds' => round($seconds, 3),
+                    'warn_above_seconds' => $warnAbove,
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Bound every statement this snapshot issues, so a bad plan fails the
+     * cycle instead of wedging it.
+     *
+     * On 2026-11-29 the pipeline statement ran 3,801 s on live from ~10:26
+     * UTC. Nothing threw, so nothing failed closed: the orchestrator sat
+     * inside capture() holding the leader lock while its own lease expired,
+     * and every lane fell back to its fail-safe timer. The orchestrator had to
+     * be rolled back by hand and the query killed.
+     *
+     * A capture that *errors* was already safe -- WorkerOrchestrator::decide()
+     * catches Throwable, calls failClosed(), and releases the leader lock in
+     * its finally. The failure mode that was not covered is a statement that
+     * neither returns nor fails. max_statement_time converts that into an
+     * exception, which turns an unbounded wedge into one skipped cycle on a
+     * path that already exists.
+     *
+     * Session-scoped rather than per-statement text: capture() reaches a dozen
+     * helpers that issue their own queries, and a session bound covers every
+     * one without touching a single statement -- which also keeps the sqlite
+     * tests of those statements working. The previous value is restored in a
+     * finally, because the orchestrator is a long-running process and this
+     * connection outlives the cycle.
+     *
+     * @template T
+     *
+     * @param  callable(): T  $work
+     * @return T
+     */
+    private function withStatementTimeout(callable $work): mixed
+    {
+        $seconds = max(0, (int) config('nntmux.orchestrator.snapshot_statement_timeout_seconds', 20));
+
+        if ($seconds <= 0) {
+            return $work();
+        }
+
+        $connection = null;
+        $previous = null;
+
+        // Arming the bound must never be able to break the capture it is
+        // protecting -- a guard that can throw is worse than no guard. Real
+        // MySQL has max_execution_time in milliseconds rather than
+        // max_statement_time, and a connection can be anything in a test, so
+        // every step here is allowed to fail into running unbounded, which is
+        // exactly the behaviour that existed before this guard. $work() is
+        // deliberately outside this try so a failing capture cannot be
+        // mistaken for a failing probe and run twice.
+        try {
+            $candidate = DB::connection();
+
+            if (in_array($candidate->getDriverName(), ['mysql', 'mariadb'], true)) {
+                $previous = $candidate->scalar('SELECT @@SESSION.max_statement_time');
+                $candidate->statement('SET SESSION max_statement_time = '.$seconds);
+                $connection = $candidate;
+            }
+        } catch (Throwable $e) {
+            Log::warning('Snapshot statement timeout could not be applied', [
+                'error' => $e->getMessage(),
+            ]);
+            $connection = null;
+        }
+
+        if ($connection === null) {
+            return $work();
+        }
+
+        try {
+            return $work();
+        } finally {
+            try {
+                $connection->statement('SET SESSION max_statement_time = '.(float) $previous);
+            } catch (Throwable $e) {
+                // A bound left behind caps every later query on this
+                // connection, so this is louder than the arming failure.
+                Log::error('Snapshot statement timeout could not be restored', [
+                    'error' => $e->getMessage(),
+                    'left_at_seconds' => $seconds,
+                ]);
+            }
+        }
+    }
+
+    /** @param array<string, int|float>|null $previous */
+    private function captureSnapshot(?array $previous = null): PipelineSnapshot
     {
         $recoveryCriteria = $this->bodyRecoveryCriteria();
         $recoverySources = $this->bodyRecoverySourceSnapshot($recoveryCriteria);
@@ -155,12 +261,55 @@ class PipelineSnapshotRepository
         //   while the orphan set is empty, which it is today. Folding it into
         //   the inactive-group branch as a LEFT JOIN instead made that branch
         //   drive from collections and cost 0.59 s against 0.22 s.
-        // - oldest_binary_age is not invertible, so it is answered by ordered
-        //   probes instead: one index walk of ix_collections_release_stage6
-        //   per (group, filecheck) pair, stopping at the first collection
-        //   that still has a pending binary. 180 probes, 0.04 s. The
-        //   IS NOT NULL guard reproduces MIN()'s NULL handling -- without it
-        //   a NULL dateadded would sort first and blank out that pair.
+        // - oldest_binary_age is deliberately the slow form: one pass over
+        //   binaries -> collections -> usenet_groups taking MIN(c.dateadded).
+        //   6.0-7.1 s at the incident's cardinality, against 0.04 s for the
+        //   ordered probes it replaces. That is the right trade here, and the
+        //   reason is the 2026-11-29 incident: the probe form wedged this
+        //   statement for 3,801 s, the orchestrator sat in capture() holding
+        //   the leader lock while its own lease expired, and every lane fell
+        //   back to its timer.
+        //
+        //   Why not a narrower fix. The incident has no established
+        //   mechanism, and that is the honest state rather than a gap waiting
+        //   to be filled. No plan exists for the hung statement: the slow log
+        //   was off, performance_schema statement history is off, and the
+        //   on-disk slow log's last entry predates the incident by twelve
+        //   hours with a 7.11 s maximum.
+        //
+        //   Two explanations were offered and both are dead. database's was a
+        //   semi-join materialization flip on the probe's EXISTS; they
+        //   retracted it themselves after finding their reproduction used
+        //   literal constants (groups_id = 111240 AND filecheck = 0) while
+        //   the deployed statement always correlates (groups_id = g.id AND
+        //   filecheck = f.stage). Materialization is reachable only in the
+        //   constant form -- the correlated reference prevents the
+        //   decorrelation it needs -- so EXPLAIN on the shipped shape returns
+        //   FirstMatch at every cardinality tested, including 1,272,999
+        //   pending binaries, above the incident's 1.19M. Mine was walk
+        //   distance, the probe walking a (group, filecheck) partition in
+        //   dateadded order until it finds a pending binary; never
+        //   reproduced, and the probe measures 0.043 s at above-incident
+        //   cardinality.
+        //
+        //   So the construct is gone not because we know what it did, but
+        //   because its cost was not bounded by anything either reviewer
+        //   could characterise, and nothing in the configuration would have
+        //   captured the plan if it had been. Do not go looking for a
+        //   materialization flip here: you will find FirstMatch every time
+        //   and conclude this revert was unnecessary.
+        //
+        //   This form has neither property. It is linear in the pending set,
+        //   with no per-partition walk and no semi-join for the optimizer to
+        //   choose a strategy for, so its cost is predictable and sits inside
+        //   the statement timeout with room. When the thing at risk is the
+        //   orchestrator's lease, predictable beats fast.
+        //
+        //   Neither of us can reproduce the hang: pending binaries were
+        //   1.19M at 10:26 and peaked at 1.46M, against the 607,718 live now,
+        //   and that cardinality is the input to the cost decision. So this is
+        //   not a fix verified against the failure; it is the removal of the
+        //   construct both candidate explanations need.
         // - the exact same pending-binary count also feeds binaries_backlog,
         //   which used to issue its own COUNT(*) (0.24 s) over the same rows.
         //

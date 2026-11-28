@@ -72,7 +72,18 @@ class WorkerOrchestrator
             // until Settings' general 30-second CLI TTL expires.
             Settings::forgetMemoizedSettings();
             $previous = $this->store->previousSnapshot();
-            $snapshot = $this->snapshots->capture($previous);
+
+            try {
+                $snapshot = $this->snapshots->capture($previous);
+            } catch (Throwable $captureError) {
+                if (! SnapshotStatementTimeout::matches($captureError)) {
+                    throw $captureError;
+                }
+
+                return $this->skipCycleAfterSnapshotTimeout($captureError);
+            }
+
+            $this->store->clearSnapshotTimeoutStreak();
             if (! $shadow) {
                 $currentForwardSettlement = ($this->currentForwardSettlement
                     ?? new CurrentForwardRefreshSettlement($this->snapshots))
@@ -674,6 +685,57 @@ class WorkerOrchestrator
                 }
             }
         }
+    }
+
+    /**
+     * A snapshot statement that ran out of time is not evidence the pipeline
+     * is broken, so it costs a cycle rather than the lease.
+     *
+     * failClosed() is expensive for a non-event: it zeroes
+     * orchestrator_lease_until and revokes every permit, so the lanes drop to
+     * their fail-safe timers, and a lane on a 300 s sleep wears that long
+     * after the orchestrator itself has recovered. The 2026-11-29 incident is
+     * what that state costs while it lasts -- boneless fell from 173k to 28k
+     * articles a minute.
+     *
+     * So one timeout skips the cycle: no decision, no failClosed, and
+     * crucially no lease renewal from a stale snapshot, because renewing on
+     * numbers we could not read would be worse than not renewing at all. The
+     * lease is ~600 s and the cycle ~24 s, so the default of five consecutive
+     * timeouts escalates in about two minutes, well inside it.
+     *
+     * @return array<string, mixed>
+     */
+    private function skipCycleAfterSnapshotTimeout(Throwable $error): array
+    {
+        $streak = $this->store->recordSnapshotTimeout();
+        $limit = max(1, (int) config('nntmux.orchestrator.snapshot_timeout_fail_closed_streak', 5));
+
+        if ($streak >= $limit) {
+            Log::error('NNTmux worker orchestrator failing closed after repeated snapshot timeouts', [
+                'consecutive_timeouts' => $streak,
+                'limit' => $limit,
+                'error' => $error->getMessage(),
+            ]);
+
+            // Rethrown rather than handled here: decide()'s own catch owns
+            // failClosed(). Calling it here as well wrote the fail-safe
+            // settings twice, which a test caught.
+            throw $error;
+        }
+
+        Log::warning('NNTmux worker orchestrator skipped a cycle: snapshot statement timed out', [
+            'consecutive_timeouts' => $streak,
+            'limit' => $limit,
+            'error' => $error->getMessage(),
+        ]);
+
+        return [
+            'leader' => true,
+            'applied' => false,
+            'reason' => 'snapshot_statement_timeout',
+            'consecutive_snapshot_timeouts' => $streak,
+        ];
     }
 
     /** @return array{PipelineSnapshot, array{generation: int, group: string, result: string}|null} */

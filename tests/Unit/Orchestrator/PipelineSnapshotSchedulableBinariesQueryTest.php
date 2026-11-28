@@ -74,6 +74,47 @@ final class PipelineSnapshotSchedulableBinariesQueryTest extends TestCase
         ));
     }
 
+    public function test_oldest_binary_age_is_the_single_pass_join_not_a_per_partition_probe(): void
+    {
+        $sql = $this->currentSql();
+
+        // The 2026-11-29 incident: the ordered-probe form of this term wedged
+        // the statement for 3,801 s and took the orchestrator's lease with it.
+        //
+        // The incident has no established mechanism. No plan was captured --
+        // the slow log was off and performance_schema statement history is
+        // off -- and both proposed explanations are now dead. A semi-join
+        // materialization flip on the probe's EXISTS was refuted by its own
+        // author: that plan is reachable only when the predicates are literal
+        // constants, while the deployed statement correlates them, and the
+        // shipped shape returns FirstMatch at every cardinality tested
+        // including above the incident's. A long ordered walk per partition
+        // was never reproduced either.
+        //
+        // The single-pass join is here because its cost is linear and bounded
+        // in the pending set, not because we know what the probe did. It is
+        // slower -- 5.8-6.5 s against 0.04 s -- and that is the trade, because
+        // what is at risk is the lease rather than the cycle time.
+        //
+        // A shape assertion because the two forms return identical values. No
+        // value test can catch a change back to the probe.
+        self::assertStringNotContainsString(
+            'ORDER BY c.dateadded LIMIT 1',
+            $sql,
+            'The per-partition ordered probe is what wedged capture() on 2026-11-29.'
+        );
+        self::assertStringNotContainsString(
+            'UNION ALL SELECT 15',
+            $sql,
+            'The (group, stage) lattice the probe iterated must be gone with it.'
+        );
+        self::assertStringContainsString(
+            'COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) AS oldest_binary_age',
+            $sql,
+            'oldest_binary_age must stay the single-pass MIN over the join.'
+        );
+    }
+
     public function test_a_collection_whose_group_row_is_gone_is_not_counted_as_schedulable(): void
     {
         $this->seedFixture();
