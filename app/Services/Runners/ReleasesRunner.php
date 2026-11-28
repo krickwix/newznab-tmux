@@ -13,22 +13,46 @@ use Illuminate\Support\Facades\Log;
 
 class ReleasesRunner extends BaseRunner
 {
+    /**
+     * Per-group release readiness.
+     *
+     * The GROUP BY form this replaced aggregated every row of every active
+     * group's collections (~650k rows through ix_collections_release_stage6,
+     * plus "Using temporary; Using filesort") to answer two boolean questions,
+     * and cost 1.5-2.5 s per call at 10.6 calls/min. The EXISTS form answers
+     * each question with a short index probe per group: 66-79 ms measured on
+     * live data, returning the same 15 rows in the same order with identical
+     * actionable/ready values.
+     *
+     * The trailing guard reproduces the dropped INNER JOIN: a group with no
+     * collections at all must not appear, because selectActionableGroups()
+     * rotates its bounded idle sweep modulo the idle-group count, so padding
+     * the list with collection-less groups would spend sweep slots launching
+     * children that have nothing to process. It is written as a scalar
+     * subquery rather than EXISTS on purpose -- EXISTS there makes the
+     * optimizer materialize the whole groups_id index (~400 ms), while the
+     * scalar form stays a per-group index probe.
+     *
+     * NOW() stays server-side: MariaDB's session clock runs on SYSTEM (UTC+1
+     * here) while app.timezone is UTC, so computing the cutoff in PHP would
+     * silently shift the 15-minute window by an hour.
+     */
+    public const string GROUP_READINESS_SQL = 'SELECT g.id, g.name,
+                (EXISTS(SELECT 1 FROM collections c
+                        WHERE c.groups_id = g.id AND c.filecheck IN (1, 2, 3, 15, 16))
+                 OR EXISTS(SELECT 1 FROM collections c
+                        WHERE c.groups_id = g.id AND c.filecheck = 0
+                          AND c.dateadded >= (NOW() - INTERVAL 15 MINUTE))) AS actionable,
+                EXISTS(SELECT 1 FROM collections c
+                        WHERE c.groups_id = g.id AND c.filecheck = 3) AS ready
+            FROM usenet_groups g
+            WHERE (g.active = 1 OR g.backfill = 1)
+              AND (SELECT 1 FROM collections c WHERE c.groups_id = g.id LIMIT 1) IS NOT NULL
+            ORDER BY g.id';
+
     public function releases(): void
     {
-        $rows = DB::select(
-            'SELECT g.id, g.name,
-                MAX(CASE
-                    WHEN c.filecheck IN (1, 2, 3, 15, 16) THEN 1
-                    WHEN c.filecheck = 0 AND c.dateadded >= (NOW() - INTERVAL 15 MINUTE) THEN 1
-                    ELSE 0
-                END) AS actionable,
-                MAX(CASE WHEN c.filecheck = 3 THEN 1 ELSE 0 END) AS ready
-            FROM usenet_groups g
-            INNER JOIN collections c ON c.groups_id = g.id
-            WHERE (g.active = 1 OR g.backfill = 1)
-            GROUP BY g.id, g.name
-            ORDER BY g.id'
-        );
+        $rows = DB::select(self::GROUP_READINESS_SQL);
         $maxProcesses = (int) Settings::settingValue('releasethreads');
         $groups = array_map(static fn (object $group): array => [
             'id' => (int) $group->id,

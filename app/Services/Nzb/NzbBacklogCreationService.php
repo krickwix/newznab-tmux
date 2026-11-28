@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Nzb;
 
+use App\Enums\FileCompletionStatus;
 use App\Models\Release;
 use App\Models\Settings;
 use Illuminate\Database\Eloquent\Builder;
@@ -17,6 +18,16 @@ final class NzbBacklogCreationService
     private const int MAX_CANDIDATE_SCAN = 10000;
 
     private const int ELIGIBILITY_CHUNK_SIZE = 100;
+
+    /**
+     * Release creation's stage 4 acceptance test, character for character.
+     *
+     * Copied from ReleaseProcessingService::stageFourAcceptable() and pinned
+     * against it by ReleaseProcessingCompletionPredicateTest, because the only
+     * thing that makes the alignment below worth anything is that the two
+     * predicates cannot drift.
+     */
+    private const string STAGE_FOUR_ACCEPTABLE_SQL = '(SELECT COUNT(b.id) FROM binaries b WHERE b.collections_id = collections.id AND (b.partcheck = ? OR (b.partcheck = ? AND b.totalparts > 0 AND b.currentparts >= CEIL(b.totalparts * ? / 100)))) >= GREATEST(1, CEIL(collections.totalfiles * ? / 100))';
 
     public function __construct(private readonly NzbService $nzb) {}
 
@@ -237,20 +248,78 @@ final class NzbBacklogCreationService
                     ->limit(1);
             }, '!=', null)
             ->where(function ($query) use ($completion): void {
-                $query->selectRaw('1')
-                    ->from('collections')
-                    ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
-                    ->whereColumn('collections.releases_id', 'releases.id')
-                    ->where(function ($query) use ($completion): void {
-                        $query->whereRaw('binaries.currentparts < CEIL(binaries.totalparts * ? / 100)', [$completion])
-                            ->orWhere('binaries.totalparts', '<=', 0);
-                    })
-                    ->limit(1);
+                $this->applyShortCollectionClause($query, $completion);
             }, '=', null)
             ->pluck('id')
             ->map(static fn ($id): int => (int) $id)
             ->values()
             ->all();
+    }
+
+    /**
+     * Subquery selecting one collection of the release that is not complete
+     * enough to write, used as an anti-join.
+     *
+     * Two definitions of "not complete enough", chosen by
+     * NNTMUX_NZB_ALIGN_RELEASE_COMPLETION.
+     *
+     * Default (false) keeps the historical rule: a single short binary
+     * anywhere in the release blocks the NZB. That is strictly harsher than
+     * the rule release creation applied when it accepted the release in the
+     * first place -- stage 4 accepts a collection once
+     * GREATEST(1, CEIL(totalfiles * completion / 100)) of its binaries are
+     * complete, so with completionpercent at 94 it tolerates up to 6% short
+     * files. The gap is not theoretical: 4,543 releases older than 48 hours
+     * sit at nzbstatus = 0 with no path forward, pinning 66M parts rows,
+     * because they were created under one rule and are being judged by
+     * another.
+     *
+     * When enabled, the gate applies stage 4's own predicate per collection,
+     * reusing its SQL verbatim and negating it, so "write the NZB" means
+     * exactly "release creation would still accept this".
+     *
+     * This stays behind a flag that defaults to the current behaviour because
+     * turning it on makes releases writable that have been unwritable for
+     * weeks, and writing an NZB deletes the release's collections, binaries
+     * and parts. The deletion is not a separate sweep that could run away:
+     * NzbService does it inline per release, in 500-row chunks, as each NZB is
+     * written. So the backlog drains at the NZB worker's own per-run limit --
+     * distributed_nzb_limit, or 5 to 20 releases with a fresh active lease --
+     * and not faster.
+     *
+     * @param  Builder<Release>|QueryBuilder  $query
+     */
+    private function applyShortCollectionClause(Builder|QueryBuilder $query, int $completion): void
+    {
+        if (! $this->alignsWithReleaseCompletion()) {
+            $query->selectRaw('1')
+                ->from('collections')
+                ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
+                ->whereColumn('collections.releases_id', 'releases.id')
+                ->where(function ($query) use ($completion): void {
+                    $query->whereRaw('binaries.currentparts < CEIL(binaries.totalparts * ? / 100)', [$completion])
+                        ->orWhere('binaries.totalparts', '<=', 0);
+                })
+                ->limit(1);
+
+            return;
+        }
+
+        $query->selectRaw('1')
+            ->from('collections')
+            ->whereColumn('collections.releases_id', 'releases.id')
+            ->whereRaw('NOT ('.self::STAGE_FOUR_ACCEPTABLE_SQL.')', [
+                FileCompletionStatus::Complete->value,
+                FileCompletionStatus::Incomplete->value,
+                $completion,
+                $completion,
+            ])
+            ->limit(1);
+    }
+
+    private function alignsWithReleaseCompletion(): bool
+    {
+        return (bool) config('nntmux.nzb_align_release_completion', false);
     }
 
     private function requiredCompletionPercent(): int
@@ -432,14 +501,10 @@ final class NzbBacklogCreationService
                 ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
                 ->whereColumn('collections.releases_id', 'releases.id');
         })->orWhereExists(function ($query) use ($completion): void {
-            $query->selectRaw('1')
-                ->from('collections')
-                ->join('binaries', 'binaries.collections_id', '=', 'collections.id')
-                ->whereColumn('collections.releases_id', 'releases.id')
-                ->where(function ($query) use ($completion): void {
-                    $query->where('binaries.totalparts', '<=', 0)
-                        ->orWhereRaw('binaries.currentparts < CEIL(binaries.totalparts * ? / 100)', [$completion]);
-                });
+            // Same definition of "short" the selection gate uses, so the
+            // completion-alignment flag cannot leave this path quarantining a
+            // release the gate has just started accepting.
+            $this->applyShortCollectionClause($query, $completion);
         })->orWhereExists(function ($query): void {
             $query->selectRaw('1')
                 ->from('collections')

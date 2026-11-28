@@ -53,6 +53,8 @@ class TmuxMonitorService
 
     protected Tmux $tmux;
 
+    protected MonitorStatisticsCache $statisticsCache;
+
     /**
      * @var array<string, mixed>
      */
@@ -62,9 +64,10 @@ class TmuxMonitorService
 
     protected bool $shouldContinue = true;
 
-    public function __construct()
+    public function __construct(?MonitorStatisticsCache $statisticsCache = null)
     {
         $this->tmux = new Tmux;
+        $this->statisticsCache = $statisticsCache ?? new MonitorStatisticsCache;
     }
 
     /**
@@ -178,6 +181,24 @@ class TmuxMonitorService
     }
 
     /**
+     * Refresh the monitor settings without the statistics pass.
+     *
+     * For lanes whose plan is decided from settings alone, the ~20 statement
+     * statistics pass produced counts nothing would read. This is the part of
+     * collectStatistics() those lanes actually needed: one indexed read of the
+     * monitor settings, so a setting flipped in the UI still reaches them on
+     * the next loop.
+     *
+     * @return array<string, mixed>
+     */
+    public function refreshMonitorSettings(): array
+    {
+        $this->runVar['settings'] = $this->tmux->getMonitorSettings();
+
+        return $this->runVar;
+    }
+
+    /**
      * Refresh only the settings that make a one-shot backfill permit visible.
      *
      * The full monitor snapshot may be cached for up to a minute, while the
@@ -269,9 +290,30 @@ class TmuxMonitorService
 
     /**
      * Refresh all statistics from database
+     *
+     * The ~20 statements below answer a question about the database, not
+     * about this pod, so the answer is shared across the fleet rather than
+     * recomputed per worker. See MonitorStatisticsCache. Only the
+     * database-derived state travels; counts.start is a per-process
+     * since-launch baseline, so the derived diff/percent values are
+     * recalculated locally either way.
      */
     protected function refreshStatistics(): void
     {
+        $shared = $this->statisticsCache->read();
+
+        if ($shared !== null) {
+            $this->runVar['settings'] = $shared['settings'];
+            $this->runVar['counts']['now'] = $shared['counts'];
+            $this->runVar['timers']['query'] = $shared['query_timers'];
+            $this->runVar['timers']['newOld'] = $shared['new_old'];
+
+            // Calculate diffs and percentages
+            $this->calculateStatistics();
+
+            return;
+        }
+
         $timer = time();
 
         // Refresh settings
@@ -282,10 +324,26 @@ class TmuxMonitorService
         $this->getCategoryCounts();
 
         // Get process counts
-        $this->getProcessCounts();
+        $complete = $this->getProcessCounts();
 
         // Get table counts
-        $this->getTableCounts();
+        $complete = $this->getTableCounts() && $complete;
+
+        // Both of those swallow their own exceptions, so a failed pass leaves
+        // $counts short rather than throwing. Short is the dangerous shape:
+        // every key the job catalog cannot find reads as "no work" on its ?? 0
+        // default, so publishing one pod's failed read would idle every
+        // statistics-dependent lane for the whole TTL. Keep the short counts
+        // locally -- that is the pre-existing single-pass behaviour -- but do
+        // not hand them to the fleet.
+        if ($complete) {
+            $this->statisticsCache->write(
+                (array) ($this->runVar['settings'] ?? []),
+                (array) ($this->runVar['counts']['now'] ?? []),
+                (array) ($this->runVar['timers']['query'] ?? []),
+                (array) ($this->runVar['timers']['newOld'] ?? []),
+            );
+        }
 
         // Calculate diffs and percentages
         $this->calculateStatistics();
@@ -338,9 +396,13 @@ class TmuxMonitorService
     }
 
     /**
-     * Get process-related counts
+     * Get process-related counts.
+     *
+     * @return bool False when the pass failed and $counts is therefore short.
+     *              A short pass must not be published to the fleet: every
+     *              missing key reads as "no work" and idles a lane.
      */
-    protected function getProcessCounts(): void
+    protected function getProcessCounts(): bool
     {
         $timer = time();
 
@@ -374,15 +436,20 @@ class TmuxMonitorService
 
             $this->runVar['timers']['query']['proc2_time'] = time() - $timer2;
 
+            return true;
         } catch (\Exception $e) {
             logger()->error('Error collecting process counts: '.$e->getMessage());
+
+            return false;
         }
     }
 
     /**
-     * Get table row counts
+     * Get table row counts.
+     *
+     * @return bool False when the pass failed and $counts is therefore short.
      */
-    protected function getTableCounts(): void
+    protected function getTableCounts(): bool
     {
         $timer = time();
 
@@ -434,8 +501,11 @@ class TmuxMonitorService
                 }
             }
 
+            return true;
         } catch (\Exception $e) {
             logger()->error('Error collecting table counts: '.$e->getMessage());
+
+            return false;
         }
     }
 

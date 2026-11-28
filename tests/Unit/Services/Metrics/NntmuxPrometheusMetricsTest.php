@@ -7,6 +7,7 @@ namespace Tests\Unit\Services\Metrics;
 use App\Models\Category;
 use App\Services\Distributed\DistributedJobCatalog;
 use App\Services\Metrics\DistributedWorkerTelemetry;
+use App\Services\Metrics\MetricsRenderCache;
 use App\Services\Metrics\NntmuxPrometheusMetrics;
 use App\Services\Metrics\SplitCollectionTelemetry;
 use App\Services\Orchestrator\ControlState;
@@ -127,6 +128,184 @@ class NntmuxPrometheusMetricsTest extends TestCase
         putenv($key.'='.$value);
         $_ENV[$key] = $value;
         $_SERVER[$key] = $value;
+    }
+
+    public function test_the_three_collection_views_come_from_one_aggregate_and_keep_their_own_scopes(): void
+    {
+        $this->seedCollections();
+        $metrics = new NntmuxPrometheusMetrics;
+
+        $formation = implode("\n", $this->invoke($metrics, 'collectionFormationMetrics'));
+        $lifecycle = implode("\n", $this->invoke($metrics, 'pipelineLifecycleMetrics'));
+        $nzb = implode("\n", $this->invoke($metrics, 'nzbBacklogMetrics'));
+
+        // Per-group series: active and backfill groups only, ordered by name.
+        $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.active",filecheck="0"} 2', $formation);
+        $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.active",filecheck="4"} 1', $formation);
+        $this->assertStringContainsString('nntmux_collections_filecheck_total{group="alt.backfill",filecheck="0"} 1', $formation);
+        $this->assertStringNotContainsString('group="alt.dormant"', $formation);
+
+        // The lifecycle roll-up never carried a group filter and still does
+        // not, so the dormant group's collections are counted here while being
+        // absent from the labelled series above.
+        $this->assertStringContainsString('nntmux_collections_filecheck_lifecycle_count{filecheck="0",state="new",lifecycle="backlog"} 7', $lifecycle);
+        $this->assertStringContainsString('nntmux_collections_filecheck_lifecycle_count{filecheck="4",state="inserted",lifecycle="nzb_pending"} 1', $lifecycle);
+        $this->assertStringContainsString('nntmux_collections_filecheck_lifecycle_count{filecheck="3",state="ready_for_release",lifecycle="ready"} 0', $lifecycle);
+
+        // Same bucket, read from the same aggregate rather than its own COUNT.
+        $this->assertStringContainsString('nntmux_nzb_inserted_collections_count 1', $nzb);
+    }
+
+    public function test_the_shared_collection_aggregate_runs_once_for_all_three_views(): void
+    {
+        $this->seedCollections();
+        $metrics = new NntmuxPrometheusMetrics;
+
+        $statements = [];
+        DB::listen(static function ($query) use (&$statements): void {
+            $statements[] = $query->sql;
+        });
+
+        $this->invoke($metrics, 'collectionFormationMetrics');
+        $this->invoke($metrics, 'pipelineLifecycleMetrics');
+        $this->invoke($metrics, 'nzbBacklogMetrics');
+
+        $aggregates = array_values(array_filter(
+            $statements,
+            static fn (string $sql): bool => str_contains($sql, 'groups_id, filecheck, count(*)')
+                || str_contains($sql, 'groups_id, filecheck, COUNT(*)'),
+        ));
+
+        self::assertCount(1, $aggregates, 'The collections aggregate should be computed once per render pass.');
+        // And the views it feeds must no longer issue their own passes.
+        foreach ($statements as $sql) {
+            self::assertStringNotContainsString('inner join "usenet_groups"', $sql);
+        }
+    }
+
+    public function test_the_per_group_series_is_empty_without_the_groups_table(): void
+    {
+        $this->seedCollections();
+        DB::statement('DROP TABLE usenet_groups');
+        $metrics = new NntmuxPrometheusMetrics;
+
+        $formation = implode("\n", $this->invoke($metrics, 'collectionFormationMetrics'));
+
+        self::assertStringNotContainsString('nntmux_collections_filecheck_total{', $formation);
+    }
+
+    public function test_a_cached_exposition_is_served_without_touching_the_database(): void
+    {
+        config([
+            'nntmux.distributed_lock_store' => 'array',
+            'nntmux.metrics_render_cache_seconds' => 60,
+        ]);
+        Cache::store('array')->flush();
+
+        (new MetricsRenderCache)->write("nntmux_demo 1\nnntmux_metric_scrape_success 1\n", microtime(true) - 12.0);
+
+        $statements = [];
+        DB::listen(static function ($query) use (&$statements): void {
+            $statements[] = $query->sql;
+        });
+
+        $body = (new NntmuxPrometheusMetrics)->render();
+
+        self::assertSame([], $statements, 'A cache hit must not re-run the exposition queries.');
+        self::assertStringContainsString('nntmux_demo 1', $body);
+        // Served age is published live, so a reused body cannot pass for a
+        // fresh one on a dashboard.
+        self::assertMatchesRegularExpression('/nntmux_metric_cache_age_seconds 1[12](\.\d+)?\n/', $body);
+    }
+
+    public function test_a_failed_render_is_never_cached(): void
+    {
+        config([
+            'nntmux.distributed_lock_store' => 'array',
+            'nntmux.metrics_render_cache_seconds' => 60,
+        ]);
+        Cache::store('array')->flush();
+
+        // No collections/usenet_groups tables and a dropped releases table, so
+        // the render raises inside its own try/catch and reports failure.
+        DB::statement('DROP TABLE releases');
+        $body = (new NntmuxPrometheusMetrics)->render();
+
+        self::assertStringContainsString('nntmux_metric_cache_age_seconds 0', $body);
+        self::assertNull(
+            (new MetricsRenderCache)->read(),
+            'Caching a failed render would hold one transient error in front of every scrape for the window.'
+        );
+    }
+
+    public function test_caching_is_off_when_the_window_is_zero(): void
+    {
+        config([
+            'nntmux.distributed_lock_store' => 'array',
+            'nntmux.metrics_render_cache_seconds' => 0,
+        ]);
+        Cache::store('array')->flush();
+
+        $cache = new MetricsRenderCache;
+        $cache->write("nntmux_demo 1\n", microtime(true));
+
+        self::assertSame(0, $cache->ttl());
+        self::assertNull($cache->read());
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function invoke(NntmuxPrometheusMetrics $metrics, string $method): array
+    {
+        $reflected = (new ReflectionClass($metrics))->getMethod($method);
+        $reflected->setAccessible(true);
+
+        /** @var list<string> $lines */
+        $lines = $reflected->invoke($metrics);
+
+        return $lines;
+    }
+
+    private function seedCollections(): void
+    {
+        DB::statement('CREATE TABLE usenet_groups (
+            id INTEGER PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            active INTEGER NOT NULL DEFAULT 0,
+            backfill INTEGER NOT NULL DEFAULT 0,
+            first_record INTEGER NOT NULL DEFAULT 0,
+            first_record_postdate DATETIME NULL
+        )');
+        DB::statement('CREATE TABLE collections (
+            id INTEGER PRIMARY KEY,
+            groups_id INTEGER NOT NULL,
+            filecheck INTEGER NOT NULL DEFAULT 0,
+            totalfiles INTEGER NOT NULL DEFAULT 0,
+            collection_regexes_id INTEGER NULL
+        )');
+
+        DB::table('usenet_groups')->insert([
+            ['id' => 1, 'name' => 'alt.active', 'active' => 1, 'backfill' => 0],
+            ['id' => 2, 'name' => 'alt.backfill', 'active' => 0, 'backfill' => 1],
+            ['id' => 3, 'name' => 'alt.dormant', 'active' => 0, 'backfill' => 0],
+        ]);
+
+        $rows = [];
+        $id = 1;
+        // alt.active: two pending, one inserted
+        $rows[] = ['id' => $id++, 'groups_id' => 1, 'filecheck' => 0, 'totalfiles' => 3, 'collection_regexes_id' => 10];
+        $rows[] = ['id' => $id++, 'groups_id' => 1, 'filecheck' => 0, 'totalfiles' => 1, 'collection_regexes_id' => 10];
+        $rows[] = ['id' => $id++, 'groups_id' => 1, 'filecheck' => 4, 'totalfiles' => 3, 'collection_regexes_id' => 10];
+        // alt.backfill: one pending
+        $rows[] = ['id' => $id++, 'groups_id' => 2, 'filecheck' => 0, 'totalfiles' => 4, 'collection_regexes_id' => 11];
+        // alt.dormant holds four pending collections it should not be labelled
+        // for, but which the unfiltered roll-up still counts.
+        for ($i = 0; $i < 4; $i++) {
+            $rows[] = ['id' => $id++, 'groups_id' => 3, 'filecheck' => 0, 'totalfiles' => 2, 'collection_regexes_id' => 12];
+        }
+
+        DB::table('collections')->insert($rows);
     }
 
     public function test_release_metrics_expose_category_based_hashed_backlog(): void

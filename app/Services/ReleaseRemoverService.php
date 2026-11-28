@@ -9,6 +9,7 @@ use App\Facades\Search;
 use App\Models\Category;
 use App\Models\Settings;
 use App\Services\AdditionalProcessing\AdditionalCandidateQuery;
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Nzb\NzbParserService;
 use App\Services\Nzb\NzbService;
 use App\Services\Releases\ReleaseBrowseService;
@@ -86,6 +87,8 @@ class ReleaseRemoverService
      */
     protected array $result = [];
 
+    private DistributedWorkerTelemetry $telemetry;
+
     private NzbService $nzb;
 
     private NzbParserService $nzbParser;
@@ -103,12 +106,14 @@ class ReleaseRemoverService
         ?ReleaseManagementService $releaseManagement = null,
         ?NzbService $nzb = null,
         ?NzbParserService $nzbParser = null,
-        ?ReleaseImageService $releaseImage = null
+        ?ReleaseImageService $releaseImage = null,
+        ?DistributedWorkerTelemetry $telemetry = null
     ) {
         $this->releaseManagement = $releaseManagement ?? app(ReleaseManagementService::class);
         $this->nzb = $nzb ?? app(NzbService::class);
         $this->nzbParser = $nzbParser ?? app(NzbParserService::class);
         $this->releaseImage = $releaseImage ?? new ReleaseImageService;
+        $this->telemetry = $telemetry ?? app(DistributedWorkerTelemetry::class);
         $this->echoCLI = config('nntmux.echocli');
 
         $this->initRemovalHandlers();
@@ -267,7 +272,7 @@ class ReleaseRemoverService
             return false;
         }
 
-        $this->removalHandlers[$type]();
+        $this->runRemovalHandler($type);
 
         return true;
     }
@@ -295,10 +300,43 @@ class ReleaseRemoverService
         ];
 
         foreach ($defaultTypes as $removalType) {
-            $this->removalHandlers[$removalType]();
+            $this->runRemovalHandler($removalType);
         }
 
         return true;
+    }
+
+    /**
+     * Run one removal type and report what it deleted.
+     *
+     * The worker deleted ~6.7 releases a minute and reported none of it: with
+     * no counter, a removal type that suddenly eats a thousand releases and a
+     * removal type that has silently stopped matching anything look alike from
+     * outside the pod. Every handler funnels its deletions through
+     * deleteReleases(), which accumulates into $deletedCount, so the delta
+     * across one handler is that type's contribution however many queries it
+     * ran internally -- removeBlacklist() walks one query per regex, and
+     * removePar2Only() makes a second pass over hashed NZBs.
+     *
+     * Reported twice: once under the type, once into a 'release' total, so an
+     * operator can alert on the aggregate without summing eighteen series.
+     */
+    private function runRemovalHandler(string $type): void
+    {
+        $before = $this->deletedCount;
+
+        $this->removalHandlers[$type]();
+
+        $deleted = $this->deletedCount - $before;
+
+        // A dry run matches rows and deletes nothing, and counting those as
+        // deletions would make --delete and its absence indistinguishable.
+        if (! $this->delete || $deleted < 1) {
+            return;
+        }
+
+        $this->telemetry->recordItem('removecrap', $type, 'deleted', $deleted);
+        $this->telemetry->recordItem('removecrap', 'release', 'deleted', $deleted);
     }
 
     /**
@@ -393,6 +431,24 @@ class ReleaseRemoverService
      * worker passes a 4-hour window, which never holds a release that old.
      * Opt-in only, so it is not part of the "all" set.
      *
+     * The post-processing arms are all negative: they ask whether additional
+     * processing has run or can never run. A release that is still queued for
+     * it -- passwordstatus = -1 and nzbstatus = 1, with a size inside the
+     * bounds -- matches none of them and is therefore immortal, however long
+     * it has waited. 6,196 of the 11,799 cat-20 releases on live are more than
+     * a week old and every one of them is in exactly that state.
+     *
+     * NNTMUX_REMOVE_UNRESOLVED_HASHED_MAX_AGE_HOURS (0 = off) adds the
+     * backstop the owner's 2026-10-08 policy implies: past that age, an
+     * unresolved hashed release goes regardless of where post-processing
+     * thinks it is. Deletion still runs through deleteReleases() and
+     * deleteSingleWithService(), so NZB files, images and child rows are
+     * cleaned up the same way as for every other removal type.
+     *
+     * NNTMUX_REMOVE_UNRESOLVED_HASHED_MAX_PER_PASS bounds how much of that
+     * backlog one pass takes, which matters on the first run after the
+     * backstop is enabled.
+     *
      * @throws Exception
      */
     protected function removeUnresolvedHashed(): bool|string
@@ -407,16 +463,57 @@ class ReleaseRemoverService
             $notCandidate[] = 'r.size >= '.($maxSizeGB * 1073741824);
         }
 
+        $eligible = sprintf(
+            '(r.adddate < %s AND (%s))',
+            escapeString(Carbon::now()->subHours(self::UNRESOLVED_HASHED_GRACE_HOURS)->format('Y-m-d H:i:s')),
+            implode(' OR ', $notCandidate)
+        );
+
+        $maxAgeHours = $this->unresolvedHashedMaxAgeHours();
+        if ($maxAgeHours > 0) {
+            $eligible .= sprintf(
+                ' OR r.adddate < %s',
+                escapeString(Carbon::now()->subHours($maxAgeHours)->format('Y-m-d H:i:s'))
+            );
+        }
+
+        // Bounded per pass so the first run after enabling the backstop is not
+        // one unbounded delete of every release that qualifies. The lane runs
+        // roughly every 67 s, so a few hundred a pass drains thousands within
+        // the hour with per-pass work an operator can predict, and each pass
+        // picks up where the last left off because deleted rows do not come
+        // back. 0 keeps the historical unbounded select.
+        $perPass = $this->unresolvedHashedMaxPerPass();
+
         return $this->executeSimpleRemoval('HashedUnresolved', sprintf(
             'SELECT r.guid, r.searchname, r.id
             FROM releases r
             WHERE r.categories_id = %d
-            AND r.adddate < %s
-            AND (%s)',
+            AND (%s)
+            ORDER BY r.id%s',
             Category::OTHER_HASHED,
-            escapeString(Carbon::now()->subHours(self::UNRESOLVED_HASHED_GRACE_HOURS)->format('Y-m-d H:i:s')),
-            implode(' OR ', $notCandidate)
+            $eligible,
+            $perPass > 0 ? ' LIMIT '.$perPass : ''
         ));
+    }
+
+    /**
+     * Releases the unresolved-hashed removal may delete in one pass, 0 for no
+     * limit.
+     */
+    private function unresolvedHashedMaxPerPass(): int
+    {
+        return max(0, (int) config('nntmux.remove_unresolved_hashed_max_per_pass', 0));
+    }
+
+    /**
+     * Age at which an unresolved hashed release is dropped whatever
+     * post-processing thinks. 0 keeps the post-processing arms as the only
+     * grounds for removal, which is the historical behaviour.
+     */
+    private function unresolvedHashedMaxAgeHours(): int
+    {
+        return max(0, (int) config('nntmux.remove_unresolved_hashed_max_age_hours', 0));
     }
 
     /**

@@ -155,9 +155,21 @@ final class MovieLookupState
                 'id', 'imdbid', 'searchname', 'categories_id', 'movieinfo_id',
             ]);
             $state = DB::table('movie_lookup_states')->where('release_id', $releaseId)->lockForUpdate()->first();
+            // A movieinfo_id on its own does not mean the release is resolved.
+            // 167 of the 202 rows sitting at status 'claimed' were exactly
+            // this: imdbid IS NULL with movieinfo_id > 0, a movie row linked
+            // without the IMDb id that is supposed to identify it. The old
+            // guard read them as finished and bailed out -- and bailing out
+            // leaves the state row 'claimed', so the claim just expired and
+            // the release was re-claimed on the next sweep. ~11 claims and
+            // ~13 external provider lookups a minute since 2026-10-08, with
+            // no attempt recorded, no backoff applied and no progress
+            // possible. Such a release still needs its imdbid, so it takes
+            // the ordinary no-match path and quarantines after the configured
+            // attempts like any other release that cannot be matched.
             if ($release === null
                 || ! $this->hasCurrentClaim($state, $release, $claimToken)
-                || ($release->movieinfo_id !== null && (int) $release->movieinfo_id !== 0)) {
+                || $this->hasResolvedMovieLink($release)) {
                 return null;
             }
 
@@ -247,6 +259,22 @@ final class MovieLookupState
                 OR (mls.status = 'claimed' AND mls.claim_expires_at > CURRENT_TIMESTAMP)
               )
         )";
+    }
+
+    /**
+     * Whether the release already carries a complete movie link.
+     *
+     * Complete means both halves: a movieinfo row, and the IMDb id that
+     * identifies it. Either half on its own is a release still waiting on
+     * lookup and must not be mistaken for a finished one --
+     * movieinfo_needs_repair_sql() takes the mirror-image view of the other
+     * half, where the imdbid is known and the movieinfo link is missing.
+     */
+    private function hasResolvedMovieLink(Release $release): bool
+    {
+        return $release->movieinfo_id !== null
+            && (int) $release->movieinfo_id !== 0
+            && imdb_id_is_valid($release->imdbid);
     }
 
     /**

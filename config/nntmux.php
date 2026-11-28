@@ -29,6 +29,36 @@ return [
     'inline_nzb_creation' => (bool) env('NNTMUX_INLINE_NZB_CREATION', true),
     'build_version' => env('NNTMUX_BUILD_VERSION', 'unknown'),
     'distributed_nzb_limit' => (int) env('NNTMUX_DISTRIBUTED_NZB_LIMIT', 1),
+    // Judge NZB-creation eligibility by the same completion rule release
+    // creation used to accept the release (stage 4's
+    // GREATEST(1, CEIL(totalfiles * completionpercent / 100)) complete
+    // binaries per collection) instead of rejecting any release with a single
+    // short binary. Defaults to the historical, stricter rule.
+    //
+    // Enabling it makes ~4,178 releases writable that have been stuck at
+    // nzbstatus = 0 for weeks, and writing an NZB deletes that release's
+    // collections inline. Measure the drain in rows, not releases: this
+    // backlog holds 341,049 binaries and 66,345,770 parts across 4,819
+    // collections, about 71 binaries and 13,768 parts per release, roughly
+    // 200x a normal one. At distributed_nzb_limit = 20 that is ~275k parts
+    // rows deleted per run every ~21 s, about 13k rows/s sustained for an
+    // hour. distributed_nzb_limit is the throttle; set that lane to 1 for the
+    // first rollout (~24 h drain, ~700 rows/s) before raising it.
+    'nzb_align_release_completion' => (bool) env('NNTMUX_NZB_ALIGN_RELEASE_COMPLETION', false),
+    // Age in hours past which releases:remove-crap --type=hashed_unresolved
+    // deletes an Other > Hashed release regardless of where post-processing
+    // thinks it is. 0 keeps the post-processing arms as the only grounds for
+    // removal, which leaves a release still queued for additional processing
+    // (passwordstatus = -1, nzbstatus = 1, size inside the bounds) immortal.
+    // Enabling this is a one-off bulk deletion on its first run: 6,196 of the
+    // 11,799 cat-20 releases on live are over a week old. They are deleted one
+    // at a time through the normal release-deletion service, not in bulk SQL.
+    'remove_unresolved_hashed_max_age_hours' => max(0, (int) env('NNTMUX_REMOVE_UNRESOLVED_HASHED_MAX_AGE_HOURS', 0)),
+    // Releases the unresolved-hashed removal may delete in one pass, 0 for no
+    // limit. The lane runs roughly every 67 s, so 200 drains ~6,200 in about
+    // 35 minutes with bounded per-pass work instead of one unbounded delete on
+    // the first run after the age backstop above is enabled.
+    'remove_unresolved_hashed_max_per_pass' => max(0, (int) env('NNTMUX_REMOVE_UNRESOLVED_HASHED_MAX_PER_PASS', 0)),
     'distributed_nzb_sleep' => (int) env('NNTMUX_DISTRIBUTED_NZB_SLEEP', 60),
     'distributed_nzb_scan_cap' => (int) env('NNTMUX_DISTRIBUTED_NZB_SCAN_CAP', 10000),
     'distributed_nzb_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS', 7200),
@@ -398,6 +428,20 @@ return [
     'distributed_current_forward_max_run_seconds' => min(600, max(60, (int) env('NNTMUX_DISTRIBUTED_CURRENT_FORWARD_MAX_RUN_SECONDS', 600))),
     'distributed_long_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_LONG_LOCK_SECONDS', 3600),
     'distributed_lock_store' => env('NNTMUX_DISTRIBUTED_LOCK_STORE', 'redis'),
+    // Seconds a tmux monitor statistics snapshot may be reused from the shared
+    // cache. Every distributed worker that gates on release/collection counts
+    // recomputes the same ~20 statements on its own schedule, so one pod's
+    // snapshot answers for all of them. 0 disables sharing and each process
+    // computes its own, as before.
+    'distributed_statistics_cache_seconds' => max(0, (int) env('NNTMUX_DISTRIBUTED_STATISTICS_CACHE_SECONDS', 20)),
+    // Seconds a rendered Prometheus exposition may be served again before the
+    // exporter recomputes it. The scrape interval is 30 s and a full render is
+    // ~7% of MariaDB's busy time on its own, growing with the backlog, so the
+    // default reuses each body for two scrapes. These are dashboard and alert
+    // gauges, not gate inputs; render() publishes
+    // nntmux_metric_cache_age_seconds so a reused body is never mistaken for a
+    // fresh one. 0 recomputes on every scrape, as before.
+    'metrics_render_cache_seconds' => max(0, (int) env('NNTMUX_METRICS_RENDER_CACHE_SECONDS', 60)),
     'allow_large_cbp_fk_restore' => (bool) env('NNTMUX_ALLOW_LARGE_CBP_FK_RESTORE', false),
     'purge_inactive_users' => env('PURGE_INACTIVE_USERS', false),
     'purge_inactive_users_days' => env('PURGE_INACTIVE_USERS_DAYS', 180),

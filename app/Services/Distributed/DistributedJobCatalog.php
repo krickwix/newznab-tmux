@@ -56,6 +56,46 @@ class DistributedJobCatalog
     }
 
     /**
+     * Jobs whose resolve() verdict depends on the tmux monitor statistics.
+     *
+     * Everything here reads $counts, or $killswitch -- which setKillswitches()
+     * derives from $counts -- so its plan cannot be decided without the full
+     * statistics pass. Every other lane is decided from settings, constants
+     * and config alone, and paid for the pass anyway: the worker loop collected
+     * statistics before it knew whether the job was even enabled.
+     *
+     * Keep this in step with resolve(): a job added here that does not read
+     * counts only wastes queries, but a job left out that does read them would
+     * resolve against an empty counts array and report itself as having no
+     * work.
+     *
+     * @var list<string>
+     */
+    private const array STATISTICS_DEPENDENT_JOBS = [
+        // backfill reads $counts and $killswitch too, but the worker loop
+        // handles it on its own branch and never consults readsStatistics()
+        // for it. Listed anyway: this is the answer to "does resolving this
+        // job need the statistics", and that answer is yes whoever asks.
+        'backfill',
+        'binaries',
+        'fixnames',
+        'hashed-fixnames',
+        'metadata-refresh',
+        'post-additional',
+        'post-amazon',
+        'post-movies',
+        'post-tv',
+    ];
+
+    /**
+     * Whether resolving this job needs the monitor statistics pass.
+     */
+    public function readsStatistics(string $job): bool
+    {
+        return in_array($job, self::STATISTICS_DEPENDENT_JOBS, true);
+    }
+
+    /**
      * @param  array{
      *     settings?: array<string, mixed>,
      *     constants?: array<string, mixed>,

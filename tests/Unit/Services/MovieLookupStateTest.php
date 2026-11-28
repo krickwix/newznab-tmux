@@ -156,7 +156,109 @@ class MovieLookupStateTest extends ImdbScraperTestCase
         $this->assertNotNull($token);
 
         $this->assertTrue($state->markNoMatch(1, $token));
-        $this->assertSame('', Release::query()->whereKey(1)->value('imdbid'));
-        $this->assertDatabaseMissing('movie_lookup_states', ['release_id' => 1]);
+        // The imdbid stays NULL rather than being stamped with an empty
+        // string: an empty string satisfies neither imdb_id_needs_lookup_sql
+        // nor movieinfo_needs_repair_sql, so it made a no-match permanent.
+        // The state row carries the no-match instead, under backoff.
+        $this->assertNull(Release::query()->whereKey(1)->value('imdbid'));
+        $this->assertDatabaseHas('movie_lookup_states', [
+            'release_id' => 1,
+            'status' => MovieLookupState::STATUS_RETRY,
+            'reason_code' => 'no_match',
+            'attempts' => 1,
+        ]);
+        $this->assertNull(DB::table('movie_lookup_states')->where('release_id', 1)->value('claim_token'));
+    }
+
+    #[Test]
+    public function a_movieinfo_link_without_an_imdbid_is_treated_as_unresolved(): void
+    {
+        // 167 of the 202 rows stuck at status 'claimed' on the live database
+        // were in exactly this state: a movieinfo row linked without the IMDb
+        // id that identifies it. The guard read that as resolved and returned
+        // without writing anything, leaving the claim to expire and the
+        // release to be re-claimed on the next sweep, forever.
+        Release::query()->whereKey(1)->update(['imdbid' => null, 'movieinfo_id' => 4321]);
+        $state = new MovieLookupState;
+        $token = $state->claim(1);
+        $this->assertNotNull($token);
+
+        $this->assertTrue($state->markNoMatch(1, $token));
+        $this->assertDatabaseHas('movie_lookup_states', [
+            'release_id' => 1,
+            'status' => MovieLookupState::STATUS_RETRY,
+            'reason_code' => 'no_match',
+            'attempts' => 1,
+        ]);
+        $this->assertNull(DB::table('movie_lookup_states')->where('release_id', 1)->value('claim_token'));
+    }
+
+    #[Test]
+    public function a_release_stuck_this_way_reaches_quarantine_instead_of_being_reclaimed_forever(): void
+    {
+        config(['nntmux_api.movie_lookup_max_attempts' => 2]);
+        Release::query()->whereKey(1)->update(['imdbid' => null, 'movieinfo_id' => 4321]);
+        $state = new MovieLookupState;
+
+        $first = $state->claim(1);
+        $this->assertNotNull($first);
+        $this->assertTrue($state->markNoMatch(1, $first));
+
+        // Clear the backoff the way the passage of time would.
+        DB::table('movie_lookup_states')->where('release_id', 1)->update(['next_attempt_at' => null]);
+
+        $second = $state->claim(1);
+        $this->assertNotNull($second);
+        $this->assertTrue($state->markNoMatch(1, $second));
+
+        $this->assertDatabaseHas('movie_lookup_states', [
+            'release_id' => 1,
+            'status' => MovieLookupState::STATUS_QUARANTINED,
+            'attempts' => 2,
+        ]);
+        // Quarantined rows are excluded by eligibilitySql(), so the lookup
+        // sweep stops picking it up at all.
+        $this->assertSame(0, Release::query()
+            ->whereKey(1)
+            ->whereRaw($state->eligibilitySql())
+            ->count());
+    }
+
+    #[Test]
+    public function a_fully_linked_release_is_still_refused(): void
+    {
+        $state = new MovieLookupState;
+        $token = $state->claim(1);
+        $this->assertNotNull($token);
+
+        // Release 1 keeps imdbid 1234567 from setUp(); give it the matching
+        // movieinfo row. Both halves present means resolved, and a no-match
+        // for it is a caller mistake, not a verdict.
+        Release::query()->whereKey(1)->update(['movieinfo_id' => 4321]);
+
+        $this->assertFalse($state->markNoMatch(1, $token));
+        $this->assertDatabaseHas('movie_lookup_states', [
+            'release_id' => 1,
+            'status' => MovieLookupState::STATUS_CLAIMED,
+        ]);
+    }
+
+    #[Test]
+    public function a_placeholder_imdbid_beside_a_movieinfo_link_is_also_unresolved(): void
+    {
+        Release::query()->whereKey(1)->update(['imdbid' => '0000000', 'movieinfo_id' => 4321]);
+        $state = new MovieLookupState;
+        $token = $state->claim(1);
+        $this->assertNotNull($token);
+
+        $this->assertTrue($state->markNoMatch(1, $token));
+        // The placeholder is normalised away so the release stays eligible
+        // once the backoff elapses.
+        $this->assertNull(Release::query()->whereKey(1)->value('imdbid'));
+        $this->assertDatabaseHas('movie_lookup_states', [
+            'release_id' => 1,
+            'status' => MovieLookupState::STATUS_RETRY,
+            'reason_code' => 'no_match',
+        ]);
     }
 }
