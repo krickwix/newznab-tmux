@@ -89,6 +89,23 @@ final class MonitorStatisticsCacheTest extends TestCase
         self::assertNull((new MonitorStatisticsCache)->read());
     }
 
+    /**
+     * Guards the hand-written key list against drift -- within stated limits,
+     * which are worth knowing before anyone trusts it further than it goes.
+     *
+     * The scan sees literal quoted keys only, so it structurally cannot see
+     * backfillGroupWorkCount()'s $counts[$countKey]. Those two keys
+     * (backfill_groups_date, backfill_groups_days) are in the list because I
+     * read the method, not because this test found them, and a future dynamic
+     * read will still need a human.
+     *
+     * It also reads DistributedJobCatalog only. TmuxMonitorService::setKillswitches()
+     * reads counts['now']['total_work'] and ['collections_table'] too;
+     * collections_table happens to be in the list, and total_work is derived
+     * locally by calculateStatistics() from the adopted counts rather than
+     * carried in the snapshot. Both are fine today, but not because this scan
+     * covers them.
+     */
     public function test_the_required_keys_cover_every_count_the_job_catalog_reads(): void
     {
         $source = file_get_contents(__DIR__.'/../../../app/Services/Distributed/DistributedJobCatalog.php');
