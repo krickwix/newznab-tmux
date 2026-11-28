@@ -9,6 +9,7 @@ use App\Facades\Search;
 use App\Models\Category;
 use App\Models\Settings;
 use App\Services\AdditionalProcessing\AdditionalCandidateQuery;
+use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Nzb\NzbParserService;
 use App\Services\Nzb\NzbService;
 use App\Services\Releases\ReleaseBrowseService;
@@ -86,6 +87,8 @@ class ReleaseRemoverService
      */
     protected array $result = [];
 
+    private DistributedWorkerTelemetry $telemetry;
+
     private NzbService $nzb;
 
     private NzbParserService $nzbParser;
@@ -103,12 +106,14 @@ class ReleaseRemoverService
         ?ReleaseManagementService $releaseManagement = null,
         ?NzbService $nzb = null,
         ?NzbParserService $nzbParser = null,
-        ?ReleaseImageService $releaseImage = null
+        ?ReleaseImageService $releaseImage = null,
+        ?DistributedWorkerTelemetry $telemetry = null
     ) {
         $this->releaseManagement = $releaseManagement ?? app(ReleaseManagementService::class);
         $this->nzb = $nzb ?? app(NzbService::class);
         $this->nzbParser = $nzbParser ?? app(NzbParserService::class);
         $this->releaseImage = $releaseImage ?? new ReleaseImageService;
+        $this->telemetry = $telemetry ?? app(DistributedWorkerTelemetry::class);
         $this->echoCLI = config('nntmux.echocli');
 
         $this->initRemovalHandlers();
@@ -267,7 +272,7 @@ class ReleaseRemoverService
             return false;
         }
 
-        $this->removalHandlers[$type]();
+        $this->runRemovalHandler($type);
 
         return true;
     }
@@ -295,10 +300,43 @@ class ReleaseRemoverService
         ];
 
         foreach ($defaultTypes as $removalType) {
-            $this->removalHandlers[$removalType]();
+            $this->runRemovalHandler($removalType);
         }
 
         return true;
+    }
+
+    /**
+     * Run one removal type and report what it deleted.
+     *
+     * The worker deleted ~6.7 releases a minute and reported none of it: with
+     * no counter, a removal type that suddenly eats a thousand releases and a
+     * removal type that has silently stopped matching anything look alike from
+     * outside the pod. Every handler funnels its deletions through
+     * deleteReleases(), which accumulates into $deletedCount, so the delta
+     * across one handler is that type's contribution however many queries it
+     * ran internally -- removeBlacklist() walks one query per regex, and
+     * removePar2Only() makes a second pass over hashed NZBs.
+     *
+     * Reported twice: once under the type, once into a 'release' total, so an
+     * operator can alert on the aggregate without summing eighteen series.
+     */
+    private function runRemovalHandler(string $type): void
+    {
+        $before = $this->deletedCount;
+
+        $this->removalHandlers[$type]();
+
+        $deleted = $this->deletedCount - $before;
+
+        // A dry run matches rows and deletes nothing, and counting those as
+        // deletions would make --delete and its absence indistinguishable.
+        if (! $this->delete || $deleted < 1) {
+            return;
+        }
+
+        $this->telemetry->recordItem('removecrap', $type, 'deleted', $deleted);
+        $this->telemetry->recordItem('removecrap', 'release', 'deleted', $deleted);
     }
 
     /**

@@ -27,11 +27,39 @@ class DistributedWorkerTelemetry
         'terminated',
     ];
 
-    /** @var array<string, list<string>> */
+    /**
+     * Items each worker may report, used as the `item` label.
+     *
+     * removecrap reports a 'release' total plus one entry per removal type.
+     * The types are the service's own fixed constants, so this stays a closed
+     * vocabulary -- no release name, regex or reason string can reach a label.
+     *
+     * @var array<string, list<string>>
+     */
     public const ITEMS_BY_WORKER = [
         'nzb-backlog' => ['nzb'],
         'releases' => ['release'],
         'hopeless-purge' => ['collection'],
+        'removecrap' => [
+            'release',
+            'blacklist',
+            'blfiles',
+            'codec',
+            'executable',
+            'gibberish',
+            'hashed',
+            'hashed_unresolved',
+            'installbin',
+            'nzb',
+            'par2only',
+            'passworded',
+            'passwordurl',
+            'sample',
+            'scr',
+            'short',
+            'size',
+            'wmv_all',
+        ],
     ];
 
     /** @var list<string> */
