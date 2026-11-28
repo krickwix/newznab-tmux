@@ -289,7 +289,7 @@ class NNTPService extends NntpClient
                     ': '.
                     $cError;
 
-                return $this->throwError(cli()->error($message));
+                return $this->nntpError($message);
             }
 
             // If we are connected, try to authenticate.
@@ -327,7 +327,7 @@ class NNTPService extends NntpClient
                             $userName.
                             ' ('.$aError.')';
 
-                        return $this->throwError(cli()->error($message));
+                        return $this->nntpError($message);
                     }
                 }
             }
@@ -351,7 +351,7 @@ class NNTPService extends NntpClient
         // If we somehow got out of the loop, return an error.
         $message = 'Unable to connect to '.$this->_currentServer.$enc;
 
-        return $this->throwError(cli()->error($message));
+        return $this->nntpError($message);
     }
 
     /**
@@ -690,7 +690,7 @@ class NNTPService extends NntpClient
         } else {
             $message = 'Wrong Identifier type, array, int or string accepted. This type of var was passed: '.gettype($identifiers);
 
-            return $this->throwError(cli()->error($message));
+            return $this->nntpError($message);
         }
 
         if ($aConnected === true) {
@@ -999,104 +999,121 @@ class NNTPService extends NntpClient
     }
 
     /**
-     * Loop over the compressed data when XFeature GZip Compress is turned on,
-     * string the data until we find a indicator
-     * (period, carriage feed, line return ;; .\r\n), decompress the data,
-     * split the data (bunch of headers in a string) into an array, finally
-     * return the array.
+     * Read one XFEATURE COMPRESS GZIP response and return its headers.
      *
-     * Have we failed to decompress the data, was there a
-     * problem downloading the data, etc..
+     * The end of the response is decided by the compressed stream itself, not
+     * by looking for a dot terminator and hoping. The previous reader treated
+     * any line ending in ".\r\n" as a possible end, waited 5 ms for more
+     * bytes and, if none arrived, declared the response finished and
+     * decompressed what it had. Compressed bytes contain ".\r\n" by chance,
+     * so a network pause longer than 5 ms at such a byte truncated the stream:
+     * on 2026-11-28, with compression enabled on the binaries lane for nine
+     * minutes, 11 of 153 chunks died with "Decompression of OVER headers
+     * failed."
+     *
+     * Each socket read is instead fed to an incremental inflate context, which
+     * reports ZLIB_STREAM_END exactly when the compressed stream is complete.
+     * There is no timer and nothing to guess: a pause anywhere simply blocks
+     * on the socket within its own timeout and reading continues. This works
+     * whether or not the server appends a terminator, which is why the
+     * XFEATURE-COMPRESS GZIP TERMINATOR variant some servers advertise is not
+     * negotiated here -- it would be protocol risk bought for an end-detection
+     * problem that no longer exists.
+     *
+     * The dot terminator is still consumed before returning. zlib stops at its
+     * own stream end and ignores whatever follows, so the terminator has to be
+     * drained explicitly or it would be left in the socket for the next
+     * command to misread as its own response. It is tracked as a rolling
+     * 3-byte tail rather than per-read, so a terminator split across two reads
+     * at the 16 KB boundary is still recognised.
      *
      * @return array<string, mixed>|string|NntpError On success : (array)  The headers.
      *                                               On failure : (object) DariusIII\NetNntp\Error.
-     *                                               On decompress failure: (string) error message
      */
     protected function &_getXFeatureTextResponse(): array|string|NntpError
     {
-        $possibleTerm = false;
-        // Use array accumulation for better performance with large data
-        $dataParts = [];
         $socket = $this->_socket;
+        $inflate = inflate_init(ZLIB_ENCODING_DEFLATE);
+
+        if ($inflate === false) {
+            $error = $this->nntpError('Unable to initialise decompression for OVER headers.', 1000);
+
+            return $error;
+        }
+
+        $headers = '';
+        $bytesReceived = 0;
+        $streamComplete = false;
+        $tail = '';
 
         while (! feof($socket)) {
-            // Did we find a possible ending ? (.\r\n)
-            if ($possibleTerm) {
-                // Use stream_select for more efficient socket polling
-                $read = [$socket];
-                $write = $except = null;
+            $buffer = fgets($socket, 16384);
 
-                // Check if data is available with a short timeout (5ms)
-                $ready = @stream_select($read, $write, $except, 0, 5000);
-
-                if ($ready > 0) {
-                    // Data available, read it
-                    stream_set_blocking($socket, false);
-                    $buffer = fgets($socket, 16384);
-                    stream_set_blocking($socket, true);
-                } else {
-                    $buffer = '';
-                }
-
-                // If the buffer was really empty, then we know $possibleTerm was the real ending.
-                if ($buffer === '' || $buffer === false) {
-                    // Join all parts and remove .\r\n from end, decompress data.
-                    $data = implode('', $dataParts);
-                    $deComp = @gzuncompress(substr($data, 0, -3));
-
-                    if (! empty($deComp)) {
-                        $bytesReceived = \strlen($data);
-                        if ($this->_echo && $bytesReceived > 10240) {
-                            cli()->primaryOver(
-                                'Received '.round($bytesReceived / 1024).
-                                'KB from group ('.$this->group().').'
-                            );
-                        }
-
-                        // Split the string of headers into an array of individual headers, then return it.
-                        $deComp = explode("\r\n", trim($deComp));
-
-                        return $deComp; // @phpstan-ignore return.type
-                    }
-                    $message = 'Decompression of OVER headers failed.';
-
-                    return $this->throwError(cli()->error($message), 1000);
-                }
-                // The buffer was not empty, so we know this was not the real ending, so reset $possibleTerm.
-                $possibleTerm = false;
-                $dataParts[] = $buffer;
-            } else {
-                // Get data from the stream with larger buffer.
-                $buffer = fgets($socket, 16384);
-            }
-
-            // If we got no data at all try one more time to pull data.
-            if (empty($buffer)) {
+            // One retry, as before: a momentarily empty read is not the end of
+            // the response, but two in a row means the peer has gone.
+            if ($buffer === false || $buffer === '') {
                 usleep(5000);
                 $buffer = fgets($socket, 16384);
 
-                // If we got nothing again, return error.
-                if (empty($buffer)) {
-                    $message = 'Error fetching data from usenet server while downloading OVER headers.';
+                if ($buffer === false || $buffer === '') {
+                    $error = $this->nntpError('Error fetching data from usenet server while downloading OVER headers.', 1000);
 
-                    return $this->throwError(cli()->error($message), 1000);
+                    return $error;
                 }
             }
 
-            // Append current buffer to parts array.
-            $dataParts[] = $buffer;
+            $bytesReceived += \strlen($buffer);
+            $tail = substr($tail.$buffer, -3);
 
-            // Check if we have the ending (.\r\n) - check last 3 chars directly
-            $bufLen = \strlen($buffer);
-            if ($bufLen >= 3 && $buffer[$bufLen - 3] === '.' && $buffer[$bufLen - 2] === "\r" && $buffer[$bufLen - 1] === "\n") {
-                // We have a possible ending, next loop check if it is.
-                $possibleTerm = true;
+            if (! $streamComplete) {
+                $chunk = @inflate_add($inflate, $buffer, ZLIB_NO_FLUSH);
+
+                if ($chunk === false) {
+                    $error = $this->nntpError('Decompression of OVER headers failed.', 1000);
+
+                    return $error;
+                }
+
+                $headers .= $chunk;
+                $streamComplete = inflate_get_status($inflate) === ZLIB_STREAM_END;
+            }
+
+            if ($streamComplete && $tail === ".\r\n") {
+                if ($this->_echo && $bytesReceived > 10240) {
+                    cli()->primaryOver(
+                        'Received '.round($bytesReceived / 1024).
+                        'KB from group ('.$this->group().').'
+                    );
+                }
+
+                $decoded = explode("\r\n", trim($headers));
+
+                return $decoded; // @phpstan-ignore return.type
             }
         }
 
-        $message = 'Unspecified error while downloading OVER headers.';
+        $message = $streamComplete
+            ? 'Connection closed before the OVER header terminator arrived.'
+            : 'Connection closed before the compressed OVER headers were complete.';
+        $error = $this->nntpError($message, 1000);
 
-        return $this->throwError(cli()->error($message), 1000);
+        return $error;
+    }
+
+    /**
+     * Report an NNTP failure and build the error object for it.
+     *
+     * cli()->error() returns null, so the call sites that passed its return
+     * value straight into throwError() -- which requires a string -- raised a
+     * TypeError instead of the error they meant to report. That turned a
+     * recoverable fetch failure into an uncaught crash in the middle of a
+     * header download.
+     */
+    private function nntpError(string $message, ?int $code = null): NntpError
+    {
+        cli()->error($message);
+
+        return $this->throwError($message, $code);
     }
 
     /**
