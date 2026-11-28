@@ -8,7 +8,9 @@ use App\Models\Settings;
 use App\Services\Metrics\DistributedWorkerTelemetry;
 use App\Services\Nzb\NzbBacklogCreationService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use LogicException;
+use Throwable;
 
 class PipelineSnapshotRepository
 {
@@ -88,6 +90,95 @@ class PipelineSnapshotRepository
 
     /** @param array<string, int|float>|null $previous */
     public function capture(?array $previous = null): PipelineSnapshot
+    {
+        return $this->withStatementTimeout(fn (): PipelineSnapshot => $this->captureSnapshot($previous));
+    }
+
+    /**
+     * Bound every statement this snapshot issues, so a bad plan fails the
+     * cycle instead of wedging it.
+     *
+     * On 2026-11-29 the pipeline statement ran 3,801 s on live from ~10:26
+     * UTC. Nothing threw, so nothing failed closed: the orchestrator sat
+     * inside capture() holding the leader lock while its own lease expired,
+     * and every lane fell back to its fail-safe timer. The orchestrator had to
+     * be rolled back by hand and the query killed.
+     *
+     * A capture that *errors* was already safe -- WorkerOrchestrator::decide()
+     * catches Throwable, calls failClosed(), and releases the leader lock in
+     * its finally. The failure mode that was not covered is a statement that
+     * neither returns nor fails. max_statement_time converts that into an
+     * exception, which turns an unbounded wedge into one skipped cycle on a
+     * path that already exists.
+     *
+     * Session-scoped rather than per-statement text: capture() reaches a dozen
+     * helpers that issue their own queries, and a session bound covers every
+     * one without touching a single statement -- which also keeps the sqlite
+     * tests of those statements working. The previous value is restored in a
+     * finally, because the orchestrator is a long-running process and this
+     * connection outlives the cycle.
+     *
+     * @template T
+     *
+     * @param  callable(): T  $work
+     * @return T
+     */
+    private function withStatementTimeout(callable $work): mixed
+    {
+        $seconds = max(0, (int) config('nntmux.orchestrator.snapshot_statement_timeout_seconds', 20));
+
+        if ($seconds <= 0) {
+            return $work();
+        }
+
+        $connection = null;
+        $previous = null;
+
+        // Arming the bound must never be able to break the capture it is
+        // protecting -- a guard that can throw is worse than no guard. Real
+        // MySQL has max_execution_time in milliseconds rather than
+        // max_statement_time, and a connection can be anything in a test, so
+        // every step here is allowed to fail into running unbounded, which is
+        // exactly the behaviour that existed before this guard. $work() is
+        // deliberately outside this try so a failing capture cannot be
+        // mistaken for a failing probe and run twice.
+        try {
+            $candidate = DB::connection();
+
+            if (in_array($candidate->getDriverName(), ['mysql', 'mariadb'], true)) {
+                $previous = $candidate->scalar('SELECT @@SESSION.max_statement_time');
+                $candidate->statement('SET SESSION max_statement_time = '.$seconds);
+                $connection = $candidate;
+            }
+        } catch (Throwable $e) {
+            Log::warning('Snapshot statement timeout could not be applied', [
+                'error' => $e->getMessage(),
+            ]);
+            $connection = null;
+        }
+
+        if ($connection === null) {
+            return $work();
+        }
+
+        try {
+            return $work();
+        } finally {
+            try {
+                $connection->statement('SET SESSION max_statement_time = '.(float) $previous);
+            } catch (Throwable $e) {
+                // A bound left behind caps every later query on this
+                // connection, so this is louder than the arming failure.
+                Log::error('Snapshot statement timeout could not be restored', [
+                    'error' => $e->getMessage(),
+                    'left_at_seconds' => $seconds,
+                ]);
+            }
+        }
+    }
+
+    /** @param array<string, int|float>|null $previous */
+    private function captureSnapshot(?array $previous = null): PipelineSnapshot
     {
         $recoveryCriteria = $this->bodyRecoveryCriteria();
         $recoverySources = $this->bodyRecoverySourceSnapshot($recoveryCriteria);

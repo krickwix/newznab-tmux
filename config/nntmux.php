@@ -162,6 +162,16 @@ return [
         [],
     ),
     'orchestrator' => [
+        // Hard per-statement bound for everything PipelineSnapshotRepository::capture()
+        // issues, in seconds. 0 disables it.
+        //
+        // On 2026-11-29 the pipeline statement ran 3,801 s on live and nothing
+        // threw, so nothing failed closed: the orchestrator sat in capture()
+        // holding the leader lock while its own lease expired and every lane
+        // dropped to its fail-safe timer. A capture that errors was already
+        // handled; a capture that neither returns nor fails was not. This
+        // turns the second into the first.
+        'snapshot_statement_timeout_seconds' => max(0, (int) env('NNTMUX_ORCHESTRATOR_SNAPSHOT_STATEMENT_TIMEOUT_SECONDS', 20)),
         'leader_lock_seconds' => min(600, max(120, (int) env('NNTMUX_ORCHESTRATOR_LEADER_LOCK_SECONDS', 120))),
         'lock_store' => env('NNTMUX_ORCHESTRATOR_LOCK_STORE', 'redis'),
         'state_store' => env('NNTMUX_ORCHESTRATOR_STATE_STORE', 'redis'),
