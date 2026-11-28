@@ -20,6 +20,38 @@ class PipelineSnapshotRepository
 
     private const string BACKFILL_TV_COMPLETE_SERIES_PATTERN = '(^|[^[:alnum:]])komplett[ ._-]+abenteuerserie[ ._-]+(19|20)[0-9]{2}([^[:alnum:]]|$).*(avi|mkv|mp4|mpeg|xvid|divx|h\\.?26[45])([^[:alnum:]]|$)';
 
+    /**
+     * The `sb` derived table of capture()'s pipeline statement, hoisted so the
+     * equivalence test can run it beside the join form it replaced.
+     */
+    private const string SCHEDULABLE_BINARIES_SQL = '(SELECT GREATEST(0, CAST(ab.pending AS SIGNED) - CAST(xb.pending AS SIGNED)) AS schedulable_binaries_backlog,
+                    GREATEST(0, CAST(ab.parts AS SIGNED) - CAST(xb.parts AS SIGNED)) AS schedulable_parts_backlog,
+                    ab.pending AS binaries_backlog,
+                    oba.oldest_binary_age
+                FROM (SELECT COUNT(*) AS pending, COALESCE(SUM(currentparts), 0) AS parts
+                        FROM binaries WHERE partcheck = 0) AS ab
+                CROSS JOIN (SELECT COALESCE(SUM(x.pending), 0) AS pending, COALESCE(SUM(x.parts), 0) AS parts FROM (
+                        SELECT COUNT(*) AS pending, COALESCE(SUM(b.currentparts), 0) AS parts
+                            FROM binaries b INNER JOIN collections c ON c.id = b.collections_id
+                            WHERE b.partcheck = 0 AND c.filecheck NOT IN (0, 1, 2, 15, 16)
+                        UNION ALL
+                        SELECT STRAIGHT_JOIN COUNT(*) AS pending, COALESCE(SUM(b.currentparts), 0) AS parts
+                            FROM usenet_groups g
+                            INNER JOIN collections c ON c.groups_id = g.id
+                            INNER JOIN binaries b ON b.collections_id = c.id
+                            WHERE g.active <> 1 AND g.backfill <> 1
+                              AND c.filecheck IN (0, 1, 2, 15, 16) AND b.partcheck = 0) AS x) AS xb
+                CROSS JOIN (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(p.dateadded), NOW()), 0) AS oldest_binary_age FROM (
+                        SELECT (SELECT c.dateadded FROM collections c
+                                WHERE c.groups_id = g.id AND c.filecheck = f.stage AND c.dateadded IS NOT NULL
+                                  AND EXISTS(SELECT 1 FROM binaries b
+                                        WHERE b.collections_id = c.id AND b.partcheck = 0)
+                                ORDER BY c.dateadded LIMIT 1) AS dateadded
+                            FROM usenet_groups g
+                            CROSS JOIN (SELECT 0 AS stage UNION ALL SELECT 1 UNION ALL SELECT 2
+                                UNION ALL SELECT 15 UNION ALL SELECT 16) AS f
+                            WHERE g.active = 1 OR g.backfill = 1) AS p) AS oba) AS sb';
+
     private readonly BackfillTargetSelector $targets;
 
     private readonly WorkerControlStateStore $state;
@@ -76,15 +108,57 @@ class PipelineSnapshotRepository
             COALESCE(MAX(CASE WHEN TABLE_NAME = 'parts' THEN TABLE_ROWS END), 0) AS parts_count
             FROM information_schema.TABLES
             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'parts'");
-        // Each scan below runs once per orchestrator cycle (~24 s). The
-        // binaries/collections/groups join is the costly one (~2 s on 600k
-        // pending binaries), so its count, part sum and oldest age share one
-        // pass in `sb`, and every processable-collection figure shares `sc`.
+        // Each scan below runs once per orchestrator cycle (~24 s). Every
+        // processable-collection figure shares one pass in `sc`.
         // Aggregates without GROUP BY always yield one row, so the cross
         // joins never drop the snapshot.
+        //
+        // `sb` is deliberately not the obvious join. Walking
+        // binaries -> collections -> usenet_groups for every pending binary
+        // cost 6.0-7.1 s measured on live data (1.19M rows with
+        // partcheck = 0, each paying a collections primary-key lookup and a
+        // usenet_groups lookup) and was 4.5 s of a 4.9 s snapshot. The same
+        // three numbers now cost 1.3-1.8 s:
+        //
+        // - count and part sum are inverted. 99%+ of pending binaries belong
+        //   to a schedulable collection, so the cheap set is the complement:
+        //   total pending binaries minus the ones excluded by filecheck
+        //   (34k rows) minus the ones in a group that is neither active nor
+        //   on backfill. binaries.collections_id is a foreign key with
+        //   ON DELETE CASCADE, so no pending binary can be missing its
+        //   collection and escape the complement. collections.filecheck is
+        //   NOT NULL, so NOT IN is total and the two sides really do
+        //   partition the set.
+        // - the group term is kept rather than dropped. It is currently empty
+        //   (every group holding collections is active), but that is a fact
+        //   about today's data, not an invariant, and these numbers gate
+        //   backfill admission. STRAIGHT_JOIN makes it drive from
+        //   usenet_groups, which probes collections.groups_id and misses
+        //   immediately for the ~109k groups that hold nothing: 0.23 s
+        //   instead of 0.55 s when the optimizer drives from collections.
+        // - oldest_binary_age is not invertible, so it is answered by ordered
+        //   probes instead: one index walk of ix_collections_release_stage6
+        //   per (group, filecheck) pair, stopping at the first collection
+        //   that still has a pending binary. 180 probes, 0.04 s. The
+        //   IS NOT NULL guard reproduces MIN()'s NULL handling -- without it
+        //   a NULL dateadded would sort first and blank out that pair.
+        // - the exact same pending-binary count also feeds binaries_backlog,
+        //   which used to issue its own COUNT(*) (0.24 s) over the same rows.
+        //
+        // Verified equivalent against the previous statement inside one
+        // START TRANSACTION WITH CONSISTENT SNAPSHOT: identical
+        // schedulable_binaries_backlog (1159485), schedulable_parts_backlog
+        // (56557889) and MIN(dateadded), and binaries_backlog matched the
+        // standalone COUNT(*) exactly (1193754).
+        //
+        // The GREATEST(0, ...) clamps are for the race, not the algebra: the
+        // complement cannot exceed the total, but the two aggregates are
+        // separate passes over a table being written to, so a few rows can
+        // land between them. Without the clamp an unsigned underflow would
+        // report a nonsensical backlog to the gates.
         $pipeline = DB::selectOne('SELECT
             (SELECT COUNT(*) FROM collections WHERE filecheck IN (0, 1, 2, 15, 16)) AS collections_backlog,
-            (SELECT COUNT(*) FROM binaries WHERE partcheck = 0) AS binaries_backlog,
+            sb.binaries_backlog,
             sb.schedulable_parts_backlog,
             sb.schedulable_binaries_backlog,
             sc.schedulable_collections_backlog,
@@ -98,11 +172,7 @@ class PipelineSnapshotRepository
             nz.oldest_nzb_age,
             NOT EXISTS(SELECT 1 FROM usenet_groups g LEFT JOIN short_groups s ON s.name = g.name
                 WHERE g.active = 1'.$pausedClause.' AND (s.name IS NULL OR CAST(s.last_record AS SIGNED) - CAST(g.last_record AS SIGNED) > '.$this->currentGroupMaxLag().')) AS current_groups
-            FROM (SELECT COUNT(*) AS schedulable_binaries_backlog,
-                    COALESCE(SUM(b.currentparts), 0) AS schedulable_parts_backlog,
-                    COALESCE(TIMESTAMPDIFF(SECOND, MIN(c.dateadded), NOW()), 0) AS oldest_binary_age
-                FROM binaries b INNER JOIN collections c ON c.id = b.collections_id INNER JOIN usenet_groups g ON g.id = c.groups_id
-                WHERE b.partcheck = 0 AND c.filecheck IN (0, 1, 2, 15, 16) AND (g.active = 1 OR g.backfill = 1)) AS sb
+            FROM '.self::SCHEDULABLE_BINARIES_SQL.'
             CROSS JOIN (SELECT COALESCE(SUM(c.filecheck IN (0, 1, 2, 15, 16)), 0) AS schedulable_collections_backlog,
                     COALESCE(SUM(c.filecheck = 3), 0) AS ready_collections,
                     COALESCE(TIMESTAMPDIFF(SECOND, MIN(CASE WHEN c.filecheck IN (0, 1, 2, 15, 16) THEN c.dateadded END), NOW()), 0) AS oldest_collection_age,
