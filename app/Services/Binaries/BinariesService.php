@@ -38,6 +38,12 @@ class BinariesService
 
     private BinariesConfig $config;
 
+    /**
+     * Whether the last scan() failed to download its headers, as opposed to
+     * finding no articles in the range.
+     */
+    private bool $lastFetchFailed = false;
+
     private HeaderParser $headerParser;
 
     private HeaderStorageService $headerStorage;
@@ -136,6 +142,19 @@ class BinariesService
     public function setNntp(NNTPService $nntp): void
     {
         $this->nntp = $nntp;
+    }
+
+    /**
+     * Whether the last scan() could not download its headers.
+     *
+     * True means the range was neither stored nor queued for repair, so
+     * advancing a group cursor past it loses those articles for good. An empty
+     * scan() result with this false is simply an empty range, which the cursor
+     * must advance past or it stalls on it forever.
+     */
+    public function lastFetchFailed(): bool
+    {
+        return $this->lastFetchFailed;
     }
 
     /**
@@ -364,6 +383,7 @@ class BinariesService
         $this->bodyPreambleProbed = [];
 
         $returnArray = [];
+        $this->lastFetchFailed = false;
         $partRepair = ($type === 'partrepair');
         $addToPartRepair = ($type === 'update' && $this->config->partRepair);
 
@@ -373,6 +393,15 @@ class BinariesService
             if ($partRepair && $this->partRepairClaimToken === null) {
                 $this->missedPartHandler->incrementRangeAttempts($groupMySQL['id'], $first, $last);
             }
+
+            // Reported beside the return value, not inside it. A failed fetch
+            // and a range that held no articles are different facts and the
+            // cursor must treat them differently, but every caller already
+            // reads this method's emptiness as "nothing to record" --
+            // GetArticleRange's empty($return) guard is what stops a managed
+            // backfill range being receipted as complete. Widening the return
+            // shape to carry the distinction broke that guard once already.
+            $this->lastFetchFailed = true;
 
             return $returnArray;
         }
