@@ -72,6 +72,10 @@ class DistributedJobCatalog
      * @var list<string>
      */
     private const array STATISTICS_DEPENDENT_JOBS = [
+        // backfill reads $counts and $killswitch too, but the worker loop
+        // handles it on its own branch and never consults readsStatistics()
+        // for it. Listed anyway: this is the answer to "does resolving this
+        // job need the statistics", and that answer is yes whoever asks.
         'backfill',
         'binaries',
         'fixnames',

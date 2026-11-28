@@ -71,11 +71,15 @@ class DistributedJobWorker
                 // releases, four proc_query aggregates and the
                 // information_schema reads, once per loop, in every pod, for
                 // counts nothing in their plan reads.
-                $runVar = $this->catalog->readsStatistics($job)
-                    ? $this->monitorService->collectStatistics()
-                    : $this->monitorService->refreshMonitorSettings();
+                // current-forward is the one settings-only lane that follows
+                // with its own narrow settings read, so a general one here
+                // would be thrown away unread 11 times a minute.
                 if ($job === 'current-forward') {
                     $runVar = $this->monitorService->refreshCurrentForwardControlSettings();
+                } else {
+                    $runVar = $this->catalog->readsStatistics($job)
+                        ? $this->monitorService->collectStatistics()
+                        : $this->monitorService->refreshMonitorSettings();
                 }
                 $plan = $this->catalog->resolve($job, $runVar);
             }

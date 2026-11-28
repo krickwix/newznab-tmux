@@ -33,6 +33,39 @@ class MonitorStatisticsCache
     private const string KEY = 'nntmux:tmux-monitor:statistics';
 
     /**
+     * Count keys DistributedJobCatalog::resolve() reads to decide whether a
+     * lane has work.
+     *
+     * Every one is consulted with a ?? 0 default, so a snapshot that is merely
+     * short -- not empty -- reads as "nothing to do" and disables the lane.
+     * Requiring them before a snapshot is published or adopted is what makes
+     * "never publish a partial read" true rather than aspirational: a test
+     * against [] alone only catches total failure, and the pass that fails
+     * here fails partway.
+     *
+     * MonitorStatisticsCacheTest scans the catalog's source and fails if it
+     * grows a read this list does not cover.
+     *
+     * @var list<string>
+     */
+    public const array REQUIRED_COUNT_KEYS = [
+        'backfill_groups_date',
+        'backfill_groups_days',
+        'collections_table',
+        'other_hashed',
+        'processanime',
+        'processbooks',
+        'processconsole',
+        'processgames',
+        'processmovies',
+        'processmusic',
+        'processnfo',
+        'processrenames',
+        'processtv',
+        'work',
+    ];
+
+    /**
      * Read a shared snapshot, or null to compute a fresh one.
      *
      * Fails open in every direction: sharing disabled, nothing published yet,
@@ -66,7 +99,7 @@ class MonitorStatisticsCache
             }
         }
 
-        if ($snapshot['settings'] === [] || $snapshot['counts'] === []) {
+        if ($snapshot['settings'] === [] || ! self::countsAreComplete($snapshot['counts'])) {
             return null;
         }
 
@@ -99,7 +132,10 @@ class MonitorStatisticsCache
         // getTableCounts() swallow their own exceptions, so a failed pass
         // leaves counts short rather than throwing, and publishing that would
         // spread one pod's failed read across every lane for the whole TTL.
-        if ($settings === [] || $counts === []) {
+        // The caller already declines to publish an incomplete pass; this is
+        // the second line, and it also rejects a snapshot shaped by a
+        // different build of the statistics pass.
+        if ($settings === [] || ! self::countsAreComplete($counts)) {
             return;
         }
 
@@ -113,6 +149,20 @@ class MonitorStatisticsCache
         } catch (Throwable $e) {
             $this->logFailure('write', $e);
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $counts
+     */
+    private static function countsAreComplete(array $counts): bool
+    {
+        foreach (self::REQUIRED_COUNT_KEYS as $key) {
+            if (! array_key_exists($key, $counts)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     public function ttl(): int

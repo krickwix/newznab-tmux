@@ -468,6 +468,7 @@ class DistributedJobWorkerTest extends TestCase
             'counts' => ['now' => []],
             'killswitch' => [],
         ];
+        // The permit fields are what the narrow read adds on top.
         $freshRunVar = $staleRunVar;
         $freshRunVar['settings'] += [
             'orchestrator_cf_permit' => 17,
@@ -478,10 +479,11 @@ class DistributedJobWorkerTest extends TestCase
 
         $monitor = Mockery::mock(TmuxMonitorService::class);
         $monitor->shouldReceive('initializeMonitor')->once();
-        // current-forward resolves from settings alone, so it reads the
-        // monitor settings rather than paying for the statistics pass.
+        // current-forward resolves from settings alone and reads its own
+        // narrow control settings, so it pays for neither the statistics pass
+        // nor a general settings read that would be discarded unread.
         $monitor->shouldReceive('collectStatistics')->never();
-        $monitor->shouldReceive('refreshMonitorSettings')->once()->andReturn($staleRunVar);
+        $monitor->shouldReceive('refreshMonitorSettings')->never();
         $monitor->shouldReceive('refreshCurrentForwardControlSettings')->once()->andReturn($freshRunVar);
 
         $telemetry = Mockery::mock(DistributedWorkerTelemetry::class);

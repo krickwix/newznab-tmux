@@ -159,16 +159,21 @@ final class DistributedWorkerStatisticsPassTest extends TestCase
     public function test_a_published_snapshot_is_served_back_whole(): void
     {
         $cache = new MonitorStatisticsCache;
+        // Only a complete pass is publishable, so the fixture carries every
+        // count the job catalog reads. MonitorStatisticsCacheTest covers the
+        // short-snapshot rejection itself.
+        $counts = array_fill_keys(MonitorStatisticsCache::REQUIRED_COUNT_KEYS, 7);
+        $counts['collections_table'] = 42;
         $cache->write(
             ['monitor' => 30, 'post' => 1],
-            ['work' => 7, 'collections_table' => 42],
+            $counts,
             ['tmux_time' => 1],
             ['newestrelease' => 5],
         );
 
         self::assertSame([
             'settings' => ['monitor' => 30, 'post' => 1],
-            'counts' => ['work' => 7, 'collections_table' => 42],
+            'counts' => $counts,
             'query_timers' => ['tmux_time' => 1],
             'new_old' => ['newestrelease' => 5],
         ], $cache->read());
@@ -193,7 +198,12 @@ final class DistributedWorkerStatisticsPassTest extends TestCase
         // a failed pass leaves counts short rather than throwing. Publishing
         // that would spread one pod's failure across every lane.
         $cache->write(['monitor' => 30], [], ['tmux_time' => 1], []);
+        self::assertNull($cache->read());
 
+        // And a pass that failed partway, which is the shape the swallowed
+        // exceptions actually produce. MonitorStatisticsCacheTest covers this
+        // key by key.
+        $cache->write(['monitor' => 30], ['tv' => 10, 'other_hashed' => 18], ['tmux_time' => 1], []);
         self::assertNull($cache->read());
     }
 
@@ -212,9 +222,11 @@ final class DistributedWorkerStatisticsPassTest extends TestCase
 
     public function test_a_refresh_adopts_a_shared_snapshot_instead_of_querying(): void
     {
+        $counts = array_fill_keys(MonitorStatisticsCache::REQUIRED_COUNT_KEYS, 3);
+        $counts['collections_table'] = 500;
         (new MonitorStatisticsCache)->write(
             ['monitor' => 30, 'collections_kill' => 100],
-            ['collections_table' => 500, 'process_nfo' => 3],
+            $counts,
             ['tmux_time' => 2],
             ['newestrelease' => 9],
         );

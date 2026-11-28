@@ -324,17 +324,26 @@ class TmuxMonitorService
         $this->getCategoryCounts();
 
         // Get process counts
-        $this->getProcessCounts();
+        $complete = $this->getProcessCounts();
 
         // Get table counts
-        $this->getTableCounts();
+        $complete = $this->getTableCounts() && $complete;
 
-        $this->statisticsCache->write(
-            (array) ($this->runVar['settings'] ?? []),
-            (array) ($this->runVar['counts']['now'] ?? []),
-            (array) ($this->runVar['timers']['query'] ?? []),
-            (array) ($this->runVar['timers']['newOld'] ?? []),
-        );
+        // Both of those swallow their own exceptions, so a failed pass leaves
+        // $counts short rather than throwing. Short is the dangerous shape:
+        // every key the job catalog cannot find reads as "no work" on its ?? 0
+        // default, so publishing one pod's failed read would idle every
+        // statistics-dependent lane for the whole TTL. Keep the short counts
+        // locally -- that is the pre-existing single-pass behaviour -- but do
+        // not hand them to the fleet.
+        if ($complete) {
+            $this->statisticsCache->write(
+                (array) ($this->runVar['settings'] ?? []),
+                (array) ($this->runVar['counts']['now'] ?? []),
+                (array) ($this->runVar['timers']['query'] ?? []),
+                (array) ($this->runVar['timers']['newOld'] ?? []),
+            );
+        }
 
         // Calculate diffs and percentages
         $this->calculateStatistics();
@@ -387,9 +396,13 @@ class TmuxMonitorService
     }
 
     /**
-     * Get process-related counts
+     * Get process-related counts.
+     *
+     * @return bool False when the pass failed and $counts is therefore short.
+     *              A short pass must not be published to the fleet: every
+     *              missing key reads as "no work" and idles a lane.
      */
-    protected function getProcessCounts(): void
+    protected function getProcessCounts(): bool
     {
         $timer = time();
 
@@ -423,15 +436,20 @@ class TmuxMonitorService
 
             $this->runVar['timers']['query']['proc2_time'] = time() - $timer2;
 
+            return true;
         } catch (\Exception $e) {
             logger()->error('Error collecting process counts: '.$e->getMessage());
+
+            return false;
         }
     }
 
     /**
-     * Get table row counts
+     * Get table row counts.
+     *
+     * @return bool False when the pass failed and $counts is therefore short.
      */
-    protected function getTableCounts(): void
+    protected function getTableCounts(): bool
     {
         $timer = time();
 
@@ -483,8 +501,11 @@ class TmuxMonitorService
                 }
             }
 
+            return true;
         } catch (\Exception $e) {
             logger()->error('Error collecting table counts: '.$e->getMessage());
+
+            return false;
         }
     }
 
