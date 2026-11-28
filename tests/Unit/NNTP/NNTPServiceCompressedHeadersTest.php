@@ -20,6 +20,15 @@ use Tests\TestCase;
  *
  * The end is now decided by the compressed stream itself (ZLIB_STREAM_END),
  * with no timer involved.
+ *
+ * The 5 ms timer turned out not to be the trigger at all. ingest staged the
+ * real socket and showed that a chance ".\r\n" in the compressed bytes fails
+ * the old reader with no pause whatsoever, because the non-blocking fgets()
+ * after the successful stream_select() returns '' on binary data whenever the
+ * next "\n" is out of reach. So the production rate was the data, not a
+ * jittery link, and
+ * test_a_chance_dot_terminator_in_the_compressed_bytes_does_not_truncate_a_real_socket_read
+ * pins the actual defect rather than the absence of a clock.
  */
 final class NNTPServiceCompressedHeadersTest extends TestCase
 {
@@ -50,17 +59,47 @@ final class NNTPServiceCompressedHeadersTest extends TestCase
         self::assertSame(self::HEADERS, $result);
     }
 
+    public function test_a_chance_dot_terminator_in_the_compressed_bytes_does_not_truncate_a_real_socket_read(): void
+    {
+        // The production failure, reproduced. ingest staged this against a
+        // real socket and found the trigger is byte content, not timing: the
+        // old reader switched to non-blocking after stream_select() reported
+        // data, and a non-blocking fgets() over binary data returns '' when
+        // the next "\n" is out of reach -- which it read as the end of the
+        // response. No pause is needed; the whole response is written in one
+        // go before the read starts.
+        $fixture = NntpCompressedOverviewFixture::withFalseTerminator();
+
+        self::assertGreaterThan(-1, $fixture['false_terminator_at'], 'Fixture must embed the hazard.');
+
+        $result = $this->readFrom($fixture['socket']);
+        fclose($fixture['peer']);
+
+        self::assertSame($fixture['lines'], $result);
+    }
+
+    public function test_the_same_payload_without_a_chance_terminator_also_reads_clean(): void
+    {
+        // ingest's control: identical shape and single write, ".\r\n" absent.
+        // The old reader passed this one, which is what isolated the cause to
+        // the bytes rather than the network.
+        $fixture = NntpCompressedOverviewFixture::withoutFalseTerminator();
+
+        self::assertSame(-1, $fixture['false_terminator_at']);
+
+        $result = $this->readFrom($fixture['socket']);
+        fclose($fixture['peer']);
+
+        self::assertSame($fixture['lines'], $result);
+    }
+
     public function test_a_stream_that_never_signals_readiness_is_still_read_to_completion(): void
     {
-        // PausingNntpStream serves the response in small chunks and never
-        // reports data ready to stream_select(), standing in for the "no bytes
-        // available right now" condition the old reader mistook for the end of
-        // the response. It is a stand-in, not a byte-level reproduction: the
-        // real failure needed a >5 ms pause on a real socket at a chance
-        // ".\r\n", which no single-threaded fixture can produce. What this
-        // pins is the property that makes that race impossible -- the new
-        // reader consults no clock and no readiness signal, only the
-        // compressed stream's own end.
+        // A stream that cannot answer "are more bytes coming?" at all, which
+        // is the condition the old reader guessed at with its timer. The
+        // byte-content reproduction above is the one that pins the real
+        // defect; this one pins that the reader needs no readiness signal
+        // either.
         $payload = implode("\r\n", self::HEADERS)."\r\n";
         $compressed = gzcompress($payload, 0);
 

@@ -1063,6 +1063,20 @@ class NNTPService extends NntpClient
             }
 
             $bytesReceived += \strlen($buffer);
+
+            // Rolling, not per-read: a terminator split across two reads at
+            // the 16 KB boundary must still be recognised.
+            //
+            // Do not "simplify" this into a test on the compressed stream's
+            // own last bytes. If the stream's final three bytes are themselves
+            // ".\r\n" and the read that reaches ZLIB_STREAM_END ends exactly
+            // there, this matches the payload instead of the terminator and
+            // returns with the real terminator still in the socket. That is
+            // ~1 in 2^24 per chunk, and each get_range child QUITs
+            // immediately afterwards so nothing reads the leftover, which is
+            // why it is documented rather than fixed -- zlib does not report
+            // how many bytes it consumed, so distinguishing the two would
+            // mean tracking the stream length independently.
             $tail = substr($tail.$buffer, -3);
 
             if (! $streamComplete) {
