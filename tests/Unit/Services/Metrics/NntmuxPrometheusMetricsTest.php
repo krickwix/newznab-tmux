@@ -743,9 +743,32 @@ class NntmuxPrometheusMetricsTest extends TestCase
         $this->assertStringContainsString('nntmux_build_info{version="20260710-v8",environment="production"} 1', $output);
         $this->assertStringContainsString('nntmux_nzb_worker_config_info{inline_creation="disabled"} 1', $output);
         $this->assertStringContainsString('nntmux_nzb_worker_batch_limit 2', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_batch_limit_cap 0', $output);
         $this->assertStringContainsString('nntmux_nzb_worker_sleep_seconds 45', $output);
         $this->assertStringContainsString('nntmux_nzb_worker_scan_cap 5000', $output);
         $this->assertStringContainsString('nntmux_nzb_worker_lock_seconds 7200', $output);
+    }
+
+    /**
+     * The batch-limit gauge reported the configured default, which is not what
+     * the lane runs: an orchestrator lease replaces it with
+     * orchestrator_nzb_limit clamped to 5..20. It now reports the capped
+     * ceiling, and the cap gauge says whether that number is a ceiling at all.
+     * Cap gauge below the batch limit is the "a lease can raise this" signal.
+     */
+    public function test_config_metrics_report_the_capped_nzb_batch_ceiling(): void
+    {
+        config([
+            'nntmux.distributed_nzb_limit' => 20,
+            'nntmux.distributed_nzb_limit_max' => 1,
+        ]);
+        $method = (new ReflectionClass($metrics = new NntmuxPrometheusMetrics))->getMethod('buildConfigMetrics');
+        $method->setAccessible(true);
+
+        $output = implode("\n", $method->invoke($metrics));
+
+        $this->assertStringContainsString('nntmux_nzb_worker_batch_limit 1', $output);
+        $this->assertStringContainsString('nntmux_nzb_worker_batch_limit_cap 1', $output);
     }
 
     public function test_orchestrator_metrics_export_the_zero_write_shadow_snapshot(): void

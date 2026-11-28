@@ -29,6 +29,13 @@ return [
     'inline_nzb_creation' => (bool) env('NNTMUX_INLINE_NZB_CREATION', true),
     'build_version' => env('NNTMUX_BUILD_VERSION', 'unknown'),
     'distributed_nzb_limit' => (int) env('NNTMUX_DISTRIBUTED_NZB_LIMIT', 1),
+    // Hard ceiling on the releases one dedicated NZB worker cycle may attempt,
+    // 0 for no cap (the historical behaviour). distributed_nzb_limit above is
+    // not a ceiling: with a fresh orchestrator lease the lane takes
+    // orchestrator_nzb_limit clamped to 5..20 instead, which on live is 100,
+    // so a lane configured for 1 release per cycle ran 20. This cap is applied
+    // last, under both branches, and the orchestrator cannot raise it.
+    'distributed_nzb_limit_max' => max(0, (int) env('NNTMUX_DISTRIBUTED_NZB_LIMIT_MAX', 0)),
     // Judge NZB-creation eligibility by the same completion rule release
     // creation used to accept the release (stage 4's
     // GREATEST(1, CEIL(totalfiles * completionpercent / 100)) complete

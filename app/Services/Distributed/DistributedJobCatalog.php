@@ -414,11 +414,61 @@ class DistributedJobCatalog
     private function nzbLimit(array $settings): int
     {
         $static = max(1, (int) config('nntmux.distributed_nzb_limit', 1));
+
         if (! $this->hasFreshActiveLease($settings)) {
-            return $this->isOrchestratorTimerManaged($settings) ? min(5, $static) : $static;
+            $limit = $this->isOrchestratorTimerManaged($settings) ? min(5, $static) : $static;
+        } else {
+            $limit = max(5, min(20, (int) ($settings['orchestrator_nzb_limit'] ?? $static)));
         }
 
-        return max(5, min(20, (int) ($settings['orchestrator_nzb_limit'] ?? $static)));
+        return self::capNzbLimit($limit);
+    }
+
+    /**
+     * Clamp a resolved NZB batch limit to the operator's hard ceiling.
+     *
+     * NNTMUX_DISTRIBUTED_NZB_LIMIT is a floor-ish default, not a ceiling: the
+     * fresh-lease branch above ignores it entirely and takes
+     * orchestrator_nzb_limit instead, clamped to 5..20. On live that setting
+     * is 100, so a lane set to NNTMUX_DISTRIBUTED_NZB_LIMIT=1 ran 20 releases
+     * per cycle as soon as the orchestrator held a lease. That is the
+     * difference between ~700 and ~13,000 parts rows deleted per second for
+     * the nzb-backlog drain, so "set the lane to 1" has to mean 1.
+     *
+     * This cap is the one knob the orchestrator cannot raise. It defaults to 0
+     * -- no cap, today's behaviour exactly -- and when set it applies to both
+     * branches, lease or no lease. Minimum 1: a cap is a ceiling on work, not
+     * a way to stop the lane, which is what enabled = false is for.
+     */
+    private static function capNzbLimit(int $limit): int
+    {
+        $cap = (int) config('nntmux.distributed_nzb_limit_max', 0);
+
+        if ($cap <= 0) {
+            return $limit;
+        }
+
+        return max(1, min($limit, $cap));
+    }
+
+    /**
+     * The effective ceiling on one NZB worker cycle, for metrics.
+     *
+     * Config-only, so the exporter stays off the database: this is the static
+     * limit under the cap, which is what the lane actually runs whenever the
+     * cap binds, and the pre-cap static default otherwise.
+     */
+    public static function nzbLimitCeiling(): int
+    {
+        return self::capNzbLimit(max(1, (int) config('nntmux.distributed_nzb_limit', 1)));
+    }
+
+    /**
+     * The configured hard cap, 0 when there is none.
+     */
+    public static function nzbLimitCap(): int
+    {
+        return max(0, (int) config('nntmux.distributed_nzb_limit_max', 0));
     }
 
     /** @param array<string, mixed> $settings */

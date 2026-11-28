@@ -283,9 +283,11 @@ final class NzbBacklogCreationService
      * weeks, and writing an NZB deletes the release's collections, binaries
      * and parts. The deletion is not a separate sweep that could run away:
      * NzbService does it inline per release, in 500-row chunks, as each NZB is
-     * written. So the backlog drains at the NZB worker's own per-run limit --
-     * distributed_nzb_limit, or 5 to 20 releases with a fresh active lease --
-     * and not faster.
+     * written. So the backlog drains at the NZB worker's own per-run limit and
+     * not faster -- but mind which limit that is: distributed_nzb_limit only
+     * applies without a fresh active lease, and with one the lane takes
+     * orchestrator_nzb_limit clamped to 5..20 instead. To hold the drain at a
+     * rate you chose, set distributed_nzb_limit_max, which caps both.
      *
      * @param  Builder<Release>|QueryBuilder  $query
      */
