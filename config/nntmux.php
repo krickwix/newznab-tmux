@@ -33,9 +33,17 @@ return [
     // creation used to accept the release (stage 4's
     // GREATEST(1, CEIL(totalfiles * completionpercent / 100)) complete
     // binaries per collection) instead of rejecting any release with a single
-    // short binary. Defaults to the historical, stricter rule: enabling it
-    // makes releases writable that have been stuck at nzbstatus = 0 for
-    // weeks, and writing their NZBs deletes their collections.
+    // short binary. Defaults to the historical, stricter rule.
+    //
+    // Enabling it makes ~4,178 releases writable that have been stuck at
+    // nzbstatus = 0 for weeks, and writing an NZB deletes that release's
+    // collections inline. Measure the drain in rows, not releases: this
+    // backlog holds 341,049 binaries and 66,345,770 parts across 4,819
+    // collections, about 71 binaries and 13,768 parts per release, roughly
+    // 200x a normal one. At distributed_nzb_limit = 20 that is ~275k parts
+    // rows deleted per run every ~21 s, about 13k rows/s sustained for an
+    // hour. distributed_nzb_limit is the throttle; set that lane to 1 for the
+    // first rollout (~24 h drain, ~700 rows/s) before raising it.
     'nzb_align_release_completion' => (bool) env('NNTMUX_NZB_ALIGN_RELEASE_COMPLETION', false),
     // Age in hours past which releases:remove-crap --type=hashed_unresolved
     // deletes an Other > Hashed release regardless of where post-processing
