@@ -54,8 +54,8 @@ class PipelineSnapshotRepository
                 CROSS JOIN (SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(p.dateadded), NOW()), 0) AS oldest_binary_age FROM (
                         SELECT (SELECT c.dateadded FROM collections c
                                 WHERE c.groups_id = g.id AND c.filecheck = f.stage AND c.dateadded IS NOT NULL
-                                  AND EXISTS(SELECT 1 FROM binaries b
-                                        WHERE b.collections_id = c.id AND b.partcheck = 0)
+                                  AND (SELECT 1 FROM binaries b
+                                        WHERE b.collections_id = c.id AND b.partcheck = 0 LIMIT 1) IS NOT NULL
                                 ORDER BY c.dateadded LIMIT 1) AS dateadded
                             FROM usenet_groups g
                             CROSS JOIN (SELECT 0 AS stage UNION ALL SELECT 1 UNION ALL SELECT 2
@@ -246,6 +246,24 @@ class PipelineSnapshotRepository
         //   while the orphan set is empty, which it is today. Folding it into
         //   the inactive-group branch as a LEFT JOIN instead made that branch
         //   drive from collections and cost 0.59 s against 0.22 s.
+        // - the pending-binary test inside the probe is a scalar subquery, not
+        //   EXISTS, and that is the whole of the 2026-11-29 incident.
+        //   MariaDB may implement an EXISTS semi-join either as FirstMatch --
+        //   a per-row ref probe on ix_binaries_collection, 1.8 ms -- or by
+        //   MATERIALIZING the entire partcheck = 0 set, which database
+        //   measured at 2311.5 ms for a single probe. The choice is cost-based
+        //   on that set's cardinality, so it flipped silently as the pending
+        //   count grew, and the probe sits in a DEPENDENT SUBQUERY evaluated
+        //   once per (group, stage) row: 180 rebuilds of a ~1M-row set is the
+        //   3,801 s statement. A scalar subquery is not eligible for semi-join
+        //   materialization at all, so the plan cannot flip this way. Same
+        //   trick as the group-readiness query in ReleasesRunner, for a
+        //   different reason.
+        //
+        //   Verified equivalent inside one START TRANSACTION WITH CONSISTENT
+        //   SNAPSHOT: both forms returned MIN(dateadded) = 2026-11-24
+        //   12:51:07. Measured after: probe 1.8 ms against 2311.5 ms, whole
+        //   oba term 36.4 ms, and EXPLAIN carries no MATERIALIZED line.
         // - oldest_binary_age is not invertible, so it is answered by ordered
         //   probes instead: one index walk of ix_collections_release_stage6
         //   per (group, filecheck) pair, stopping at the first collection

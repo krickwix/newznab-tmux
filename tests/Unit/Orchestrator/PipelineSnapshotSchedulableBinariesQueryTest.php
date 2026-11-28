@@ -74,6 +74,35 @@ final class PipelineSnapshotSchedulableBinariesQueryTest extends TestCase
         ));
     }
 
+    public function test_the_pending_binary_test_is_never_an_exists_semi_join(): void
+    {
+        $sql = $this->currentSql();
+
+        // The 2026-11-29 incident. MariaDB may implement an EXISTS semi-join
+        // either as FirstMatch -- a per-row ref probe, 1.8 ms -- or by
+        // materializing the whole partcheck = 0 set, which database measured
+        // at 2311.5 ms for a single probe. The choice is cost-based on that
+        // set's cardinality, so it flipped silently as the pending count grew,
+        // and this probe runs inside a DEPENDENT SUBQUERY evaluated once per
+        // (group, stage) row. 180 rebuilds of a ~1M-row set is the 3,801 s
+        // statement that wedged the orchestrator.
+        //
+        // A scalar subquery is not eligible for semi-join materialization, so
+        // the plan cannot flip this way. This is a shape assertion because the
+        // defect is in the shape: the two forms return identical values, which
+        // is exactly why nothing else would catch a change back.
+        self::assertStringNotContainsString(
+            'EXISTS(SELECT 1 FROM binaries',
+            $sql,
+            'An EXISTS here is materialization-eligible and can flip to a ~1M-row rebuild per probe.'
+        );
+        self::assertStringContainsString(
+            'WHERE b.collections_id = c.id AND b.partcheck = 0 LIMIT 1) IS NOT NULL',
+            $sql,
+            'The pending-binary test must stay a scalar subquery.'
+        );
+    }
+
     public function test_a_collection_whose_group_row_is_gone_is_not_counted_as_schedulable(): void
     {
         $this->seedFixture();
