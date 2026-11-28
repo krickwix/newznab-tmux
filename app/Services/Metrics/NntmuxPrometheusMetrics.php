@@ -159,12 +159,19 @@ class NntmuxPrometheusMetrics
         }
 
         $renderedAt = microtime(true);
-        $body = $this->build();
+        $succeeded = false;
+        $body = $this->build($succeeded);
 
         // Only a complete scrape is worth reusing. Caching a failed render
         // would hold one transient database error in front of every scrape for
         // the whole window.
-        if (str_contains($body, "\nnntmux_metric_scrape_success 1\n")) {
+        //
+        // build() reports this directly rather than the body being searched
+        // for its own success line. That search needed a leading newline, so a
+        // later change to the body's layout would have silently stopped all
+        // caching with no signal -- a lost optimisation nobody would notice,
+        // which is the worst kind of coupling to have to a text format.
+        if ($succeeded) {
             $this->renderCache->write($body, $renderedAt);
         }
 
@@ -183,7 +190,7 @@ class NntmuxPrometheusMetrics
             .$this->metric('nntmux_metric_cache_age_seconds', max(0.0, round($age, 3)))."\n";
     }
 
-    private function build(): string
+    private function build(bool &$succeeded): string
     {
         $this->collectionFilecheckCounts = null;
         $this->activeGroupNames = null;
@@ -213,6 +220,7 @@ class NntmuxPrometheusMetrics
                 $this->lockMetrics(),
             );
             $lines[] = 'nntmux_metric_scrape_success 1';
+            $succeeded = true;
         } catch (Throwable $e) {
             $lines[] = 'nntmux_metric_scrape_success 0';
             $lines[] = $this->metric('nntmux_metric_scrape_error', 1, [
