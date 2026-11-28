@@ -29,6 +29,14 @@ return [
     'inline_nzb_creation' => (bool) env('NNTMUX_INLINE_NZB_CREATION', true),
     'build_version' => env('NNTMUX_BUILD_VERSION', 'unknown'),
     'distributed_nzb_limit' => (int) env('NNTMUX_DISTRIBUTED_NZB_LIMIT', 1),
+    // Judge NZB-creation eligibility by the same completion rule release
+    // creation used to accept the release (stage 4's
+    // GREATEST(1, CEIL(totalfiles * completionpercent / 100)) complete
+    // binaries per collection) instead of rejecting any release with a single
+    // short binary. Defaults to the historical, stricter rule: enabling it
+    // makes releases writable that have been stuck at nzbstatus = 0 for
+    // weeks, and writing their NZBs deletes their collections.
+    'nzb_align_release_completion' => (bool) env('NNTMUX_NZB_ALIGN_RELEASE_COMPLETION', false),
     'distributed_nzb_sleep' => (int) env('NNTMUX_DISTRIBUTED_NZB_SLEEP', 60),
     'distributed_nzb_scan_cap' => (int) env('NNTMUX_DISTRIBUTED_NZB_SCAN_CAP', 10000),
     'distributed_nzb_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS', 7200),
