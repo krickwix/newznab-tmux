@@ -62,6 +62,49 @@ final class ReleaseRemoverUnresolvedHashedTest extends TestCase
         $this->assertTrue($this->service(['1', '2', '3'])->removeCrap(true, '4', 'hashed_unresolved'));
     }
 
+    public function test_without_the_age_backstop_a_release_still_queued_for_processing_is_immortal(): void
+    {
+        config(['nntmux.remove_unresolved_hashed_max_age_hours' => 0]);
+
+        // passwordstatus = -1 with nzbstatus = 1 and a size inside the
+        // post-processing bounds matches none of the removal arms, which are
+        // all negative. 6,196 of the 11,799 cat-20 releases on live sit here.
+        $this->release(1, hoursOld: 24 * 90);
+
+        $this->assertTrue($this->service([])->removeCrap(true, '4', 'hashed_unresolved'));
+    }
+
+    public function test_the_age_backstop_drops_it_regardless_of_the_processing_arms(): void
+    {
+        config(['nntmux.remove_unresolved_hashed_max_age_hours' => 168]);
+
+        $this->release(1, hoursOld: 24 * 90);
+
+        $this->assertTrue($this->service(['1'])->removeCrap(true, '4', 'hashed_unresolved'));
+    }
+
+    public function test_the_age_backstop_leaves_younger_releases_to_the_processing_arms(): void
+    {
+        config(['nntmux.remove_unresolved_hashed_max_age_hours' => 168]);
+
+        // Older than the 24 hour grace but younger than the backstop, and
+        // still queued for processing, so neither rule reaches it.
+        $this->release(1, hoursOld: 48);
+        // Same age, but processing has finished on it, so the grace arm does.
+        $this->release(2, hoursOld: 48, passwordstatus: 0);
+
+        $this->assertTrue($this->service(['2'])->removeCrap(true, '4', 'hashed_unresolved'));
+    }
+
+    public function test_the_age_backstop_does_not_reach_outside_the_hashed_category(): void
+    {
+        config(['nntmux.remove_unresolved_hashed_max_age_hours' => 168]);
+
+        $this->release(1, hoursOld: 24 * 90, category: Category::MOVIE_HD);
+
+        $this->assertTrue($this->service([])->removeCrap(true, '4', 'hashed_unresolved'));
+    }
+
     public function test_releases_that_can_still_be_resolved_are_kept(): void
     {
         // Processed, but still inside the grace period.

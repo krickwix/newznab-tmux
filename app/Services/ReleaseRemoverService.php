@@ -431,6 +431,20 @@ class ReleaseRemoverService
      * worker passes a 4-hour window, which never holds a release that old.
      * Opt-in only, so it is not part of the "all" set.
      *
+     * The post-processing arms are all negative: they ask whether additional
+     * processing has run or can never run. A release that is still queued for
+     * it -- passwordstatus = -1 and nzbstatus = 1, with a size inside the
+     * bounds -- matches none of them and is therefore immortal, however long
+     * it has waited. 6,196 of the 11,799 cat-20 releases on live are more than
+     * a week old and every one of them is in exactly that state.
+     *
+     * NNTMUX_REMOVE_UNRESOLVED_HASHED_MAX_AGE_HOURS (0 = off) adds the
+     * backstop the owner's 2026-10-08 policy implies: past that age, an
+     * unresolved hashed release goes regardless of where post-processing
+     * thinks it is. Deletion still runs through deleteReleases() and
+     * deleteSingleWithService(), so NZB files, images and child rows are
+     * cleaned up the same way as for every other removal type.
+     *
      * @throws Exception
      */
     protected function removeUnresolvedHashed(): bool|string
@@ -445,16 +459,38 @@ class ReleaseRemoverService
             $notCandidate[] = 'r.size >= '.($maxSizeGB * 1073741824);
         }
 
+        $eligible = sprintf(
+            '(r.adddate < %s AND (%s))',
+            escapeString(Carbon::now()->subHours(self::UNRESOLVED_HASHED_GRACE_HOURS)->format('Y-m-d H:i:s')),
+            implode(' OR ', $notCandidate)
+        );
+
+        $maxAgeHours = $this->unresolvedHashedMaxAgeHours();
+        if ($maxAgeHours > 0) {
+            $eligible .= sprintf(
+                ' OR r.adddate < %s',
+                escapeString(Carbon::now()->subHours($maxAgeHours)->format('Y-m-d H:i:s'))
+            );
+        }
+
         return $this->executeSimpleRemoval('HashedUnresolved', sprintf(
             'SELECT r.guid, r.searchname, r.id
             FROM releases r
             WHERE r.categories_id = %d
-            AND r.adddate < %s
             AND (%s)',
             Category::OTHER_HASHED,
-            escapeString(Carbon::now()->subHours(self::UNRESOLVED_HASHED_GRACE_HOURS)->format('Y-m-d H:i:s')),
-            implode(' OR ', $notCandidate)
+            $eligible
         ));
+    }
+
+    /**
+     * Age at which an unresolved hashed release is dropped whatever
+     * post-processing thinks. 0 keeps the post-processing arms as the only
+     * grounds for removal, which is the historical behaviour.
+     */
+    private function unresolvedHashedMaxAgeHours(): int
+    {
+        return max(0, (int) config('nntmux.remove_unresolved_hashed_max_age_hours', 0));
     }
 
     /**

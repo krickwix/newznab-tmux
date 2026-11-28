@@ -37,6 +37,15 @@ return [
     // makes releases writable that have been stuck at nzbstatus = 0 for
     // weeks, and writing their NZBs deletes their collections.
     'nzb_align_release_completion' => (bool) env('NNTMUX_NZB_ALIGN_RELEASE_COMPLETION', false),
+    // Age in hours past which releases:remove-crap --type=hashed_unresolved
+    // deletes an Other > Hashed release regardless of where post-processing
+    // thinks it is. 0 keeps the post-processing arms as the only grounds for
+    // removal, which leaves a release still queued for additional processing
+    // (passwordstatus = -1, nzbstatus = 1, size inside the bounds) immortal.
+    // Enabling this is a one-off bulk deletion on its first run: 6,196 of the
+    // 11,799 cat-20 releases on live are over a week old. They are deleted one
+    // at a time through the normal release-deletion service, not in bulk SQL.
+    'remove_unresolved_hashed_max_age_hours' => max(0, (int) env('NNTMUX_REMOVE_UNRESOLVED_HASHED_MAX_AGE_HOURS', 0)),
     'distributed_nzb_sleep' => (int) env('NNTMUX_DISTRIBUTED_NZB_SLEEP', 60),
     'distributed_nzb_scan_cap' => (int) env('NNTMUX_DISTRIBUTED_NZB_SCAN_CAP', 10000),
     'distributed_nzb_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS', 7200),
