@@ -105,6 +105,40 @@ final class ReleaseRemoverUnresolvedHashedTest extends TestCase
         $this->assertTrue($this->service([])->removeCrap(true, '4', 'hashed_unresolved'));
     }
 
+    public function test_a_per_pass_limit_bounds_the_first_run_and_resumes_on_the_next(): void
+    {
+        config([
+            'nntmux.remove_unresolved_hashed_max_age_hours' => 168,
+            'nntmux.remove_unresolved_hashed_max_per_pass' => 2,
+        ]);
+
+        $this->release(1, hoursOld: 24 * 90);
+        $this->release(2, hoursOld: 24 * 90);
+        $this->release(3, hoursOld: 24 * 90);
+
+        // Lowest ids first, so the order is stable and each pass continues
+        // where the last stopped -- deleted rows do not come back.
+        $this->assertTrue($this->service(['1', '2'], deleteRows: true)->removeCrap(true, '4', 'hashed_unresolved'));
+        $this->assertSame([3], DB::table('releases')->orderBy('id')->pluck('id')->map(static fn ($id): int => (int) $id)->all());
+
+        $this->assertTrue($this->service(['3'], deleteRows: true)->removeCrap(true, '4', 'hashed_unresolved'));
+        $this->assertSame([], DB::table('releases')->pluck('id')->all());
+    }
+
+    public function test_without_a_limit_one_pass_takes_the_whole_backlog(): void
+    {
+        config([
+            'nntmux.remove_unresolved_hashed_max_age_hours' => 168,
+            'nntmux.remove_unresolved_hashed_max_per_pass' => 0,
+        ]);
+
+        $this->release(1, hoursOld: 24 * 90);
+        $this->release(2, hoursOld: 24 * 90);
+        $this->release(3, hoursOld: 24 * 90);
+
+        $this->assertTrue($this->service(['1', '2', '3'])->removeCrap(true, '4', 'hashed_unresolved'));
+    }
+
     public function test_releases_that_can_still_be_resolved_are_kept(): void
     {
         // Processed, but still inside the grace period.
@@ -140,16 +174,26 @@ final class ReleaseRemoverUnresolvedHashedTest extends TestCase
     /**
      * @param  list<string>  $expectedIds
      */
-    private function service(array $expectedIds): ReleaseRemoverService
+    private function service(array $expectedIds, bool $deleteRows = false): ReleaseRemoverService
     {
         $releaseManagement = Mockery::mock(ReleaseManagementService::class);
         if ($expectedIds === []) {
             $releaseManagement->shouldNotReceive('deleteSingleWithService');
         }
         foreach ($expectedIds as $id) {
-            $releaseManagement->shouldReceive('deleteSingleWithService')
+            $expectation = $releaseManagement->shouldReceive('deleteSingleWithService')
                 ->once()
                 ->with(['g' => 'guid-'.$id, 'i' => (int) $id, 'reason' => 'HashedUnresolved'], Mockery::any(), Mockery::any());
+
+            if ($deleteRows) {
+                // Mirror the real service's effect on the table so a following
+                // pass sees what is actually left.
+                $expectation->andReturnUsing(static function (array $identifiers): bool {
+                    DB::table('releases')->where('id', $identifiers['i'])->delete();
+
+                    return true;
+                });
+            }
         }
 
         return new ReleaseRemoverService(

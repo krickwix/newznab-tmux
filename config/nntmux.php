@@ -46,6 +46,11 @@ return [
     // 11,799 cat-20 releases on live are over a week old. They are deleted one
     // at a time through the normal release-deletion service, not in bulk SQL.
     'remove_unresolved_hashed_max_age_hours' => max(0, (int) env('NNTMUX_REMOVE_UNRESOLVED_HASHED_MAX_AGE_HOURS', 0)),
+    // Releases the unresolved-hashed removal may delete in one pass, 0 for no
+    // limit. The lane runs roughly every 67 s, so 200 drains ~6,200 in about
+    // 35 minutes with bounded per-pass work instead of one unbounded delete on
+    // the first run after the age backstop above is enabled.
+    'remove_unresolved_hashed_max_per_pass' => max(0, (int) env('NNTMUX_REMOVE_UNRESOLVED_HASHED_MAX_PER_PASS', 0)),
     'distributed_nzb_sleep' => (int) env('NNTMUX_DISTRIBUTED_NZB_SLEEP', 60),
     'distributed_nzb_scan_cap' => (int) env('NNTMUX_DISTRIBUTED_NZB_SCAN_CAP', 10000),
     'distributed_nzb_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_NZB_LOCK_SECONDS', 7200),

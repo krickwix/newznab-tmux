@@ -445,6 +445,10 @@ class ReleaseRemoverService
      * deleteSingleWithService(), so NZB files, images and child rows are
      * cleaned up the same way as for every other removal type.
      *
+     * NNTMUX_REMOVE_UNRESOLVED_HASHED_MAX_PER_PASS bounds how much of that
+     * backlog one pass takes, which matters on the first run after the
+     * backstop is enabled.
+     *
      * @throws Exception
      */
     protected function removeUnresolvedHashed(): bool|string
@@ -473,14 +477,33 @@ class ReleaseRemoverService
             );
         }
 
+        // Bounded per pass so the first run after enabling the backstop is not
+        // one unbounded delete of every release that qualifies. The lane runs
+        // roughly every 67 s, so a few hundred a pass drains thousands within
+        // the hour with per-pass work an operator can predict, and each pass
+        // picks up where the last left off because deleted rows do not come
+        // back. 0 keeps the historical unbounded select.
+        $perPass = $this->unresolvedHashedMaxPerPass();
+
         return $this->executeSimpleRemoval('HashedUnresolved', sprintf(
             'SELECT r.guid, r.searchname, r.id
             FROM releases r
             WHERE r.categories_id = %d
-            AND (%s)',
+            AND (%s)
+            ORDER BY r.id%s',
             Category::OTHER_HASHED,
-            $eligible
+            $eligible,
+            $perPass > 0 ? ' LIMIT '.$perPass : ''
         ));
+    }
+
+    /**
+     * Releases the unresolved-hashed removal may delete in one pass, 0 for no
+     * limit.
+     */
+    private function unresolvedHashedMaxPerPass(): int
+    {
+        return max(0, (int) config('nntmux.remove_unresolved_hashed_max_per_pass', 0));
     }
 
     /**
