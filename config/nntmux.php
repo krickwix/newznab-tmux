@@ -428,6 +428,23 @@ return [
     'distributed_current_forward_max_run_seconds' => min(600, max(60, (int) env('NNTMUX_DISTRIBUTED_CURRENT_FORWARD_MAX_RUN_SECONDS', 600))),
     'distributed_long_lock_seconds' => (int) env('NNTMUX_DISTRIBUTED_LONG_LOCK_SECONDS', 3600),
     'distributed_lock_store' => env('NNTMUX_DISTRIBUTED_LOCK_STORE', 'redis'),
+    // How long a group's in-flight and failed article ranges are remembered,
+    // in seconds. A cycle fans ~20 get_range children over one window and each
+    // advances usenet_groups.last_record with a monotonic max, so without this
+    // a child that succeeded further along carries the cursor past a range
+    // another child never read -- stored nowhere, queued for repair nowhere.
+    // 0 disables the guard entirely and restores that behaviour.
+    'binaries_article_range_floor_seconds' => max(0, (int) env('NNTMUX_BINARIES_ARTICLE_RANGE_FLOOR_SECONDS', 0)),
+    // Failed fetches of the SAME range before it is written off, reported as
+    // nntmux_worker_items_total{worker="binaries",item="article_range",result="written_off"}
+    // and logged by article number. Bounded on purpose: a range that can never
+    // be fetched must not wedge the group behind it forever.
+    'binaries_article_range_max_attempts' => max(1, (int) env('NNTMUX_BINARIES_ARTICLE_RANGE_MAX_ATTEMPTS', 3)),
+    // Seconds a child waits for a group's range lock before giving up. A lost
+    // claim leaves its range unprotected, so it is reported as
+    // nntmux_worker_items_total{worker="binaries",item="article_range",result="lock_timeout"}
+    // and logged rather than dropped silently.
+    'binaries_article_range_lock_wait_seconds' => max(1, (int) env('NNTMUX_BINARIES_ARTICLE_RANGE_LOCK_WAIT_SECONDS', 5)),
     // Seconds a tmux monitor statistics snapshot may be reused from the shared
     // cache. Every distributed worker that gates on release/collection counts
     // recomputes the same ~20 statements on its own schedule, so one pod's

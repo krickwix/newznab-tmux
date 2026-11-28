@@ -37,6 +37,7 @@ class DistributedWorkerTelemetry
      * @var array<string, list<string>>
      */
     public const ITEMS_BY_WORKER = [
+        'binaries' => ['article_range'],
         'nzb-backlog' => ['nzb'],
         'releases' => ['release'],
         'hopeless-purge' => ['collection'],
@@ -64,6 +65,10 @@ class DistributedWorkerTelemetry
 
     /** @var list<string> */
     public const ITEM_RESULTS = [
+        'floored',
+        'written_off',
+        'abandoned',
+        'lock_timeout',
         'scanned',
         'selected',
         'attempted',
