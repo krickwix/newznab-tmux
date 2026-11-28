@@ -421,6 +421,14 @@ return [
     // snapshot answers for all of them. 0 disables sharing and each process
     // computes its own, as before.
     'distributed_statistics_cache_seconds' => max(0, (int) env('NNTMUX_DISTRIBUTED_STATISTICS_CACHE_SECONDS', 20)),
+    // Seconds a rendered Prometheus exposition may be served again before the
+    // exporter recomputes it. The scrape interval is 30 s and a full render is
+    // ~7% of MariaDB's busy time on its own, growing with the backlog, so the
+    // default reuses each body for two scrapes. These are dashboard and alert
+    // gauges, not gate inputs; render() publishes
+    // nntmux_metric_cache_age_seconds so a reused body is never mistaken for a
+    // fresh one. 0 recomputes on every scrape, as before.
+    'metrics_render_cache_seconds' => max(0, (int) env('NNTMUX_METRICS_RENDER_CACHE_SECONDS', 60)),
     'allow_large_cbp_fk_restore' => (bool) env('NNTMUX_ALLOW_LARGE_CBP_FK_RESTORE', false),
     'purge_inactive_users' => env('PURGE_INACTIVE_USERS', false),
     'purge_inactive_users_days' => env('PURGE_INACTIVE_USERS_DAYS', 180),

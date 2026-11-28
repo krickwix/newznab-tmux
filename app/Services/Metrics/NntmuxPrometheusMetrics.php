@@ -35,6 +35,35 @@ class NntmuxPrometheusMetrics
     private array $schemaCache = [];
 
     /**
+     * Collection counts for this render pass, as groups_id => filecheck => count.
+     *
+     * Three metric groups asked the same question of the same table in three
+     * different shapes, each one its own pass over ~1M rows: a
+     * GROUP BY g.name, c.filecheck joined to usenet_groups (1.34 s measured on
+     * live), a GROUP BY filecheck over everything (0.20 s), and a
+     * COUNT(*) WHERE filecheck = Inserted. They now share one
+     * GROUP BY groups_id, filecheck, which is answered index-only from the
+     * leading columns of ix_collections_release_stage6 (0.57 s) -- the group
+     * join and the varchar grouping were most of the cost.
+     *
+     * The two coarser views are exact roll-ups of this one, not estimates:
+     * neither carried a group filter, so summing over groups_id reproduces
+     * them. The per-group view does filter, and that filter is applied to
+     * these rows rather than in SQL, so a group holding collections while
+     * inactive is still excluded from the labelled series.
+     *
+     * @var array<int, array<int, int>>|null
+     */
+    private ?array $collectionFilecheckCounts = null;
+
+    /**
+     * Names of the groups the per-group collection series covers, as id => name.
+     *
+     * @var array<int, string>|null
+     */
+    private ?array $activeGroupNames = null;
+
+    /**
      * How long a memoised schema answer may be reused, in seconds.
      *
      * Not indefinite: a migration that adds or drops a table would otherwise never be noticed
@@ -76,6 +105,7 @@ class NntmuxPrometheusMetrics
         private readonly DistributedWorkerTelemetry $workerTelemetry = new DistributedWorkerTelemetry,
         private readonly DistributedJobCatalog $jobCatalog = new DistributedJobCatalog,
         private readonly SplitCollectionTelemetry $splitCollectionTelemetry = new SplitCollectionTelemetry,
+        private readonly MetricsRenderCache $renderCache = new MetricsRenderCache,
     ) {}
 
     private function schemaCached(string $key, callable $probe): bool
@@ -122,6 +152,42 @@ class NntmuxPrometheusMetrics
 
     public function render(): string
     {
+        $cached = $this->renderCache->read();
+
+        if ($cached !== null) {
+            return $this->withCacheAge($cached['body'], microtime(true) - $cached['rendered_at']);
+        }
+
+        $renderedAt = microtime(true);
+        $body = $this->build();
+
+        // Only a complete scrape is worth reusing. Caching a failed render
+        // would hold one transient database error in front of every scrape for
+        // the whole window.
+        if (str_contains($body, "\nnntmux_metric_scrape_success 1\n")) {
+            $this->renderCache->write($body, $renderedAt);
+        }
+
+        return $this->withCacheAge($body, 0.0);
+    }
+
+    /**
+     * Age of the exposition being served, appended live so a body reused from
+     * the cache is never indistinguishable from a freshly computed one.
+     */
+    private function withCacheAge(string $body, float $age): string
+    {
+        return $body
+            ."# HELP nntmux_metric_cache_age_seconds Age of the served exposition; 0 when it was computed by this scrape.\n"
+            ."# TYPE nntmux_metric_cache_age_seconds gauge\n"
+            .$this->metric('nntmux_metric_cache_age_seconds', max(0.0, round($age, 3)))."\n";
+    }
+
+    private function build(): string
+    {
+        $this->collectionFilecheckCounts = null;
+        $this->activeGroupNames = null;
+
         $lines = [
             '# HELP nntmux_metric_scrape_success Whether the NNTmux metrics scrape completed successfully.',
             '# TYPE nntmux_metric_scrape_success gauge',
@@ -354,6 +420,70 @@ class NntmuxPrometheusMetrics
     }
 
     /**
+     * @return array<int, array<int, int>>
+     */
+    private function collectionFilecheckCounts(): array
+    {
+        if ($this->collectionFilecheckCounts !== null) {
+            return $this->collectionFilecheckCounts;
+        }
+
+        if (! $this->tableExists('collections')) {
+            return $this->collectionFilecheckCounts = [];
+        }
+
+        $counts = [];
+        foreach (DB::table('collections')->selectRaw('groups_id, filecheck, COUNT(*) AS collections_count')->groupBy(['groups_id', 'filecheck'])->get() as $row) {
+            $counts[(int) $row->groups_id][(int) $row->filecheck] = (int) $row->collections_count;
+        }
+
+        return $this->collectionFilecheckCounts = $counts;
+    }
+
+    /**
+     * Total collections in one filecheck state across every group.
+     */
+    private function collectionsInFilecheck(int $filecheck): int
+    {
+        $total = 0;
+        foreach ($this->collectionFilecheckCounts() as $byFilecheck) {
+            $total += $byFilecheck[$filecheck] ?? 0;
+        }
+
+        return $total;
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function activeGroupNames(): array
+    {
+        if ($this->activeGroupNames !== null) {
+            return $this->activeGroupNames;
+        }
+
+        if (! $this->tableExists('usenet_groups')) {
+            return $this->activeGroupNames = [];
+        }
+
+        $names = [];
+        $rows = DB::table('usenet_groups')
+            ->select(['id', 'name'])
+            ->where(static function ($query): void {
+                $query->where('active', 1)->orWhere('backfill', 1);
+            })
+            ->get();
+
+        foreach ($rows as $row) {
+            $names[(int) $row->id] = (string) $row->name;
+        }
+
+        asort($names);
+
+        return $this->activeGroupNames = $names;
+    }
+
+    /**
      * @return list<string>
      */
     private function collectionFormationMetrics(): array
@@ -369,42 +499,46 @@ class NntmuxPrometheusMetrics
             return $lines;
         }
 
-        $filecheckRows = DB::table('collections as c')
-            ->join('usenet_groups as g', 'g.id', '=', 'c.groups_id')
-            ->where(static function ($query): void {
-                $query->where('g.active', 1)->orWhere('g.backfill', 1);
-            })
-            ->groupBy(['g.name', 'c.filecheck'])
-            ->orderBy('g.name')
-            ->orderBy('c.filecheck')
-            ->selectRaw('g.name AS group_name, c.filecheck, COUNT(*) AS collections_count')
-            ->get();
+        $counts = $this->collectionFilecheckCounts();
 
-        foreach ($filecheckRows as $row) {
-            $lines[] = $this->metric('nntmux_collections_filecheck_total', (int) $row->collections_count, [
-                'group' => (string) $row->group_name,
-                'filecheck' => (string) $row->filecheck,
-            ]);
+        // Group name order, then filecheck, as the SQL ORDER BY produced.
+        foreach ($this->activeGroupNames() as $groupId => $groupName) {
+            $byFilecheck = $counts[$groupId] ?? [];
+            ksort($byFilecheck);
+
+            foreach ($byFilecheck as $filecheck => $count) {
+                $lines[] = $this->metric('nntmux_collections_filecheck_total', $count, [
+                    'group' => $groupName,
+                    'filecheck' => (string) $filecheck,
+                ]);
+            }
         }
 
-        $pendingMultifileRows = DB::table('collections as c')
-            ->join('usenet_groups as g', 'g.id', '=', 'c.groups_id')
-            ->where(static function ($query): void {
-                $query->where('g.active', 1)->orWhere('g.backfill', 1);
-            })
-            ->where('c.filecheck', 0)
-            ->where('c.totalfiles', '>', 1)
-            ->groupBy(['g.name', 'c.collection_regexes_id'])
-            ->orderBy('group_name')
-            ->orderBy('collection_regexes_id')
-            ->selectRaw('g.name AS group_name, c.collection_regexes_id, COUNT(*) AS pending_multifile_count')
+        // Same shape as above: aggregate by groups_id rather than joining and
+        // grouping by the group's varchar name, and apply the active/backfill
+        // filter to the result. 0.73 s against 1.72 s measured on live.
+        $pendingMultifile = [];
+        $pendingRows = DB::table('collections')
+            ->where('filecheck', 0)
+            ->where('totalfiles', '>', 1)
+            ->groupBy(['groups_id', 'collection_regexes_id'])
+            ->selectRaw('groups_id, collection_regexes_id, COUNT(*) AS pending_multifile_count')
             ->get();
 
-        foreach ($pendingMultifileRows as $row) {
-            $lines[] = $this->metric('nntmux_collections_pending_multifile_total', (int) $row->pending_multifile_count, [
-                'group' => (string) $row->group_name,
-                'collection_regexes_id' => (string) $row->collection_regexes_id,
-            ]);
+        foreach ($pendingRows as $row) {
+            $pendingMultifile[(int) $row->groups_id][(string) $row->collection_regexes_id] = (int) $row->pending_multifile_count;
+        }
+
+        foreach ($this->activeGroupNames() as $groupId => $groupName) {
+            $byRegex = $pendingMultifile[$groupId] ?? [];
+            ksort($byRegex, SORT_NATURAL);
+
+            foreach ($byRegex as $regexId => $count) {
+                $lines[] = $this->metric('nntmux_collections_pending_multifile_total', $count, [
+                    'group' => $groupName,
+                    'collection_regexes_id' => (string) $regexId,
+                ]);
+            }
         }
 
         return $lines;
@@ -424,11 +558,6 @@ class NntmuxPrometheusMetrics
             return $lines;
         }
 
-        $counts = DB::table('collections')
-            ->selectRaw('filecheck, COUNT(*) AS collections_count')
-            ->groupBy('filecheck')
-            ->pluck('collections_count', 'filecheck');
-
         $states = [
             CollectionFileCheckStatus::Default->value => ['new', 'backlog'],
             CollectionFileCheckStatus::CompleteCollection->value => ['collection_complete', 'backlog'],
@@ -443,7 +572,7 @@ class NntmuxPrometheusMetrics
         foreach ($states as $filecheck => [$state, $lifecycle]) {
             $lines[] = $this->metric(
                 'nntmux_collections_filecheck_lifecycle_count',
-                (int) ($counts[$filecheck] ?? 0),
+                $this->collectionsInFilecheck($filecheck),
                 [
                     'filecheck' => (string) $filecheck,
                     'state' => $state,
@@ -491,9 +620,7 @@ class NntmuxPrometheusMetrics
             ]);
         }
 
-        $insertedCollections = $this->tableExists('collections')
-            ? (int) DB::table('collections')->where('filecheck', CollectionFileCheckStatus::Inserted->value)->count()
-            : 0;
+        $insertedCollections = $this->collectionsInFilecheck(CollectionFileCheckStatus::Inserted->value);
         $lines[] = $this->metric('nntmux_nzb_inserted_collections_count', $insertedCollections);
 
         return $lines;
